@@ -1,20 +1,22 @@
-# StarlingAI
+<table border="0" cellpadding="0" cellspacing="0">
+  <tr>
+    <td valign="middle" width="72">
+      <img src="swarmLogo.svg" alt="StarlingAI logo" width="56" />
+    </td>
+    <td valign="middle">
+      <strong style="font-size:1.4em;">StarlingAI</strong><br/>
+      <sub>GUARDED AGENT SWARM &nbsp;·&nbsp; <em>under development</em></sub>
+    </td>
+  </tr>
+</table>
 
-<p align="center">
-   <img src="swarmLogo.svg" alt="StarlingAI logo" width="220" />
-</p>
+**A general-purpose AI agent swarm that tackles any task by composing the right specialists — not a collection of one-off pipelines.**
 
-<p align="center">
-  <strong>A general-purpose AI agent swarm that tackles any task by composing the right specialists — not a collection of one-off pipelines.</strong>
-</p>
-
-<p align="center">
-  <a href="docs/architecture.md">Architecture</a> ·
-  <a href="docs/agents.md">Agents</a> ·
-  <a href="docs/api.md">API</a> ·
-  <a href="docs/security.md">Security</a> ·
-  <a href="QUICKSTART.md">Quick Start</a>
-</p>
+<a href="docs/architecture.md">Architecture</a> ·
+<a href="docs/agents.md">Agents</a> ·
+<a href="docs/api.md">API</a> ·
+<a href="docs/security.md">Security</a> ·
+<a href="QUICKSTART.md">Quick Start</a>
 
 ---
 
