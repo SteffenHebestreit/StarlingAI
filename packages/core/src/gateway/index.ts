@@ -1,0 +1,1937 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { createServer } from "node:http";
+import { Readable } from "node:stream";
+import { timingSafeEqual } from "node:crypto";
+import { writeFile, mkdir } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { resolve, basename, extname } from "node:path";
+import JSON5 from "json5";
+import { WebSocketServer } from "ws";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { getConfig, updateConfig } from "../config/loader.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
+import { RpcConnection } from "./rpc.js";
+import { getAllSessions, createSession, endSession } from "../agent/session.js";
+import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
+import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
+import { getGuardrails, updateGuardrails, resetGuardrails } from "../guardrails/store.js";
+import { handleAguiStream } from "./agui.js";
+import { runSubAgent } from "../agent/sub-agent.js";
+import { runTurn } from "../agent/runtime.js";
+import { createJob, completeJob, failJob, getJob } from "../agent/jobs.js";
+import { requestApprovalViaChannel } from "../approval/index.js";
+import { resolveApproval, getPendingApproval } from "../approval/store.js";
+import { childLogger } from "../logger.js";
+import { handleSlackEvent } from "../channels/slack.js";
+import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
+import { getChannelStatuses } from "../channels/registry.js";
+import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
+import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js";
+import { getRuntimeStatusSnapshot } from "../runtime/status.js";
+import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
+import { resolveAgentRouting } from "../tools/sub-agent.js";
+import { logAudit } from "../audit/logger.js";
+import { getConcurrencySnapshot } from "../swarm/concurrency.js";
+import { isSwarmBusConnected } from "../swarm/bus.js";
+import { MultimodalSchema } from "../config/schema.js";
+import { getMcpConnections } from "../mcp/registry.js";
+
+const log = childLogger("gateway");
+
+export function createGateway() {
+  const config = getConfig();
+  const app = new Hono();
+  const turnTimeoutMs = config.gateway.turnTimeoutMs;
+  const currentMultimodalConfig = () => getConfig().multimodal;
+
+  // ── Request body size limit ──────────────────────────────────────────────
+  const maxBodyBytes = config.gateway.maxBodyBytes ?? 1_048_576;
+  app.use("*", async (c, next) => {
+    const contentLength = c.req.header("Content-Length");
+    const maxMultimodalBodyBytes = currentMultimodalConfig().maxUploadBytes ?? maxBodyBytes;
+    const limit = c.req.path.startsWith("/api/multimodal/") ? maxMultimodalBodyBytes : maxBodyBytes;
+    if (contentLength && Number(contentLength) > limit) {
+      return c.json({ error: "Request body too large" }, 413);
+    }
+    await next();
+  });
+
+  app.use("*", cors({
+    origin: [
+      `http://localhost:${config.channels.webchat.port}`,
+      "http://localhost:3001",   // Vite dev server
+      "http://127.0.0.1:3001",
+    ],
+    credentials: true,
+  }));
+
+  function upstreamUrl(baseUrl: string, routePath: string): string {
+    const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+    return new URL(routePath.replace(/^\//, ""), normalizedBase).toString();
+  }
+
+  function upstreamHeaders(apiKey?: string, init: Record<string, string> | Headers = {}): Headers {
+    const headers = new Headers(init);
+    if (apiKey && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${apiKey}`);
+    }
+    return headers;
+  }
+
+  async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Request to ${url} failed: ${detail}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function summarizeUpstreamText(value: string): string {
+    const collapsed = value.replace(/\s+/g, " ").trim();
+    if (!collapsed) return "empty response";
+    return collapsed.length > 240 ? `${collapsed.slice(0, 237)}...` : collapsed;
+  }
+
+  async function extractUpstreamError(response: Response, fallback: string): Promise<string> {
+    const contentType = response.headers.get("content-type") ?? "";
+
+    try {
+      if (contentType.includes("application/json")) {
+        const body = await response.json() as Record<string, unknown>;
+        const detail = body["detail"] ?? body["error"] ?? body["message"];
+        if (typeof detail === "string" && detail.trim()) {
+          return detail.trim();
+        }
+        return fallback;
+      }
+
+      const text = await response.text();
+      if (text.trim()) {
+        return `${fallback}: ${summarizeUpstreamText(text)}`;
+      }
+    } catch {
+      // Ignore parse failures and fall back to the generic message.
+    }
+
+    return fallback;
+  }
+
+  async function parseUpstreamJsonResponse(response: Response, fallback: string): Promise<Record<string, unknown>> {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      const text = await response.text();
+      throw new Error(`${fallback}: ${summarizeUpstreamText(text)}`);
+    }
+
+    try {
+      return await response.json() as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(error instanceof Error ? `${fallback}: ${error.message}` : fallback);
+    }
+  }
+
+  function normalizePythonLiteralText(value: string): string {
+    let output = "";
+    let quote: "'" | '"' | null = null;
+    let escaping = false;
+
+    for (let index = 0; index < value.length;) {
+      const char = value[index];
+
+      if (quote) {
+        output += char;
+        if (escaping) {
+          escaping = false;
+        } else if (char === "\\") {
+          escaping = true;
+        } else if (char === quote) {
+          quote = null;
+        }
+        index += 1;
+        continue;
+      }
+
+      if (char === "'" || char === '"') {
+        quote = char;
+        output += char;
+        index += 1;
+        continue;
+      }
+
+      const before = index === 0 ? "" : (value[index - 1] ?? "");
+      const afterTrue = value[index + 4] ?? "";
+      const afterFalse = value[index + 5] ?? "";
+      const afterNone = value[index + 4] ?? "";
+      const boundaryBefore = before === "" || /[^A-Za-z0-9_]/.test(before);
+
+      if (boundaryBefore && value.startsWith("True", index) && (afterTrue === "" || /[^A-Za-z0-9_]/.test(afterTrue))) {
+        output += "true";
+        index += 4;
+        continue;
+      }
+
+      if (boundaryBefore && value.startsWith("False", index) && (afterFalse === "" || /[^A-Za-z0-9_]/.test(afterFalse))) {
+        output += "false";
+        index += 5;
+        continue;
+      }
+
+      if (boundaryBefore && value.startsWith("None", index) && (afterNone === "" || /[^A-Za-z0-9_]/.test(afterNone))) {
+        output += "null";
+        index += 4;
+        continue;
+      }
+
+      output += char;
+      index += 1;
+    }
+
+    return output;
+  }
+
+  function parseMcpToolTextResponse(text: string, fallback: string): Record<string, unknown> {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      throw new Error(fallback);
+    }
+
+    try {
+      return JSON5.parse(normalizePythonLiteralText(trimmed)) as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(error instanceof Error ? `${fallback}: ${error.message}` : fallback);
+    }
+  }
+
+  async function callMultimodalToolViaMcp(input: {
+    serverName: string;
+    toolName: string;
+    filename: string;
+    contentType: string;
+    fileBytes: ArrayBuffer;
+    timeoutMs: number;
+  }): Promise<Record<string, unknown>> {
+    const connection = getMcpConnections().get(input.serverName);
+    if (!connection) {
+      throw new Error(`Configured MCP server not connected: ${input.serverName}`);
+    }
+
+    const result = await withTimeout(
+      connection.client.callTool({
+        name: input.toolName,
+        arguments: {
+          filename: input.filename,
+          content_type: input.contentType,
+          base64_content: Buffer.from(input.fileBytes).toString("base64"),
+        },
+      }),
+      input.timeoutMs,
+      `MCP tool ${input.serverName}/${input.toolName}`,
+    );
+
+    const text = (result.content as Array<{ type: string; text?: string }> | undefined)
+      ?.map(item => (item.type === "text" ? (item.text ?? "") : JSON.stringify(item)))
+      .join("\n")
+      .trim() ?? "";
+
+    if ((result as { isError?: boolean }).isError) {
+      throw new Error(text || `MCP tool ${input.serverName}/${input.toolName} failed`);
+    }
+
+    return parseMcpToolTextResponse(text, `MCP tool ${input.serverName}/${input.toolName} returned an unparsable response`);
+  }
+
+  async function checkEndpointHealth(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    path: string;
+    method?: "GET" | "POST" | "OPTIONS";
+    body?: FormData | string;
+    headers?: Record<string, string>;
+    successStatuses?: number[];
+  }): Promise<{ ok: boolean; status?: number; error?: string }> {
+    const successStatuses = input.successStatuses ?? [200];
+
+    try {
+      const response = await fetchWithTimeout(
+        upstreamUrl(input.baseUrl, input.path),
+        {
+          method: input.method ?? "GET",
+          headers: upstreamHeaders(input.apiKey, input.headers),
+          body: input.body,
+        },
+        Math.min(input.timeoutMs, 5000),
+      );
+
+      if (successStatuses.includes(response.status)) {
+        return { ok: true, status: response.status };
+      }
+
+      return {
+        ok: false,
+        status: response.status,
+        error: await extractUpstreamError(response, `Upstream returned HTTP ${response.status}`),
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async function checkSttHealth(baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+    const openAiProbe = await checkEndpointHealth({
+      baseUrl,
+      apiKey,
+      timeoutMs,
+      path: "/v1/audio/transcriptions",
+      method: "POST",
+      body: (() => {
+        const probe = new FormData();
+        probe.append("model", model);
+        return probe;
+      })(),
+      successStatuses: [200, 400, 401, 422],
+    });
+
+    if (openAiProbe.ok || (openAiProbe.status !== 404 && openAiProbe.status !== 405)) {
+      return openAiProbe;
+    }
+
+    const healthProbe = await checkEndpointHealth({
+      baseUrl,
+      apiKey,
+      timeoutMs,
+      path: "/health",
+      successStatuses: [200],
+    });
+
+    return healthProbe.ok ? healthProbe : openAiProbe;
+  }
+
+  async function sendSttRequest(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    model: string;
+    audioBlob: Blob;
+    filename: string;
+    language?: string;
+    prompt?: string;
+  }): Promise<Response> {
+    const openAiForm = new FormData();
+    openAiForm.append("file", input.audioBlob, input.filename);
+    openAiForm.append("model", input.model);
+    if (input.language) openAiForm.append("language", input.language);
+    if (input.prompt) openAiForm.append("prompt", input.prompt);
+
+    const openAiResponse = await fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/v1/audio/transcriptions"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(input.apiKey),
+        body: openAiForm,
+      },
+      input.timeoutMs,
+    );
+
+    if (openAiResponse.status !== 404 && openAiResponse.status !== 405) {
+      return openAiResponse;
+    }
+
+    const fallbackForm = new FormData();
+    fallbackForm.append("audio", input.audioBlob, input.filename);
+    if (input.language) fallbackForm.append("language", input.language);
+    if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+
+    return fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/transcribe"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(input.apiKey),
+        body: fallbackForm,
+      },
+      input.timeoutMs,
+    );
+  }
+
+  async function readWorkspaceBinaryFile(path: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
+    const workspaceRoot = resolve(getConfig().workspacePath);
+    const targetPath = resolve(workspaceRoot, path);
+    if (!targetPath.startsWith(workspaceRoot)) {
+      throw new Error("Audio example path escapes the workspace");
+    }
+    const fileStat = await stat(targetPath);
+    if (!fileStat.isFile()) {
+      throw new Error(`Audio example is not a file: ${path}`);
+    }
+    const bytes = await readFile(targetPath);
+    const extension = extname(targetPath).toLowerCase();
+    const contentTypes: Record<string, string> = {
+      ".wav": "audio/wav",
+      ".mp3": "audio/mpeg",
+      ".m4a": "audio/mp4",
+      ".webm": "audio/webm",
+      ".ogg": "audio/ogg",
+      ".flac": "audio/flac",
+    };
+    return {
+      filename: basename(targetPath),
+      contentType: contentTypes[extension] ?? "application/octet-stream",
+      bytes,
+    };
+  }
+
+  function normalizeQwenLanguage(language: string): string {
+    const normalized = language.trim();
+    const map: Record<string, string> = {
+      en: "English",
+      "en-us": "English",
+      en_us: "English",
+      english: "English",
+      de: "German",
+      "de-de": "German",
+      de_de: "German",
+      german: "German",
+      es: "Spanish",
+      spanish: "Spanish",
+      fr: "French",
+      french: "French",
+      it: "Italian",
+      italian: "Italian",
+      pt: "Portuguese",
+      portuguese: "Portuguese",
+      ru: "Russian",
+      russian: "Russian",
+      ja: "Japanese",
+      japanese: "Japanese",
+      ko: "Korean",
+      korean: "Korean",
+      zh: "Chinese",
+      chinese: "Chinese",
+    };
+    return map[normalized.toLowerCase()] ?? normalized;
+  }
+
+  async function fetchTtsVoiceCatalog(config: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+  }): Promise<Record<string, unknown>> {
+    const [voicesResponse, speakersResponse, modelsResponse] = await Promise.all([
+      fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+      fetchWithTimeout(upstreamUrl(config.baseUrl, "/speakers"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+      fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+    ]);
+
+    if (!voicesResponse.ok) throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
+    if (!speakersResponse.ok) throw new Error(await extractUpstreamError(speakersResponse, "Failed to load speakers"));
+    if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
+
+    const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
+    const speakersBody = await parseUpstreamJsonResponse(speakersResponse, "Speaker list returned a non-JSON response");
+    const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
+    return {
+      voices: Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [],
+      speakers: Array.isArray(speakersBody["speakers"]) ? speakersBody["speakers"] : [],
+      models: modelsBody["models"] ?? {},
+      currentModel: modelsBody["current_model"] ?? undefined,
+    };
+  }
+
+  async function sendTtsRequest(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    text: string;
+    model?: string;
+    language: string;
+    speaker?: string;
+    savedVoiceId?: string;
+    audioExample?: { filename: string; contentType: string; bytes: Uint8Array };
+    referenceText?: string;
+    saveVoiceAs?: string;
+    quality?: string;
+    gender?: string;
+  }): Promise<Response> {
+    const language = normalizeQwenLanguage(input.language);
+    const model = input.model?.trim();
+
+    if (model) {
+      const loadModelResponse = await fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/load_model"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+          body: JSON.stringify({ model }),
+        },
+        input.timeoutMs,
+      );
+      if (!loadModelResponse.ok) return loadModelResponse;
+    }
+
+    if (input.savedVoiceId) {
+      const formData = new FormData();
+      formData.append("text", input.text);
+      formData.append("lang", language);
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, `/voices/${encodeURIComponent(input.savedVoiceId)}/tts`),
+        { method: "POST", headers: upstreamHeaders(input.apiKey), body: formData },
+        input.timeoutMs,
+      );
+    }
+
+    if (input.audioExample) {
+      if (input.saveVoiceAs) {
+        const saveForm = new FormData();
+        saveForm.append("name", input.saveVoiceAs);
+        saveForm.append("lang", language);
+        saveForm.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+        const saveResponse = await fetchWithTimeout(
+          upstreamUrl(input.baseUrl, "/voices/save"),
+          { method: "POST", headers: upstreamHeaders(input.apiKey), body: saveForm },
+          input.timeoutMs,
+        );
+        if (!saveResponse.ok) return saveResponse;
+        const savedVoice = await parseUpstreamJsonResponse(saveResponse, "Saved voice response was not JSON");
+        const voiceId = typeof savedVoice["voice_id"] === "string" ? savedVoice["voice_id"] : input.saveVoiceAs;
+        const formData = new FormData();
+        formData.append("text", input.text);
+        formData.append("lang", language);
+        return fetchWithTimeout(
+          upstreamUrl(input.baseUrl, `/voices/${encodeURIComponent(voiceId)}/tts`),
+          { method: "POST", headers: upstreamHeaders(input.apiKey), body: formData },
+          input.timeoutMs,
+        );
+      }
+
+      const formData = new FormData();
+      formData.append("text", input.text);
+      formData.append("lang", language);
+      formData.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+      const route = input.referenceText ? "/clone-with-ref-text" : "/clone";
+      if (input.referenceText) formData.append("ref_text", input.referenceText);
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, route),
+        { method: "POST", headers: upstreamHeaders(input.apiKey), body: formData },
+        input.timeoutMs,
+      );
+    }
+
+    return fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/tts"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          text: input.text,
+          lang: language,
+          speaker: input.speaker ?? "Vivian",
+          instruct: input.gender ?? input.quality ?? "",
+        }),
+      },
+      input.timeoutMs,
+    );
+  }
+
+  // ── Health endpoints ─────────────────────────────────────────────────────
+  app.get("/healthz", (c) => c.json({ status: "ok" }));
+  app.get("/readyz", (c) => {
+    const sessions = getAllSessions().length;
+    return c.json({ status: "ready", sessions });
+  });
+
+  // ── Status endpoint (auth required) ─────────────────────────────────────
+  app.get("/api/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    return c.json({
+      version: "0.1.0",
+      uptime: process.uptime(),
+      sessions: getAllSessions().map(s => ({
+        id: s.id,
+        channel: s.channel,
+        createdAt: s.createdAt,
+        turns: s.getTurnCount(),
+      })),
+    });
+  });
+
+  app.get("/api/runtime/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(getRuntimeStatusSnapshot());
+  });
+
+  app.get("/api/multimodal/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    const [files, stt, tts] = await Promise.all([
+      checkEndpointHealth({
+        baseUrl: multimodalConfig.files.baseUrl,
+        apiKey: multimodalConfig.files.apiKey,
+        timeoutMs: multimodalConfig.files.timeoutMs,
+        path: "/api/health",
+      }),
+      checkSttHealth(multimodalConfig.stt.baseUrl, multimodalConfig.stt.apiKey, multimodalConfig.stt.timeoutMs, multimodalConfig.stt.model),
+      checkEndpointHealth({
+        baseUrl: multimodalConfig.tts.baseUrl,
+        apiKey: multimodalConfig.tts.apiKey,
+        timeoutMs: multimodalConfig.tts.timeoutMs,
+        path: "/health",
+      }),
+    ]);
+
+    return c.json({
+      files,
+      stt,
+      tts,
+      wakeWord: multimodalConfig.wakeWord,
+    });
+  });
+
+
+  app.get("/api/multimodal/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(currentMultimodalConfig());
+  });
+
+  app.put("/api/multimodal/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = MultimodalSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid multimodal configuration", details: parsed.error.flatten() }, 400);
+    }
+
+    try {
+      const updatedConfig = updateConfig((raw) => {
+        raw["multimodal"] = parsed.data;
+      });
+      return c.json(updatedConfig.multimodal);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  app.post("/api/multimodal/file-to-markdown", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    const formData = await c.req.raw.formData();
+    const uploadedFile = formData.get("file");
+    if (!(uploadedFile instanceof File)) {
+      return c.json({ error: "file is required" }, 400);
+    }
+
+    const isImage = uploadedFile.type.startsWith("image/");
+    const fileBytes = await uploadedFile.arrayBuffer();
+
+    // Buffer image bytes once — needed for both upstream and the vision fallback
+    const imageBytes = isImage ? fileBytes : null;
+
+    let markdownFromUpstream = "";
+
+    if (multimodalConfig.files.mcpServer) {
+      try {
+        const body = await callMultimodalToolViaMcp({
+          serverName: multimodalConfig.files.mcpServer,
+          toolName: multimodalConfig.files.toolName,
+          filename: uploadedFile.name,
+          contentType: uploadedFile.type,
+          fileBytes,
+          timeoutMs: multimodalConfig.files.timeoutMs,
+        });
+        markdownFromUpstream = (typeof body["markdown"] === "string" ? body["markdown"] : "").trim();
+        if (markdownFromUpstream) {
+          return c.json({ ...body, filename: typeof body["filename"] === "string" ? body["filename"] : uploadedFile.name });
+        }
+      } catch (err) {
+        if (!isImage) {
+          return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+        }
+        log.warn({ err, filename: uploadedFile.name, server: multimodalConfig.files.mcpServer }, "MCP file_to_markdown failed for image — trying REST/vision fallbacks");
+      }
+    }
+
+    const upstreamFormData = new FormData();
+    if (imageBytes) {
+      upstreamFormData.append("file", new Blob([imageBytes], { type: uploadedFile.type }), uploadedFile.name);
+    } else {
+      upstreamFormData.append("file", uploadedFile, uploadedFile.name);
+    }
+
+    try {
+      const upstream = await fetchWithTimeout(
+        upstreamUrl(multimodalConfig.files.baseUrl, `/api/tools/${multimodalConfig.files.toolName}`),
+        {
+          method: "POST",
+          headers: upstreamHeaders(multimodalConfig.files.apiKey),
+          body: upstreamFormData,
+        },
+        multimodalConfig.files.timeoutMs,
+      );
+      if (upstream.ok) {
+        const body = await parseUpstreamJsonResponse(upstream, "File conversion returned a non-JSON response") as Record<string, unknown>;
+        markdownFromUpstream = (typeof body["markdown"] === "string" ? body["markdown"] : "").trim();
+        if (markdownFromUpstream) return c.json(body);
+      } else if (!isImage) {
+        return new Response(JSON.stringify({ error: await extractUpstreamError(upstream, "File conversion failed") }), {
+          status: upstream.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch (err) {
+      if (!isImage) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+      }
+      log.warn({ err, filename: uploadedFile.name }, "file_to_markdown upstream failed for image — trying vision fallback");
+    }
+
+    // ── Vision model fallback for images ──────────────────────────────────────
+    // Triggered when: file is an image AND upstream returned empty markdown (no vision LLM
+    // configured in markitdown) OR upstream call failed entirely.
+    if (isImage && imageBytes && multimodalConfig.files.visionModel) {
+      try {
+        const base64 = Buffer.from(imageBytes).toString("base64");
+        const dataUrl = `data:${uploadedFile.type};base64,${base64}`;
+        const providerConfig = getConfig().providers?.lmstudio;
+        const visionBaseUrl = (providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
+        const visionApiKey = providerConfig?.apiKey ?? "lm-studio";
+        // Strip provider prefix (e.g. "lmstudio/qwen2-vl-7b-instruct" → "qwen2-vl-7b-instruct")
+        const modelId = multimodalConfig.files.visionModel.replace(/^[^/]+\//, "");
+
+        const visionRes = await fetchWithTimeout(
+          `${visionBaseUrl}/chat/completions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${visionApiKey}` },
+            body: JSON.stringify({
+              model: modelId,
+              messages: [{
+                role: "user",
+                content: [
+                  { type: "image_url", image_url: { url: dataUrl } },
+                  { type: "text", text: "Analyze this image in detail. Extract all visible text exactly as written. Identify key UI elements, data, charts, error messages, or any other relevant content. Provide a structured Markdown description." },
+                ],
+              }],
+              max_tokens: 2048,
+              temperature: 0.1,
+            }),
+          },
+          multimodalConfig.files.timeoutMs,
+        );
+
+        if (visionRes.ok) {
+          const visionBody = await visionRes.json() as { choices?: Array<{ message?: { content?: string } }> };
+          const description = visionBody.choices?.[0]?.message?.content?.trim() ?? "";
+          if (description) {
+            log.info({ filename: uploadedFile.name, model: modelId }, "Vision model fallback succeeded");
+            return c.json({ markdown: description, filename: uploadedFile.name });
+          }
+        } else {
+          log.warn({ status: visionRes.status, filename: uploadedFile.name }, "Vision model fallback returned non-OK status");
+        }
+      } catch (err) {
+        log.warn({ err, filename: uploadedFile.name }, "Vision model fallback failed");
+      }
+    }
+
+    // Return empty markdown — frontend keeps the image placeholder and the assistant can decide
+    // whether to use direct vision analysis or delegate specialist follow-up.
+    return c.json({ markdown: "", filename: uploadedFile.name });
+  });
+
+  app.post("/api/multimodal/transcribe", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    const formData = await c.req.raw.formData();
+    const uploadedFile = formData.get("file");
+    if (!(uploadedFile instanceof File)) {
+      return c.json({ error: "file is required" }, 400);
+    }
+
+    const audioBlob = new Blob([await uploadedFile.arrayBuffer()], { type: uploadedFile.type || "application/octet-stream" });
+    const filename = uploadedFile.name || "audio.wav";
+    const model = String(formData.get("model") ?? multimodalConfig.stt.model);
+
+    const languageValue = formData.get("language");
+    const language = typeof languageValue === "string" && languageValue.trim() ? languageValue.trim() : undefined;
+
+    const promptValue = formData.get("prompt");
+    const prompt = typeof promptValue === "string" && promptValue.trim() ? promptValue.trim() : undefined;
+
+    try {
+      const upstream = await sendSttRequest({
+        baseUrl: multimodalConfig.stt.baseUrl,
+        apiKey: multimodalConfig.stt.apiKey,
+        timeoutMs: multimodalConfig.stt.timeoutMs,
+        model,
+        audioBlob,
+        filename,
+        language,
+        prompt,
+      });
+      if (!upstream.ok) {
+        return new Response(JSON.stringify({ error: await extractUpstreamError(upstream, "Transcription failed") }), {
+          status: upstream.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const body = await parseUpstreamJsonResponse(upstream, "Transcription returned a non-JSON response");
+      const segments = Array.isArray(body["segments"])
+        ? body["segments"].map((segment) => {
+            if (typeof segment === "string") return segment;
+            if (segment && typeof segment === "object" && "text" in segment) return String(segment["text"] ?? "");
+            return "";
+          }).filter(Boolean).join(" ").trim()
+        : "";
+      return c.json({
+        text: String(body["text"] ?? body["transcription"] ?? body["result"] ?? segments ?? ""),
+        language: body["language"] ?? body["detected_language"] ?? body["lang"],
+        duration: body["duration"] ?? body["processing_time"],
+      });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  app.get("/api/multimodal/voices", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    try {
+      return c.json(await fetchTtsVoiceCatalog(multimodalConfig.tts));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  app.post("/api/multimodal/tts", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const text = String(body["text"] ?? "").trim();
+    if (!text) return c.json({ error: "text is required" }, 400);
+
+    try {
+      const audioExamplePath = typeof body["audioExamplePath"] === "string" && body["audioExamplePath"].trim()
+        ? body["audioExamplePath"].trim()
+        : multimodalConfig.tts.voiceSamplePath;
+      const upstream = await sendTtsRequest({
+        baseUrl: multimodalConfig.tts.baseUrl,
+        apiKey: multimodalConfig.tts.apiKey,
+        timeoutMs: multimodalConfig.tts.timeoutMs,
+        text,
+        model: typeof body["model"] === "string" && body["model"].trim()
+          ? body["model"].trim()
+          : multimodalConfig.tts.model,
+        language: typeof body["language"] === "string" && body["language"].trim()
+          ? body["language"].trim()
+          : multimodalConfig.tts.defaultLanguage,
+        speaker: typeof body["speaker"] === "string" && body["speaker"].trim()
+          ? body["speaker"].trim()
+          : multimodalConfig.tts.defaultSpeaker,
+        savedVoiceId: typeof body["voiceId"] === "string" && body["voiceId"].trim()
+          ? body["voiceId"].trim()
+          : typeof body["voice"] === "string" && body["voice"].trim()
+            ? body["voice"].trim()
+            : multimodalConfig.tts.defaultVoiceId,
+        audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath) : undefined,
+        referenceText: typeof body["referenceText"] === "string" && body["referenceText"].trim()
+          ? body["referenceText"].trim()
+          : multimodalConfig.tts.voiceSampleText,
+        saveVoiceAs: typeof body["saveVoiceAs"] === "string" && body["saveVoiceAs"].trim()
+          ? body["saveVoiceAs"].trim()
+          : undefined,
+        quality: typeof body["quality"] === "string" ? body["quality"] : multimodalConfig.tts.defaultQuality,
+        gender: typeof body["gender"] === "string" ? body["gender"] : undefined,
+      });
+
+      if (!upstream.ok) {
+        return new Response(JSON.stringify({ error: await extractUpstreamError(upstream, "Speech synthesis failed") }), {
+          status: upstream.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const audio = await upstream.arrayBuffer();
+      return new Response(audio, {
+        status: 200,
+        headers: {
+          "Content-Type": upstream.headers.get("content-type") ?? "audio/wav",
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // ── Summarize-for-speech ─────────────────────────────────────────────────
+  // POST /api/multimodal/summarize-for-speech
+  //   Body: { text: string, maxSentences?: number }
+  //   Returns: { summary: string }
+  // Condenses a long assistant reply to a spoken-friendly summary using the
+  // configured LLM.  Used by the auto-speak feature in the web UI.
+
+  app.post("/api/multimodal/summarize-for-speech", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const text = String(body["text"] ?? "").trim();
+    if (!text) return c.json({ error: "text is required" }, 400);
+
+    const multimodalConfig = currentMultimodalConfig();
+    const maxSentences = typeof body["maxSentences"] === "number"
+      ? Math.min(Math.max(1, Math.round(body["maxSentences"])), 5)
+      : (multimodalConfig.tts.speakReplySummaryMaxSentences ?? 3);
+
+    try {
+      const { getLMStudioProvider } = await import("../providers/index.js");
+      const provider = getLMStudioProvider();
+      const llmResponse = await provider.complete(
+        [
+          {
+            role: "system",
+            content: `You are a concise voice assistant. Summarise the text the user provides into at most ${maxSentences} natural, spoken sentence(s). Use plain language — no markdown, no bullet points, no code blocks. Respond with only the summary.`,
+          },
+          { role: "user", content: text },
+        ],
+        [],
+      );
+      const summary = (llmResponse.content ?? "").trim();
+      if (!summary) return c.json({ error: "Summarisation returned empty response" }, 500);
+      return c.json({ summary });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // ── Direct image analysis ────────────────────────────────────────────────
+  // POST /api/multimodal/analyze-image
+  //   Multipart form: field "file" — any image (PNG, JPEG, WebP, GIF, BMP)
+  //   Optional form field "prompt" — custom question about the image
+  //   Returns: { analysis: string }
+  // Encodes the image as base64 and sends it directly to the vision LLM —
+  // nothing is written to disk.
+
+  app.post("/api/multimodal/analyze-image", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const formData = await c.req.raw.formData();
+    const uploadedFile = formData.get("file");
+    if (!(uploadedFile instanceof File)) return c.json({ error: "file field is required" }, 400);
+
+    const promptValue = formData.get("prompt");
+    const userPrompt = typeof promptValue === "string" && promptValue.trim()
+      ? promptValue.trim()
+      : "Analyze this image in detail. Extract all visible text exactly as written. Identify all UI elements, data, charts, diagrams, error messages, and any other relevant content. Provide a structured Markdown description.";
+
+    const imageBytes = new Uint8Array(await uploadedFile.arrayBuffer());
+    const base64 = Buffer.from(imageBytes).toString("base64");
+    const mimeType = uploadedFile.type || "image/png";
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+
+    const cfg = getConfig();
+    const multimodalConfig = currentMultimodalConfig();
+    const providerConfig = cfg.providers?.lmstudio;
+    const visionBaseUrl = (providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
+    const visionApiKey = providerConfig?.apiKey ?? "lm-studio";
+
+    // Use dedicated vision model if configured, otherwise fall back to default LLM
+    // (qwen3.5-35b is vision-enabled so no separate model is needed)
+    const visionModelRaw = multimodalConfig.files.visionModel ?? cfg.agents.defaults.model.primary;
+    const modelId = visionModelRaw.replace(/^[^/]+\//, "");
+
+    try {
+      const res = await fetchWithTimeout(
+        `${visionBaseUrl}/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${visionApiKey}` },
+          body: JSON.stringify({
+            model: modelId,
+            messages: [{
+              role: "user",
+              content: [
+                { type: "image_url", image_url: { url: dataUrl } },
+                { type: "text", text: userPrompt },
+              ],
+            }],
+            max_tokens: 2048,
+            temperature: 0.1,
+          }),
+        },
+        multimodalConfig.files.timeoutMs,
+      );
+
+      if (!res.ok) {
+        return c.json({ error: await extractUpstreamError(res, "Vision LLM returned an error") }, 502);
+      }
+
+      const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const analysis = body.choices?.[0]?.message?.content?.trim() ?? "";
+      if (!analysis) return c.json({ error: "Vision model returned empty analysis" }, 500);
+
+      return c.json({ analysis, model: modelId, filename: uploadedFile.name });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // ── Workspace file upload ────────────────────────────────────────────────
+  // POST /api/workspace/upload
+  //   Multipart form: field "file" — any file type
+  //   Optional form field "subdir" — subdirectory under workspace (default: "uploads")
+  //   Returns: { workspacePath: "<configured-workspace>/uploads/foo.png", relativePath: "uploads/foo.png", filename: "foo.png" }
+  // Saves the uploaded file into the workspace volume so agents can access it.
+
+  app.post("/api/workspace/upload", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const formData = await c.req.raw.formData();
+    const uploadedFile = formData.get("file");
+    if (!(uploadedFile instanceof File)) {
+      return c.json({ error: "file field is required" }, 400);
+    }
+
+    const subdirRaw = formData.get("subdir");
+    const subdir = (typeof subdirRaw === "string" && /^[\w/-]+$/.test(subdirRaw))
+      ? subdirRaw
+      : "uploads";
+
+    // Sanitise filename: keep extension, replace unsafe characters
+    const ext = extname(uploadedFile.name);
+    const safeName = basename(uploadedFile.name, ext)
+      .replace(/[^\w\s.-]/g, "_")
+      .replace(/\s+/g, "_")
+      .slice(0, 120) + ext;
+
+    const workspaceRoot = getConfig().workspacePath;
+    const targetDir = resolve(workspaceRoot, subdir);
+    const targetPath = resolve(targetDir, safeName);
+
+    // Prevent path traversal
+    if (!targetPath.startsWith(resolve(workspaceRoot))) {
+      return c.json({ error: "Invalid upload path" }, 400);
+    }
+
+    try {
+      await mkdir(targetDir, { recursive: true });
+      const buffer = new Uint8Array(await uploadedFile.arrayBuffer());
+      await writeFile(targetPath, buffer);
+
+      const relativePath = `${subdir}/${safeName}`;
+      return c.json({
+        workspacePath: `${workspaceRoot}/${subdir}/${safeName}`,
+        relativePath,
+        filename: safeName,
+      });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // ── Site credentials API ─────────────────────────────────────────────────
+  // GET  /api/sites          — list all sites (usernames only, no passwords)
+  // POST /api/sites/:host    — create or update a site credential
+  // DELETE /api/sites/:host  — remove a site credential
+
+  app.get("/api/sites", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(listSiteCredentials());
+  });
+
+  app.post("/api/sites/:hostname", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const hostname = c.req.param("hostname");
+    if (hasConfigSiteCredential(hostname)) {
+      return c.json({ error: "Sites declared in starlingai.json are read-only in the dashboard" }, 403);
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const username = String(body["username"] ?? "").trim();
+    const existing = resolveSiteCredential(hostname);
+    const password = String(body["password"] ?? "").trim() || (existing?.source === "store" ? existing.password : "");
+    if (!username || !password) {
+      return c.json({ error: "username and password are required" }, 400);
+    }
+
+    saveSiteCredential(hostname, {
+      username,
+      password,
+      loginUrl: body["loginUrl"] ? String(body["loginUrl"]) : undefined,
+      urls: body["urls"] && typeof body["urls"] === "object" && !Array.isArray(body["urls"])
+        ? Object.fromEntries(Object.entries(body["urls"] as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+        : undefined,
+      usernameSelector: body["usernameSelector"] ? String(body["usernameSelector"]) : undefined,
+      passwordSelector: body["passwordSelector"] ? String(body["passwordSelector"]) : undefined,
+      submitSelector: body["submitSelector"] ? String(body["submitSelector"]) : undefined,
+      notes: body["notes"] ? String(body["notes"]) : undefined,
+    });
+    return c.json({ ok: true, hostname });
+  });
+
+  app.delete("/api/sites/:hostname", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    deleteSiteCredential(c.req.param("hostname"));
+    return c.json({ ok: true });
+  });
+
+  // ── Guardrails API ────────────────────────────────────────────────────────
+  // GET  /api/guardrails         — read current guardrail state
+  // PUT  /api/guardrails         — update (partial patch)
+  // POST /api/guardrails/reset   — reset to config defaults
+
+  app.get("/api/guardrails", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(getGuardrails());
+  });
+
+  app.put("/api/guardrails", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const patch: Parameters<typeof updateGuardrails>[0] = {};
+    if (typeof body["promptInjectionBlock"] === "boolean") patch.promptInjectionBlock = body["promptInjectionBlock"];
+    if (typeof body["outputSecretScan"] === "boolean") patch.outputSecretScan = body["outputSecretScan"];
+    if (typeof body["maxInputLength"] === "number") patch.maxInputLength = body["maxInputLength"];
+    const updated = updateGuardrails(patch);
+    log.info({ patch }, "Guardrails updated");
+    return c.json(updated);
+  });
+
+  app.post("/api/guardrails/reset", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const reset = resetGuardrails();
+    log.info("Guardrails reset to config defaults");
+    return c.json(reset);
+  });
+
+  // ── Sub-agents API ────────────────────────────────────────────────────────
+  // GET   /api/agents            — list all configured sub-agents with their model config
+  // PATCH /api/agents/:name/model — hot-patch a sub-agent's model config in memory
+
+  app.get("/api/agents", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const cfg = getConfig();
+    const agents = Object.entries(cfg.subAgents ?? {}).map(([name, agent]) => ({
+      name,
+      description: agent.description,
+      capabilities: agent.capabilities,
+      tags: agent.tags,
+      model: agent.model ?? {},
+      maxIterations: agent.maxIterations,
+    }));
+    return c.json(agents);
+  });
+
+  app.get("/api/agents/resolve", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const query = String(c.req.query("query") ?? "").trim();
+    if (!query) return c.json({ error: "query is required" }, 400);
+
+    const rawMinConfidence = String(c.req.query("minConfidence") ?? "medium");
+    const minConfidence = rawMinConfidence === "high" || rawMinConfidence === "low"
+      ? rawMinConfidence
+      : "medium";
+
+    return c.json(await resolveAgentRouting(query, { minConfidence }));
+  });
+
+  app.patch("/api/agents/:name/model", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const name = c.req.param("name");
+    const cfg = getConfig();
+    const agent = cfg.subAgents?.[name];
+    if (!agent) return c.json({ error: `Agent '${name}' not found` }, 404);
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json() as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const allowed = ["primary", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow"];
+    const patch: Record<string, unknown> = {};
+    for (const key of allowed) {
+      if (key in body) patch[key] = body[key];
+    }
+    agent.model = { ...(agent.model ?? {}), ...patch } as typeof agent.model;
+    log.info({ agent: name, patch }, "Sub-agent model config patched");
+    return c.json({ name, model: agent.model });
+  });
+
+  // GET /api/agents/outcomes — per-agent execution stats from agent_outcomes.ndjson
+  app.get("/api/agents/outcomes", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const { readFileSync, existsSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const workspacePath = getConfig().workspacePath;
+    const outcomesFile = resolve(workspacePath, ".starlingai/agent_outcomes.ndjson");
+
+    if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
+
+    type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string };
+    let entries: OutcomeRow[] = [];
+    try {
+      entries = readFileSync(outcomesFile, "utf-8")
+        .trim().split("\n").filter(Boolean)
+        .map(line => { try { return JSON.parse(line) as OutcomeRow; } catch { return null; } })
+        .filter((e): e is OutcomeRow => e !== null);
+    } catch {
+      return c.json({ agents: [], totalEntries: 0 });
+    }
+
+    const statsMap = new Map<string, { success: number; failure: number; partial: number; totalTokens: number; totalIterations: number; calls: number; latestLesson?: string; lastSeen: string }>();
+    for (const e of entries) {
+      const s = statsMap.get(e.agent) ?? { success: 0, failure: 0, partial: 0, totalTokens: 0, totalIterations: 0, calls: 0, lastSeen: "" };
+      (s[e.outcome as "success" | "failure" | "partial"] as number)++;
+      s.calls++;
+      s.totalTokens += e.totalTokens ?? 0;
+      s.totalIterations += e.iterations ?? 0;
+      if (e.lesson) s.latestLesson = e.lesson;
+      if (!s.lastSeen || e.ts > s.lastSeen) s.lastSeen = e.ts;
+      statsMap.set(e.agent, s);
+    }
+
+    const agents = [...statsMap.entries()].map(([name, s]) => ({
+      name,
+      calls: s.calls,
+      success: s.success,
+      failure: s.failure,
+      partial: s.partial,
+      successRate: s.calls > 0 ? Math.round((s.success / s.calls) * 100) : 0,
+      avgTokens: s.calls > 0 ? Math.round(s.totalTokens / s.calls) : 0,
+      avgIterations: s.calls > 0 ? Math.round((s.totalIterations / s.calls) * 10) / 10 : 0,
+      latestLesson: s.latestLesson,
+      lastSeen: s.lastSeen,
+    })).sort((a, b) => b.calls - a.calls);
+
+    return c.json({ agents, totalEntries: entries.length });
+  });
+
+  // ── AG-UI streaming chat (SSE) ────────────────────────────────────────────
+  // POST /api/chat/stream  →  Server-Sent Events following the AG-UI protocol
+  // Frontend can use @ag-ui/client HttpAgent or plain EventSource / fetch + ReadableStream.
+
+  // ── A2A sub-agent endpoints ───────────────────────────────────────────────
+  // POST /a2a/agents/:name  →  JSON-RPC 2.0 task delegation to a named sub-agent
+  // Exposes each configured subAgent as an A2A-compatible HTTP endpoint.
+
+  // ── HTTP server handles AG-UI + A2A directly (bypasses Hono for streaming) ─
+  // Both endpoints are wired in the httpServer.on("request") handler below.
+
+  // ── Scenes API ────────────────────────────────────────────────────────────
+  // GET    /api/scenes           — list all scenes (config + store, auth required)
+  // POST   /api/scenes/:name     — create or update a scene in the store
+  // DELETE /api/scenes/:name     — delete a scene from the store (config scenes are read-only)
+  // POST   /api/scenes/:name/run — trigger a scene; auth via Bearer token OR
+  //                                ?key=<webhookKey> / X-Scene-Key header
+
+  app.get("/api/scenes", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(listAllScenes());
+  });
+
+  app.post("/api/scenes/:name", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const existing = getScene(name);
+    if (existing?.source === "config") {
+      return c.json({ error: "Scenes declared in starlingai.json are read-only in the dashboard" }, 403);
+    }
+
+    let body: Record<string, unknown>;
+    try { body = await c.req.json<Record<string, unknown>>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const description = String(body["description"] ?? "").trim();
+    const task = String(body["task"] ?? "").trim();
+    if (!description || !task) return c.json({ error: "description and task are required" }, 400);
+    if (task.length > 32_768) return c.json({ error: "task exceeds maximum length of 32 768 characters" }, 400);
+
+    try {
+      saveScene(name, {
+        description,
+        task,
+        webhookKey: body["webhookKey"] ? String(body["webhookKey"]) : undefined,
+      });
+      return c.json({ ok: true, name });
+    } catch (err) {
+      return c.json({ error: String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/scenes/:name", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const existing = getScene(name);
+    if (!existing) return c.json({ error: `Scene not found: ${name}` }, 404);
+    if (existing.source === "config") return c.json({ error: "Config-file scenes cannot be deleted via the API — edit starlingai.json instead" }, 403);
+    deleteScene(name);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/scenes/:name/run", async (c) => {
+    const sceneName = c.req.param("name");
+    const scene = getScene(sceneName);
+    if (!scene) return c.json({ error: `Scene not found: ${sceneName}` }, 404);
+
+    // Auth: Bearer token OR scene webhook key
+    const bearerToken = extractBearerToken(c.req.header("Authorization"));
+    const keyParam = c.req.query("key") ?? c.req.header("X-Scene-Key") ?? "";
+    const resolvedKey = scene.webhookKey?.startsWith("$")
+      ? (process.env[scene.webhookKey.slice(1)] ?? "")
+      : (scene.webhookKey ?? "");
+
+    const authed = (bearerToken && await verifyToken(bearerToken)) ||
+      (resolvedKey.length >= 16 && keyParam.length === resolvedKey.length &&
+        timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey)));
+
+    if (!authed) return c.json({ error: "Unauthorized" }, 401);
+
+    // Read optional params from request body to apply template substitution
+    let bodyParams: Record<string, string> = {};
+    try {
+      const body = await c.req.json<Record<string, unknown>>();
+      if (body && typeof body["params"] === "object" && body["params"] !== null) {
+        bodyParams = Object.fromEntries(
+          Object.entries(body["params"] as Record<string, unknown>).map(([k, v]) => [k, String(v)])
+        );
+      }
+    } catch { /* body is optional */ }
+
+    // Merge scene defaults with request params
+    const mergedParams: Record<string, string> = {};
+    for (const [key, def] of Object.entries(scene.params ?? {})) {
+      if (def.default !== undefined) mergedParams[key] = def.default;
+    }
+    Object.assign(mergedParams, bodyParams);
+
+    const task = mergedParams && Object.keys(mergedParams).length > 0
+      ? scene.task.replace(/\{\{(\w+)(?:\|([^}]*))?\}\}/g, (match, key: string, defaultVal?: string) => {
+          if (key in mergedParams) return mergedParams[key]!;
+          if (defaultVal !== undefined) return defaultVal;
+          return match;
+        })
+      : scene.task;
+
+    const session = createSession({ channel: "scene", userId: `scene:${sceneName}` });
+    const job = createJob(sceneName, session.id);
+    log.info({ sceneName, sessionId: session.id, jobId: job.id }, "Scene triggered (async)");
+
+    // Build an approvalCallback if this scene has humanInLoopSteps + an approvalChannel
+    const approvalCallback = (scene.humanInLoopSteps?.length && scene.approvalChannel)
+      ? (toolName: string, args: Record<string, unknown>) =>
+          requestApprovalViaChannel(scene.approvalChannel!, toolName, args, sceneName)
+      : undefined;
+
+    // AbortController + configurable timeout so scene jobs cannot hang forever
+    const sceneAbort = new AbortController();
+    let sceneTimedOut = false;
+    const sceneTimeoutHandle = setTimeout(() => {
+      if (sceneTimedOut) return;
+      sceneTimedOut = true;
+      sceneAbort.abort();
+      failJob(job.id, `Scene timed out after ${Math.round(turnTimeoutMs / 60000)} minutes`);
+      endSession(session.id);
+      log.warn({ sceneName, jobId: job.id }, "Scene run timed out — aborted");
+    }, turnTimeoutMs);
+
+    // Run in background — return jobId immediately
+    runTurn({
+      session,
+      userMessage: task,
+      allowedAgents: scene.allowedAgents,
+      humanInLoopSteps: scene.humanInLoopSteps,
+      approvalCallback,
+      signal: sceneAbort.signal,
+    }).then(output => {
+      if (sceneTimedOut) return;
+      clearTimeout(sceneTimeoutHandle);
+      completeJob(job.id, output);
+      logAudit("scene_job_completed", {
+        jobId: job.id,
+        sceneName,
+        status: output.blocked ? "failed" : "completed",
+        responseLength: output.response.length,
+        toolCallsExecuted: output.toolCallsExecuted,
+        blocked: output.blocked,
+        ...(output.performance ?? {}),
+      }, {
+        sessionId: session.id,
+        channel: "scene",
+        severity: output.blocked ? "warn" : "info",
+      });
+      endSession(session.id);
+    }).catch(err => {
+      if (sceneTimedOut) return;
+      clearTimeout(sceneTimeoutHandle);
+      const error = String(err);
+      failJob(job.id, error);
+      logAudit("scene_job_failed", {
+        jobId: job.id,
+        sceneName,
+        error,
+      }, {
+        sessionId: session.id,
+        channel: "scene",
+        severity: "error",
+      });
+      endSession(session.id);
+      log.error({ err, sceneName, jobId: job.id }, "Scene run failed");
+    });
+
+    return c.json({ ok: true, sceneName, jobId: job.id, sessionId: session.id, status: "running" });
+  });
+
+  // ── Approval callback endpoints ──────────────────────────────────────────
+  // GET  /api/approval/:id?approved=true|false&secret=X
+  //        — one-click link handler (Slack / WhatsApp / email).  Returns HTML.
+  // POST /api/approval/:id
+  //        — programmatic callback (n8n / outbound_webhook receivers).
+  //          Body: { approved: boolean, secret: string }
+  //          OR   Authorization: Bearer <secret>  +  body: { approved: boolean }
+
+  app.get("/api/approval/:approvalId", async (c) => {
+    const id = c.req.param("approvalId");
+    const approved = c.req.query("approved") === "true";
+    const secret = c.req.query("secret") ?? "";
+
+    const pending = getPendingApproval(id);
+    if (!pending) {
+      return c.html("<html><body><h2>Approval request not found or already resolved.</h2></body></html>", 404);
+    }
+
+    // Verify secret if one was set (slack/outbound_webhook channels always set one)
+    if (pending.secret && pending.secret !== secret) {
+      return c.html("<html><body><h2>Invalid approval secret.</h2></body></html>", 403);
+    }
+
+    resolveApproval(id, approved);
+    const action = approved ? "✅ Approved" : "❌ Denied";
+    const safeName = pending.toolName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>${action}</h2><p>Tool: <strong>${safeName}</strong></p><p>You can close this tab.</p></body></html>`);
+  });
+
+  app.post("/api/approval/:approvalId", async (c) => {
+    const id = c.req.param("approvalId");
+    let body: Record<string, unknown>;
+    try { body = await c.req.json<Record<string, unknown>>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const approved = Boolean(body["approved"]);
+    const bodySecret = body["secret"] ? String(body["secret"]) : "";
+    const headerSecret = extractBearerToken(c.req.header("Authorization")) ?? "";
+    const secret = bodySecret || headerSecret;
+
+    const pending = getPendingApproval(id);
+    if (!pending) return c.json({ error: "Approval request not found or already resolved" }, 404);
+
+    if (pending.secret && pending.secret !== secret) {
+      return c.json({ error: "Invalid approval secret" }, 403);
+    }
+
+    resolveApproval(id, approved);
+    return c.json({ ok: true, approved });
+  });
+
+  // GET /api/scenes/jobs/:jobId — poll async scene execution status
+  app.get("/api/scenes/jobs/:jobId", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const jobId = c.req.param("jobId");
+    const job = getJob(jobId);
+    if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
+    return c.json(job);
+  });
+
+  // ── Channel webhook endpoints (no auth — use their own verification) ────────
+  // Slack Events API
+  app.post("/channels/slack/events", (c) => handleSlackEvent(c));
+
+  // WhatsApp Meta Cloud API
+  app.get("/channels/whatsapp/webhook", (c) => handleWhatsappVerify(c));
+  app.post("/channels/whatsapp/webhook", (c) => handleWhatsappEvent(c));
+
+  // ── Channel management API ────────────────────────────────────────────────
+  // GET  /api/channels                — list all channels with status
+  // GET  /api/channels/dead-letters   — dead-letter queue entry count
+  // GET  /api/channels/:type          — get config for a channel type (tokens redacted)
+  // PUT  /api/channels/:type          — save/update a channel config
+  // DELETE /api/channels/:type        — remove a stored channel config
+
+  app.get("/api/channels/dead-letters", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      return c.json({
+        count: getDeadLetterCount(),
+        entries: readDeadLetters({ limit: 50 }),
+      });
+    } catch {
+      return c.json({ count: 0, entries: [] });
+    }
+  });
+
+  // ── Swarm status (concurrency + bus health) ──────────────────────────────
+  app.get("/api/swarm/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const concurrency = getConcurrencySnapshot();
+    const busConnected = isSwarmBusConnected();
+    const bottlenecks = concurrency
+      .filter(s => s.oldestQueuedMs > 0 || s.utilization >= 0.9)
+      .sort((left, right) => right.oldestQueuedMs - left.oldestQueuedMs || right.utilization - left.utilization);
+
+    return c.json({
+      bus: { connected: busConnected, mode: busConnected ? "redis" : "in-process" },
+      concurrency,
+      bottlenecks,
+      summary: {
+        activeAgents: concurrency.filter(s => s.active > 0).length,
+        queuedTasks: concurrency.reduce((sum, s) => sum + s.queued, 0),
+        bottleneckCount: bottlenecks.length,
+        peakQueuedWaitMs: concurrency.reduce((max, s) => Math.max(max, s.oldestQueuedMs), 0),
+      },
+    });
+  });
+
+  app.get("/api/channels", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const currentConfig = getConfig();
+    const registeredStatuses = new Map(getChannelStatuses().map((status) => [status.type, status]));
+    const statuses = CHANNEL_TYPES.map((type) => {
+      const status = registeredStatuses.get(type);
+      const channelStatus = {
+        type,
+        enabled: status?.enabled ?? Boolean(getEffectiveChannelConfig(type, currentConfig.channels[type]).enabled),
+        running: status?.running ?? false,
+        error: status?.error,
+        health: status?.health,
+        metrics: status?.metrics,
+        ...getChannelRuntimeSupport(type),
+      };
+      return {
+        ...channelStatus,
+        operatorState: buildChannelOperatorState(channelStatus, []),
+      };
+    });
+    return c.json(statuses);
+  });
+
+  app.get("/api/channels/:type", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const type = c.req.param("type") as Parameters<typeof getStoredChannelConfig>[0];
+    if (!CHANNEL_TYPES.includes(type)) {
+      return c.json({ error: `Unknown channel type: ${type}` }, 400);
+    }
+
+    const currentConfig = getConfig();
+    const effective = getEffectiveChannelConfig(type, currentConfig.channels[type]);
+    const status = getChannelStatuses().find((entry) => entry.type === type) ?? {
+      type,
+      enabled: Boolean(effective.enabled),
+      running: false,
+    };
+    const runtimeSupport = getChannelRuntimeSupport(type);
+    const recentDeadLetters = readDeadLetters({ channel: type, limit: 5 });
+    return c.json({
+      type,
+      source: getChannelConfigSource(type),
+      config: redactChannelSecrets(effective),
+      status: {
+        ...status,
+        ...runtimeSupport,
+        operatorState: buildChannelOperatorState({ ...status, ...runtimeSupport }, recentDeadLetters),
+      },
+      operator: {
+        recentDeadLetters,
+        recoveryProcedures: getChannelRecoveryProcedures(type),
+      },
+    });
+  });
+
+  app.put("/api/channels/:type", async (c) => {
+    const authToken = extractBearerToken(c.req.header("Authorization"));
+    if (!authToken || !await verifyToken(authToken)) return c.json({ error: "Unauthorized" }, 401);
+
+    const type = c.req.param("type");
+    if (!CHANNEL_TYPES.includes(type as Parameters<typeof saveChannelConfig>[0])) {
+      return c.json({ error: `Unknown channel type: ${type}` }, 400);
+    }
+
+    let body: StoredChannelConfig;
+    try { body = await c.req.json<StoredChannelConfig>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    // If a field is "••••••••" (redacted placeholder), preserve existing value
+    const currentConfig = getConfig();
+    const existing = getEffectiveChannelConfig(type as Parameters<typeof saveChannelConfig>[0], currentConfig.channels[type as keyof typeof currentConfig.channels]);
+    const secretFields = ["botToken", "appToken", "signingSecret", "token", "appSecret", "accessToken", "imapPassword", "smtpPassword"] as const;
+    for (const f of secretFields) {
+      if ((body as Record<string, unknown>)[f] === "••••••••") {
+        (body as Record<string, unknown>)[f] = existing[f];
+      }
+    }
+
+    saveChannelConfig(type as Parameters<typeof saveChannelConfig>[0], body);
+    await reloadChannel(type as Parameters<typeof saveChannelConfig>[0]);
+    return c.json({ ok: true, type });
+  });
+
+  app.delete("/api/channels/:type", async (c) => {
+    const authToken = extractBearerToken(c.req.header("Authorization"));
+    if (!authToken || !await verifyToken(authToken)) return c.json({ error: "Unauthorized" }, 401);
+
+    const type = c.req.param("type");
+    if (!CHANNEL_TYPES.includes(type as Parameters<typeof deleteChannelConfig>[0])) {
+      return c.json({ error: `Unknown channel type: ${type}` }, 400);
+    }
+    deleteChannelConfig(type as Parameters<typeof deleteChannelConfig>[0]);
+    await reloadChannel(type as Parameters<typeof deleteChannelConfig>[0]);
+    return c.json({ ok: true });
+  });
+
+  // ── REST chat endpoint (for simple integrations) ─────────────────────────
+  app.post("/api/chat", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    const { message, sessionId } = await c.req.json<{ message: string; sessionId?: string }>();
+    // Full implementation delegates to WS channel; REST returns 501 for streaming turns
+    return c.json({ error: "Use WebSocket for chat. REST chat coming in v0.2." }, 501);
+  });
+
+  // ── HTTP server with WS upgrade ──────────────────────────────────────────
+  const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const requestUrl = new URL(req.url ?? "/", "http://localhost");
+    const pathname = requestUrl.pathname;
+
+    // ── AG-UI streaming endpoint ─────────────────────────────────────────────
+    if (req.method === "POST" && pathname === "/api/chat/stream") {
+      const token = req.headers["authorization"]
+        ? extractBearerToken(req.headers["authorization"] as string)
+        : requestUrl.searchParams.get("token");
+
+      if (!token || !await verifyToken(token)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+
+      let rawBody = "";
+      req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const body = JSON.parse(rawBody) as { sessionId?: string; message: string };
+          await handleAguiStream(res, body);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        }
+      });
+      return;
+    }
+
+    // ── A2A agent endpoint ────────────────────────────────────────────────────
+    // POST /a2a/agents/:name  — JSON-RPC 2.0 task delegation
+    const a2aMatch = pathname.match(/^\/a2a\/agents\/([^/?]+)$/);
+    if (req.method === "POST" && a2aMatch) {
+      const token = req.headers["authorization"]
+        ? extractBearerToken(req.headers["authorization"] as string)
+        : null;
+
+      if (!token || !await verifyToken(token)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
+        return;
+      }
+
+      const agentName = decodeURIComponent(a2aMatch[1]!);
+      let rawBody = "";
+      req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+      req.on("end", async () => {
+        let rpcId: unknown = null;
+        try {
+          const rpc = JSON.parse(rawBody) as { jsonrpc: string; method: string; params: Record<string, unknown>; id: unknown };
+          rpcId = rpc.id;
+
+          if (rpc.method !== "tasks/send") {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32601, message: "Method not found — use tasks/send" }, id: rpcId }));
+            return;
+          }
+
+          const task  = String(rpc.params?.["task"] ?? "");
+          const ctx   = rpc.params?.["context"] ? String(rpc.params["context"]) : undefined;
+          const sessId = rpc.params?.["sessionId"] ? String(rpc.params["sessionId"]) : `a2a:${Date.now()}`;
+
+          const result = await runSubAgent({
+            agentName,
+            task,
+            context: ctx,
+            parentSessionId: sessId,
+            workspacePath: getConfig().workspacePath,
+          });
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", result: { output: result, agentName }, id: rpcId }));
+        } catch (err) {
+          log.error({ err, agentName }, "A2A task failed");
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: String(err) }, id: rpcId }));
+        }
+      });
+      return;
+    }
+
+    // ── Delegate all other requests to Hono ───────────────────────────────────
+    const method = req.method ?? "GET";
+    const honoReq = new Request(requestUrl, {
+      method,
+      headers: req.headers as Record<string, string>,
+      body: method === "GET" || method === "HEAD" ? undefined : Readable.toWeb(req),
+      duplex: method === "GET" || method === "HEAD" ? undefined : "half",
+    } as RequestInit & { duplex?: "half" });
+    void Promise.resolve(app.fetch(honoReq)).then((honoRes: Response) => {
+      res.writeHead(honoRes.status, Object.fromEntries(honoRes.headers.entries()));
+      return honoRes.text().then((body: string) => res.end(body));
+    }).catch(() => {
+      res.writeHead(500);
+      res.end("Internal Server Error");
+    });
+  });
+
+  function buildChannelOperatorState(
+    status: {
+      type: string;
+      enabled: boolean;
+      running: boolean;
+      supported?: boolean;
+      reason?: string | null;
+      error?: string;
+      health?: { healthy: boolean; error?: string };
+      metrics?: {
+        ingressDenied?: number;
+        lastDeliveryError?: string;
+        deliveryWindows?: { last5m?: { failed: number } };
+      };
+    },
+    recentDeadLetters: DeadLetterEntry[],
+  ): { severity: "ok" | "warning" | "critical"; summary: string } {
+    if (status.supported === false) {
+      return { severity: "warning", summary: status.reason ?? "Runtime not implemented" };
+    }
+    if (status.error) {
+      return { severity: "critical", summary: status.error };
+    }
+    if (status.health && !status.health.healthy) {
+      return { severity: "critical", summary: status.health.error ?? "Health check failing" };
+    }
+    const recentFailures = status.metrics?.deliveryWindows?.last5m?.failed ?? 0;
+    if (recentFailures > 0 || recentDeadLetters.length > 0 || status.metrics?.lastDeliveryError) {
+      return {
+        severity: "warning",
+        summary: recentFailures > 0
+          ? recentFailures + " delivery failure" + (recentFailures === 1 ? "" : "s") + " in the last 5 minutes"
+          : "Recent delivery failures require attention",
+      };
+    }
+    if ((status.metrics?.ingressDenied ?? 0) > 0) {
+      return { severity: "warning", summary: "Ingress requests were blocked by policy or rate limiting" };
+    }
+    if (status.enabled && !status.running) {
+      return { severity: "warning", summary: "Channel is enabled but not running" };
+    }
+    if (!status.enabled) {
+      return { severity: "ok", summary: "Channel is disabled" };
+    }
+    return { severity: "ok", summary: "Channel is operating normally" };
+  }
+
+  function getChannelRecoveryProcedures(type: string): string[] {
+    switch (type) {
+      case "telegram":
+        return [
+          "Verify botToken is configured and valid by calling Telegram getMe or reopening the dashboard channel status.",
+          "Confirm allowedUserIds is empty or includes the sender if the bot appears reachable but ignores messages.",
+          "Restart the gateway after token changes so the Grammy bot reconnects cleanly.",
+        ];
+      case "slack":
+        return [
+          "Verify botToken and signingSecret are set and that Slack auth.test succeeds.",
+          "If using Events API, confirm the public callback URL is reachable and still matches Slack app settings.",
+          "If using Socket Mode, confirm appToken is present and reinstall the app after scope changes.",
+        ];
+      case "discord":
+        return [
+          "Verify the bot token and confirm Message Content Intent remains enabled in the Discord developer portal.",
+          "Check guildIds restrictions and bot channel permissions if messages arrive in some servers but not others.",
+          "Restart the gateway to force a fresh Discord gateway session after token or intent changes.",
+        ];
+      case "whatsapp":
+        return [
+          "Confirm accessToken, phoneNumberId, verifyToken, and appSecret all match the Meta app and webhook configuration.",
+          "Verify the public webhook URL is reachable and that inbound requests pass X-Hub-Signature-256 validation.",
+          "Rotate the access token or re-register the webhook if Meta starts returning authorization or signature errors.",
+        ];
+      case "email":
+        return [
+          "Verify IMAP and SMTP credentials separately, especially app passwords for Gmail or Microsoft 365 accounts.",
+          "Check pollIntervalMs and mailbox connectivity if inbound mail is delayed but outbound SMTP works.",
+          "Restart the gateway after credential changes so the poller reconnects with the new settings.",
+        ];
+      case "signal":
+        return [
+          "Signal runtime support is not implemented yet; saved credentials will not start a live adapter.",
+        ];
+      default:
+        return ["Review the channel config, runtime status, and recent dead-letter entries before retrying delivery."];
+    }
+  }
+
+  const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+
+  wss.on("connection", async (ws, req) => {
+    const ip = req.socket.remoteAddress ?? "unknown";
+
+    // Auth check
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const token = url.searchParams.get("token") ??
+                  extractBearerToken(req.headers["authorization"]);
+
+    const rlCheck = checkAuthRateLimit(ip);
+    if (!rlCheck.allowed) {
+      ws.close(4429, "Too many auth failures");
+      return;
+    }
+
+    if (!token || !await verifyToken(token)) {
+      recordAuthFailure(ip);
+      ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
+      return;
+    }
+
+    clearAuthFailures(ip);
+
+    const conn = new RpcConnection(ws);
+
+    ws.on("message", async (raw) => {
+      await conn.handleMessage(raw.toString());
+    });
+
+    ws.on("close", () => conn.close());
+    ws.on("error", (err) => log.error({ err, connId: conn.connId }, "WS error"));
+  });
+
+  return {
+    start(): void {
+      const port = config.gateway.port;
+      httpServer.listen(port, "0.0.0.0", () => {
+        log.info({ port }, `Gateway listening — ws://0.0.0.0:${port}/ws`);
+      });
+    },
+    stop(): Promise<void> {
+      return new Promise((resolve) => {
+        for (const client of wss.clients) {
+          client.terminate();
+        }
+
+        wss.close();
+        httpServer.close(() => resolve());
+        httpServer.closeAllConnections?.();
+      });
+    },
+  };
+}

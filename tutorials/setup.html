@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Project Setup — StarlingAI</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="index.html">Home</a>
+        <span class="sep">›</span>
+        <span class="current">Project Setup</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero">
+        <h1>🔧 Project Setup</h1>
+        <p class="tagline">From zero to a running StarlingAI in 6 steps. Takes about 20 minutes.</p>
+      </div>
+
+      <!-- Progress bar -->
+      <div class="progress-wrap">
+        <div class="progress-label">
+          <span>Progress — <span class="progress-current">0</span> of 6 steps done</span>
+          <span id="pct-label">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:0%"></div>
+        </div>
+        <div class="step-dots" style="margin-top:.65rem;">
+          <div class="step-dot" data-step="step1">1</div>
+          <div class="step-dot" data-step="step2">2</div>
+          <div class="step-dot" data-step="step3">3</div>
+          <div class="step-dot" data-step="step4">4</div>
+          <div class="step-dot" data-step="step5">5</div>
+          <div class="step-dot" data-step="step6">6</div>
+        </div>
+      </div>
+
+      <!-- ───── Wizard Steps ──────────────────────────────── -->
+      <div class="wizard-steps">
+
+        <!-- Step 1 -->
+        <div class="step" data-step="step1">
+          <div class="step-line"></div>
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <div class="step-title">
+              Prerequisites
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <p>Install the required tools before anything else. Click each tab for your operating system.</p>
+
+            <h3>Node.js 22+</h3>
+            <div class="tab-group" id="tabs-nodejs">
+              <div class="tab-list">
+                <button class="tab-btn" data-tab="mac">macOS</button>
+                <button class="tab-btn" data-tab="linux">Linux</button>
+                <button class="tab-btn" data-tab="win">Windows</button>
+              </div>
+              <div class="tab-panel" data-tab="mac">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>brew install node@22
+echo 'export PATH="/usr/local/opt/node@22/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc</code></pre>
+                </div>
+              </div>
+              <div class="tab-panel" data-tab="linux">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code># Using nvm (recommended)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install 22
+nvm use 22</code></pre>
+                </div>
+              </div>
+              <div class="tab-panel" data-tab="win">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">powershell</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>winget install OpenJS.NodeJS.LTS</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <h3>Docker Desktop</h3>
+            <p>
+              Download and install from
+              <a href="https://www.docker.com/products/docker-desktop" target="_blank" rel="noopener">docker.com/products/docker-desktop</a>.
+              Make sure it's running before continuing.
+            </p>
+
+            <h3>pnpm</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>npm install -g pnpm</code></pre>
+            </div>
+
+            <h3>LM Studio</h3>
+            <p>
+              Download from <a href="https://lmstudio.ai" target="_blank" rel="noopener">lmstudio.ai</a> —
+              available for macOS, Windows, and Linux. You'll configure it in the next step.
+            </p>
+
+            <h3>Verify everything is installed</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>node --version    # should print v22.x.x or higher
+docker --version  # should print Docker version 24+
+pnpm --version    # should print 9.x or higher</code></pre>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="step" data-step="step2">
+          <div class="step-line"></div>
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <div class="step-title">
+              LM Studio Setup
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <p>
+              StarlingAI uses LM Studio to run language models locally. The orchestrator needs a model
+              with strong instruction-following and function-calling support.
+            </p>
+
+            <h3>Recommended models</h3>
+            <table class="compare-table" style="margin-bottom:1rem;">
+              <thead>
+                <tr><th>Model</th><th>VRAM</th><th>Notes</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>qwen/qwen3.5-35b-a3b</code></td>
+                  <td>~20 GB</td>
+                  <td>Best quality — recommended for orchestrator</td>
+                </tr>
+                <tr>
+                  <td><code>qwen/qwen3.5-9b</code></td>
+                  <td>~8 GB</td>
+                  <td>Use if VRAM is limited (slightly lower quality)</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>How to load the model</h3>
+            <ol>
+              <li>Open LM Studio</li>
+              <li>Go to the <strong>Discover</strong> tab and search for <code>qwen3.5</code></li>
+              <li>Download your chosen model</li>
+              <li>Go to <strong>Developer</strong> (the &lt;&gt; icon in the sidebar)</li>
+              <li>Select the model from the dropdown at the top</li>
+              <li>Enable <strong>Function Calling</strong> in the model settings</li>
+              <li>Click <strong>Start Server</strong></li>
+            </ol>
+
+            <div class="screenshot-placeholder">
+              <div class="ph-icon">🖥</div>
+              <div><strong>Screenshot:</strong> LM Studio → Developer → Start Server</div>
+              <div style="font-size:.78rem;color:var(--muted);">The server starts on port 1234 by default</div>
+            </div>
+
+            <div class="callout">
+              <div class="callout-icon">ℹ️</div>
+              <div class="callout-body">
+                <strong>Keep LM Studio open and the server running</strong> while using StarlingAI.
+                The gateway container connects to it via <code>http://host.docker.internal:1234/v1</code>.
+              </div>
+            </div>
+
+            <h3>Verify the server is running</h3>
+            <div class="tab-group" id="tabs-lms-verify">
+              <div class="tab-list">
+                <button class="tab-btn" data-tab="curl">curl</button>
+                <button class="tab-btn" data-tab="browser">Browser</button>
+              </div>
+              <div class="tab-panel" data-tab="curl">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>curl http://localhost:1234/v1/models</code></pre>
+                </div>
+              </div>
+              <div class="tab-panel" data-tab="browser">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">url</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>http://localhost:1234/v1/models</code></pre>
+                </div>
+              </div>
+            </div>
+            <p>You should get a JSON response listing the loaded model.</p>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step" data-step="step3">
+          <div class="step-line"></div>
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <div class="step-title">
+              Clone &amp; Configure
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <h3>Clone the repository</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>git clone https://github.com/your-org/starlingai.git
+cd starlingai</code></pre>
+            </div>
+
+            <h3>Copy the config template</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>cp starlingai.example.json starlingai.json</code></pre>
+            </div>
+
+            <h3>Run the setup script</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>node scripts/setup.mjs</code></pre>
+            </div>
+
+            <p>The setup script does the following:</p>
+            <ul>
+              <li>Generates a secure <code>SAI_MASTER_KEY</code> (AES-256 key for credential encryption)</li>
+              <li>Generates a <code>SAI_JWT_SECRET</code> for dashboard token signing</li>
+              <li>Generates a <code>POSTGRES_PASSWORD</code></li>
+              <li>Writes all secrets to a <code>.env</code> file (never commit this file)</li>
+            </ul>
+
+            <h3>Key .env variables</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">.env</span><button class="copy-btn">Copy</button></div>
+              <pre><code># Auto-generated by setup.mjs — do not edit manually
+SAI_MASTER_KEY=&lt;32-byte hex key&gt;
+SAI_JWT_SECRET=&lt;long random string&gt;
+POSTGRES_PASSWORD=&lt;random password&gt;
+
+# Optional — add channel tokens here or via the dashboard
+TELEGRAM_BOT_TOKEN=
+ANTHROPIC_API_KEY=
+
+# Logging
+LOG_LEVEL=info</code></pre>
+            </div>
+
+            <div class="callout warning">
+              <div class="callout-icon">⚠️</div>
+              <div class="callout-body">
+                <strong>Never commit your <code>.env</code> file.</strong>
+                It is listed in <code>.gitignore</code> by default.
+                The <code>SAI_MASTER_KEY</code> encrypts all stored credentials — losing it means losing
+                access to your stored channel secrets.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step" data-step="step4">
+          <div class="step-line"></div>
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <div class="step-title">
+              Install &amp; Build
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <h3>Install Node dependencies</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>pnpm install</code></pre>
+            </div>
+
+            <h3>Build and start all services</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>docker compose up -d --build</code></pre>
+            </div>
+
+            <p>This builds Docker images and starts all containers in the background. First build takes 3–5 minutes.</p>
+
+            <h3>What each container does</h3>
+            <table class="compare-table">
+              <thead>
+                <tr><th>Container</th><th>Port</th><th>Purpose</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>gateway</code></td>
+                  <td>8765</td>
+                  <td>Core engine — WebSocket API, agent orchestration, channel adapters</td>
+                </tr>
+                <tr>
+                  <td><code>web</code></td>
+                  <td>3001</td>
+                  <td>Dashboard UI for managing agents, scenes, and channels</td>
+                </tr>
+                <tr>
+                  <td><code>postgres</code></td>
+                  <td>internal</td>
+                  <td>Persistent storage for audit logs and configuration</td>
+                </tr>
+                <tr>
+                  <td><code>redis</code></td>
+                  <td>internal</td>
+                  <td>Session cache, rate limiting, and inter-service pub/sub</td>
+                </tr>
+                <tr>
+                  <td><code>tutorials</code></td>
+                  <td>3002</td>
+                  <td>This documentation site (nginx serving static HTML)</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>Check all containers are healthy</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>docker compose ps</code></pre>
+            </div>
+            <p>All services should show <code>healthy</code> or <code>running</code> status.</p>
+
+            <h3>View logs</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code># All services
+docker compose logs -f
+
+# Just the gateway
+docker compose logs -f gateway</code></pre>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="step" data-step="step5">
+          <div class="step-line"></div>
+          <div class="step-number">5</div>
+          <div class="step-body">
+            <div class="step-title">
+              First Login
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <p>The dashboard uses token-based auth. Generate your first token with the included script.</p>
+
+            <h3>Generate a login token</h3>
+            <div class="tab-group" id="tabs-token">
+              <div class="tab-list">
+                <button class="tab-btn" data-tab="unix">macOS / Linux</button>
+                <button class="tab-btn" data-tab="win">Windows</button>
+              </div>
+              <div class="tab-panel" data-tab="unix">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>./scripts/gen-token.sh</code></pre>
+                </div>
+              </div>
+              <div class="tab-panel" data-tab="win">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">cmd</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>scripts\gen-token.bat</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <p>The script prints a JWT token to your terminal. Copy the entire token string.</p>
+
+            <h3>Open the dashboard</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">url</span><button class="copy-btn">Copy</button></div>
+              <pre><code>http://localhost:3001</code></pre>
+            </div>
+
+            <p>Paste the token into the login screen when prompted.</p>
+
+            <div class="screenshot-placeholder">
+              <div class="ph-icon">🖥</div>
+              <div><strong>Screenshot:</strong> Dashboard login — paste your token here</div>
+            </div>
+
+            <div class="callout success">
+              <div class="callout-icon">✅</div>
+              <div class="callout-body">
+                Once logged in you'll see the main dashboard with an empty conversation list.
+                The agent swarm is ready to receive messages!
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 6 -->
+        <div class="step" data-step="step6">
+          <div class="step-number">6</div>
+          <div class="step-body">
+            <div class="step-title">
+              Done! 🎉
+              <span class="step-done-badge">Done</span>
+            </div>
+
+            <p>
+              StarlingAI is up and running. Here's what to do next:
+            </p>
+
+            <div class="callout">
+              <div class="callout-icon">📡</div>
+              <div class="callout-body">
+                <strong>Next step:</strong> Connect a channel to chat with your agents from
+                Telegram, Slack, Discord, WhatsApp, or Email.
+                Follow the <a href="channels/index.html">Channels guide</a> to get started.
+              </div>
+            </div>
+
+            <h3>Useful links</h3>
+            <ul>
+              <li><a href="http://localhost:3001" target="_blank" rel="noopener">Dashboard</a> — <code>http://localhost:3001</code></li>
+              <li><a href="http://localhost:3002" target="_blank" rel="noopener">This documentation</a> — <code>http://localhost:3002</code></li>
+              <li><a href="channels/index.html">Channels guide</a> — connect a messaging app</li>
+              <li><a href="agents.html">Agents guide</a> — understand the 25 built-in agents</li>
+              <li><a href="scenes.html">Scenes guide</a> — build automated workflows</li>
+            </ul>
+
+            <h3>Handy commands</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code># Stop all services
+docker compose down
+
+# Restart a single service
+docker compose restart gateway
+
+# Update and rebuild
+git pull
+docker compose up -d --build
+
+# View all logs
+docker compose logs -f</code></pre>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+      </div><!-- /wizard-steps -->
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <span>StarlingAI Setup Guide</span>
+        <a href="channels/index.html" style="color:var(--primary);">Next: Connect a channel →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+<script>
+  // Update percentage label when progress changes
+  const observer = new MutationObserver(() => {
+    const fill = document.querySelector('.progress-fill');
+    const lbl = document.getElementById('pct-label');
+    if (fill && lbl) lbl.textContent = fill.style.width || '0%';
+  });
+  const fill = document.querySelector('.progress-fill');
+  if (fill) observer.observe(fill, { attributes: true, attributeFilter: ['style'] });
+</script>
+</body>
+</html>

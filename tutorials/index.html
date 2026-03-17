@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StarlingAI Setup Guide</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <span style="color:var(--muted);font-size:.85rem;">StarlingAI Documentation</span>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero" style="border-bottom:none;margin-bottom:1.5rem;">
+        <div style="font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--primary);margin-bottom:.5rem;">StarlingAI</div>
+        <h1>Setup Guide</h1>
+        <p class="tagline">Get your general-purpose AI agent swarm running in 20 minutes.</p>
+        <div class="badge-row">
+          <span class="tag tag-blue">v1.0</span>
+          <span class="tag tag-green">Self-hosted</span>
+          <span class="tag tag-yellow">20 min setup</span>
+        </div>
+      </div>
+
+      <!-- Intro paragraph -->
+      <p style="color:var(--muted);font-size:.95rem;margin-bottom:2rem;max-width:620px;">
+        StarlingAI is inspired by the murmuration of starlings — thousands of birds that move as one coherent shape without a conductor, using only local rules. This guide walks you through every step to get your own agent swarm running — from installing prerequisites to connecting your first messaging channel.
+      </p>
+
+      <!-- Nav cards grid -->
+      <div class="nav-cards" style="grid-template-columns:repeat(2,1fr);">
+        <a class="nav-card" href="setup.html">
+          <div class="card-icon">🔧</div>
+          <div class="card-title">Project Setup</div>
+          <div class="card-desc">Install prerequisites, configure secrets, start all services with Docker Compose.</div>
+          <div class="card-arrow">Start here →</div>
+        </a>
+
+        <a class="nav-card" href="agents.html">
+          <div class="card-icon">🤖</div>
+          <div class="card-title">Agents</div>
+          <div class="card-desc">Understand the specialist agents in the swarm, configure models, and run evaluations.</div>
+          <div class="card-arrow">Explore agents →</div>
+        </a>
+
+        <a class="nav-card" href="scenes.html">
+          <div class="card-icon">🎬</div>
+          <div class="card-title">Scenes &amp; Automation</div>
+          <div class="card-desc">Create named workflows, schedule tasks, and add human-in-the-loop approval gates.</div>
+          <div class="card-arrow">Build scenes →</div>
+        </a>
+
+        <a class="nav-card" href="channels/index.html">
+          <div class="card-icon">📡</div>
+          <div class="card-title">Channels</div>
+          <div class="card-desc">Connect Telegram, Slack, Discord, WhatsApp, and Email as entry points into the swarm.</div>
+          <div class="card-arrow">Connect channels →</div>
+        </a>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- What you'll need -->
+      <div class="section">
+        <div class="section-title">⚡ What you'll need</div>
+        <p style="color:var(--muted);font-size:.9rem;margin-bottom:1rem;">
+          Make sure you have the following before starting. Click each item once you've confirmed it's ready.
+        </p>
+
+        <ul class="check-list">
+          <li data-check="nodejs">
+            <span class="check-icon"></span>
+            <div>
+              <strong>Node.js 22+</strong> —
+              <a href="https://nodejs.org" target="_blank" rel="noopener">nodejs.org</a>
+              &nbsp;<code>node --version</code> should show <code>v22.x.x</code> or higher
+            </div>
+          </li>
+          <li data-check="docker">
+            <span class="check-icon"></span>
+            <div>
+              <strong>Docker Desktop</strong> —
+              <a href="https://www.docker.com/products/docker-desktop" target="_blank" rel="noopener">docker.com</a>
+              &nbsp;with Compose v2 included
+            </div>
+          </li>
+          <li data-check="lmstudio">
+            <span class="check-icon"></span>
+            <div>
+              <strong>LM Studio</strong> —
+              <a href="https://lmstudio.ai" target="_blank" rel="noopener">lmstudio.ai</a>
+              &nbsp;for local model hosting (free)
+            </div>
+          </li>
+          <li data-check="pnpm">
+            <span class="check-icon"></span>
+            <div>
+              <strong>pnpm</strong> — fast Node package manager.
+              Install via <code>npm install -g pnpm</code>
+            </div>
+          </li>
+          <li data-check="ram">
+            <span class="check-icon"></span>
+            <div>
+              <strong>~16 GB RAM recommended</strong> — 8 GB minimum; more RAM = larger models possible
+            </div>
+          </li>
+          <li data-check="git">
+            <span class="check-icon"></span>
+            <div>
+              <strong>Git</strong> — for cloning the repository
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Quick overview -->
+      <div class="section">
+        <div class="section-title">🗺 How it works</div>
+        <p>
+          StarlingAI is a general-purpose, self-hosted AI agent swarm inspired by starling murmurations.
+          Just as each starling follows simple local rules (avoid collision, match speed, stay close) to
+          create complex emergent behavior, each agent in the swarm follows its own narrow rules and tool
+          set to contribute to solutions that no single agent could produce alone.
+        </p>
+        <p>
+          A lightweight <strong>orchestrator</strong> receives your messages (from Telegram, Slack, Discord,
+          WhatsApp, Email, or the web dashboard) and dynamically routes them to the right specialist agent —
+          a researcher, coder, data analyst, browser automator, and more. The swarm can tackle any task
+          domain by composing the right specialists at runtime.
+        </p>
+        <p>
+          Everything runs in Docker containers on your own machine. Your data never leaves your network.
+          LM Studio provides the local language model; no OpenAI API key required (though you can plug one in
+          if you prefer cloud models).
+        </p>
+
+        <div class="routing-diagram" style="margin-top:1.25rem;">
+          <div class="rd-row">
+            <div class="rd-box">Your message</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box primary">Telegram / Slack / Discord…</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box primary">Gateway</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.1rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box warning">Orchestrator</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box">search_agents</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box success">Best sub-agent</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.1rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box success">Response sent back to you</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Services table -->
+      <div class="section">
+        <div class="section-title">🐳 Services at a glance</div>
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>Port</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>gateway</code></td><td>8765</td><td>WebSocket + REST API, agent runner</td></tr>
+            <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI</td></tr>
+            <tr><td><code>postgres</code></td><td>internal</td><td>Audit logs, session store</td></tr>
+            <tr><td><code>redis</code></td><td>internal</td><td>Rate limiting, pub/sub</td></tr>
+            <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Footer -->
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <span>StarlingAI Setup Guide</span>
+        <span style="color:var(--muted);">Made with care for self-hosters</span>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

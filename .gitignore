@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.env.local
+.DS_Store
+*.log
+coverage/
+.turbo/
+
+# Runtime secrets and credentials
+.guardedswarm/
+guardedswarm.json
+starlingai.json
+packages/core/.starlingai/

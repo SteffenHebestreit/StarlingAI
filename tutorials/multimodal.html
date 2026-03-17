@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multimodal Tools — StarlingAI</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link active" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="index.html">Home</a>
+        <span class="sep">›</span>
+        <span class="current">Multimodal Tools</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero">
+        <h1>🎙️ Multimodal Tools</h1>
+        <p class="tagline">Audio transcription, speech synthesis, image analysis, and document extraction — all backed by local or remote services.</p>
+      </div>
+
+      <!-- Overview -->
+      <div class="section">
+        <div class="section-title">What are multimodal tools?</div>
+        <p>
+          StarlingAI agents can go beyond text. The multimodal tool suite gives your swarm the ability to
+          <strong>hear</strong> (transcribe audio), <strong>speak</strong> (synthesize speech),
+          <strong>see</strong> (analyse images), and <strong>read documents</strong> (convert files to text) —
+          all without leaving your self-hosted stack.
+        </p>
+        <p>
+          These tools are available to any agent that is granted them in <code>starlingai.json</code>. Three
+          pre-configured specialists — <code>media_analyst</code>, <code>transcription_agent</code>, and
+          <code>voice_narrator</code> — are included in the default agent catalog and can be used immediately
+          once the services they depend on are configured.
+        </p>
+
+        <div class="callout">
+          <div class="callout-icon">💡</div>
+          <div class="callout-body">
+            All multimodal services are <strong>optional</strong>. Each tool falls back gracefully — returning
+            a clear error — if the service it needs is not configured. The rest of the swarm continues to work normally.
+          </div>
+        </div>
+      </div>
+
+      <!-- Tool matrix -->
+      <div class="section">
+        <div class="section-title">Tool reference</div>
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>What it does</th>
+              <th>Requires</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>transcribe_audio</code></td>
+              <td>Converts an audio file (WAV, MP3, OGG, …) to text using an STT service</td>
+              <td><code>multimodal.stt.baseUrl</code></td>
+            </tr>
+            <tr>
+              <td><code>list_tts_voices</code></td>
+              <td>Returns available voices from the TTS service</td>
+              <td><code>multimodal.tts.baseUrl</code></td>
+            </tr>
+            <tr>
+              <td><code>synthesize_speech</code></td>
+              <td>Converts text to an audio file using a TTS service and saves it locally</td>
+              <td><code>multimodal.tts.baseUrl</code></td>
+            </tr>
+            <tr>
+              <td><code>analyse_image</code></td>
+              <td>Answers questions about an image using a vision-capable LLM</td>
+              <td><code>multimodal.vision.visionModel</code></td>
+            </tr>
+            <tr>
+              <td><code>extract_file_content</code></td>
+              <td>Converts documents (PDF, DOCX, XLSX, …) to Markdown text</td>
+              <td><code>multimodal.files.baseUrl</code> or MCP server</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Configuration -->
+      <div class="section">
+        <div class="section-title">Configuration</div>
+        <p>
+          Add a <code>multimodal</code> block to your <code>starlingai.json</code>. Every sub-block is
+          optional — leave out what you don't need.
+        </p>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "multimodal": {
+    // Speech-to-text (Whisper-compatible REST API)
+    "stt": {
+      "baseUrl": "http://localhost:8080",
+      "defaultLanguage": "en"
+    },
+    // Text-to-speech (Piper TTS or compatible REST API)
+    "tts": {
+      "baseUrl": "http://localhost:5500",
+      "defaultVoice": "en_US-lessac-medium",
+      "outputDir": "/workspace/audio"
+    },
+    // Vision model for image analysis
+    "vision": {
+      "visionModel": "lmstudio/qwen/qwen3.5-35b-a3b"
+    },
+    // File-to-Markdown conversion
+    "files": {
+      "baseUrl": "http://localhost:7700",
+      // OR use an MCP server instead of the REST service:
+      "mcpServer": "file_converter"
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            Configuration can also be updated live from the dashboard under
+            <strong>Settings → Multimodal</strong>. Changes take effect without a restart.
+          </div>
+        </div>
+      </div>
+
+      <!-- STT -->
+      <div class="section">
+        <div class="section-title">Speech-to-text (STT)</div>
+        <p>
+          The <code>transcribe_audio</code> tool POSTs an audio file to a Whisper-compatible transcription endpoint.
+          The recommended self-hosted option is <strong>whisper.cpp</strong> with its built-in HTTP server,
+          but any service that accepts a <code>multipart/form-data</code> upload on <code>/inference</code>
+          (returning <code>{ text: "..." }</code>) will work.
+        </p>
+
+        <h3>Quick start with whisper.cpp</h3>
+        <p>The Docker Compose stack includes a Piper TTS + whisper playground container. To start just the STT service:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code># Start the whisper.cpp server on port 8080
+docker compose up -d whisper
+
+# Verify it is reachable
+curl http://localhost:8080/api/health</code></pre>
+        </div>
+
+        <h3>Example — transcribing a file</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// Agent tool call
+{
+  "tool": "transcribe_audio",
+  "input": {
+    "filePath": "/workspace/recordings/meeting_2026-03-17.wav",
+    "language": "en"
+  }
+}
+
+// Result
+{
+  "text": "Good morning everyone. Let's get started with the sprint review...",
+  "segments": [
+    { "start": 0.0, "end": 3.2, "text": "Good morning everyone." },
+    { "start": 3.2, "end": 6.8, "text": "Let's get started with the sprint review." }
+  ]
+}</code></pre>
+        </div>
+
+        <h3>Using the transcription_agent</h3>
+        <p>The pre-built specialist handles the full workflow — transcribing and saving the result to <code>/workspace/transcripts/</code>:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
+          <pre><code>Transcribe /workspace/recordings/meeting_2026-03-17.wav and save a clean transcript.</code></pre>
+        </div>
+      </div>
+
+      <!-- TTS -->
+      <div class="section">
+        <div class="section-title">Text-to-speech (TTS)</div>
+        <p>
+          The <code>synthesize_speech</code> tool sends text to a TTS REST API and saves the returned audio
+          as a WAV file. The recommended self-hosted option is <strong>Piper TTS</strong>.
+        </p>
+
+        <h3>Quick start with Piper TTS</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code># Start Piper on port 5500
+docker compose up -d piper
+
+# List available voices
+curl http://localhost:5500/api/voices</code></pre>
+        </div>
+
+        <h3>Example — generating speech</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// Agent tool call
+{
+  "tool": "synthesize_speech",
+  "input": {
+    "text": "Your weekly digest is ready. Here are the top five stories.",
+    "voice": "en_US-lessac-medium",
+    "outputPath": "/workspace/audio/digest.wav"
+  }
+}
+
+// Result
+{
+  "filePath": "/workspace/audio/digest.wav",
+  "voice": "en_US-lessac-medium",
+  "durationSeconds": 4.2
+}</code></pre>
+        </div>
+
+        <h3>Choosing a voice</h3>
+        <p>Ask the <code>voice_narrator</code> agent to list voices and pick the best one for your content:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
+          <pre><code>Read out the following article in a calm, professional voice and save it as /workspace/audio/article.wav:
+
+[article text here]</code></pre>
+        </div>
+      </div>
+
+      <!-- Vision -->
+      <div class="section">
+        <div class="section-title">Image analysis</div>
+        <p>
+          The <code>analyse_image</code> tool passes an image (file path or URL) and a question to a
+          vision-capable LLM model. The model is configured through <code>multimodal.vision.visionModel</code>;
+          it must be loaded in LM Studio or another provider that accepts OpenAI-compatible vision requests.
+        </p>
+
+        <h3>Supported input formats</h3>
+        <ul>
+          <li>JPEG, PNG, WebP, GIF (first frame)</li>
+          <li>Local file path — <code>/workspace/screenshots/ui.png</code></li>
+          <li>HTTP/HTTPS URL (fetched server-side)</li>
+        </ul>
+
+        <h3>Example — UI screenshot analysis</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// Agent tool call
+{
+  "tool": "analyse_image",
+  "input": {
+    "imagePath": "/workspace/screenshots/dashboard.png",
+    "question": "List every UI element visible and note any error states."
+  }
+}
+
+// Result
+{
+  "answer": "The screenshot shows a navigation sidebar on the left with 5 items: Overview, Agents, Scenes, Channels, and Settings. The main area displays an error banner in red reading 'Connection timeout'. Below it is a table with 3 rows..."
+}</code></pre>
+        </div>
+
+        <h3>Using the media_analyst</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
+          <pre><code>Analyse the chart in /workspace/exports/q1-results.png and extract the revenue figures for each month.</code></pre>
+        </div>
+      </div>
+
+      <!-- File extraction -->
+      <div class="section">
+        <div class="section-title">Document extraction</div>
+        <p>
+          The <code>extract_file_content</code> tool converts binary documents to readable Markdown text.
+          It can be backed either by a <strong>REST service</strong> (e.g. MarkItDown, Docling) or by a
+          <strong>MCP server</strong> that exposes a <code>convert_to_markdown</code> tool.
+        </p>
+
+        <h3>Supported file types</h3>
+        <table class="compare-table">
+          <thead><tr><th>Format</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>PDF</td><td>Text extraction; image-heavy PDFs may need vision model for full content</td></tr>
+            <tr><td>DOCX / DOC</td><td>Full paragraph, heading, and table extraction</td></tr>
+            <tr><td>XLSX / XLS</td><td>Converts each sheet to a Markdown table</td></tr>
+            <tr><td>PPTX</td><td>Extracts slide text and notes</td></tr>
+            <tr><td>HTML</td><td>Strips tags and extracts readable content</td></tr>
+            <tr><td>CSV</td><td>Converts to Markdown table (first 500 rows)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Example</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// Agent tool call
+{
+  "tool": "extract_file_content",
+  "input": {
+    "filePath": "/workspace/docs/contract_v3.pdf"
+  }
+}
+
+// Result
+{
+  "content": "# Service Agreement\n\n## 1. Parties\n\nThis agreement is between...",
+  "mimeType": "application/pdf",
+  "pageCount": 12
+}</code></pre>
+        </div>
+
+        <h3>Configuring an MCP server</h3>
+        <p>If you prefer to use an MCP tool instead of a REST endpoint:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "multimodal": {
+    "files": {
+      // Set mcpServer to the MCP server name (no baseUrl needed)
+      "mcpServer": "file_converter"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "file_converter": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+      }
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Browser tools -->
+      <div class="section">
+        <div class="section-title">Browser tools</div>
+        <p>
+          Seven Playwright-based tools are available through the MCP Playwright integration. They give agents
+          the ability to drive a real browser — navigating pages, clicking elements, filling forms, and
+          capturing screenshots.
+        </p>
+
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>What it does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>mcp__playwright__browser_navigate</code></td><td>Navigate to a URL</td></tr>
+            <tr><td><code>mcp__playwright__browser_snapshot</code></td><td>Capture accessibility snapshot of the current page</td></tr>
+            <tr><td><code>mcp__playwright__browser_screenshot</code></td><td>Save a PNG screenshot</td></tr>
+            <tr><td><code>mcp__playwright__browser_click</code></td><td>Click an element by selector or text</td></tr>
+            <tr><td><code>mcp__playwright__browser_type</code></td><td>Type text into an input field</td></tr>
+            <tr><td><code>mcp__playwright__browser_select</code></td><td>Select a dropdown option</td></tr>
+            <tr><td><code>mcp__playwright__browser_wait_for</code></td><td>Wait for a selector or URL pattern</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Enabling Playwright MCP</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "mcp": {
+    "servers": {
+      "playwright": {
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"]
+      }
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="callout warning">
+          <div class="callout-icon">⚠️</div>
+          <div class="callout-body">
+            Browser tools run in the <strong>gateway process</strong>, not inside the Docker sandbox. Agents
+            that use them should be granted only the minimum set of browser tools they need — do not grant
+            all seven unless the agent genuinely requires full browser control.
+          </div>
+        </div>
+      </div>
+
+      <!-- Gateway API -->
+      <div class="section">
+        <div class="section-title">Gateway API routes</div>
+        <p>The gateway exposes REST endpoints for direct multimodal access without going through the agent runtime:</p>
+
+        <table class="compare-table">
+          <thead>
+            <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>GET</code></td><td><code>/api/multimodal/config</code></td><td>Read current multimodal configuration</td></tr>
+            <tr><td><code>PUT</code></td><td><code>/api/multimodal/config</code></td><td>Update multimodal configuration live</td></tr>
+            <tr><td><code>GET</code></td><td><code>/api/multimodal/status</code></td><td>Health check for all multimodal services</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/tools/file_to_markdown</code></td><td>Convert uploaded file to Markdown</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/tools/transcribe</code></td><td>Transcribe an uploaded audio file</td></tr>
+            <tr><td><code>GET</code></td><td><code>/api/tools/tts/voices</code></td><td>List available TTS voices</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/tools/tts/synthesize</code></td><td>Synthesize speech from text</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Example — checking service health</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>curl -H "Authorization: Bearer $SAI_TOKEN" \
+  http://localhost:8765/api/multimodal/status</code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "stt":   { "ok": true,  "model": "whisper-small" },
+  "tts":   { "ok": true,  "voices": 12 },
+  "vision":{ "ok": true,  "model": "lmstudio/qwen/qwen3.5-35b-a3b" },
+  "files": { "ok": false, "error": "Service unreachable at http://localhost:7700" }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Tips -->
+      <div class="section">
+        <div class="section-title">Tips &amp; best practices</div>
+        <ul>
+          <li>
+            <strong>Use the built-in specialists first.</strong> The <code>media_analyst</code>,
+            <code>transcription_agent</code>, and <code>voice_narrator</code> agents are pre-configured
+            with the right tool grants and system prompts. Grant them to scenes rather than writing custom
+            agents unless your use-case is genuinely different.
+          </li>
+          <li>
+            <strong>Keep audio files on the workspace volume.</strong> Agents running inside Docker containers
+            can only access paths under <code>/workspace</code>. Make sure your audio and image files are
+            mounted there.
+          </li>
+          <li>
+            <strong>Vision queries are model-dependent.</strong> The quality of <code>analyse_image</code>
+            results depends entirely on the vision model you have loaded. Qwen3.5-35B is vision-enabled
+            and works well for general-purpose visual QA without requiring a separate vision model.
+          </li>
+          <li>
+            <strong>Large documents may need chunking.</strong> <code>extract_file_content</code> returns the
+            full document text. For very large PDFs, ask the <code>media_analyst</code> to summarise or extract
+            specific sections rather than returning everything at once.
+          </li>
+          <li>
+            <strong>Check service health before running scenes.</strong> Query <code>/api/multimodal/status</code>
+            to confirm that all services your scene depends on are reachable before triggering an automated run.
+          </li>
+        </ul>
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="scenes.html" style="color:var(--muted);">← Scenes</a>
+        <a href="channels/index.html" style="color:var(--primary);">Next: Channels →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

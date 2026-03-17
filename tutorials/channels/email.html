@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Email — StarlingAI</title>
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="../index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="../index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="../setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="../agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="../scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="../multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="../index.html">Home</a>
+        <span class="sep">›</span>
+        <a href="index.html">Channels</a>
+        <span class="sep">›</span>
+        <span class="current">Email</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <div class="page-hero">
+        <div class="badge-row"><span class="channel-badge email">📧 Email</span><span class="tag tag-green">Easy</span><span class="tag tag-blue">~10 min</span></div>
+        <h1 style="margin-top:.6rem;">Connect Email</h1>
+        <p class="tagline">Connect any IMAP/SMTP mailbox. StarlingAI polls for new emails and replies automatically.</p>
+      </div>
+
+      <div class="callout">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body">
+          The email channel uses <strong>IMAP polling</strong> (not push). StarlingAI checks for new emails
+          every 30 seconds by default. Replies are sent via SMTP.
+        </div>
+      </div>
+
+      <div class="wizard-steps">
+
+        <!-- Step 1 -->
+        <div class="step" data-step="em1">
+          <div class="step-line"></div>
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <div class="step-title">Get your IMAP/SMTP credentials <span class="step-done-badge">Done</span></div>
+
+            <p>Most email providers support IMAP. The setup differs slightly by provider.</p>
+
+            <div class="tab-group" id="tabs-email-provider">
+              <div class="tab-list">
+                <button class="tab-btn" data-tab="gmail">Gmail</button>
+                <button class="tab-btn" data-tab="outlook">Outlook</button>
+                <button class="tab-btn" data-tab="other">Other / Custom</button>
+              </div>
+
+              <div class="tab-panel" data-tab="gmail">
+                <div style="padding:1rem;">
+                  <p>Gmail requires an <strong>App Password</strong> — your regular Google password won't work with IMAP when 2FA is enabled (which is required for app passwords).</p>
+                  <ol>
+                    <li>Go to <a href="https://myaccount.google.com/security" target="_blank" rel="noopener">myaccount.google.com/security</a></li>
+                    <li>Under <strong>How you sign in to Google</strong>, click <strong>2-Step Verification</strong></li>
+                    <li>Scroll to the bottom and click <strong>App passwords</strong></li>
+                    <li>Select app: <strong>Mail</strong>, device: <strong>Other</strong> (name it "StarlingAI")</li>
+                    <li>Click <strong>Generate</strong> and copy the 16-character password</li>
+                  </ol>
+                  <p>Use this app password as both your IMAP and SMTP password.</p>
+                  <div class="callout" style="margin-top:.75rem;">
+                    <div class="callout-icon">ℹ️</div>
+                    <div class="callout-body">
+                      You also need to enable IMAP in Gmail: <strong>Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-panel" data-tab="outlook">
+                <div style="padding:1rem;">
+                  <p>For Outlook.com and Microsoft 365 accounts:</p>
+                  <ul>
+                    <li>IMAP host: <code>outlook.office365.com</code> (port 993, SSL)</li>
+                    <li>SMTP host: <code>smtp.office365.com</code> (port 587, STARTTLS)</li>
+                    <li>Username: your full email address</li>
+                    <li>Password: your Microsoft account password</li>
+                  </ul>
+                  <div class="callout warning" style="margin-top:.75rem;">
+                    <div class="callout-icon">⚠️</div>
+                    <div class="callout-body">
+                      If your Microsoft 365 account has MFA, you may need to create an
+                      App Password via the Azure AD portal, or use OAuth2 authentication
+                      (contact your IT admin).
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-panel" data-tab="other">
+                <div style="padding:1rem;">
+                  <p>Any standard IMAP/SMTP server works. You'll need:</p>
+                  <ul>
+                    <li>IMAP hostname and port (typically 993 with SSL)</li>
+                    <li>SMTP hostname and port (typically 587 with STARTTLS, or 465 with SSL)</li>
+                    <li>Your email username (usually full email address)</li>
+                    <li>Your email password (or app password)</li>
+                  </ul>
+                  <p>Check your email provider's documentation for the exact hostnames.</p>
+                </div>
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="step" data-step="em2">
+          <div class="step-line"></div>
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <div class="step-title">Configure in dashboard <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+              <li>Go to <strong>Settings → Channels → Email</strong></li>
+              <li>Toggle <strong>On</strong></li>
+              <li>Fill in all fields:</li>
+            </ol>
+
+            <table class="compare-table">
+              <thead><tr><th>Field</th><th>Example</th></tr></thead>
+              <tbody>
+                <tr><td>IMAP Host</td><td><code>imap.gmail.com</code></td></tr>
+                <tr><td>IMAP Port</td><td><code>993</code></td></tr>
+                <tr><td>IMAP User</td><td><code>you@gmail.com</code></td></tr>
+                <tr><td>IMAP Password</td><td>App password (16 chars)</td></tr>
+                <tr><td>SMTP Host</td><td><code>smtp.gmail.com</code></td></tr>
+                <tr><td>SMTP Port</td><td><code>587</code></td></tr>
+                <tr><td>SMTP User</td><td><code>you@gmail.com</code></td></tr>
+                <tr><td>SMTP Password</td><td>Same app password</td></tr>
+                <tr><td>From Address</td><td><code>StarlingAI &lt;you@gmail.com&gt;</code></td></tr>
+              </tbody>
+            </table>
+
+            <ol start="5">
+              <li>Click <strong>Save</strong></li>
+            </ol>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step" data-step="em3">
+          <div class="step-line"></div>
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <div class="step-title">Poll interval <span class="step-done-badge">Done</span></div>
+
+            <p>
+              By default StarlingAI checks for new emails every <strong>30 seconds</strong>.
+              Adjust this in your config if you need faster or slower polling:
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+              <pre><code>{
+  "channels": {
+    "email": {
+      "enabled": true,
+      "pollIntervalMs": 15000
+    }
+  }
+}</code></pre>
+            </div>
+
+            <div class="callout warning">
+              <div class="callout-icon">⚠️</div>
+              <div class="callout-body">
+                Very short poll intervals (under 10 seconds) may trigger rate limits on free email providers.
+                30 seconds is a safe default for most use cases.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step" data-step="em4">
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <div class="step-title">Test it <span class="step-done-badge">Done</span></div>
+
+            <p>Send an email to the configured address. StarlingAI should reply within ~30 seconds.</p>
+
+            <ul>
+              <li>The subject of your email becomes the message sent to the orchestrator</li>
+              <li>The body is included as additional context</li>
+              <li>The reply comes from your configured SMTP From address</li>
+            </ul>
+
+            <div class="callout success">
+              <div class="callout-icon">✅</div>
+              <div class="callout-body">
+                Email is great for asynchronous workflows — send a task before bed,
+                wake up to the completed result in your inbox.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Provider reference -->
+      <div class="section" style="margin-top:2rem;">
+        <div class="section-title">Provider reference</div>
+        <p>Common IMAP and SMTP server settings:</p>
+
+        <table class="provider-table">
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>IMAP Host</th>
+              <th>IMAP Port</th>
+              <th>SMTP Host</th>
+              <th>SMTP Port</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">Gmail</td>
+              <td>imap.gmail.com</td>
+              <td>993</td>
+              <td>smtp.gmail.com</td>
+              <td>587</td>
+            </tr>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">Outlook / 365</td>
+              <td>outlook.office365.com</td>
+              <td>993</td>
+              <td>smtp.office365.com</td>
+              <td>587</td>
+            </tr>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">Yahoo Mail</td>
+              <td>imap.mail.yahoo.com</td>
+              <td>993</td>
+              <td>smtp.mail.yahoo.com</td>
+              <td>587</td>
+            </tr>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">Fastmail</td>
+              <td>imap.fastmail.com</td>
+              <td>993</td>
+              <td>smtp.fastmail.com</td>
+              <td>587</td>
+            </tr>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">ProtonMail Bridge</td>
+              <td>127.0.0.1</td>
+              <td>1143</td>
+              <td>127.0.0.1</td>
+              <td>1025</td>
+            </tr>
+            <tr>
+              <td style="font-weight:600;font-family:inherit;">Custom / cPanel</td>
+              <td>mail.yourdomain.com</td>
+              <td>993</td>
+              <td>mail.yourdomain.com</td>
+              <td>587</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p style="font-size:.85rem;color:var(--muted);">
+          All connections use TLS. IMAP port 993 = implicit TLS. SMTP port 587 = STARTTLS. Port 465 = implicit TLS (also supported).
+        </p>
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="whatsapp.html" style="color:var(--muted);">← WhatsApp</a>
+        <a href="../index.html" style="color:var(--primary);">Back to overview →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

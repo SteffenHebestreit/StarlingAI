@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord — StarlingAI</title>
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="../index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="../index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="../setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="../agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="../scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="../multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="../index.html">Home</a>
+        <span class="sep">›</span>
+        <a href="index.html">Channels</a>
+        <span class="sep">›</span>
+        <span class="current">Discord</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <div class="page-hero">
+        <div class="badge-row"><span class="channel-badge discord">🎮 Discord</span><span class="tag tag-green">Easy</span><span class="tag tag-blue">~10 min</span></div>
+        <h1 style="margin-top:.6rem;">Connect Discord</h1>
+        <p class="tagline">Add a bot to your Discord server and chat with your agents from any channel.</p>
+      </div>
+
+      <div class="wizard-steps">
+
+        <!-- Step 1 -->
+        <div class="step" data-step="dc1">
+          <div class="step-line"></div>
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <div class="step-title">Create a Discord Application <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Go to <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers/applications</a></li>
+              <li>Click <strong>New Application</strong> (top-right)</li>
+              <li>Enter a name (e.g. <em>StarlingAI</em>)</li>
+              <li>Accept the Terms of Service and click <strong>Create</strong></li>
+            </ol>
+
+            <p>You'll land on the General Information page of your new application.</p>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="step" data-step="dc2">
+          <div class="step-line"></div>
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <div class="step-title">Create a Bot &amp; copy the token <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>In the left sidebar, click <strong>Bot</strong></li>
+              <li>Click <strong>Add Bot</strong> → <strong>Yes, do it!</strong></li>
+              <li>Under the bot's username, click <strong>Reset Token</strong></li>
+              <li>Confirm and copy the token — you won't be able to see it again!</li>
+            </ol>
+
+            <div class="callout warning">
+              <div class="callout-icon">⚠️</div>
+              <div class="callout-body">
+                Save the token somewhere safe immediately. If you lose it, you'll need to reset it
+                (which invalidates the old one).
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step" data-step="dc3">
+          <div class="step-line"></div>
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <div class="step-title">Enable Privileged Intents <span class="step-done-badge">Done</span></div>
+
+            <p>StarlingAI needs the <strong>Message Content Intent</strong> to read message text.</p>
+
+            <p>Still on the <strong>Bot</strong> page, scroll down to <strong>Privileged Gateway Intents</strong>:</p>
+
+            <table class="compare-table">
+              <thead><tr><th>Intent</th><th>Required?</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><strong>Message Content Intent</strong></td>
+                  <td><span class="tag tag-red">Required</span></td>
+                </tr>
+                <tr>
+                  <td>Server Members Intent</td>
+                  <td><span class="tag tag-yellow">Optional</span></td>
+                </tr>
+                <tr>
+                  <td>Presence Intent</td>
+                  <td>Not needed</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <p>Toggle <strong>Message Content Intent</strong> on and click <strong>Save Changes</strong>.</p>
+
+            <div class="callout warning">
+              <div class="callout-icon">⚠️</div>
+              <div class="callout-body">
+                Without the Message Content Intent, the bot will receive events but cannot read
+                message text — it will appear to silently ignore all messages.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step" data-step="dc4">
+          <div class="step-line"></div>
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <div class="step-title">Invite the bot to your server <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>In the left sidebar, click <strong>OAuth2 → URL Generator</strong></li>
+              <li>Under <strong>Scopes</strong>, check: <code>bot</code></li>
+              <li>Under <strong>Bot Permissions</strong>, check:
+                <ul>
+                  <li>Send Messages</li>
+                  <li>Read Message History</li>
+                  <li>Read Messages / View Channels</li>
+                </ul>
+              </li>
+              <li>Copy the generated URL at the bottom of the page</li>
+              <li>Open the URL in a new browser tab</li>
+              <li>Select the server to add the bot to and click <strong>Authorize</strong></li>
+            </ol>
+
+            <p>The bot now appears in your server's member list (offline until the gateway starts).</p>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="step" data-step="dc5">
+          <div class="step-line"></div>
+          <div class="step-number">5</div>
+          <div class="step-body">
+            <div class="step-title">Configure in dashboard <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+              <li>Go to <strong>Settings → Channels → Discord</strong></li>
+              <li>Toggle <strong>On</strong></li>
+              <li>Paste your bot token</li>
+              <li>Optionally enter Guild IDs to restrict which servers the bot responds in</li>
+              <li>Set <code>dmPolicy</code></li>
+              <li>Click <strong>Save</strong></li>
+            </ol>
+
+            <h3>Restrict to specific servers (optional)</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+              <pre><code>{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "allowedGuildIds": ["123456789012345678"]
+    }
+  }
+}</code></pre>
+            </div>
+
+            <p>Find your Guild ID by right-clicking a server icon in Discord → <strong>Copy Server ID</strong> (enable Developer Mode in Discord settings first).</p>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 6 -->
+        <div class="step" data-step="dc6">
+          <div class="step-number">6</div>
+          <div class="step-body">
+            <div class="step-title">Test it <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>The bot should appear online in your Discord server</li>
+              <li>Go to any channel the bot has access to</li>
+              <li>Send a message mentioning the bot: <code>@StarlingAI hello</code></li>
+              <li>Or send a DM to the bot directly</li>
+              <li>If using pairing mode, send <code>/pair CODE</code> first</li>
+            </ol>
+
+            <div class="callout success">
+              <div class="callout-icon">✅</div>
+              <div class="callout-body">
+                The bot responds in the same channel you messaged it from. For DMs, it responds
+                in the DM thread. For channel messages, it replies in-thread to avoid spamming the channel.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="slack.html" style="color:var(--muted);">← Slack</a>
+        <a href="whatsapp.html" style="color:var(--primary);">Next: WhatsApp →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

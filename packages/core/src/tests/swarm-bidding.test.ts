@@ -1,0 +1,150 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}:done`);
+
+vi.mock("../agent/sub-agent.js", () => ({
+  runSubAgent: runSubAgentMock,
+}));
+
+describe("swarm autonomous bidding", () => {
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    runSubAgentMock.mockReset();
+    vi.resetModules();
+
+    const [{ resetSwarmBusForTests }, { resetAutonomousBiddingForTests }, configLoader] = await Promise.all([
+      import("../swarm/bus.js"),
+      import("../swarm/bidding.js"),
+      import("../config/loader.js"),
+    ]);
+
+    resetSwarmBusForTests();
+    resetAutonomousBiddingForTests();
+    configLoader.resetConfigForTests();
+  });
+
+  it("emits ranked task bids for autonomous task announcements", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-bidding-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Logs into sites and automates forms in the browser.",
+          systemPrompt: "Inspect the page and fill the login form.",
+          tools: ["get_site_credentials", "mcp__playwright__browser_click"],
+          maxIterations: 4,
+        },
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    try {
+      const [{ emitSwarmEvent }, { collectTaskBids, startAutonomousBidding }] = await Promise.all([
+        import("../swarm/bus.js"),
+        import("../swarm/bidding.js"),
+      ]);
+      await import("../tools/sub-agent.js");
+
+      startAutonomousBidding();
+      emitSwarmEvent("task_announced", {
+        sessionId: "swarm-1",
+        taskId: "task-1",
+        task: "Complete the login form automation flow",
+        data: {
+          dispatchMode: "autonomous_bidding",
+          routingQuery: "login form automation",
+        },
+      });
+
+      const bids = await collectTaskBids("task-1", 150);
+      expect(bids.length).toBeGreaterThan(0);
+      expect(bids[0]?.agentName).toBe("browser_agent");
+      expect(bids[0]?.confidence).toMatch(/high|medium|low/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("uses autonomous bids before direct fallback routing in task graphs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-bidding-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Logs into sites and automates forms in the browser.",
+          systemPrompt: "Inspect the page and fill the login form.",
+          tools: ["get_site_credentials", "mcp__playwright__browser_click"],
+          maxIterations: 4,
+        },
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    try {
+      const [{ getTool }, { startAutonomousBidding }] = await Promise.all([
+        import("../tools/registry.js"),
+        import("../swarm/bidding.js"),
+      ]);
+      await import("../tools/sub-agent.js");
+
+      startAutonomousBidding();
+
+      const runTaskGraph = getTool("run_task_graph");
+      expect(runTaskGraph).toBeDefined();
+
+      const swarmState: import("../tools/registry.js").SwarmState = {
+        objective: "Autonomous bidding",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        tasks: {},
+      };
+
+      const result = await runTaskGraph!.execute({
+        objective: "Let the swarm self-select the best agent",
+        nodes: [
+          { id: "login", task: "Complete the login form automation flow", routingQuery: "login form automation" },
+        ],
+      }, {
+        sessionId: "swarm-2",
+        workspacePath: tempDir,
+        swarmState,
+      });
+
+      expect(result.success).toBe(true);
+      expect(runSubAgentMock).toHaveBeenCalled();
+      expect(runSubAgentMock.mock.calls[0]?.[0]?.agentName).toBe("browser_agent");
+      expect(result.output).toContain("browser_agent");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+});

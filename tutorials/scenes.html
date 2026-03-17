@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Scenes &amp; Automation — StarlingAI</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="index.html">Home</a>
+        <span class="sep">›</span>
+        <span class="current">Scenes &amp; Automation</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero">
+        <h1>🎬 Scenes &amp; Automation</h1>
+        <p class="tagline">Define workflows once — let the swarm execute them using the right specialists automatically.</p>
+      </div>
+
+      <!-- What is a scene -->
+      <div class="section">
+        <div class="section-title">What is a scene?</div>
+        <p>
+          A <strong>scene</strong> is a named, reusable task template that the swarm executes autonomously.
+          Each scene defines a task and optionally constrains which agents can participate, what approval
+          gates apply, and what webhooks to trigger. The swarm dynamically discovers the best specialists
+          to handle each part of the task — you define the goal, not the step-by-step execution.
+        </p>
+        <div class="callout">
+          <div class="callout-icon">💡</div>
+          <div class="callout-body">
+            <strong>Think of scenes as missions for the swarm.</strong> You define the objective and constraints,
+            then the swarm composes the right specialists to accomplish it — like a flock of starlings
+            responding to a signal.
+          </div>
+        </div>
+      </div>
+
+      <!-- How to create -->
+      <div class="section">
+        <div class="section-title">How to create a scene</div>
+
+        <h3>Via the dashboard</h3>
+        <ol>
+          <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+          <li>Go to <strong>Settings → Scenes → New Scene</strong></li>
+          <li>Give the scene a name (e.g. <code>daily_report</code>) — no spaces, use underscores</li>
+          <li>Add steps using the visual step builder</li>
+          <li>Optionally add input variables and a schedule</li>
+          <li>Click <strong>Save</strong></li>
+        </ol>
+
+        <h3>Via starlingai.json</h3>
+        <p>Declare scenes in your config file for version-controlled automation:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "scenes": {
+    "daily_report": {
+      "description": "Compile and send a daily summary report",
+      "schedule": "0 8 * * 1-5",
+      "steps": [
+        {
+          "id": "gather_data",
+          "agent": "researcher",
+          "input": "Summarise the top 5 AI news items from today"
+        },
+        {
+          "id": "write_report",
+          "agent": "summarizer",
+          "input": "{{steps.gather_data.output}} — format as a short bullet-point email"
+        },
+        {
+          "id": "send_email",
+          "agent": "notification_router",
+          "input": "Send to {{vars.recipientEmail}}: {{steps.write_report.output}}"
+        }
+      ]
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Triggering -->
+      <div class="section">
+        <div class="section-title">Triggering a scene</div>
+        <p>Scenes can be triggered in three ways:</p>
+
+        <h3>1. From chat</h3>
+        <p>Send a message to the bot with the <code>/run</code> command:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">chat</span><button class="copy-btn">Copy</button></div>
+          <pre><code>/run daily_report
+
+# With variables:
+/run daily_report recipientEmail=steffen@example.com</code></pre>
+        </div>
+
+        <h3>2. Via the REST API</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>curl -X POST \
+  "http://localhost:8765/api/scenes/daily_report/run?key=$SCENE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"vars": {"recipientEmail": "steffen@example.com"}}'</code></pre>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            Get your <code>SCENE_KEY</code> from the dashboard under
+            <strong>Settings → Scenes → API Keys</strong>. Keep it secret — it can trigger
+            any scene in your instance.
+          </div>
+        </div>
+
+        <h3>3. From the dashboard</h3>
+        <p>
+          Navigate to <strong>Settings → Scenes</strong>, find your scene, and click the
+          <strong>Run</strong> button. You can provide variable values via the run dialog.
+        </p>
+      </div>
+
+      <!-- Example scene -->
+      <div class="section">
+        <div class="section-title">Example: daily report scene</div>
+        <p>
+          Here's a full scene definition that gathers AI news, writes a report, and emails it —
+          every weekday at 8 AM.
+        </p>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  scenes: {
+    daily_report: {
+      description: "Daily AI news digest",
+      // Cron: weekdays at 8:00 AM
+      schedule: "0 8 * * 1-5",
+      // Variables with defaults
+      vars: {
+        recipientEmail: { type: "string", required: true },
+        topN: { type: "number", default: 5 }
+      },
+      steps: [
+        {
+          id: "research",
+          agent: "researcher",
+          input: "Find the top {{vars.topN}} AI news items published today. Include source URLs."
+        },
+        {
+          id: "summarise",
+          agent: "summarizer",
+          input: "Condense the following into a concise email body (bullet points):\n{{steps.research.output}}"
+        },
+        {
+          id: "send",
+          agent: "notification_router",
+          input: "Send an email to {{vars.recipientEmail}} with subject 'Daily AI Digest' and body:\n{{steps.summarise.output}}"
+        }
+      ]
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Human-in-the-loop -->
+      <div class="section">
+        <div class="section-title">Human-in-the-loop approval</div>
+        <p>
+          Add approval gates to pause a scene before executing sensitive steps. The orchestrator will
+          send an approval request to your chosen channel and wait for you to confirm before continuing.
+        </p>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  scenes: {
+    outreach_campaign: {
+      description: "Draft and send outreach emails",
+      // Pause before executing these step IDs
+      humanInLoopSteps: ["send_emails"],
+      // Send approval request to this channel
+      approvalChannel: "slack",
+      steps: [
+        {
+          id: "draft",
+          agent: "email_drafter",
+          input: "Draft 3 cold outreach emails for: {{vars.targetCompanies}}"
+        },
+        {
+          id: "send_emails",
+          agent: "notification_router",
+          input: "Send the following emails: {{steps.draft.output}}"
+        }
+      ]
+    }
+  }
+}</code></pre>
+        </div>
+
+        <p>When the scene reaches a <code>humanInLoopSteps</code> step:</p>
+        <ol>
+          <li>The bot sends you a message on the <code>approvalChannel</code> showing what it's about to do</li>
+          <li>It waits (up to 24 hours by default)</li>
+          <li>Reply <strong>"approve"</strong> to continue, or <strong>"reject"</strong> to abort the scene</li>
+        </ol>
+
+        <div class="callout warning">
+          <div class="callout-icon">⚠️</div>
+          <div class="callout-body">
+            The <code>approvalChannel</code> must be connected and the requesting user must have
+            a valid pairing for that channel. See the
+            <a href="channels/index.html">Channels guide</a> for setup instructions.
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene variables -->
+      <div class="section">
+        <div class="section-title">Scene variables &amp; templating</div>
+        <p>
+          Scenes use a simple double-brace templating syntax. Variables are resolved at runtime
+          from three sources, in order of priority:
+        </p>
+
+        <ol>
+          <li><strong>Run-time input</strong> — provided when triggering via chat or API</li>
+          <li><strong>Scene defaults</strong> — declared in the <code>vars</code> section</li>
+          <li><strong>Previous step outputs</strong> — referenced as <code>{"{{steps.STEP_ID.output}}"}</code></li>
+        </ol>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
+          <pre><code>Available template variables:
+
+{{vars.NAME}}              — input variable (e.g. {{vars.recipientEmail}})
+{{steps.STEP_ID.output}}   — text output of a previous step
+{{steps.STEP_ID.success}}  — boolean: did the step succeed?
+{{env.SAI_MASTER_KEY}}      — environment variable (restricted list)
+{{now}}                    — current ISO timestamp
+{{today}}                  — current date (YYYY-MM-DD)</code></pre>
+        </div>
+      </div>
+
+      <!-- Scheduling -->
+      <div class="section">
+        <div class="section-title">Scheduling scenes</div>
+        <p>
+          The <code>schedule</code> field accepts standard 5-field cron expressions.
+          The timezone defaults to UTC; set <code>scheduleTimezone</code> to change it.
+        </p>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  scenes: {
+    weekly_summary: {
+      schedule: "0 9 * * 1",          // Every Monday at 9:00 AM
+      scheduleTimezone: "Europe/Berlin",
+      // ...
+    }
+  }
+}</code></pre>
+        </div>
+
+        <h3>Common cron patterns</h3>
+        <table class="compare-table">
+          <thead><tr><th>Expression</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>0 8 * * 1-5</code></td><td>Weekdays at 8:00 AM</td></tr>
+            <tr><td><code>0 9 * * 1</code></td><td>Every Monday at 9:00 AM</td></tr>
+            <tr><td><code>*/30 * * * *</code></td><td>Every 30 minutes</td></tr>
+            <tr><td><code>0 0 1 * *</code></td><td>First day of each month at midnight</td></tr>
+            <tr><td><code>0 12 * * *</code></td><td>Every day at noon</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="agents.html" style="color:var(--muted);">← Agents</a>
+        <a href="channels/index.html" style="color:var(--primary);">Next: Channels →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp — StarlingAI</title>
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="../index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="../index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="../setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="../agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="../scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="../multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="../index.html">Home</a>
+        <span class="sep">›</span>
+        <a href="index.html">Channels</a>
+        <span class="sep">›</span>
+        <span class="current">WhatsApp</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <div class="page-hero">
+        <div class="badge-row"><span class="channel-badge whatsapp">📱 WhatsApp</span><span class="tag tag-red">Hard</span><span class="tag tag-blue">~30 min</span></div>
+        <h1 style="margin-top:.6rem;">Connect WhatsApp</h1>
+        <p class="tagline">Use the Meta WhatsApp Business API to receive and send messages via WhatsApp.</p>
+      </div>
+
+      <div class="callout warning">
+        <div class="callout-icon">⚠️</div>
+        <div class="callout-body">
+          <strong>WhatsApp requires a public webhook URL.</strong>
+          Your StarlingAI instance must be reachable from the internet.
+          For local testing, use a tunnelling service like
+          <a href="https://ngrok.com" target="_blank" rel="noopener">ngrok</a> or
+          <a href="https://cloudflared.net" target="_blank" rel="noopener">Cloudflare Tunnel</a>.
+        </div>
+      </div>
+
+      <div class="wizard-steps">
+
+        <!-- Step 1 -->
+        <div class="step" data-step="wa1">
+          <div class="step-line"></div>
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <div class="step-title">Create a Meta Developer Account &amp; App <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Go to <a href="https://developers.facebook.com" target="_blank" rel="noopener">developers.facebook.com</a></li>
+              <li>Log in with a Facebook account</li>
+              <li>Click <strong>My Apps → Create App</strong></li>
+              <li>Select app type: <strong>Business</strong></li>
+              <li>Enter an app name and click <strong>Create App</strong></li>
+            </ol>
+
+            <div class="callout">
+              <div class="callout-icon">ℹ️</div>
+              <div class="callout-body">
+                You'll need to link a Business Portfolio or create a new one.
+                For personal/hobbyist use a personal portfolio works fine.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="step" data-step="wa2">
+          <div class="step-line"></div>
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <div class="step-title">Add WhatsApp product &amp; get a test number <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>On the App Dashboard, scroll down to <strong>Add a product</strong></li>
+              <li>Find <strong>WhatsApp</strong> and click <strong>Set Up</strong></li>
+              <li>You'll be taken to the WhatsApp Getting Started page</li>
+              <li>Under <strong>From</strong>, a test phone number is automatically created — note the <strong>Phone Number ID</strong></li>
+              <li>Under <strong>To</strong>, add your personal WhatsApp number as a test recipient (you'll receive a verification code)</li>
+            </ol>
+
+            <p>Take note of both:</p>
+            <ul>
+              <li><strong>Phone Number ID</strong> — numeric ID, not the actual phone number</li>
+              <li><strong>WhatsApp Business Account ID</strong> — shown at the top of the page</li>
+            </ul>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step" data-step="wa3">
+          <div class="step-line"></div>
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <div class="step-title">Configure a webhook <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>In the left sidebar, click <strong>WhatsApp → Configuration</strong></li>
+              <li>Under <strong>Webhook</strong>, click <strong>Edit</strong></li>
+              <li>Enter your <strong>Callback URL</strong>:</li>
+            </ol>
+
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">url</span><button class="copy-btn">Copy</button></div>
+              <pre><code>https://your-host/channels/whatsapp/webhook</code></pre>
+            </div>
+
+            <ol start="4">
+              <li>Enter a <strong>Verify Token</strong> — this is any string you choose (remember it for the dashboard)</li>
+              <li>Click <strong>Verify and Save</strong></li>
+              <li>Under <strong>Webhook fields</strong>, click <strong>Manage</strong></li>
+              <li>Subscribe to: <strong>messages</strong></li>
+            </ol>
+
+            <div class="callout">
+              <div class="callout-icon">ℹ️</div>
+              <div class="callout-body">
+                Meta will send a GET request to your webhook URL to verify it.
+                The StarlingAI gateway handles this automatically — just make sure it's running
+                and publicly accessible before clicking Verify.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step" data-step="wa4">
+          <div class="step-line"></div>
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <div class="step-title">Generate a Permanent Access Token <span class="step-done-badge">Done</span></div>
+
+            <p>The temporary access token on the Getting Started page expires. For production use, generate a permanent token:</p>
+
+            <ol>
+              <li>Go to <a href="https://business.facebook.com/settings" target="_blank" rel="noopener">business.facebook.com/settings</a></li>
+              <li>Navigate to <strong>Users → System Users</strong></li>
+              <li>Create a new System User with <strong>Admin</strong> role</li>
+              <li>Click <strong>Generate New Token</strong></li>
+              <li>Select your app, set expiration to <strong>Never</strong></li>
+              <li>Add permissions: <code>whatsapp_business_messaging</code>, <code>whatsapp_business_management</code></li>
+              <li>Click <strong>Generate Token</strong> and copy it</li>
+            </ol>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="step" data-step="wa5">
+          <div class="step-line"></div>
+          <div class="step-number">5</div>
+          <div class="step-body">
+            <div class="step-title">Configure in dashboard <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+              <li>Go to <strong>Settings → Channels → WhatsApp</strong></li>
+              <li>Toggle <strong>On</strong></li>
+              <li>Fill in all four fields:</li>
+            </ol>
+
+            <table class="compare-table">
+              <thead><tr><th>Field</th><th>Where to find it</th></tr></thead>
+              <tbody>
+                <tr><td>Access Token</td><td>Generated in step 4</td></tr>
+                <tr><td>Phone Number ID</td><td>WhatsApp → Getting Started → From number</td></tr>
+                <tr><td>Verify Token</td><td>The string you chose in step 3</td></tr>
+                <tr><td>App Secret</td><td>App Dashboard → Settings → Basic → App Secret</td></tr>
+              </tbody>
+            </table>
+
+            <ol start="5">
+              <li>Click <strong>Save</strong></li>
+            </ol>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 6 -->
+        <div class="step" data-step="wa6">
+          <div class="step-number">6</div>
+          <div class="step-body">
+            <div class="step-title">Add App Secret for webhook security <span class="step-done-badge">Done</span></div>
+
+            <p>
+              StarlingAI verifies every inbound webhook payload using HMAC-SHA256 with your App Secret.
+              This ensures messages actually come from Meta and haven't been tampered with.
+            </p>
+
+            <div class="callout danger">
+              <div class="callout-icon">🔒</div>
+              <div class="callout-body">
+                <strong>If the <code>appSecret</code> field is empty, signature verification is skipped.</strong>
+                This is not recommended for production — an attacker could send fake webhook events to your endpoint.
+                Always configure <code>appSecret</code> for any publicly accessible deployment.
+              </div>
+            </div>
+
+            <p>Find your App Secret:</p>
+            <ol>
+              <li>Go to the App Dashboard → <strong>App Settings → Basic</strong></li>
+              <li>Click <strong>Show</strong> next to App Secret</li>
+              <li>Copy and paste it into the <strong>App Secret</strong> field in the dashboard</li>
+            </ol>
+
+            <h3>Test your setup</h3>
+            <p>
+              Send a WhatsApp message from the test recipient number you registered in step 2.
+              The bot should reply within a few seconds.
+            </p>
+
+            <div class="callout success">
+              <div class="callout-icon">✅</div>
+              <div class="callout-body">
+                WhatsApp is now connected. Note that the test number has a sending limit
+                (typically 1,000 conversations/day for the sandbox). For higher volume,
+                you'll need a verified WhatsApp Business Account.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="discord.html" style="color:var(--muted);">← Discord</a>
+        <a href="email.html" style="color:var(--primary);">Next: Email →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agents — StarlingAI</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="index.html">Home</a>
+        <span class="sep">›</span>
+        <span class="current">Agents</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero">
+        <h1>🤖 Agents</h1>
+        <p class="tagline">StarlingAI ships 25+ specialist agents. The swarm automatically discovers and routes to the right one — like starlings self-organizing without a conductor.</p>
+      </div>
+
+      <!-- How routing works -->
+      <div class="section">
+        <div class="section-title">How the swarm routes tasks</div>
+        <p>
+          You never need to address agents directly. Simply send a message — the swarm
+          analyses it, searches for the best matching specialist using hybrid semantic + outcome-weighted scoring,
+          delegates the task, and returns the result. If the first agent fails, the swarm automatically
+          falls back to the next-best candidate — self-healing without human intervention.
+        </p>
+        <p>
+          This is the swarm's emergent execution: each delegation improves future routing through outcome
+          tracking. The swarm gets smarter over time, learning which specialists handle which tasks best.
+        </p>
+
+        <div class="routing-diagram">
+          <div class="rd-row">
+            <div class="rd-box">Your message</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box primary">Orchestrator</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.15rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box">search_agents</div>
+            <div class="rd-arrow" style="font-size:.75rem;color:var(--muted);">hybrid semantic +<br>outcome-weighted</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.15rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box warning">delegate_to_agent</div>
+            <div class="rd-arrow">→</div>
+            <div class="rd-box success">Best sub-agent</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.15rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box success">Response → back to you</div>
+          </div>
+          <div class="rd-divider" style="margin-top:.5rem;">
+            Each delegation improves future routing via outcome weighting
+          </div>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            The orchestrator keeps a short conversation history so it can handle follow-up
+            questions and multi-turn tasks without losing context.
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent reference table -->
+      <div class="section">
+        <div class="section-title">Agent reference</div>
+        <p>The swarm ships with 25+ pre-configured specialists covering research, code, automation, communication, and more. You can change the model for any agent via the dashboard or config file, and the swarm can create new ephemeral agents on demand for tasks that no existing specialist covers.</p>
+
+        <div class="agent-table-wrap">
+          <table class="agent-table">
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th>Model size</th>
+                <th>What it's good at</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="agent-name">researcher</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Web research, fact-checking, topic summaries with citations</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">code_analyst</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Code review, security analysis, architecture assessment</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">shell_agent</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Executing shell commands in a sandboxed container</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">browser_agent</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Navigating websites, scraping content, form automation</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">coder</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Writing, refactoring, and debugging code in any language</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">proposal_writer</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Drafting business proposals, RFP responses, pitch decks</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">data_analyst</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Analysing CSV/JSON data, generating reports and visualisations</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">email_drafter</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Writing professional emails from bullet points or briefs</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">summarizer</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Condensing long documents, threads, or meeting notes</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">job_scout</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Searching job boards, filtering by criteria, tracking applications</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">cv_generator</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Tailoring CVs and cover letters to specific job descriptions</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">application_pipeline</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>End-to-end job application automation (scout + CV + submit)</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">agent_factory</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Dynamically creates new agents from a description</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">scheduler</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Creating and managing cron-scheduled tasks</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">monitor_agent</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Watching URLs, APIs, or files for changes and alerting</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">translator</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Translating text between 100+ languages</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">pdf_analyst</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Extracting, analysing, and summarising PDF documents</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">git_agent</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Git operations: diff, blame, branch management, PR summaries</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">test_runner</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Running test suites, parsing results, suggesting fixes</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">notification_router</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Sending notifications to channels or webhooks based on conditions</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">retrieval_analyst</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>RAG over your documents — semantic search + synthesis</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">incident_responder</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Triaging alerts, runbook execution, incident timeline generation</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">workflow_designer</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Designing and exporting scenes / automation workflows</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">channel_operator</span></td>
+                <td><span class="model-badge">9B</span></td>
+                <td>Managing channel configuration, pairing users, updating dm policy</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">prompt_optimizer</span></td>
+                <td><span class="model-badge">35B</span></td>
+                <td>Improving system prompts and agent instructions</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">media_analyst</span></td>
+                <td><span class="model-badge">Vision</span></td>
+                <td>Analysing images and extracting content from documents (PDF, DOCX, XLSX)</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">transcription_agent</span></td>
+                <td><span class="model-badge">Default</span></td>
+                <td>Transcribing audio files to text using the STT service</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">voice_narrator</span></td>
+                <td><span class="model-badge">Default</span></td>
+                <td>Converting text to speech and saving audio output via TTS</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Changing a model -->
+      <div class="section">
+        <div class="section-title">Changing a model for an agent</div>
+
+        <h3>Via the dashboard</h3>
+        <ol>
+          <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+          <li>Go to <strong>Settings → Sub-Agents</strong></li>
+          <li>Click the agent you want to change</li>
+          <li>Update the <strong>Primary model</strong> and optionally the <strong>Fallback model</strong> fields</li>
+          <li>Click <strong>Save</strong></li>
+        </ol>
+
+        <h3>Via starlingai.json</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "subAgents": {
+    "researcher": {
+      "model": {
+        "primary": "qwen/qwen3.5-35b-a3b",
+        "fallback": "qwen/qwen3.5-9b"
+      }
+    },
+    "summarizer": {
+      "model": {
+        "primary": "qwen/qwen3.5-9b"
+      }
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            After changing <code>starlingai.json</code>, restart the gateway:
+            <code>docker compose restart gateway</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Embedding model -->
+      <div class="section">
+        <div class="section-title">Embedding model (better routing)</div>
+        <p>
+          By default the orchestrator uses keyword matching to route queries. Installing a dedicated embedding
+          model in LM Studio enables semantic search — significantly improving routing accuracy.
+        </p>
+
+        <h3>Recommended embedding model</h3>
+        <p>
+          Search for <code>text-embedding-qwen3-embedding-8b</code> in LM Studio's Discover tab, download it,
+          and load it alongside your main model. Then update your config:
+        </p>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  "agents": {
+    "defaults": {
+      "model": {
+        "embeddingModel": "text-embedding-qwen3-embedding-8b",
+        "embeddingUrl": "http://host.docker.internal:1234/v1"
+      }
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Running evaluations -->
+      <div class="section">
+        <div class="section-title">Running evaluations</div>
+        <p>
+          StarlingAI ships with an evaluation harness. Run it to benchmark agent quality and
+          routing accuracy using your own test cases.
+        </p>
+
+        <h3>Using the canonical eval file</h3>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>pnpm --filter @starlingai/core agents:evaluate</code></pre>
+        </div>
+
+        <h3>Writing your own evals</h3>
+        <p>Copy the canonical file and add your own test cases:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>cp agent-eval.jsonc my-evals.jsonc
+# Edit my-evals.jsonc, then:
+pnpm --filter @starlingai/core agents:evaluate my-evals.jsonc</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">jsonc</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// my-evals.jsonc
+{
+  "workspacePath": "/workspace",
+  "cases": [
+    {
+      "name": "research-docs",
+      "agentName": "researcher",
+      "task": "Summarise the LM Studio function calling requirements.",
+      "expectIncludes": ["LM Studio"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 45000
+    },
+    {
+      "name": "coder-smoke",
+      "agentName": "coder",
+      "task": "Write a Python function to parse ISO dates.",
+      "expectIncludes": ["def"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 30000
+    }
+  ]
+}</code></pre>
+        </div>
+
+        <p>The evaluator prints pass/fail summaries, case previews, and can compare the run against a saved baseline.</p>
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="setup.html" style="color:var(--muted);">← Project Setup</a>
+        <a href="scenes.html" style="color:var(--primary);">Next: Scenes →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

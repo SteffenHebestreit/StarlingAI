@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "starlingai.json": "jsonc",
+    "starlingai.example.json": "jsonc"
+  }
+}

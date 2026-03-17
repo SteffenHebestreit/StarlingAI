@@ -1,0 +1,149 @@
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  DIRECT_MAIN_TOOL_NAMES,
+  ORCHESTRATION_TOOL_NAMES,
+  getAvailableDirectMainToolNames,
+  getAvailableOrchestrationToolNames,
+  getMainAssistantToolNames,
+} from "../agent/default-tools.js";
+import { getTool, registerTool, unregisterTool } from "../tools/registry.js";
+
+const registeredForTest = new Set<string>();
+
+function registerStubTool(name: string): void {
+  if (getTool(name)) {
+    return;
+  }
+
+  registerTool({
+    name,
+    description: `stub ${name}`,
+    parameters: {},
+    async execute() {
+      return { success: true, output: name };
+    },
+  });
+  registeredForTest.add(name);
+}
+
+afterEach(() => {
+  for (const name of registeredForTest) {
+    unregisterTool(name);
+  }
+  registeredForTest.clear();
+});
+
+describe("default main assistant tools", () => {
+  it("returns only direct tools that are currently registered", () => {
+    registerStubTool("read_file");
+    registerStubTool("memory_search");
+    registerStubTool("web_search");
+    // delegate_to_agent is orchestration — must not appear in direct list
+    registerStubTool("delegate_to_agent");
+
+    const availableDirectTools = getAvailableDirectMainToolNames();
+    const directToolSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
+
+    expect(availableDirectTools).toEqual(["read_file", "memory_search", "web_search"]);
+    expect(availableDirectTools.every(name => directToolSet.has(name))).toBe(true);
+  });
+
+  it("combines registered direct and orchestration tools in policy order", () => {
+    registerStubTool("browser_snapshot");
+    registerStubTool("get_site_credentials");
+    registerStubTool("delegate_to_agent");
+    registerStubTool("run_task_graph");
+
+    const mainAssistantTools = getMainAssistantToolNames();
+
+    expect(mainAssistantTools).toEqual([
+      "get_site_credentials",
+      "browser_snapshot",
+      "delegate_to_agent",
+      "run_task_graph",
+    ]);
+    expect(mainAssistantTools[0]).toBe("get_site_credentials");
+    expect(ORCHESTRATION_TOOL_NAMES).toContain("delegate_to_agent");
+    expect(ORCHESTRATION_TOOL_NAMES).toContain("run_task_graph");
+  });
+
+  it("returns an empty array when no direct tools are registered", () => {
+    // Only register an orchestration tool — direct list should be empty
+    registerStubTool("list_agents");
+
+    const availableDirectTools = getAvailableDirectMainToolNames();
+    expect(availableDirectTools).toEqual([]);
+  });
+
+  it("returns an empty array when no orchestration tools are registered", () => {
+    // Only register a direct tool — orchestration list should be empty
+    registerStubTool("web_search");
+
+    const availableOrchTools = getAvailableOrchestrationToolNames();
+    expect(availableOrchTools).toEqual([]);
+  });
+
+  it("returns empty list from getMainAssistantToolNames when nothing is registered", () => {
+    // Registeredfortesting set is empty; no stubs registered here
+    const tools = getMainAssistantToolNames();
+    // may include tools registered by other imported modules — just verify
+    // that it only contains known names from both lists
+    const knownNames = new Set<string>([...DIRECT_MAIN_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES]);
+    for (const name of tools) {
+      expect(knownNames.has(name)).toBe(true);
+    }
+  });
+
+  it("preserves the declaration order within each tier", () => {
+    // Register a subset of direct tools in reverse order; output should follow declaration order
+    registerStubTool("web_fetch");
+    registerStubTool("web_search");
+    registerStubTool("memory_search");
+
+    const availableDirectTools = getAvailableDirectMainToolNames();
+
+    const expectedOrder = DIRECT_MAIN_TOOL_NAMES.filter(n =>
+      ["web_fetch", "web_search", "memory_search"].includes(n),
+    );
+    expect(availableDirectTools).toEqual(expectedOrder);
+  });
+
+  it("preserves orchestration tool declaration order", () => {
+    registerStubTool("run_task_graph");
+    registerStubTool("list_agents");
+    registerStubTool("delegate_to_agent");
+
+    const available = getAvailableOrchestrationToolNames();
+
+    const expectedOrder = ORCHESTRATION_TOOL_NAMES.filter(n =>
+      ["run_task_graph", "list_agents", "delegate_to_agent"].includes(n),
+    );
+    expect(available).toEqual(expectedOrder);
+  });
+
+  it("places all direct tools before all orchestration tools in getMainAssistantToolNames", () => {
+    registerStubTool("web_search");
+    registerStubTool("delegate_to_agent");
+    registerStubTool("read_file");
+    registerStubTool("list_agents");
+
+    const combined = getMainAssistantToolNames();
+    const directSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
+    const orchSet = new Set<string>(ORCHESTRATION_TOOL_NAMES);
+
+    let seenOrchestration = false;
+    for (const name of combined) {
+      if (orchSet.has(name)) seenOrchestration = true;
+      if (seenOrchestration) {
+        expect(directSet.has(name)).toBe(false);
+      }
+    }
+  });
+
+  it("DIRECT_MAIN_TOOL_NAMES and ORCHESTRATION_TOOL_NAMES have no overlap", () => {
+    const directSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
+    for (const name of ORCHESTRATION_TOOL_NAMES) {
+      expect(directSet.has(name)).toBe(false);
+    }
+  });
+});

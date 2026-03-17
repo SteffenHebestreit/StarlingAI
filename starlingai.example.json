@@ -1,0 +1,334 @@
+// StarlingAI configuration example
+// Copy this file to the project root as starlingai.json and adjust for your environment.
+{
+  "providers": {
+    "lmstudio": {
+      "baseUrl": "http://host.docker.internal:1234/v1",
+      "apiKey": "lm-studio",
+      "timeoutMs": 30000,
+      "maxRetries": 3
+    }
+    // "anthropic": {
+    //   "apiKey": "$ANTHROPIC_API_KEY"
+    // }
+  },
+
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "fallback": "lmstudio/qwen/qwen3.5-9b",
+        "contextWindow": 32768,
+        "temperature": 0.3,
+        "maxTokens": 4096,
+        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-8b"
+      }
+    },
+    "rateLimit": {
+      "requestsPerMinute": 60,
+      "toolCallsPerTurn": 20,
+      "concurrentSessions": 10
+    }
+  },
+
+  "subAgents": {
+    "researcher": {
+      "description": "Web research expert for documentation and public web lookup.",
+      "capabilities": ["web research", "documentation lookup"],
+      "tags": ["research", "docs"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "temperature": 0.2,
+        "maxTokens": 4096
+      },
+      "maxIterations": 4,
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "code_analyst": {
+      "description": "Code analysis specialist for workspace inspection and bug diagnosis.",
+      "capabilities": ["code reading", "architecture review"],
+      "tags": ["code", "analysis"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 5,
+      "tools": [
+        "read_file",
+        "list_files",
+        "write_file",
+        "mcp__filesystem__read_file",
+        "mcp__filesystem__list_directory"
+      ]
+    },
+    "browser_agent": {
+      "description": "Browser automation specialist using Playwright MCP tools.",
+      "capabilities": ["browser automation", "form submission"],
+      "tags": ["browser", "playwright"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.2,
+        "maxTokens": 4096
+      },
+      "maxIterations": 12,
+      "tools": [
+        "get_site_credentials",
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_screenshot",
+        "mcp__playwright__browser_select_option",
+        "mcp__playwright__browser_wait_for",
+        "write_file"
+      ]
+    },
+    "coder": {
+      "description": "JS and TS sandbox execution specialist.",
+      "capabilities": ["code generation", "sandbox execution"],
+      "tags": ["code", "sandbox"],
+      "model": {
+        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "temperature": 0.2,
+        "maxTokens": 8192
+      },
+      "maxIterations": 4,
+      "tools": [
+        "mcp__code_sandbox__run_js",
+        "mcp__code_sandbox__run_ts",
+        "read_file",
+        "write_file",
+        "list_files"
+      ]
+    },
+    "summarizer": {
+      "description": "Short structured summaries for files and fetched pages.",
+      "capabilities": ["summarization"],
+      "tags": ["summary"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "temperature": 0.15,
+        "maxTokens": 4096
+      },
+      "maxIterations": 3,
+      "tools": [
+        "web_fetch",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "agent_factory": {
+      "description": "Creates purpose-built ephemeral agents when the static catalog is not enough.",
+      "capabilities": ["meta orchestration", "ephemeral agents"],
+      "tags": ["meta", "agents"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.2,
+        "maxTokens": 4096
+      },
+      "maxIterations": 6,
+      "tools": [
+        "list_agents",
+        "delegate_to_agent",
+        "create_ephemeral_agent"
+      ]
+    }
+  },
+
+  "scenes": {
+    "apply_jobs": {
+      "description": "Run the application pipeline for one ranked freelance lead.",
+      "task": "Run the application_pipeline agent for one unchecked lead with rating 0.7 or higher.",
+      "webhookKey": "$SCENE_APPLY_JOBS_KEY",
+      "allowedAgents": ["application_pipeline", "proposal_writer", "browser_agent"],
+      "humanInLoopSteps": ["get_site_credentials", "mcp__playwright__browser_navigate"],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "minRating": {
+          "description": "Minimum lead rating to accept",
+          "default": "0.7"
+        }
+      }
+    }
+  },
+
+  "channels": {
+    "webchat": {
+      "enabled": true,
+      "port": 3001
+    },
+    "telegram": {
+      "enabled": false,
+      "botToken": "$TELEGRAM_BOT_TOKEN",
+      "allowedUserIds": []
+    },
+    "slack": {
+      "enabled": false,
+      "botToken": "$SLACK_BOT_TOKEN",
+      "signingSecret": "$SLACK_SIGNING_SECRET",
+      "appToken": "$SLACK_APP_TOKEN",
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "discord": {
+      "enabled": false,
+      "token": "$DISCORD_BOT_TOKEN",
+      "guildIds": [],
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "whatsapp": {
+      "enabled": false,
+      "accessToken": "$WHATSAPP_ACCESS_TOKEN",
+      "phoneNumberId": "$WHATSAPP_PHONE_NUMBER_ID",
+      "verifyToken": "$WHATSAPP_VERIFY_TOKEN",
+      "appSecret": "$WHATSAPP_APP_SECRET",
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "email": {
+      "enabled": false,
+      "imapHost": "imap.example.com",
+      "imapPort": 993,
+      "imapUser": "$EMAIL_IMAP_USER",
+      "imapPassword": "$EMAIL_IMAP_PASSWORD",
+      "smtpHost": "smtp.example.com",
+      "smtpPort": 587,
+      "smtpUser": "$EMAIL_SMTP_USER",
+      "smtpPassword": "$EMAIL_SMTP_PASSWORD",
+      "smtpFrom": "StarlingAI <bot@example.com>",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["ops@example.com"]
+    },
+    "signal": {
+      "enabled": false,
+      "account": "+49123456789",
+      "signalCliPath": "signal-cli",
+      "dmPolicy": "disabled",
+      "allowFrom": []
+    }
+  },
+
+  "gateway": {
+    "port": 8765,
+    "restPort": 8766,
+    "bindHost": "loopback",
+    "sessionTtlMs": 3600000,
+    "turnTimeoutMs": 900000,
+    "publicUrl": "https://starlingai.example.com"
+  },
+
+  "multimodal": {
+    "maxUploadBytes": 20971520,
+    "files": {
+      "baseUrl": "http://fastapi-mcp-template:8000",
+      "toolName": "file_to_markdown",
+      "timeoutMs": 60000
+    },
+    "stt": {
+      "baseUrl": "http://qwen3-asr-service:5002",
+      "model": "Qwen/Qwen3-ASR-1.7B",
+      "timeoutMs": 60000
+    },
+    "tts": {
+      "baseUrl": "http://qwen3-tts-service:5004",
+      "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "defaultLanguage": "English",
+      "defaultSpeaker": "Vivian",
+      "voiceSamplePath": "samples/assistant-voice.wav",
+      "voiceSampleText": "Hello, this is the reference voice sample used by StarlingAI.",
+      "defaultQuality": "medium",
+      "timeoutMs": 60000
+    },
+    "wakeWord": {
+      "enabled": false,
+      "language": "en-US",
+      "keywords": ["Hey Guarded", "Okay Guarded", "Luna"],
+      "stopPhrases": ["stop recording", "end recording", "stop listening", "luna stop"],
+      "silenceTimeoutMs": 4000
+    }
+  },
+
+  "guardrails": {
+    "promptInjectionBlock": true,
+    "outputSecretScan": true,
+    "maxInputLength": 32000,
+    "sandboxShellExec": true
+  },
+
+  "mcp": {
+    "servers": {
+      "playwright": {
+        "transport": "docker",
+        "image": "mcp/playwright:latest",
+        "network": "bridge",
+        "autoStart": true
+      },
+      "code_sandbox": {
+        "transport": "docker",
+        "image": "mcp/node-code-sandbox",
+        "mounts": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "autoStart": true
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+        "autoStart": true
+      }
+    }
+  },
+
+  "approvalChannels": {
+    "slack-approvals": {
+      "type": "slack",
+      "webhookUrl": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK_URL",
+      "timeoutMs": 600000
+    }
+  },
+
+  "integrations": {
+    "n8n": {
+      "baseUrl": "http://host.docker.internal:5678",
+      "apiKey": "$N8N_API_KEY",
+      "leadsWebhookUrl": "http://host.docker.internal:5678/webhook/starlingai-leads",
+      "markAppliedWebhookUrl": "http://host.docker.internal:5678/webhook/starlingai-apply"
+    }
+  },
+
+  "webhooks": {
+    "notify_ops": {
+      "description": "Notify an internal webhook about important runtime events.",
+      "url": "https://example.com/hooks/starlingai",
+      "method": "POST",
+      "headers": {
+        "Authorization": "$OPS_WEBHOOK_TOKEN"
+      }
+    }
+  },
+
+  "sites": {
+    "github.com": {
+      "username": "your-username",
+      "password": "$GITHUB_PASSWORD",
+      "loginUrl": "https://github.com/login"
+    },
+    "app.example.com": {
+      "username": "ops@example.com",
+      "password": "secret:app_example_password",
+      "loginUrl": "https://app.example.com/login",
+      "urls": {
+        "dashboard": "https://app.example.com/dashboard"
+      },
+      "notes": "Use the local account rather than SSO."
+    }
+  },
+
+  "workspacePath": "/workspace"
+}

@@ -1,0 +1,226 @@
+name: starlingai
+
+services:
+  # ── Core gateway ──────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    image: starlingai/gateway:dev
+    restart: unless-stopped
+    ports:
+      - "8765:8765"   # WebSocket + REST
+    environment:
+      - NODE_ENV=production
+      - SAI_JWT_SECRET=${SAI_JWT_SECRET}
+      - SAI_MASTER_KEY=${SAI_MASTER_KEY}
+      - SAI_LMSTUDIO_URL=http://host.docker.internal:1234/v1
+      - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
+      - REDIS_URL=redis://redis:6379
+      - SAI_AUDIT_LOG=/data/audit.jsonl
+      - SAI_CRED_STORE=/data/credentials.enc
+      - SAI_CONFIG_PATH=/config/starlingai.json
+      - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
+      - N8N_PASSWORD=${N8N_PASSWORD:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - FREELANCEMAP_PASSWORD=${FREELANCEMAP_PASSWORD:-}
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://search.k2o}
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - gc-data:/data
+      - ./starlingai.json:/config/starlingai.json:ro
+      - gc-workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock  # For sandbox + container agent execution (rw)
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access LM Studio on host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fastapi-mcp-template:
+        condition: service_healthy
+      qwen3-asr-service:
+        condition: service_healthy
+      qwen3-tts-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Web dashboard ─────────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    image: starlingai/web:dev
+    restart: unless-stopped
+    ports:
+      - "3001:3000"   # Host 3001 → container 3000 (3000 already in use on host)
+    networks:
+      - starlingai-public
+    depends_on:
+      - gateway
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── File-to-Markdown service ───────────────────────────────────────────────
+  fastapi-mcp-template:
+    build:
+      context: .
+      dockerfile: docker/fastapi-mcp-template/Dockerfile
+    image: starlingai/fastapi-mcp-template:dev
+    restart: unless-stopped
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ENABLED_TOOLS=file_converter
+      # qwen/qwen3.5-35b-a3b is used as a text model through the provider.
+      # Keep LLM-enhanced image conversion disabled unless a real vision-capable model is loaded.
+      - FTMD_MARKITDOWN_ENABLE_LLM=false
+      # Provider configuration for file conversion features that rely on text-only model access.
+      - FTMD_OPENAI_BASE_URL=${FTMD_OPENAI_BASE_URL:-http://host.docker.internal:1234/v1}
+      - FTMD_OPENAI_API_KEY=${FTMD_OPENAI_API_KEY:-lm-studio}
+      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen/qwen3.5-35b-a3b}
+      - LOG_LEVEL=${FASTAPI_MCP_TEMPLATE_LOG_LEVEL:-INFO}
+    networks:
+      - starlingai-internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Qwen3 speech services from tts-stt-playground ────────────────────────
+  qwen3-asr-service:
+    build:
+      context: .
+      dockerfile: docker/qwen3-asr-service/Dockerfile
+    image: starlingai/qwen3-asr-service:dev
+    restart: unless-stopped
+    environment:
+      - QWEN3_ASR_MODEL=${QWEN3_ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  qwen3-tts-service:
+    build:
+      context: .
+      dockerfile: docker/qwen3-tts-service/Dockerfile
+    image: starlingai/qwen3-tts-service:dev
+    restart: unless-stopped
+    environment:
+      - QWEN3_ASR_SERVICE_URL=http://qwen3-asr-service:5002
+      - QWEN3_TTS_MODEL=${QWEN3_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+      - gc-qwen-voices:/app/voices
+    networks:
+      - starlingai-internal
+    depends_on:
+      qwen3-asr-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # ── Agent worker (ephemeral — built here, spawned by gateway on demand) ──
+  # Not started by compose; gateway spawns individual containers via Docker socket.
+  agent-worker:
+    build:
+      context: .
+      dockerfile: docker/agent-worker/Dockerfile
+    image: starlingai/agent-worker:dev
+    profiles:
+      - build-only   # Never started by `docker compose up`
+
+  # ── PostgreSQL (audit logs) ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=starlingai
+      - POSTGRES_USER=starlingai
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - gc-postgres-data:/var/lib/postgresql/data
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U starlingai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis (sessions + rate limiting) ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - gc-redis-data:/data
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Setup & tutorials server ──────────────────────────────────────────────
+  tutorials:
+    build:
+      context: ./tutorials
+      dockerfile: Dockerfile
+    image: starlingai/tutorials:dev
+    restart: unless-stopped
+    ports:
+      - "3002:80"
+    networks:
+      - starlingai-public
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  gc-postgres-data:
+  gc-redis-data:
+  gc-data:
+  gc-workspace:
+  gc-qwen-model-cache:
+  gc-qwen-voices:
+
+networks:
+  starlingai-internal:
+    driver: bridge
+    internal: true   # No external internet access for backend services
+  starlingai-public:
+    driver: bridge

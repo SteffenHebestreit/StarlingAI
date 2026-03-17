@@ -1,0 +1,241 @@
+import { defineStore } from "pinia";
+import { useStorage } from "@vueuse/core";
+import { computed, ref, watch } from "vue";
+import { useGatewayStore } from "./gateway";
+
+export interface SceneDetail {
+  name: string;
+  description: string;
+  task: string;
+  webhookKey?: string;
+  source: "config" | "store";
+}
+
+export interface SceneInput {
+  description: string;
+  task: string;
+  webhookKey?: string;
+}
+
+export interface SceneJobPerformance {
+  turnDurationMs: number;
+  firstModelResponseMs?: number;
+  llmCalls: number;
+  llmTimeMs: number;
+  toolCallsRequested: number;
+  toolExecutionTimeMs: number;
+  systemPromptChars: number;
+  collapsedHistoryMessages: number;
+  collapsedHistoryChars: number;
+  promptChars: number;
+  completionChars: number;
+  toolIterations: number;
+  finishReason: string;
+  blocked: boolean;
+}
+
+export interface SceneJob {
+  id: string;
+  sceneName: string;
+  sessionId: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  response?: string;
+  toolCallsExecuted?: number;
+  blocked?: boolean;
+  performance?: SceneJobPerformance;
+  error?: string;
+}
+
+interface SceneRunResponse {
+  ok: boolean;
+  sceneName: string;
+  jobId: string;
+  sessionId: string;
+  status: "running";
+}
+
+export const useScenesStore = defineStore("scenes", () => {
+  const gateway = useGatewayStore();
+  const scenes = ref<SceneDetail[]>([]);
+  const loading = ref(false);
+  const error = ref<string | null>(null);
+  const runError = ref<string | null>(null);
+  const recentJobs = useStorage<SceneJob[]>("gc_scene_jobs", []);
+  const pollTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function restUrl(path: string): string {
+    const wsUrl = gateway.wsUrl ?? "ws://localhost:8765/ws";
+    const base = wsUrl.replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    return `${base}${path}`;
+  }
+
+  function authHeaders(): Record<string, string> {
+    return { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" };
+  }
+
+  function upsertJob(job: SceneJob) {
+    const withoutCurrent = recentJobs.value.filter((entry) => entry.id !== job.id);
+    recentJobs.value = [job, ...withoutCurrent]
+      .sort((left, right) => {
+        const leftTs = left.completedAt ?? left.startedAt;
+        const rightTs = right.completedAt ?? right.startedAt;
+        return rightTs.localeCompare(leftTs);
+      })
+      .slice(0, 12);
+  }
+
+  function dismissJob(jobId: string) {
+    stopPolling(jobId);
+    recentJobs.value = recentJobs.value.filter((entry) => entry.id !== jobId);
+  }
+
+  function stopPolling(jobId: string) {
+    const timer = pollTimers.get(jobId);
+    if (timer) {
+      clearTimeout(timer);
+      pollTimers.delete(jobId);
+    }
+  }
+
+  async function fetchJob(jobId: string): Promise<SceneJob | null> {
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/jobs/${encodeURIComponent(jobId)}`), {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const job = await res.json() as SceneJob;
+      upsertJob(job);
+      if (job.status !== "running") stopPolling(job.id);
+      return job;
+    } catch (e) {
+      runError.value = String(e);
+      stopPolling(jobId);
+      return null;
+    }
+  }
+
+  function schedulePoll(jobId: string, delayMs = 2000) {
+    if (pollTimers.has(jobId)) return;
+    const timer = setTimeout(async () => {
+      pollTimers.delete(jobId);
+      const job = await fetchJob(jobId);
+      if (job?.status === "running") {
+        schedulePoll(jobId, 2000);
+      }
+    }, delayMs);
+    pollTimers.set(jobId, timer);
+  }
+
+  function resumeRunningJobs() {
+    if (!gateway.token) return;
+    recentJobs.value
+      .filter((job) => job.status === "running")
+      .forEach((job) => schedulePoll(job.id, 0));
+  }
+
+  async function fetch() {
+    loading.value = true;
+    error.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl("/api/scenes"), { headers: authHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      scenes.value = await res.json() as SceneDetail[];
+    } catch (e) {
+      error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function save(name: string, input: SceneInput): Promise<void> {
+    loading.value = true;
+    error.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/${encodeURIComponent(name)}`), {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      await fetch();
+    } catch (e) {
+      error.value = String(e);
+      loading.value = false;
+    }
+  }
+
+  async function remove(name: string): Promise<void> {
+    loading.value = true;
+    error.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/${encodeURIComponent(name)}`), {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      await fetch();
+    } catch (e) {
+      error.value = String(e);
+      loading.value = false;
+    }
+  }
+
+  async function run(name: string, params?: Record<string, string>): Promise<SceneJob | null> {
+    runError.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/${encodeURIComponent(name)}/run`), {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(params && Object.keys(params).length > 0 ? { params } : {}),
+      });
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+
+      const data = await res.json() as SceneRunResponse;
+      const job: SceneJob = {
+        id: data.jobId,
+        sceneName: data.sceneName,
+        sessionId: data.sessionId,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      upsertJob(job);
+      schedulePoll(job.id, 0);
+      return job;
+    } catch (e) {
+      runError.value = String(e);
+      return null;
+    }
+  }
+
+  const runningJobs = computed(() => recentJobs.value.filter((job) => job.status === "running"));
+
+  watch(() => gateway.token, (token) => {
+    if (token) resumeRunningJobs();
+  }, { immediate: true });
+
+  return {
+    scenes,
+    loading,
+    error,
+    runError,
+    recentJobs,
+    runningJobs,
+    fetch,
+    fetchJob,
+    save,
+    remove,
+    run,
+    dismissJob,
+  };
+});

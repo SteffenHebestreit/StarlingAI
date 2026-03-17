@@ -1,0 +1,52 @@
+export type AuditEventType =
+  | "session_created"
+  | "session_ended"
+  | "message_received"
+  | "message_sent"
+  | "tool_call_requested"
+  | "tool_call_approved"
+  | "tool_call_blocked"
+  | "tool_call_completed"
+  | "tool_call_failed"
+  | "tool_output_blocked"
+  | "guardrail_blocked"
+  | "guardrail_flagged"
+  | "output_redacted"
+  | "auth_success"
+  | "auth_failure"
+  | "rate_limited"
+  | "provider_health_check"
+  | "channel_delivery_failed"
+  | "agent_routing_evaluated"
+  | "credential_accessed"
+  | "session_reset"
+  | "sub_agent_started"
+  | "sub_agent_completed"
+  | "sub_agent_tool_call"
+  | "sub_agent_tool_blocked"
+  | "sub_agent_max_iterations"
+  | "parallel_delegate_started"
+  | "turn_performance"
+  | "scene_job_completed"
+  | "scene_job_failed"
+  | "ephemeral_agent_rejected"
+  | "approval_requested"
+  | "approval_resolved"
+  | "warden_alert"
+  | "architect_fallback_started"
+  | "architect_fallback_completed"
+  | "architect_fallback_failed"
+  | "architect_fallback_rejected"
+  | "prompt_budget_exceeded"
+  | "turn_slo_breach";
+
+export interface AuditEvent {
+  id: string;
+  timestamp: string; // ISO 8601
+  type: AuditEventType;
+  sessionId?: string;
+  userId?: string;
+  channel?: string;
+  data: Record<string, unknown>;
+  severity: "info" | "warn" | "error";
+}

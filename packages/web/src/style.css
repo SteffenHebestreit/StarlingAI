@@ -1,0 +1,131 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100;
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+  }
+
+  :root {
+    --accent-purple: 168, 85, 247;
+    --accent-pink: 236, 72, 153;
+    --logo-blue: 29, 78, 216;
+    --logo-cyan: 34, 211, 238;
+    --logo-indigo: 79, 70, 229;
+  }
+}
+
+@layer components {
+  /* ── Glassmorphic card ────────────────────────────────────────────────── */
+  .glass-card {
+    @apply bg-gray-800/50 backdrop-blur-lg border border-purple-500/20 rounded-2xl shadow-xl;
+  }
+
+  /* ── Bottom-border input (OpenTYME style) ─────────────────────────────── */
+  .input-line {
+    @apply block w-full bg-transparent border-0 border-b-2 border-gray-600
+           focus:outline-none focus:border-purple-500
+           text-gray-100 placeholder-gray-500
+           transition-colors duration-200 py-2 text-sm;
+  }
+
+  /* ── Standard box input (for dense forms) ────────────────────────────── */
+  .input-box {
+    @apply w-full bg-gray-900/60 border border-gray-700/60 rounded-xl px-3 py-2.5 text-sm
+           focus:outline-none focus:border-purple-500/70 focus:bg-gray-800/60
+           text-gray-100 placeholder-gray-500 transition-colors;
+  }
+
+  /* ── Gradient primary button ──────────────────────────────────────────── */
+  .btn-grad {
+    @apply bg-gradient-to-r from-purple-600 to-pink-600
+           hover:from-purple-500 hover:to-pink-500
+           text-white font-medium transition-all
+           shadow-lg shadow-purple-500/25
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* ── Ghost secondary button ───────────────────────────────────────────── */
+  .btn-ghost {
+    @apply bg-gray-800/60 hover:bg-gray-700/80 border border-gray-700/50 hover:border-gray-600
+           text-gray-300 hover:text-white font-medium transition-all
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-brand-ghost {
+    @apply border text-slate-100 font-medium transition-all
+           disabled:opacity-40 disabled:cursor-not-allowed;
+    background: linear-gradient(180deg, rgba(8, 15, 30, 0.78), rgba(8, 15, 30, 0.56));
+    border-color: rgba(var(--logo-cyan), 0.22);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 24px rgba(var(--logo-blue), 0.12);
+  }
+
+  .btn-brand-ghost:hover:not(:disabled) {
+    color: rgb(207 250 254);
+    border-color: rgba(var(--logo-cyan), 0.4);
+    background: linear-gradient(180deg, rgba(14, 29, 56, 0.9), rgba(10, 21, 44, 0.72));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 14px 28px rgba(var(--logo-blue), 0.18);
+  }
+
+  /* ── Danger button ────────────────────────────────────────────────────── */
+  .btn-danger {
+    @apply bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500
+           text-white font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* ── Source badge ─────────────────────────────────────────────────────── */
+  .badge-config {
+    @apply text-xs px-2 py-0.5 rounded-full bg-blue-900/40 text-blue-300 border border-blue-700/30;
+  }
+  .badge-store {
+    @apply text-xs px-2 py-0.5 rounded-full bg-emerald-900/40 text-emerald-300 border border-emerald-700/30;
+  }
+}
+
+/* ── Background orbs ──────────────────────────────────────────────────────── */
+.bg-orb {
+  position: fixed;
+  pointer-events: none;
+  border-radius: 9999px;
+  filter: blur(80px);
+  opacity: 0.12;
+  animation: orb-drift 12s ease-in-out infinite alternate;
+}
+.bg-orb-1 {
+  width: 600px; height: 600px;
+  background: radial-gradient(circle, rgb(168,85,247), transparent 70%);
+  top: -200px; left: -200px;
+  animation-duration: 14s;
+}
+.bg-orb-2 {
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, rgb(236,72,153), transparent 70%);
+  bottom: -150px; right: -100px;
+  animation-duration: 10s;
+  animation-delay: -5s;
+}
+@keyframes orb-drift {
+  from { transform: translate(0, 0) scale(1); }
+  to   { transform: translate(40px, 30px) scale(1.08); }
+}
+
+/* ── Markdown prose (dark) ────────────────────────────────────────────────── */
+.prose-invert pre {
+  @apply bg-gray-900/80 border border-purple-500/20 rounded-xl;
+}
+.prose-invert code {
+  @apply bg-gray-900 text-purple-300 px-1 py-0.5 rounded text-xs;
+}
+.prose-invert a {
+  @apply text-purple-400 hover:text-purple-300;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(168,85,247,0.25); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(168,85,247,0.45); }

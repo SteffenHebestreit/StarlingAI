@@ -1,0 +1,110 @@
+{
+  "workspacePath": "/workspace",
+  "outputPath": "./.starlingai/agent-eval-report.json",
+  "cases": [
+    {
+      "name": "research-docs",
+      "agentName": "researcher",
+      "task": "Find the LM Studio documentation for function calling and summarize the main requirements.",
+      "expectIncludes": ["LM Studio", "function"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 45000
+    },
+    {
+      "name": "routing-analysis",
+      "agentName": "code_analyst",
+      "task": "Explain how StarlingAI resolves the best sub-agent for a task and mention the main files involved.",
+      "expectIncludes": ["search_agents", "outcome"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 30000
+    },
+    {
+      "name": "retrieval-workspace",
+      "agentName": "retrieval_analyst",
+      "task": "Search the workspace for any files that mention 'parallel_delegate' and return the file paths and a one-line summary of each match.",
+      "expectIncludes": ["parallel_delegate"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 30000
+    },
+    {
+      "name": "summary-smoke",
+      "agentName": "summarizer",
+      "task": "Summarize this sentence in one line: StarlingAI runs guarded multi-agent workflows behind a local gateway.",
+      "expectIncludes": ["StarlingAI"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 15000
+    },
+    {
+      "name": "translation-de-en",
+      "agentName": "translator",
+      "task": "Translate the following German text to English: 'StarlingAI ist ein lokales Multi-Agenten-System mit konfigurierbaren Berechtigungen.'",
+      "expectIncludes": ["StarlingAI", "local", "multi-agent"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 15000
+    },
+    {
+      "name": "email-draft-smoke",
+      "agentName": "email_drafter",
+      "task": "Draft a short follow-up email in English to a client confirming receipt of their project brief. Keep it under 80 words.",
+      "expectIncludes": ["project", "brief"],
+      "expectExcludes": ["Sub-agent error:", "PLACEHOLDER"],
+      "maxDurationMs": 20000
+    },
+    {
+      "name": "coder-smoke",
+      "agentName": "coder",
+      "task": "Write a JavaScript function called 'slugify' that converts a string to a URL-safe slug (lowercase, hyphens). Save it to /workspace/helpers/slugify.js and return its content.",
+      "expectIncludes": ["slugify", "function"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 30000
+    },
+    {
+      "name": "shell-smoke",
+      "agentName": "shell_agent",
+      "task": "Run 'echo hello_starlingai' and return the output.",
+      "expectIncludes": ["hello_starlingai"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 15000
+    },
+    {
+      "name": "git-agent-smoke",
+      "agentName": "git_agent",
+      "task": "Run 'git status' in the workspace and summarize the current repository state in one sentence.",
+      "expectIncludes": ["git"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 20000
+    },
+    {
+      "name": "test-runner-smoke",
+      "agentName": "test_runner",
+      "task": "Run 'echo no_tests_configured && exit 0' and report the outcome as if it were a test suite result.",
+      "expectIncludes": ["no_tests_configured"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 20000
+    },
+    {
+      "name": "data-analyst-smoke",
+      "agentName": "data_analyst",
+      "task": "Given this dataset as CSV: 'month,revenue\\nJan,1200\\nFeb,1500\\nMar,1100', compute the average monthly revenue and identify the best month.",
+      "expectIncludes": ["1266", "Feb"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 25000
+    },
+    {
+      "name": "scheduler-add",
+      "agentName": "scheduler",
+      "task": "Add a new task: title='Review eval results', due='2026-04-01T09:00:00', notes='Check agent-eval-report.json'. Return confirmation and the next 5 tasks.",
+      "expectIncludes": ["Review eval results", "2026-04-01"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 20000
+    },
+    {
+      "name": "agent-factory-smoke",
+      "agentName": "agent_factory",
+      "task": "Design and run an ephemeral agent that takes the number 42, doubles it, and returns the result. Grant only the minimum tools needed.",
+      "expectIncludes": ["84"],
+      "expectExcludes": ["Sub-agent error:"],
+      "maxDurationMs": 30000
+    }
+  ]
+}

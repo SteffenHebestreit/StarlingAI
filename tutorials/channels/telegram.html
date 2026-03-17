@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Telegram — StarlingAI</title>
+  <link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../../swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="../index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="../index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="../setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="../agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="../scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="../multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="../index.html">Home</a>
+        <span class="sep">›</span>
+        <a href="index.html">Channels</a>
+        <span class="sep">›</span>
+        <span class="current">Telegram</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <div class="page-hero">
+        <div class="badge-row"><span class="channel-badge telegram">✈️ Telegram</span><span class="tag tag-green">Easy</span><span class="tag tag-blue">~5 min</span></div>
+        <h1 style="margin-top:.6rem;">Connect Telegram</h1>
+        <p class="tagline">The fastest way to start chatting with your agents. All you need is a Telegram account.</p>
+      </div>
+
+      <div class="wizard-steps">
+
+        <!-- Step 1 -->
+        <div class="step" data-step="tg1">
+          <div class="step-line"></div>
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <div class="step-title">Create a bot via BotFather <span class="step-done-badge">Done</span></div>
+
+            <p>
+              BotFather is the official Telegram bot that creates and manages other bots.
+              Open Telegram and search for <strong>@BotFather</strong>.
+            </p>
+
+            <ol>
+              <li>Send <code>/newbot</code> to @BotFather</li>
+              <li>Choose a display name (e.g. "My StarlingAI")</li>
+              <li>Choose a username — must end in <code>bot</code> (e.g. <code>mystarlingai_bot</code>)</li>
+              <li>BotFather replies with your bot token</li>
+            </ol>
+
+            <p>Your token will look like:</p>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
+              <pre><code>123456789:AAF-FakeToken-example_here</code></pre>
+            </div>
+
+            <div class="callout">
+              <div class="callout-icon">🔒</div>
+              <div class="callout-body">
+                Treat your bot token like a password. Anyone with this token can control your bot.
+                Never share it publicly or commit it to version control.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="step" data-step="tg2">
+          <div class="step-line"></div>
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <div class="step-title">Add token to .env <span class="step-done-badge">Done</span></div>
+
+            <p>Open your <code>.env</code> file and add the token:</p>
+
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">.env</span><button class="copy-btn">Copy</button></div>
+              <pre><code>TELEGRAM_BOT_TOKEN=123456789:AAF-YourActualTokenHere</code></pre>
+            </div>
+
+            <p>Then restart the gateway to pick up the change:</p>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code>docker compose restart gateway</code></pre>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step" data-step="tg3">
+          <div class="step-line"></div>
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <div class="step-title">Enable in the dashboard <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Open <a href="http://localhost:3001" target="_blank" rel="noopener">http://localhost:3001</a></li>
+              <li>Go to <strong>Settings → Channels → Telegram</strong></li>
+              <li>Toggle the channel <strong>On</strong></li>
+              <li>Set your preferred <code>dmPolicy</code> (default: <code>pairing</code>)</li>
+              <li>Click <strong>Save</strong></li>
+            </ol>
+
+            <div class="screenshot-placeholder">
+              <div class="ph-icon">🖥</div>
+              <div><strong>Screenshot:</strong> Settings → Channels → Telegram toggle</div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step" data-step="tg4">
+          <div class="step-line"></div>
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <div class="step-title">Optional: restrict to your user ID <span class="step-done-badge">Done</span></div>
+
+            <p>
+              If you want only yourself (or a specific list of people) to message the bot,
+              use <code>allowlist</code> policy and add your Telegram user ID.
+            </p>
+
+            <h3>Find your Telegram user ID</h3>
+            <p>Message <strong>@userinfobot</strong> on Telegram — it replies with your numeric user ID.</p>
+
+            <h3>Add to config</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+              <pre><code>{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "allowlist",
+      "allowedUsers": ["123456789"]
+    }
+  }
+}</code></pre>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="step" data-step="tg5">
+          <div class="step-number">5</div>
+          <div class="step-body">
+            <div class="step-title">Test it <span class="step-done-badge">Done</span></div>
+
+            <ol>
+              <li>Open Telegram and search for your bot username (e.g. <code>@mystarlingai_bot</code>)</li>
+              <li>Send <code>/start</code></li>
+              <li>The bot should reply with a welcome message</li>
+              <li>If using pairing mode: it will tell you to run <code>/pair CODE</code></li>
+            </ol>
+
+            <div class="callout">
+              <div class="callout-icon">🔑</div>
+              <div class="callout-body">
+                <strong>Pairing mode:</strong> on first message the bot asks you to authorize.
+                Find your pairing code in the gateway logs:
+                <div class="code-block" style="margin-top:.5rem;">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>docker compose logs gateway | grep "Pairing code"</code></pre>
+                </div>
+                Then send <code>/pair YOUR_CODE</code> in the Telegram chat. You're now authorized permanently.
+              </div>
+            </div>
+
+            <div class="callout success">
+              <div class="callout-icon">✅</div>
+              <div class="callout-body">
+                Once paired, send any message to test agent routing. Try: <em>"What is the capital of France?"</em>
+                — the summarizer or researcher agent should respond within a few seconds.
+              </div>
+            </div>
+
+            <button class="step-mark-btn">Mark as done</button>
+          </div>
+        </div>
+
+      </div><!-- /wizard-steps -->
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="index.html" style="color:var(--muted);">← All Channels</a>
+        <a href="slack.html" style="color:var(--primary);">Next: Slack →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,276 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Stub logAudit before importing the warden so we can track alert emissions
+// without writing to the real audit file.
+vi.mock("../audit/logger.js", () => ({
+  logAudit: vi.fn(),
+  subscribeToAudit: vi.fn((cb: (e: unknown) => void) => {
+    // store the subscriber so tests can fire events through it
+    _subscriberRef = cb;
+    return () => { _subscriberRef = null; };
+  }),
+}));
+
+let _subscriberRef: ((e: unknown) => void) | null = null;
+
+import {
+  sweepAnomaliesNow,
+  resetWardenForTests,
+  getWardenStats,
+  startWarden,
+  stopWarden,
+} from "../agent/warden.js";
+import { logAudit } from "../audit/logger.js";
+
+// Helper to fire a fake audit event through the subscriber
+function fireEvent(event: Record<string, unknown>): void {
+  _subscriberRef?.(event);
+}
+
+describe("Warden — tool storm detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("does not alert below threshold", () => {
+    for (let i = 0; i < 14; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-1", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "tool_storm")).toHaveLength(0);
+  });
+
+  it("fires tool_storm when threshold is reached", () => {
+    for (let i = 0; i < 15; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-1", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some(a => a.type === "tool_storm" && a.subject === "sess-1")).toBe(true);
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(
+      "warden_alert",
+      expect.objectContaining({ alertType: "tool_storm" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("resets window after firing so it does not re-alert on the same burst", () => {
+    for (let i = 0; i < 15; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-2", data: {} });
+    }
+    sweepAnomaliesNow();
+    vi.mocked(logAudit).mockClear();
+    // No new events — second sweep should not fire
+    const alerts2 = sweepAnomaliesNow();
+    expect(alerts2.filter(a => a.type === "tool_storm")).toHaveLength(0);
+  });
+});
+
+describe("Warden — repeated failures detection", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-warden-"));
+    process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+    delete process.env["SAI_CONFIG_PATH"];
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not alert with fewer than threshold failures", () => {
+    for (let i = 0; i < 2; i++) {
+      fireEvent({ type: "sub_agent_max_iterations", sessionId: "s", data: { agentName: "fragile_agent" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "repeated_failures")).toHaveLength(0);
+  });
+
+  it("fires repeated_failures and reinforces circuit breaker", () => {
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "sub_agent_max_iterations", sessionId: "s", data: { agentName: "fragile_agent" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    const hit = alerts.find(a => a.type === "repeated_failures");
+    expect(hit).toBeDefined();
+    expect(hit?.action).toBe("circuit_tripped");
+    expect(hit?.severity).toBe("error");
+  });
+
+  it("clears the agent entry after acting so it won't double-fire", () => {
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "sub_agent_max_iterations", sessionId: "s", data: { agentName: "fragile_agent" } });
+    }
+    sweepAnomaliesNow();
+    vi.mocked(logAudit).mockClear();
+    const alerts2 = sweepAnomaliesNow();
+    expect(alerts2.filter(a => a.type === "repeated_failures")).toHaveLength(0);
+  });
+});
+
+describe("Warden — tool escape attempt detection", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-warden-esc-"));
+    process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+    delete process.env["SAI_CONFIG_PATH"];
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not alert below escape threshold", () => {
+    for (let i = 0; i < 2; i++) {
+      fireEvent({ type: "sub_agent_tool_blocked", sessionId: "sub:s:escape_agent:1", data: { agentName: "escape_agent" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "tool_escape_attempt")).toHaveLength(0);
+  });
+
+  it("fires tool_escape_attempt at threshold", () => {
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "sub_agent_tool_blocked", sessionId: "sub:s:escape_agent:1", data: { agentName: "escape_agent" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    const hit = alerts.find(a => a.type === "tool_escape_attempt");
+    expect(hit).toBeDefined();
+    expect(hit?.action).toBe("circuit_tripped");
+    expect(hit?.severity).toBe("error");
+  });
+});
+
+describe("Warden — rate limit flood detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("does not alert below flood threshold", () => {
+    for (let i = 0; i < 4; i++) {
+      fireEvent({ type: "rate_limited", sessionId: undefined, data: { scope: "channel_ingress", channel: "whatsapp", senderId: "123" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "rate_limit_flood")).toHaveLength(0);
+  });
+
+  it("fires rate_limit_flood when sender exceeds threshold", () => {
+    for (let i = 0; i < 5; i++) {
+      fireEvent({ type: "rate_limited", sessionId: undefined, data: { scope: "channel_ingress", channel: "whatsapp", senderId: "spammer" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    const hit = alerts.find(a => a.type === "rate_limit_flood");
+    expect(hit).toBeDefined();
+    expect(hit?.severity).toBe("warn");
+    expect(hit?.subject).toBe("whatsapp:spammer");
+  });
+});
+
+describe("Warden — turn SLO breach detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("does not alert when turn duration is within SLO", () => {
+    // Default orchestratorTurnSloMs = 120_000 ms; send a turn well under budget
+    fireEvent({ type: "turn_performance", sessionId: "orch-1", data: { turnDurationMs: 5_000, firstModelResponseMs: 2_000 } });
+    expect(vi.mocked(logAudit).mock.calls.some(([type]) => type === "warden_alert")).toBe(false);
+  });
+
+  it("fires turn_slo_breach for orchestrator turn exceeding budget", () => {
+    // Default orchestratorTurnSloMs = 120_000; send 150_000 ms
+    fireEvent({ type: "turn_performance", sessionId: "orch-slow", data: { turnDurationMs: 150_000, firstModelResponseMs: 5_000 } });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0]?.[1]).toMatchObject({ alertType: "turn_slo_breach" });
+    expect(getWardenStats().alertsEmitted).toBeGreaterThanOrEqual(1);
+  });
+
+  it("fires turn_slo_breach for sub-agent first-token latency exceeding budget", () => {
+    // Default firstTokenSloMs = 30_000; send 45_000 ms first token — sub-agent session ("sub:...")
+    fireEvent({ type: "turn_performance", sessionId: "sub:sess:agent:1", data: { turnDurationMs: 50_000, firstModelResponseMs: 45_000 } });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("fires tool_failure_spike when suspicious tool failures accumulate", () => {
+    fireEvent({ type: "tool_call_failed", sessionId: "orch-tools", data: { tool: "web_fetch", issueCode: "network_failure" } });
+    fireEvent({ type: "tool_output_blocked", sessionId: "orch-tools", data: { tool: "web_fetch", issueCode: "tool_output_blocked" } });
+    fireEvent({ type: "tool_call_completed", sessionId: "orch-tools", data: { tool: "web_search", issueCode: "empty_output", suspiciousReturn: true } });
+    const alerts = sweepAnomaliesNow();
+    const hit = alerts.find(a => a.type === "tool_failure_spike");
+    expect(hit).toBeDefined();
+    expect(hit?.intervention?.actions.some(action => action.kind === "stop_turn")).toBe(true);
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls.some(([, data]) => (data as Record<string, unknown>)["alertType"] === "tool_failure_spike")).toBe(true);
+  });
+});
+
+describe("Warden — stats and lifecycle", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+  });
+
+  it("starts and stops cleanly", () => {
+    expect(getWardenStats().running).toBe(false);
+    startWarden();
+    expect(getWardenStats().running).toBe(true);
+    stopWarden();
+    expect(getWardenStats().running).toBe(false);
+  });
+
+  it("tracks total alerts emitted across sweeps", () => {
+    startWarden();
+    for (let i = 0; i < 15; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-x", data: {} });
+    }
+    sweepAnomaliesNow();
+    expect(getWardenStats().alertsEmitted).toBeGreaterThanOrEqual(1);
+    stopWarden();
+  });
+
+  it("is idempotent — starting twice does not double-register", () => {
+    startWarden();
+    startWarden();
+    for (let i = 0; i < 15; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-y", data: {} });
+    }
+    vi.mocked(logAudit).mockClear();
+    sweepAnomaliesNow();
+    const stormCalls = vi.mocked(logAudit).mock.calls.filter(
+      ([type]) => type === "warden_alert",
+    );
+    // Only one alert per anomaly — not doubled
+    expect(stormCalls).toHaveLength(1);
+    stopWarden();
+  });
+});
