@@ -1,9 +1,9 @@
-<table border="0" cellpadding="0" cellspacing="0">
+<table border="0" cellpadding="0" cellspacing="0" width="100%">
   <tr>
-    <td valign="middle" width="72">
-      <img src="swarmLogo.svg" alt="StarlingAI logo" width="56" />
+    <td valign="middle" width="25%">
+      <img src="swarmLogo.svg" alt="StarlingAI logo" width="100%" />
     </td>
-    <td valign="middle">
+    <td valign="middle" width="75%">
       <strong style="font-size:1.4em;">StarlingAI</strong><br/>
       <sub>GUARDED AGENT SWARM &nbsp;·&nbsp; <em>under development</em></sub>
     </td>
