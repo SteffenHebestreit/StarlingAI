@@ -117,4 +117,6 @@ The bundled multimodal stack defaults to Qwen3 across the board: Qwen3.5 for age
 
 ## License
 
-MIT
+[Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/)
+
+You are free to share and adapt the material for non-commercial purposes, as long as you give appropriate credit. Commercial use is not permitted without explicit written permission.
