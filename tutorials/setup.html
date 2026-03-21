@@ -27,6 +27,7 @@
         <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
         <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
         <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+        <a class="nav-link" href="pentest.html"><span class="nav-icon">🔐</span> Pentest</a>
       </div>
       <div class="nav-section">
         <div class="nav-section-title">Channels</div>
@@ -324,12 +325,38 @@ LOG_LEVEL=info</code></pre>
             </div>
 
             <h3>Build and start all services</h3>
-            <div class="code-block">
-              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-              <pre><code>docker compose up -d --build</code></pre>
+            <div class="tab-group" id="tabs-start">
+              <div class="tab-list">
+                <button class="tab-btn" data-tab="unix">macOS / Linux / Git Bash</button>
+                <button class="tab-btn" data-tab="win">Windows CMD</button>
+              </div>
+              <div class="tab-panel" data-tab="unix">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>./start.sh</code></pre>
+                </div>
+              </div>
+              <div class="tab-panel" data-tab="win">
+                <div class="code-block">
+                  <div class="code-block-header"><span class="code-lang">cmd</span><button class="copy-btn">Copy</button></div>
+                  <pre><code>start.bat</code></pre>
+                </div>
+              </div>
             </div>
 
-            <p>This builds Docker images and starts all containers in the background. First build takes 3–5 minutes.</p>
+            <p>The start script builds Docker images, starts all containers, waits for health checks, and prints a dashboard login token. First build takes 5–10 minutes (downloads base images and model weights).</p>
+
+            <div class="callout">
+              <div class="callout-icon">ℹ️</div>
+              <div class="callout-body">
+                <strong>Useful flags:</strong><br/>
+                <code>./start.sh --build</code> — force rebuild<br/>
+                <code>./start.sh --no-cache</code> — rebuild with no Docker cache<br/>
+                <code>./start.sh --fresh</code> — wipe volumes + rebuild (clean slate)<br/>
+                <code>./start.sh --pentest</code> — also start the Kali pentest service<br/>
+                <code>./start.sh --down</code> — stop all services
+              </div>
+            </div>
 
             <h3>What each container does</h3>
             <table class="compare-table">
@@ -337,33 +364,27 @@ LOG_LEVEL=info</code></pre>
                 <tr><th>Container</th><th>Port</th><th>Purpose</th></tr>
               </thead>
               <tbody>
-                <tr>
-                  <td><code>gateway</code></td>
-                  <td>8765</td>
-                  <td>Core engine — WebSocket API, agent orchestration, channel adapters</td>
-                </tr>
-                <tr>
-                  <td><code>web</code></td>
-                  <td>3001</td>
-                  <td>Dashboard UI for managing agents, scenes, and channels</td>
-                </tr>
-                <tr>
-                  <td><code>postgres</code></td>
-                  <td>internal</td>
-                  <td>Persistent storage for audit logs and configuration</td>
-                </tr>
-                <tr>
-                  <td><code>redis</code></td>
-                  <td>internal</td>
-                  <td>Session cache, rate limiting, and inter-service pub/sub</td>
-                </tr>
-                <tr>
-                  <td><code>tutorials</code></td>
-                  <td>3002</td>
-                  <td>This documentation site (nginx serving static HTML)</td>
-                </tr>
+                <tr><td><code>gateway</code></td><td>8765</td><td>Core engine — WebSocket API, agent orchestration, channel adapters</td></tr>
+                <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI for managing agents, scenes, and channels</td></tr>
+                <tr><td><code>postgres</code></td><td>internal</td><td>Persistent storage for audit logs and configuration</td></tr>
+                <tr><td><code>redis</code></td><td>internal</td><td>Session cache, rate limiting, and inter-service pub/sub</td></tr>
+                <tr><td><code>qwen3-asr-service</code></td><td>internal</td><td>Speech-to-text — Qwen3-ASR (downloads model on first start)</td></tr>
+                <tr><td><code>qwen3-tts-service</code></td><td>internal</td><td>Text-to-speech with voice cloning — Qwen3-TTS</td></tr>
+                <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP tool)</td></tr>
+                <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
               </tbody>
             </table>
+
+            <h3>Optional services</h3>
+            <p>These run under separate profiles and can be added to a running stack at any time:</p>
+            <div class="code-block">
+              <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+              <pre><code># Start / stop optional services without restarting the core stack:
+./extras.sh pentest on     # Kali Linux pentest toolchain
+./extras.sh image on       # FLUX image generation
+./extras.sh all on         # both
+./extras.sh status         # show what's running</code></pre>
+            </div>
 
             <h3>Check all containers are healthy</h3>
             <div class="code-block">
@@ -480,16 +501,30 @@ docker compose logs -f gateway</code></pre>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
               <pre><code># Stop all services
-docker compose down
+./start.sh --down
 
-# Restart a single service
+# Stop and wipe all data (fresh start next time)
+./start.sh --down --volumes
+
+# Force rebuild after a git pull
+git pull
+./start.sh --build
+
+# Full clean rebuild with no cache
+./start.sh --no-cache
+
+# Start with Kali pentest service
+./start.sh --pentest
+
+# Manage optional services on a running stack
+./extras.sh pentest on
+./extras.sh image on
+./extras.sh status
+
+# Restart a single container
 docker compose restart gateway
 
-# Update and rebuild
-git pull
-docker compose up -d --build
-
-# View all logs
+# View live logs
 docker compose logs -f</code></pre>
             </div>
 

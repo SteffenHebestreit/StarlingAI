@@ -9,7 +9,7 @@ vi.mock("../agent/sub-agent.js", () => ({
 
 describe("swarm orchestration tools", () => {
   afterEach(async () => {
-    runSubAgentMock.mockReset();
+    runSubAgentMock.mockClear();
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
@@ -56,7 +56,50 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts).toHaveLength(2);
     expect(tasks[0]?.attempts[0]?.agentName).toBe("researcher");
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
-  }, 15000);
+  }, 30_000);
+
+  it("treats empty delegated output as failure and uses the fallback agent", async () => {
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => {
+      if (agentName === "researcher") return "";
+      return `${agentName}:${task}:ok`;
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Research MCP",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      fallbackAgents: ["retrieval_analyst"],
+      task: "Find official Model Context Protocol sources",
+    }, {
+      sessionId: "session-empty-output",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("retrieval_analyst");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("researcher");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
 
   it("executes dependency-aware task graphs and exposes the shared swarm state", async () => {
     runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}:done`);

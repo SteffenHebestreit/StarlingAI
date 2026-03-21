@@ -32,6 +32,9 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.h1, __VLS_intrinsicElements.h1
     ...{ class: "text-xl font-semibold bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent mb-1" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "text-xs uppercase tracking-[0.18em] text-cyan-200/70 mb-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
     ...{ class: "text-sm text-gray-500" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.form, __VLS_intrinsicElements.form)({
@@ -102,6 +105,11 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['bg-clip-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-transparent']} */ ;
 /** @type {__VLS_StyleScopedClasses['mb-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-cyan-200/70']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
 /** @type {__VLS_StyleScopedClasses['space-y-6']} */ ;

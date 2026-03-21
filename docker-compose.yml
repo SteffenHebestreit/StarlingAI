@@ -28,6 +28,7 @@ services:
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://search.k2o}
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
@@ -46,9 +47,9 @@ services:
       fastapi-mcp-template:
         condition: service_healthy
       qwen3-asr-service:
-        condition: service_healthy
+        condition: service_started   # model download can take 15+ min; gateway handles unavailability gracefully
       qwen3-tts-service:
-        condition: service_healthy
+        condition: service_started   # same — TTS is supplemental, not a hard gateway dependency
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8765/healthz"]
       interval: 15s
@@ -110,6 +111,8 @@ services:
     build:
       context: .
       dockerfile: docker/qwen3-asr-service/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     image: starlingai/qwen3-asr-service:dev
     restart: unless-stopped
     environment:
@@ -118,27 +121,31 @@ services:
       - gc-qwen-model-cache:/root/.cache/huggingface
     networks:
       - starlingai-internal
+      - starlingai-public
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:5002/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 900s
 
   qwen3-tts-service:
     build:
       context: .
       dockerfile: docker/qwen3-tts-service/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     image: starlingai/qwen3-tts-service:dev
     restart: unless-stopped
     environment:
       - QWEN3_ASR_SERVICE_URL=http://qwen3-asr-service:5002
-      - QWEN3_TTS_MODEL=${QWEN3_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
+      - QWEN3_TTS_MODEL=${QWEN3_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-0.6B-Instruct}
     volumes:
       - gc-qwen-model-cache:/root/.cache/huggingface
       - gc-qwen-voices:/app/voices
     networks:
       - starlingai-internal
+      - starlingai-public
     depends_on:
       qwen3-asr-service:
         condition: service_healthy
@@ -147,7 +154,110 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 900s
+
+  image-generation-service:
+    build:
+      context: .
+      dockerfile: docker/qwen-image-service/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    image: starlingai/image-generation-service:dev
+    profiles:
+      - image
+    restart: unless-stopped
+    environment:
+      - IMAGE_MODEL=${IMAGE_MODEL:-black-forest-labs/FLUX.1-schnell}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # ── Compute backend ───────────────────────────────────────────────────
+      # auto  = detect CUDA → ROCm → CPU automatically
+      # rocm  = force AMD ROCm/HIP (use Dockerfile.rocm)
+      # cpu   = CPU-only fallback and the default on this workstation
+      - COMPUTE_BACKEND=${IMAGE_COMPUTE_BACKEND:-cpu}
+      # ── Memory offloading ─────────────────────────────────────────────────
+      # CPU offload streams layers from RAM when GPU VRAM is limited.
+      - IMAGE_CPU_OFFLOAD=${IMAGE_CPU_OFFLOAD:-true}
+      # ── Unified / shared memory (AMD APU — Strix Halo / Ryzen AI Max) ─────
+      # iGPU and CPU share the same LPDDR5X pool — no offloading needed.
+      # Set UNIFIED_MEMORY=true to load the model fully to the iGPU device.
+      - UNIFIED_MEMORY=${IMAGE_UNIFIED_MEMORY:-false}
+      # ── ROCm / RDNA 3 + 3.5 GFX version override ─────────────────────────
+      # RDNA 3   (RX 7000 series, gfx1100):             HSA_OVERRIDE_GFX_VERSION=11.0.0
+      # RDNA 3.5 (Strix Halo / Ryzen AI Max, gfx1151): HSA_OVERRIDE_GFX_VERSION=11.5.1
+      # RDNA 3.5 (Strix Point / Ryzen AI 300, gfx1150): HSA_OVERRIDE_GFX_VERSION=11.5.0
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.5.1}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    # ROCm / AMD GPU: uncomment the two device lines below and switch Dockerfile.
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # group_add:
+    #   - video
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "body=$$(curl -s http://localhost:5005/health || true); echo \"$$body\" | grep -q '\"status\":\"error\"' && exit 1; echo \"$$body\" | grep -q '\"status\":\"'"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 900s
+
+  # ── Kali Linux pentest service ────────────────────────────────────────────
+  # Active scanning tools require PENTEST_SCOPE to be set.
+  # Example: PENTEST_SCOPE=192.168.1.0/24,10.0.0.5,target.example.com
+  # Profile "pentest" — start with: docker compose --profile pentest up
+  kali-pentest:
+    build:
+      context: .
+      dockerfile: docker/kali-pentest/Dockerfile
+    image: starlingai/kali-pentest:dev
+    profiles:
+      - pentest
+    restart: unless-stopped
+    environment:
+      # Authorized scan targets — MUST be set before active tools will run.
+      # Format: comma-separated IPs, CIDR ranges, or hostnames.
+      - PENTEST_SCOPE=${PENTEST_SCOPE:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    cap_add:
+      - NET_RAW       # Required for nmap SYN/UDP scans and Metasploit raw sockets
+      - NET_ADMIN     # Required for some network-level recon tools
+    # Memory limit — prevents OOM from heavy scans (full nmap -p-, sqlmap, metasploit)
+    # crashing the service mid-run. Increase if scans are being killed unexpectedly.
+    mem_limit: 2g
+    memswap_limit: 2g    # no swap — fail fast rather than swap-thrash
+    oom_kill_disable: false
+    networks:
+      - starlingai-internal    # Receives requests from gateway
+      - starlingai-pentest     # Outbound scanning network (reaches external targets)
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Test runner — run all core unit tests ─────────────────────────────────
+  # Usage: docker compose --profile test run --rm test-runner
+  test-runner:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+      target: test
+    image: starlingai/test-runner:dev
+    profiles:
+      - test
+    environment:
+      - SAI_CONFIG_PATH=/app/starlingai.json
+      - NODE_ENV=test
+    networks:
+      - starlingai-internal
 
   # ── Agent worker (ephemeral — built here, spawned by gateway on demand) ──
   # Not started by compose; gateway spawns individual containers via Docker socket.
@@ -224,3 +334,5 @@ networks:
     internal: true   # No external internet access for backend services
   starlingai-public:
     driver: bridge
+  starlingai-pentest:
+    driver: bridge    # External internet access allowed for active scanning

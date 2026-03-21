@@ -51,6 +51,44 @@ const WRITING_INTENT_TOKENS = new Set([
   "letter", "outreach", "subject", "application",
 ]);
 
+const GIT_VCS_TOKENS = new Set([
+  "git", "commit", "branch", "merge", "rebase", "stash", "diff",
+  "checkout", "pull", "push", "clone",
+]);
+
+const CODE_ANALYSIS_TOKENS = new Set([
+  "explain", "review", "analyze", "analyse", "structure",
+  "vulnerabilities", "security", "audit", "inspect",
+]);
+
+const CODE_CONTEXT_TOKENS = new Set([
+  "code", "source", "file", "function", "class", "module",
+  "codebase", "implementation",
+]);
+
+const WORKFLOW_AUTOMATION_TOKENS = new Set([
+  "automation", "pipeline", "workflow", "n8n", "integrate", "integration",
+  "orchestrate", "orchestration",
+]);
+
+const TTS_PHRASES: RegExp[] = [
+  /\bread\s+(out|aloud)\b/,
+  /\btext\s+to\s+speech\b/,
+  /\bsynthesize\s+speech\b/,
+  /\bnarrate\b/,
+  /\bspeak\s+(this|the|it)\b/,
+  /\bvoice\s+over\b/,
+  /\baudio\s+narrat/,
+];
+
+const STT_PHRASES: RegExp[] = [
+  /\btranscrib/,
+  /\bspeech\s+to\s+text\b/,
+  /\bvoice\s+memo\b/,
+  /\b(audio|voice|recording)\s+to\s+text\b/,
+  /\bmeeting\s+(notes|transcript|recording)/,
+];
+
 function hasPhrase(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -85,6 +123,50 @@ function isResearchSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean 
     );
 }
 
+function isTtsSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  return tools.some(t => t === "synthesize_speech" || t === "list_tts_voices")
+    || caps.includes("text to speech") || caps.includes("voice synthesis") || caps.includes("audio narration");
+}
+
+function isSttSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  return tools.some(t => t === "transcribe_audio")
+    || caps.includes("audio transcription") || caps.includes("speech to text");
+}
+
+function isCodeAnalysisSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  return caps.includes("code review") || caps.includes("code analysis")
+    || caps.includes("code explanation") || caps.includes("architecture review");
+}
+
+function isCodeWriterSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  return caps.includes("code writing") || caps.includes("code generation") || caps.includes("programming");
+}
+
+function isPromptSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  return caps.includes("prompt analysis") || caps.includes("prompt rewriting") || caps.includes("convergence tuning");
+}
+
+function isWorkflowSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  const tags = (cfg.tags ?? []).join(" ").toLowerCase();
+  return caps.includes("automation") || caps.includes("workflow") || caps.includes("integration architecture")
+    || tags.includes("workflow") || tags.includes("automation") || tags.includes("n8n");
+}
+
+function isChannelOpsSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  const tags = (cfg.tags ?? []).join(" ").toLowerCase();
+  return caps.includes("channel troubleshooting") || caps.includes("delivery diagnosis")
+    || tags.includes("channels");
+}
+
 export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig, keywords: string[]): number {
   const normalizedQuery = normalizeSearchText(query);
   const queryTokens = tokenizeSearchText(query);
@@ -98,7 +180,9 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
       /api reference/,
     ]);
 
-  const writingIntent = hasToken(queryTokens, WRITING_INTENT_TOKENS)
+  // Suppress writing intent from "message" when the query is about git (e.g. "commit message")
+  const gitContext = hasToken(queryTokens, GIT_VCS_TOKENS);
+  const writingIntentRaw = hasToken(queryTokens, WRITING_INTENT_TOKENS)
     || hasPhrase(normalizedQuery, [
       /cover letter/,
       /cold outreach/,
@@ -106,12 +190,26 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
       /write (a )?proposal/,
       /write (a )?message/,
     ]);
+  const writingIntent = writingIntentRaw
+    && !(gitContext && queryTokens.filter(t => WRITING_INTENT_TOKENS.has(t)).every(t => t === "message"));
+
+  // Audio direction intent
+  const ttsIntent = hasPhrase(normalizedQuery, TTS_PHRASES);
+  const sttIntent = hasPhrase(normalizedQuery, STT_PHRASES);
+
+  // Code analysis intent (requires both an analysis verb AND code-related context)
+  const codeAnalysisIntent = hasToken(queryTokens, CODE_ANALYSIS_TOKENS)
+    && hasToken(queryTokens, CODE_CONTEXT_TOKENS);
+
+  // Workflow / automation intent
+  const workflowIntent = hasToken(queryTokens, WORKFLOW_AUTOMATION_TOKENS);
 
   const writingSpecialist = isWritingSpecialist(cfg, keywords);
   const researchSpecialist = isResearchSpecialist(cfg, keywords);
 
   let adjustment = 0;
 
+  // ── Research vs writing ──
   if (researchIntent && !writingIntent) {
     if (researchSpecialist) adjustment += 0.12;
     if (writingSpecialist && !researchSpecialist) adjustment -= 0.25;
@@ -120,6 +218,29 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (writingIntent) {
     if (writingSpecialist) adjustment += 0.1;
     if (researchSpecialist && !writingSpecialist) adjustment -= 0.04;
+  }
+
+  // ── TTS vs STT ──
+  if (ttsIntent && !sttIntent) {
+    if (isTtsSpecialist(cfg)) adjustment += 0.12;
+    if (isSttSpecialist(cfg) && !isTtsSpecialist(cfg)) adjustment -= 0.15;
+  }
+  if (sttIntent && !ttsIntent) {
+    if (isSttSpecialist(cfg)) adjustment += 0.12;
+    if (isTtsSpecialist(cfg) && !isSttSpecialist(cfg)) adjustment -= 0.15;
+  }
+
+  // ── Code analysis vs code writing / prompt optimization ──
+  if (codeAnalysisIntent) {
+    if (isCodeAnalysisSpecialist(cfg)) adjustment += 0.12;
+    if (isCodeWriterSpecialist(cfg) && !isCodeAnalysisSpecialist(cfg)) adjustment -= 0.08;
+    if (isPromptSpecialist(cfg)) adjustment -= 0.12;
+  }
+
+  // ── Workflow automation vs channel ops ──
+  if (workflowIntent) {
+    if (isWorkflowSpecialist(cfg)) adjustment += 0.1;
+    if (isChannelOpsSpecialist(cfg) && !isWorkflowSpecialist(cfg)) adjustment -= 0.08;
   }
 
   return adjustment;

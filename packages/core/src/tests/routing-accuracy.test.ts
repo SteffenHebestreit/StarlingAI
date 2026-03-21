@@ -106,7 +106,7 @@ const ROUTING_FIXTURE = {
     transcription_agent: {
       description: "Transcribe audio files to text using the configured speech-to-text service.",
       capabilities: ["audio transcription", "speech to text", "podcast transcription", "meeting notes", "voice memo transcription", "multi-language transcription"],
-      tags: ["audio", "transcription", "speech", "stt", "voice", "whisper"],
+      tags: ["audio", "transcription", "speech", "stt", "voice", "qwen3-asr"],
       tools: ["transcribe_audio", "write_file", "read_file"],
       maxIterations: 4,
     },
@@ -116,6 +116,41 @@ const ROUTING_FIXTURE = {
       tags: ["tts", "speech", "voice", "audio", "narration", "synthesize"],
       tools: ["synthesize_speech", "list_tts_voices", "write_file"],
       maxIterations: 4,
+    },
+    retrieval_analyst: {
+      description: "Workspace retrieval and document analysis specialist. Searches all text files in the project for relevant content, reads and synthesises findings, and returns cited, structured answers.",
+      capabilities: ["workspace search", "document retrieval", "knowledge lookup", "code search"],
+      tags: ["retrieval", "rag", "search", "workspace"],
+      tools: ["workspace_search", "read_file", "list_files", "write_file"],
+      maxIterations: 4,
+    },
+    incident_responder: {
+      description: "Runtime incident triage agent. Diagnoses provider connectivity issues, MCP server failures, channel errors, and gateway health problems. Reads logs, checks endpoints, and produces a structured incident report with recommended remediation.",
+      capabilities: ["incident triage", "health diagnosis", "provider troubleshooting", "log analysis"],
+      tags: ["ops", "monitoring", "incident", "reliability"],
+      tools: ["shell_exec", "read_file", "list_files", "web_fetch"],
+      maxIterations: 5,
+    },
+    workflow_designer: {
+      description: "n8n and webhook workflow design specialist. Analyses automation requirements, designs n8n workflow structures, generates webhook configurations, and documents the integration architecture.",
+      capabilities: ["n8n workflows", "webhook design", "automation planning", "integration architecture"],
+      tags: ["n8n", "workflow", "automation", "integration"],
+      tools: ["read_file", "write_file", "list_files", "web_search"],
+      maxIterations: 4,
+    },
+    channel_operator: {
+      description: "Communication channel troubleshooting specialist. Diagnoses Telegram, Slack, Discord, WhatsApp, and email channel connectivity issues, checks token validity, tests webhook reachability, and produces actionable remediation steps.",
+      capabilities: ["channel troubleshooting", "webhook testing", "token validation", "delivery diagnosis"],
+      tags: ["channels", "telegram", "slack", "discord", "whatsapp", "ops"],
+      tools: ["shell_exec", "read_file", "web_fetch"],
+      maxIterations: 5,
+    },
+    prompt_optimizer: {
+      description: "Agent prompt quality analyst. Reviews sub-agent system prompts for clarity, tool-use convergence, and output consistency. Produces rewrite suggestions with rationale.",
+      capabilities: ["prompt analysis", "system prompt rewriting", "convergence tuning", "agent quality"],
+      tags: ["prompts", "quality", "optimization", "evaluation"],
+      tools: ["read_file", "write_file", "list_files"],
+      maxIterations: 3,
     },
   },
 };
@@ -146,6 +181,16 @@ const ROUTING_CASES: Array<{ query: string; expected: string; description: strin
   { query: "convert this voice memo to text", expected: "transcription_agent", description: "speech to text" },
   { query: "read out this article using a natural voice", expected: "voice_narrator", description: "text to speech" },
   { query: "synthesize speech for this podcast intro script", expected: "voice_narrator", description: "speech synthesis" },
+  { query: "search the workspace for all files that reference the AuthService class", expected: "retrieval_analyst", description: "workspace code search" },
+  { query: "find every mention of the database connection string in the project", expected: "retrieval_analyst", description: "workspace retrieval" },
+  { query: "the LM Studio provider keeps returning 502 errors, diagnose the issue", expected: "incident_responder", description: "provider incident triage" },
+  { query: "gateway health check is failing and agents are timing out", expected: "incident_responder", description: "runtime health diagnosis" },
+  { query: "design an n8n workflow that triggers a webhook when a new order arrives", expected: "workflow_designer", description: "n8n webhook workflow" },
+  { query: "create an automation pipeline that connects the CRM to our email system", expected: "workflow_designer", description: "integration automation" },
+  { query: "the Telegram bot stopped receiving messages, troubleshoot the channel", expected: "channel_operator", description: "telegram channel troubleshooting" },
+  { query: "check why Slack webhook delivery is failing and fix it", expected: "channel_operator", description: "slack webhook diagnosis" },
+  { query: "review the researcher agent system prompt and suggest improvements for convergence", expected: "prompt_optimizer", description: "prompt quality review" },
+  { query: "the coder agent keeps looping without producing output, optimize its prompt", expected: "prompt_optimizer", description: "prompt convergence tuning" },
 ];
 
 describe("routing accuracy benchmarks", () => {

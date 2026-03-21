@@ -49,6 +49,7 @@ describe("AgentSession collapsed history", () => {
 
     expect(prompt).toContain("## Swarm Rules");
     expect(prompt).toContain("Use direct tools first");
+    expect(prompt).toContain("ask one concise clarifying question instead of guessing");
     expect(prompt).toContain("For mixed tasks, do the direct-tool portion first");
     expect(prompt).toContain("For simple login or form tasks, prefer get_site_credentials plus the browser_* tools yourself");
     expect(prompt).toContain("For file or image attachments, prefer extract_file_content or analyze_image first");

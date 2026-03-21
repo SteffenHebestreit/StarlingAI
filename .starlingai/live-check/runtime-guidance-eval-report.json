@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-03-20T16:48:12.462Z",
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "totalCases": 4,
+  "passedCases": 2,
+  "failedCases": 2,
+  "results": [
+    {
+      "name": "mcp-official-sources-natural",
+      "passed": true,
+      "durationMs": 5295,
+      "failures": [],
+      "toolCalls": [
+        "web_search"
+      ],
+      "eventTypes": [
+        "RUN_STARTED",
+        "TOOL_CALL_STARTED",
+        "TOOL_CALL_ENDED",
+        "TEXT_MESSAGE_STARTED",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_ENDED",
+        "RUN_FINISHED"
+      ],
+      "responsePreview": "The official Model Context Protocol (MCP) specification and repository is maintained by Anthropic. **Official Repository:** https://github.com/modelcontextprotocol/specification This repository contains the complete MCP specification, inclu"
+    },
+    {
+      "name": "playwright-docs-natural",
+      "passed": false,
+      "durationMs": 43082,
+      "failures": [
+        "run error: Timed out after 45000ms",
+        "missing expected tool call: web_search",
+        "missing expected text: Playwright"
+      ],
+      "toolCalls": [],
+      "eventTypes": [],
+      "responsePreview": "",
+      "runError": "Timed out after 45000ms"
+    },
+    {
+      "name": "lm-studio-release-notes-natural",
+      "passed": true,
+      "durationMs": 9848,
+      "failures": [],
+      "toolCalls": [
+        "web_search"
+      ],
+      "eventTypes": [
+        "RUN_STARTED",
+        "TOOL_CALL_STARTED",
+        "TOOL_CALL_ENDED",
+        "TEXT_MESSAGE_STARTED",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_ENDED",
+        "RUN_FINISHED"
+      ],
+      "responsePreview": "The latest LM Studio release notes are for **version 0.4.0**, which introduces \"the next generation of LM Studio.\" **Source:** [LM Studio Blog – Introducing LM Studio 0.4.0](https://lmstudio.ai/blog/0.4.0) For a detailed list of features an"
+    },
+    {
+      "name": "timeless-control-binary-search",
+      "passed": false,
+      "durationMs": 3800,
+      "failures": [
+        "missing expected text: binary search"
+      ],
+      "toolCalls": [],
+      "eventTypes": [
+        "RUN_STARTED",
+        "TEXT_MESSAGE_STARTED",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_ENDED",
+        "RUN_FINISHED"
+      ],
+      "responsePreview": "Binary search is an efficient algorithm for finding a target value within a sorted array by repeatedly dividing the search interval in half. It begins by comparing the target to the middle element of the array; if they are not equal, the ha"
+    }
+  ]
+}

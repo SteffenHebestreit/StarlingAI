@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find c:UserssteffenDocumentsstarlingAI -type f -name *.json)",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\(''c:/Users/steffen/Documents/starlingAI/starlingai.json''\\)\\); agents=d.get\\(''agents'',{}\\); coord=agents.get\\(''pentest_coordinator'',{}\\); print\\(json.dumps\\({k:v for k,v in coord.items\\(\\) if k!=''systemPrompt''}, indent=2\\)\\); print\\(''---PROMPT---''\\); print\\(coord.get\\(''systemPrompt'',''''\\)\\)\")",
+      "Bash(docker volume:*)",
+      "Bash(docker images:*)",
+      "Bash(chmod +x c:/Users/steffen/Documents/starlingAI/start.sh)",
+      "Bash(chmod +x c:/Users/steffen/Documents/starlingAI/extras.sh)",
+      "Bash(grep -l \"Multimodal\" c:/Users/steffen/Documents/starlingAI/tutorials/*.html c:/Users/steffen/Documents/starlingAI/tutorials/channels/*.html)",
+      "Bash(for f:*)",
+      "Bash(do)",
+      "Bash(sed -i 's|<a class=\"\"nav-link\"\" href=\"\"multimodal.html\"\"><span class=\"\"nav-icon\"\">🎙️</span> Multimodal</a>\\\\n      </div>|<a class=\"\"nav-link\"\" href=\"\"multimodal.html\"\"><span class=\"\"nav-icon\"\">🎙️</span> Multimodal</a>\\\\n        <a class=\"\"nav-link\"\" href=\"\"pentest.html\"\"><span class=\"\"nav-icon\"\">🔐</span> Pentest</a>\\\\n      </div>|g' \"$f\")",
+      "Bash(done)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); mcps=d.get\\(''''mcpServers'''',{}\\); [print\\(k, '''':'''', list\\(v.keys\\(\\)\\)\\) for k,v in mcps.items\\(\\)]\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); mcps=d.get\\(''''mcpServers'''',{}\\); print\\(json.dumps\\(mcps, indent=2\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\(''/c/Users/steffen/.claude/settings.json''\\)\\); mcps=d.get\\(''mcpServers'',{}\\); print\\(json.dumps\\(mcps, indent=2\\) if mcps else ''No MCP servers configured''\\)\")",
+      "Bash(cat /c/Users/steffen/.docker/mcp/*.json)",
+      "Bash(docker context:*)",
+      "Bash(docker mcp:*)",
+      "Bash(docker extension:*)"
+    ]
+  }
+}

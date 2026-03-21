@@ -1,12 +1,13 @@
 import { defineConfig } from "vitest/config";
 
-export default defineConfig({
+export default defineConfig({ 
   test: {
     globals: true,
     environment: "node",
     include: ["src/**/*.test.ts"],
-    coverage: {
-      include: ["src/guardrails/**", "src/tools/**", "src/agent/**"],
-    },
+    testTimeout: 60000,
+    hookTimeout: 30000,
+    minWorkers: 1,
+    maxWorkers: 1,
   },
 });

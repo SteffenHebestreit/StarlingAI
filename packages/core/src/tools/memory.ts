@@ -14,7 +14,7 @@ import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
 import { writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
 import { getConfig } from "../config/loader.js";
-import { getLMStudioProvider } from "../providers/index.js";
+import { getEmbeddingProvider } from "../providers/index.js";
 
 const log = childLogger("tool:memory");
 const MEMORY_SUBDIR = ".starlingai/memory";
@@ -298,7 +298,7 @@ registerTool({
     if (query) {
       const matches = await searchSharedFacts(parentSessionId, query, {
         maxResults: Number(args["maxResults"] ?? 5),
-        provider: embeddingModel ? getLMStudioProvider() : undefined,
+        provider: embeddingModel ? getEmbeddingProvider() : undefined,
         embeddingModel,
       });
 

@@ -39,6 +39,8 @@ WORKDIR /app
 
 RUN git clone --depth 1 --branch "${FASTAPI_MCP_TEMPLATE_REF}" "${FASTAPI_MCP_TEMPLATE_REPO}" /app
 
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 RUN pip install --no-cache-dir -r fastapi_mcp_template/requirements.txt \
     && for tool in $(echo "$ENABLED_TOOLS" | tr ',' ' '); do \
         if [ -f "tools/requirements/${tool}.txt" ]; then \

@@ -79,13 +79,54 @@
       "maxIterations": 12,
       "tools": [
         "get_site_credentials",
-        "mcp__playwright__browser_navigate",
-        "mcp__playwright__browser_click",
-        "mcp__playwright__browser_type",
-        "mcp__playwright__browser_snapshot",
-        "mcp__playwright__browser_screenshot",
-        "mcp__playwright__browser_select_option",
-        "mcp__playwright__browser_wait_for",
+        "mcp__docker_gateway__browser_navigate",
+        "mcp__docker_gateway__browser_click",
+        "mcp__docker_gateway__browser_type",
+        "mcp__docker_gateway__browser_snapshot",
+        "mcp__docker_gateway__browser_screenshot",
+        "mcp__docker_gateway__browser_select_option",
+        "mcp__docker_gateway__browser_wait_for",
+        "write_file"
+      ]
+    },
+    "infrastructure_agent": {
+      "description": "Infrastructure automation specialist for provisioning systems and deploying applications with Proxmox, Terraform, readiness checks, Ansible, SSH, and SCP file transfers.",
+      "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
+      "tags": ["infrastructure", "ops", "terraform", "ansible", "vault", "ssh", "scp", "docker", "proxmox", "readiness"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 10,
+      "systemPrompt": "You are an infrastructure automation specialist. Prefer proxmox_vm for standard Proxmox VM lifecycle actions, terraform_exec for declarative infrastructure changes and saved-plan workflows, service_check to wait for HTTP, TCP, SSH, or DNS readiness between provisioning steps, ansible_task or ansible_playbook for host configuration depending on scope including Vault-backed playbooks, ssh_upload for transferring local deployment artifacts, ssh_download for collecting remote logs or generated files, and SSH for targeted remote execution and verification. When using terraform_exec with action=output, rely on the structured output values for downstream steps instead of reparsing the JSON manually. Prefer complete end-to-end deployments over partial setup.",
+      "tools": [
+        "proxmox_vm",
+        "terraform_exec",
+        "service_check",
+        "ansible_playbook",
+        "ansible_task",
+        "ssh_exec",
+        "ssh_upload",
+        "ssh_download",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "image_creator": {
+      "description": "Image generation specialist for prompt refinement and final image creation.",
+      "capabilities": ["image generation", "prompt refinement"],
+      "tags": ["image", "design", "multimodal"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.45,
+        "maxTokens": 4096
+      },
+      "maxIterations": 5,
+      "tools": [
+        "generate_image",
+        "analyze_image",
+        "read_file",
         "write_file"
       ]
     },
@@ -100,8 +141,8 @@
       },
       "maxIterations": 4,
       "tools": [
-        "mcp__code_sandbox__run_js",
-        "mcp__code_sandbox__run_ts",
+        "mcp__docker_gateway__run_js",
+        "mcp__docker_gateway__run_ts",
         "read_file",
         "write_file",
         "list_files"
@@ -138,6 +179,140 @@
         "delegate_to_agent",
         "create_ephemeral_agent"
       ]
+    },
+
+    // ── Pentesting agents ──────────────────────────────────────────────────
+    // These agents require the kali-pentest service running with PENTEST_SCOPE set.
+    // Start with: docker compose --profile pentest up kali-pentest
+
+    "pentest_coordinator": {
+      "description": "Penetration testing orchestrator. Plans and coordinates a full pentest engagement by delegating to specialized sub-agents: recon, vuln_scanner, web_auditor, network_auditor, exploit, and report_writer. Requires written authorization and PENTEST_SCOPE to be configured.",
+      "capabilities": ["pentest coordination", "engagement planning", "recon", "vulnerability assessment", "exploitation", "report writing"],
+      "tags": ["pentest", "security", "offensive"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 20,
+      "systemPrompt": "You are a professional penetration testing coordinator. MANDATORY PRE-FLIGHT CHECKLIST — you MUST complete all steps before calling any active scanning tool:\n\n1. Ask the user: 'Do you have written authorization to test the target(s)? Please confirm yes and provide the authorization reference (ticket ID, contract number, or letter date).'\n2. Ask the user: 'What is the authorized target scope? Please list all IPs, CIDR ranges, and/or hostnames.'\n3. Ask the user: 'Who authorized this engagement? (Name and role of the asset owner or their delegate)'\n4. Call pentest_set_scope with the collected details — this unlocks active scanning.\n5. Confirm to the user: 'Scope configured. Starting engagement: [name].'\n\nOnly after completing the above, structure the engagement as: Recon → Vulnerability Scanning → Web/Network Auditing → Exploitation (only with explicit additional approval per exploit) → Report.\n\nDelegate each phase to the appropriate specialist agent. Always capture findings via share_finding so report_writer_agent can build a comprehensive report. Never proceed past step 4 without explicit user confirmation.",
+      "tools": [
+        "pentest_set_scope",
+        "list_agents",
+        "delegate_to_agent",
+        "parallel_delegate",
+        "run_task_graph",
+        "searchsploit_query",
+        "share_finding",
+        "read_shared_facts",
+        "write_file",
+        "read_file"
+      ]
+    },
+
+    "recon_agent": {
+      "description": "Passive and active reconnaissance specialist. Performs port scanning, service enumeration, OS detection, and Exploit-DB searches to map the attack surface of authorized targets.",
+      "capabilities": ["network reconnaissance", "port scanning", "service enumeration", "OS fingerprinting", "CVE lookup"],
+      "tags": ["pentest", "recon", "nmap", "security"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 10,
+      "systemPrompt": "You are a recon specialist. Start with a quick nmap scan, then escalate to full port scan and service version detection. Use searchsploit_query to look up CVEs for discovered services. Store all findings using share_finding with structured JSON: {target, port, service, version, cves: [], notes}.",
+      "tools": [
+        "nmap_scan",
+        "searchsploit_query",
+        "pentest_exec",
+        "share_finding",
+        "read_shared_facts",
+        "write_file"
+      ]
+    },
+
+    "web_auditor_agent": {
+      "description": "Web application security auditor. Tests web services for directory traversal, SQL injection, misconfigurations, and known vulnerabilities using Nikto, Gobuster, and SQLMap.",
+      "capabilities": ["web vulnerability scanning", "directory brute-force", "SQL injection", "web reconnaissance"],
+      "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "security"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 12,
+      "systemPrompt": "You are a web application penetration tester. For each web target: (1) run nikto_scan for server misconfigurations and CVEs, (2) run gobuster_scan to discover hidden paths, (3) test discovered endpoints for SQL injection with sqlmap_scan at risk=1 level=1. Always use pentest_exec for supplemental tools like whatweb or wafw00f. Store findings via share_finding.",
+      "tools": [
+        "nikto_scan",
+        "gobuster_scan",
+        "sqlmap_scan",
+        "pentest_exec",
+        "searchsploit_query",
+        "share_finding",
+        "read_shared_facts",
+        "write_file"
+      ]
+    },
+
+    "network_auditor_agent": {
+      "description": "Network security auditor. Performs in-depth network service assessment including UDP scanning, NSE script execution, and credential brute-force on exposed services.",
+      "capabilities": ["network auditing", "service exploitation", "credential testing", "NSE scripting"],
+      "tags": ["pentest", "network", "nmap", "hydra", "security"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 10,
+      "systemPrompt": "You are a network penetration tester. Run deep nmap scans with vuln and default NSE scripts on discovered services. Use hydra_attack for credential testing only when the coordinator has explicitly authorized it. Enumerate SMB, FTP, SSH, and RDP services. Store all findings via share_finding.",
+      "tools": [
+        "nmap_scan",
+        "hydra_attack",
+        "pentest_exec",
+        "searchsploit_query",
+        "share_finding",
+        "read_shared_facts",
+        "write_file"
+      ]
+    },
+
+    "exploit_agent": {
+      "description": "Exploitation specialist using Metasploit Framework. Executes verified exploits against authorized targets. Requires explicit per-engagement approval from the user before running any exploit module.",
+      "capabilities": ["exploit execution", "metasploit", "payload delivery", "post-exploitation"],
+      "tags": ["pentest", "exploit", "metasploit", "security"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.05,
+        "maxTokens": 8192
+      },
+      "maxIterations": 8,
+      "systemPrompt": "You are an exploitation specialist. Only run exploits that: (1) have confirmed vulnerable service versions from recon data, (2) have been explicitly approved by the user for this engagement. Prefer check commands before running exploits. After exploitation, limit post-ex to whoami, hostname, and network interface enumeration — do not exfiltrate data. Always record what was done via share_finding with full command details.",
+      "tools": [
+        "metasploit_exec",
+        "pentest_exec",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+
+    "report_writer_agent": {
+      "description": "Penetration test report writer. Collects all shared findings from the swarm and generates a professional Markdown pentest report with executive summary, severity ratings, evidence, and remediation guidance.",
+      "capabilities": ["report writing", "finding aggregation", "risk rating", "remediation guidance"],
+      "tags": ["pentest", "reporting", "security"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.2,
+        "maxTokens": 8192
+      },
+      "maxIterations": 6,
+      "systemPrompt": "You are a professional penetration test report writer. Read all shared findings via read_shared_facts, structure them by severity (Critical → High → Medium → Low → Informational), assign CVSS scores where applicable, write clear remediation guidance for each finding, and produce a complete report using pentest_report. The executive summary should be suitable for a non-technical audience.",
+      "tools": [
+        "read_shared_facts",
+        "pentest_report",
+        "write_file",
+        "read_file"
+      ]
     }
   },
 
@@ -147,7 +322,7 @@
       "task": "Run the application_pipeline agent for one unchecked lead with rating 0.7 or higher.",
       "webhookKey": "$SCENE_APPLY_JOBS_KEY",
       "allowedAgents": ["application_pipeline", "proposal_writer", "browser_agent"],
-      "humanInLoopSteps": ["get_site_credentials", "mcp__playwright__browser_navigate"],
+      "humanInLoopSteps": ["get_site_credentials", "mcp__docker_gateway__browser_navigate"],
       "approvalChannel": "slack-approvals",
       "params": {
         "minRating": {
@@ -238,13 +413,23 @@
     },
     "tts": {
       "baseUrl": "http://qwen3-tts-service:5004",
-      "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
       "defaultLanguage": "English",
       "defaultSpeaker": "Vivian",
       "voiceSamplePath": "samples/assistant-voice.wav",
       "voiceSampleText": "Hello, this is the reference voice sample used by StarlingAI.",
       "defaultQuality": "medium",
       "timeoutMs": 60000
+    },
+    "imageGeneration": {
+      "baseUrl": "http://image-generation-service:5005",
+      "model": "black-forest-labs/FLUX.1-schnell",
+      "timeoutMs": 120000,
+      "defaultWidth": 768,
+      "defaultHeight": 768,
+      "defaultSteps": 4,
+      "defaultGuidanceScale": 0,
+      "cpuOffload": true
     },
     "wakeWord": {
       "enabled": false,
@@ -264,16 +449,10 @@
 
   "mcp": {
     "servers": {
-      "playwright": {
-        "transport": "docker",
-        "image": "mcp/playwright:latest",
-        "network": "bridge",
-        "autoStart": true
-      },
-      "code_sandbox": {
-        "transport": "docker",
-        "image": "mcp/node-code-sandbox",
-        "mounts": ["/var/run/docker.sock:/var/run/docker.sock"],
+      "docker_gateway": {
+        "transport": "stdio",
+        "command": "docker",
+        "args": ["mcp", "gateway", "run"],
         "autoStart": true
       },
       "filesystem": {

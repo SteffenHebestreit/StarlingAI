@@ -38,6 +38,7 @@ export type AuditEventType =
   | "architect_fallback_failed"
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
+  | "turn_guidance_applied"
   | "turn_slo_breach";
 
 export interface AuditEvent {

@@ -316,6 +316,7 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - Be helpful, accurate, and concise in your final synthesized response
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
+- If the request is missing necessary identifiers, scope, or target details, ask one concise clarifying question instead of guessing
 
 ## Response Format
 - **Always respond in Markdown.** Use headings (##, ###), bullet lists, numbered lists, bold/italic, inline code, fenced code blocks with language tags (e.g. \`\`\`python), and tables where they add clarity.
@@ -369,6 +370,7 @@ Use these only when direct tools are not enough. All of these require delegate_t
 - Research / web facts → delegate_to_agent(agentName: "researcher", ...)
 - Code reading / analysis → delegate_to_agent(agentName: "code_analyst", ...)
 - Shell commands / DevOps → delegate_to_agent(agentName: "shell_agent", ...)
+- Infrastructure / Proxmox VM / Ansible / SSH Setup → delegate_to_agent(agentName: "infrastructure_agent", ...)
 - Browser automation / site login → delegate_to_agent(agentName: "browser_agent", ...) only when direct browser_* tools plus get_site_credentials are not enough
 - Writing and running code → delegate_to_agent(agentName: "coder", ...)
 - Translation between languages → delegate_to_agent(agentName: "translator", ...)

@@ -25,6 +25,8 @@ Each configured sub-agent can define:
 
 The runtime exposes the current catalog through `GET /api/agents`.
 
+Typical built-in patterns include keeping a broadly capable main assistant with direct tools while also configuring narrower specialists for the same capability. For example, image generation can be exposed directly on the main assistant through `generate_image` and also through a dedicated `image_creator` sub-agent that focuses on prompt crafting and visual iteration.
+
 ## Routing Model
 
 The orchestrator resolves agents through the hybrid routing layer used by `search_agents` and surfaced at `GET /api/agents/resolve`. This routing is domain-agnostic — the same mechanism works for research tasks, code analysis, browser automation, data processing, or any other domain where a specialist has been configured.
@@ -111,6 +113,7 @@ The Warden agent runs as a background process subscribing to the live audit stre
 | `tool_escape_attempt` | Sub-agent has ≥3 blocked tool calls | Reinforce circuit breaker + `warden_alert` (error) |
 | `rate_limit_flood` | Sender rate-limited ≥5 times in 1 min | `warden_alert` (warn) |
 | `turn_slo_breach` | Turn exceeds `orchestratorTurnSloMs` or `subAgentTurnSloMs` | `warden_alert` (warn) |
+| `repeated_identical_output` | Same tool returns identical output ≥3 times in a row | `warden_alert` (warn) — runtime also injects a loop-break notice into the LLM context |
 
 All alerts appear in the JSONL audit log and the real-time WebSocket dashboard stream.
 
@@ -169,3 +172,80 @@ Important details:
 - duration guard is `maxDurationMs`
 
 The harness writes a JSON report and prints a concise summary with pass/fail counts and output previews.
+
+## Main Assistant Live Eval
+
+The checked-in agent harness above evaluates sub-agents directly. For runtime behavior that lives in the main assistant turn loop, such as dynamic web-search guidance, use the live gateway evaluator instead:
+
+```bash
+pnpm runtime-guidance:evaluate
+```
+
+This reads [runtime-guidance-eval.example.jsonc](c:\Users\steffen\Documents\starlingAI\runtime-guidance-eval.example.jsonc), sends each prompt through `/api/chat/stream`, and records whether the assistant actually invoked tools like `web_search`.
+
+The live-eval plan format is:
+
+```jsonc
+{
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "outputPath": "./.starlingai/live-check/runtime-guidance-eval-report.json",
+  "cases": [
+    {
+      "name": "official-docs-natural",
+      "message": "Find the official Model Context Protocol specification and repo. Keep it short.",
+      "expectToolIncludes": ["web_search"],
+      "expectTextIncludes": ["Model Context Protocol"],
+      "maxDurationMs": 45000
+    },
+    {
+      "name": "timeless-control",
+      "message": "Explain how binary search works in one paragraph.",
+      "expectToolExcludes": ["web_search", "web_fetch"],
+      "maxDurationMs": 20000
+    }
+  ]
+}
+```
+
+The report includes the observed tool calls, stream event types, response preview, and per-case pass/fail reasons.
+
+---
+
+## Penetration Testing Agents
+
+StarlingAI includes a Kali Linux-based pentest swarm activated with the `pentest` Docker Compose profile. The toolchain enforces a mandatory authorization workflow before any active scanning begins.
+
+### Pre-flight workflow (enforced by `pentest_coordinator`)
+
+```
+1. Ask user for written authorization confirmation
+2. Ask user for authorized target scope (IPs / CIDRs / hostnames)
+3. Ask user for authorization reference (ticket, contract, letter)
+4. Call pentest_set_scope  →  unlocks active scanning tools
+5. Delegate phases to specialist agents
+6. Generate report via report_writer_agent
+```
+
+### Agent catalog
+
+| Agent | Role | Key tools |
+|---|---|---|
+| `pentest_coordinator` | Orchestrates the full engagement | `pentest_set_scope`, delegation tools |
+| `recon_agent` | Port scanning and CVE lookup | `nmap_scan`, `searchsploit_query` |
+| `web_auditor_agent` | Web app vulnerability assessment | `nikto_scan`, `gobuster_scan`, `sqlmap_scan` |
+| `network_auditor_agent` | Network service and credential testing | `nmap_scan`, `hydra_attack` |
+| `exploit_agent` | Metasploit exploitation (explicit approval per exploit) | `metasploit_exec` |
+| `report_writer_agent` | Collects findings and writes the report | `pentest_report` |
+
+### Tool tiers for pentest tools
+
+| Tool | Tier | Requires approval |
+|---|---|---|
+| `searchsploit_query` | 0 (read-only, offline) | No |
+| `pentest_report` | 1 (write to workspace) | No |
+| All active scanning tools | 3 (privileged) | Yes — per call |
+
+Scope is also validated server-side in the `kali-pentest` service — a target not in the authorized scope is rejected even if the tool tier approval was granted.
+
+> **Full documentation:** [docs/pentest.md](pentest.md)
+

@@ -1,0 +1,27 @@
+Running mcp-official-sources-natural... PASS
+Running playwright-docs-natural... PASS
+Running lm-studio-release-notes-natural... FAIL
+Running timeless-control-binary-search... PASS
+Runtime guidance live eval
+Gateway: http://127.0.0.1:8765
+Passed 3/4 cases
+
+- mcp-official-sources-natural PASS in 14589ms
+  Tools: web_search, web_search, web_search, browser_navigate
+  Events: RUN_STARTED, TOOL_CALL_STARTED, TOOL_CALL_ENDED, TEXT_MESSAGE_STARTED, TEXT_MESSAGE_CONTENT, TEXT_MESSAGE_ENDED, RUN_FINISHED
+  Preview: The search backend is returning no results despite multiple attempts with varied queries. Let me try a direct browser navigation to the known official source. ## Model Context Protocol (MCP) **Official Repository:** 🔗 https://github.com/mo
+- playwright-docs-natural PASS in 31604ms
+  Tools: web_search, web_search, web_fetch, web_fetch, web_fetch
+  Events: RUN_STARTED, TOOL_CALL_STARTED, TOOL_CALL_ENDED, TEXT_MESSAGE_STARTED, TEXT_MESSAGE_CONTENT, TEXT_MESSAGE_ENDED, RUN_FINISHED
+  Preview: The search engine is having trouble finding the Playwright documentation. Let me try a different approach by directly fetching the official Playwright website. I was able to fetch the Playwright Trace Viewer documentation. Let me analyze th
+- lm-studio-release-notes-natural FAIL in 40967ms
+  Tools: web_search, web_fetch, browser_navigate, browser_snapshot, browser_screenshot
+  Events: RUN_STARTED, TOOL_CALL_STARTED, TOOL_CALL_ENDED, TEXT_MESSAGE_STARTED, TEXT_MESSAGE_CONTENT, OPERATOR_INTERVENTION
+  Failures: run error: Timed out after 45000ms
+  Preview: Let me try a different search approach to find LM Studio's release notes. The search backend is returning no results for LM Studio queries. Let me try fetching the official LM Studio website directly to find their release notes. I found the
+- timeless-control-binary-search PASS in 5762ms
+  Tools: none
+  Events: RUN_STARTED, TEXT_MESSAGE_STARTED, TEXT_MESSAGE_CONTENT, TEXT_MESSAGE_ENDED, RUN_FINISHED
+  Preview: Binary search is an efficient algorithm for finding a target value within a sorted array by repeatedly dividing the search interval in half. It begins by comparing the target to the middle element of the array; if they are not equal, it eli
+
+Report written to /mnt/c/Users/steffen/.starlingai/live-check/runtime-guidance-eval-report.json

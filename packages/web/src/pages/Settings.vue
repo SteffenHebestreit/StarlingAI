@@ -66,6 +66,28 @@
                 <span :class="component.healthy ? 'text-green-400' : 'text-amber-400'">{{ component.healthy ? 'ok' : 'degraded' }}</span>
               </div>
             </div>
+            <div class="border-t border-purple-500/10" />
+            <div class="flex justify-between items-center">
+              <span class="text-gray-400">Model Endpoints</span>
+              <div class="flex items-center gap-2">
+                <span :class="['status-dot', runtime.modelEndpoints?.healthy ? 'status-dot--on' : 'status-dot--off']" />
+                <span :class="runtime.modelEndpoints?.healthy ? 'text-green-400' : 'text-amber-400'">
+                  {{ runtime.modelEndpoints?.healthy ? 'Healthy' : 'Needs Attention' }}
+                </span>
+              </div>
+            </div>
+            <div v-if="runtime.modelEndpointError" class="text-xs text-red-400">{{ runtime.modelEndpointError }}</div>
+            <div v-else-if="runtime.modelEndpoints?.endpoints?.length" class="space-y-2 pt-1">
+              <div v-for="endpoint in runtime.modelEndpoints.endpoints" :key="`${endpoint.role}-${endpoint.baseUrl}-${endpoint.model}`" class="model-endpoint-row">
+                <div class="min-w-0">
+                  <div class="text-gray-300 text-xs">{{ formatModelEndpointRole(endpoint.role) }}</div>
+                  <div class="text-[11px] text-gray-500 font-mono truncate" :title="endpoint.model">{{ endpoint.model }}</div>
+                  <div class="text-[11px] text-gray-600 font-mono truncate" :title="endpoint.baseUrl">{{ endpoint.baseUrl }}</div>
+                  <div v-if="endpoint.error" class="text-[11px] text-red-400 truncate" :title="endpoint.error">{{ endpoint.error }}</div>
+                </div>
+                <span :class="endpoint.ok ? 'text-green-400' : 'text-amber-400'" class="text-xs shrink-0">{{ endpoint.ok ? 'ok' : 'down' }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -111,6 +133,18 @@
                   <div v-if="multimodalStore.status.files.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.files.error }}</div>
                 </div>
 
+                <div v-if="multimodalStore.status.vision !== null" class="multimodal-health-card">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-gray-300 text-sm">Vision</span>
+                    <span :class="multimodalStore.status.vision?.ok ? 'badge-running' : 'badge-health-bad'">
+                      {{ multimodalStore.status.vision?.ok ? 'available' : 'offline' }}
+                    </span>
+                  </div>
+                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.visionBaseUrl || multimodalForm.filesBaseUrl }}</div>
+                  <div class="mt-1 text-[11px] text-gray-600 font-mono break-all">{{ multimodalForm.visionModel || 'uses default model' }}</div>
+                  <div v-if="multimodalStore.status.vision?.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.vision.error }}</div>
+                </div>
+
                 <div class="multimodal-health-card">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-gray-300 text-sm">Speech To Text</span>
@@ -131,6 +165,17 @@
                   </div>
                   <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.ttsBaseUrl }}</div>
                   <div v-if="multimodalStore.status.tts.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.tts.error }}</div>
+                </div>
+
+                <div v-if="multimodalStore.status.imageGeneration !== null" class="multimodal-health-card">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-gray-300 text-sm">Image Generation</span>
+                    <span :class="multimodalStore.status.imageGeneration?.ok ? 'badge-running' : 'badge-health-bad'">
+                      {{ multimodalStore.status.imageGeneration?.ok ? 'available' : 'offline' }}
+                    </span>
+                  </div>
+                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.imageGenBaseUrl }}</div>
+                  <div v-if="multimodalStore.status.imageGeneration?.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.imageGeneration.error }}</div>
                 </div>
               </div>
             </div>
@@ -168,6 +213,23 @@
                 <div class="md:col-span-2">
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.filesApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                </div>
+                <div class="md:col-span-2 border-t border-purple-500/10 pt-3 mt-1">
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500 mb-3">Vision Fallback</div>
+                  <div class="multimodal-grid">
+                    <div class="md:col-span-2">
+                      <label class="field-label">Vision Model <span class="text-gray-600 font-normal">optional</span></label>
+                      <input v-model="multimodalForm.visionModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-9b or Qwen/Qwen2.5-VL-7B-Instruct" />
+                    </div>
+                    <div class="md:col-span-2">
+                      <label class="field-label">Vision Endpoint <span class="text-gray-600 font-normal">optional override</span></label>
+                      <input v-model="multimodalForm.visionBaseUrl" type="text" class="input-box font-mono" placeholder="defaults to orchestrator endpoint" />
+                    </div>
+                    <div class="md:col-span-2">
+                      <label class="field-label">Vision API Key <span class="text-gray-600 font-normal">optional</span></label>
+                      <input v-model="multimodalForm.visionApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses provider or dedicated vision key" />
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -232,6 +294,95 @@
                 <div class="md:col-span-2">
                   <label class="field-label">Audio Example Transcript <span class="text-gray-600 font-normal">optional</span></label>
                   <textarea v-model="multimodalForm.ttsVoiceSampleText" class="input-box font-mono text-xs resize-none" rows="3" placeholder="Exact words spoken in the audio example for higher quality cloning" />
+                </div>
+              </div>
+
+              <div class="rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3">
+                <div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen3</div>
+                  <div class="text-xs text-gray-500 mt-1">Upload a sample once, save it in the Qwen voice library, and reuse the returned voice ID for faster synthesis.</div>
+                </div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">Voice Name</label>
+                    <input v-model="savedVoiceForm.name" type="text" class="input-box" placeholder="e.g. Steffen Voice" />
+                  </div>
+                  <div>
+                    <label class="field-label">Language</label>
+                    <input v-model="savedVoiceForm.language" type="text" class="input-box font-mono" placeholder="English" />
+                  </div>
+                  <div class="md:col-span-2">
+                    <label class="field-label">Voice Sample File</label>
+                    <input type="file" accept="audio/*" class="input-box" @change="onSavedVoiceFileSelected" />
+                    <div v-if="savedVoiceForm.fileName" class="mt-2 text-[11px] text-gray-500">Selected: {{ savedVoiceForm.fileName }}</div>
+                  </div>
+                </div>
+                <div v-if="savedVoiceForm.message" class="text-xs" :class="savedVoiceForm.error ? 'text-red-400' : 'text-green-300'">{{ savedVoiceForm.message }}</div>
+                <div class="flex justify-end">
+                  <button @click="saveVoiceSampleToLibrary" :disabled="savedVoiceForm.saving || !savedVoiceForm.file" class="btn-ghost px-4 py-2 rounded-xl text-xs">
+                    {{ savedVoiceForm.saving ? 'Saving Voice…' : 'Upload And Save Voice' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Image Generation</div>
+              <div class="text-xs text-gray-500">Qwen-Image service for text-to-image generation. Leave endpoint empty to disable.</div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Image Gen Endpoint <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.imageGenBaseUrl" type="text" class="input-box font-mono" placeholder="http://image-generation-service:5005" />
+                </div>
+                <div>
+                  <label class="field-label">Model <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.imageGenModel" type="text" class="input-box font-mono" placeholder="black-forest-labs/FLUX.1-schnell" />
+                </div>
+                <div>
+                  <label class="field-label">Timeout (ms)</label>
+                  <input v-model.number="multimodalForm.imageGenTimeoutMs" type="number" min="1000" class="input-box" />
+                </div>
+                <div>
+                  <label class="field-label">Default Width</label>
+                  <input v-model.number="multimodalForm.imageGenDefaultWidth" type="number" min="256" max="2048" step="64" class="input-box" />
+                </div>
+                <div>
+                  <label class="field-label">Default Height</label>
+                  <input v-model.number="multimodalForm.imageGenDefaultHeight" type="number" min="256" max="2048" step="64" class="input-box" />
+                </div>
+                <div>
+                  <label class="field-label">Default Steps</label>
+                  <input v-model.number="multimodalForm.imageGenDefaultSteps" type="number" min="1" max="100" class="input-box" />
+                </div>
+                <div>
+                  <label class="field-label">Guidance Scale</label>
+                  <input v-model.number="multimodalForm.imageGenGuidanceScale" type="number" min="0" max="20" step="0.5" class="input-box" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.imageGenApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                </div>
+                <div class="md:col-span-2 space-y-2">
+                  <label class="field-label">Default Negative Prompt <span class="text-gray-600 font-normal">applied to every generation unless overridden</span></label>
+                  <textarea v-model="multimodalForm.imageGenDefaultNegativePrompt"
+                    class="input-box font-mono text-xs resize-none w-full" rows="3"
+                    placeholder="e.g. low quality, blurry, deformed fingers, watermark" />
+                  <div class="space-y-1.5">
+                    <div class="text-[11px] text-gray-500">Presets — click to append terms to the field above:</div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button
+                        v-for="preset in IMAGE_GEN_NEGATIVE_PRESETS"
+                        :key="preset.label"
+                        @click="applyNegativePreset(preset.value)"
+                        class="px-2.5 py-1 rounded-lg text-xs border border-purple-500/20 bg-purple-900/20 text-purple-200 hover:bg-purple-700/30 hover:border-purple-400/40 transition-colors"
+                        :title="preset.value"
+                      >{{ preset.label }}</button>
+                      <button
+                        @click="multimodalForm.imageGenDefaultNegativePrompt = ''"
+                        class="px-2.5 py-1 rounded-lg text-xs border border-red-500/20 bg-red-900/10 text-red-300 hover:bg-red-800/20 transition-colors"
+                      >Clear</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -622,12 +773,163 @@
                       @change="agentsStore.patchModel(agent.name, { apiKey: ($event.target as HTMLInputElement).value || undefined })"
                       class="input-box text-sm" />
                   </div>
+                  <div class="md:col-span-2 flex items-center justify-between gap-4 pt-1">
+                    <div>
+                      <label class="field-label text-xs">thinking mode <span class="text-gray-600 font-normal">Qwen3.5 chain-of-thought reasoning</span></label>
+                      <p class="text-[11px] text-gray-600 mt-0.5">When set, StarlingAI sends <code class="text-gray-400">enable_thinking</code> via <code class="text-gray-400">extra_body</code> and applies Qwen-recommended sampling (on: temp 0.6 / top_p 0.95 · off: temp 0.7 / top_p 0.8) unless you override top_p.</p>
+                    </div>
+                    <select
+                      :value="agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'"
+                      @change="agentsStore.patchModel(agent.name, { enableThinking: ($event.target as HTMLSelectElement).value === '' ? undefined : ($event.target as HTMLSelectElement).value === 'on' })"
+                      class="input-box text-sm w-24 shrink-0">
+                      <option value="">auto</option>
+                      <option value="on">on</option>
+                      <option value="off">off</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </details>
           </div>
 
           <div v-else class="empty-state">No agents found.</div>
+        </div>
+
+        <div class="glass-card p-5">
+          <div class="flex items-center justify-between mb-4 gap-3">
+            <div>
+              <h3 class="section-title mb-0">Model Routing</h3>
+              <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+            </div>
+          </div>
+
+          <div v-if="!gateway.connected" class="empty-state">Connect to edit model routing.</div>
+          <div v-else-if="modelEndpointForm.loading && !modelEndpointForm.loaded" class="empty-state">Loading…</div>
+          <div v-else class="space-y-4">
+            <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+              Changes here write the same mutable config used by runtime hot-reload and the model-endpoint health checker.
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Orchestrator</div>
+                <span v-if="getModelEndpointStatus('orchestrator')" :class="getModelEndpointStatus('orchestrator')?.ok ? 'badge-running' : 'badge-health-bad'">
+                  {{ getModelEndpointStatus('orchestrator')?.ok ? 'healthy' : 'mismatch' }}
+                </span>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Primary Model</label>
+                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-35b-a3b" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Endpoint Override <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.orchestratorBaseUrl" type="text" class="input-box font-mono" placeholder="uses provider default when empty" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.orchestratorApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses provider default when empty" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('orchestrator')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('orchestrator')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Embeddings</div>
+                <span v-if="getModelEndpointStatus('embeddings')" :class="getModelEndpointStatus('embeddings')?.ok ? 'badge-running' : 'badge-health-bad'">
+                  {{ getModelEndpointStatus('embeddings')?.ok ? 'healthy' : 'mismatch' }}
+                </span>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding Model <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.embeddingModel" type="text" class="input-box font-mono" placeholder="leave empty to disable semantic embeddings" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding Endpoint <span class="text-gray-600 font-normal">optional override</span></label>
+                  <input v-model="modelEndpointForm.embeddingBaseUrl" type="text" class="input-box font-mono" placeholder="uses orchestrator/provider endpoint when empty" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding API Key <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.embeddingApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses orchestrator/provider key when empty" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('embeddings')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('embeddings')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Reranker</div>
+                  <div class="text-xs text-gray-500 mt-1">Optional retrieval reranking endpoint.</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="getModelEndpointStatus('reranker')" :class="getModelEndpointStatus('reranker')?.ok ? 'badge-running' : 'badge-health-bad'">
+                    {{ getModelEndpointStatus('reranker')?.ok ? 'healthy' : 'mismatch' }}
+                  </span>
+                  <toggle-switch :value="modelEndpointForm.rerankerEnabled" @change="modelEndpointForm.rerankerEnabled = $event" />
+                </div>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker Model</label>
+                  <input v-model="modelEndpointForm.rerankerModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3-Reranker-4B" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker Endpoint</label>
+                  <input v-model="modelEndpointForm.rerankerBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker API Key</label>
+                  <input v-model="modelEndpointForm.rerankerApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('reranker')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('reranker')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Guard Moderation</div>
+                  <div class="text-xs text-gray-500 mt-1">Optional moderation model used before input/tool content reaches the assistant.</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="getModelEndpointStatus('guard')" :class="getModelEndpointStatus('guard')?.ok ? 'badge-running' : 'badge-health-bad'">
+                    {{ getModelEndpointStatus('guard')?.ok ? 'healthy' : 'mismatch' }}
+                  </span>
+                  <toggle-switch :value="modelEndpointForm.guardEnabled" @change="modelEndpointForm.guardEnabled = $event" />
+                </div>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard Model</label>
+                  <input v-model="modelEndpointForm.guardModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3Guard-Gen-4B" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard Endpoint</label>
+                  <input v-model="modelEndpointForm.guardBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard API Key</label>
+                  <input v-model="modelEndpointForm.guardApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('guard')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('guard')?.error }}</div>
+            </div>
+
+            <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ modelEndpointForm.error }}</div>
+
+            <div class="flex justify-end">
+              <button @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                {{ modelEndpointForm.saving ? 'Saving…' : 'Save Model Routing' }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- ── Channels ───────────────────────────────────────────────────── -->
@@ -1084,12 +1386,42 @@ const routingLab = reactive({
 
 const multimodalLoaded = computed(() => Boolean(multimodalStore.config.files.baseUrl));
 
+const IMAGE_GEN_NEGATIVE_PRESETS = [
+  {
+    label: "Quality",
+    value: "low quality, worst quality, blurry, pixelated, noisy, grainy, jpeg artifacts, compression artifacts, oversaturated, washed out, overexposed, underexposed",
+  },
+  {
+    label: "Human Realism",
+    value: "deformed fingers, extra fingers, missing fingers, fused fingers, bad hands, mutated hands, distorted hands, ai-looking, uncanny valley, plastic skin, waxy skin, doll face, dead eyes, empty eyes",
+  },
+  {
+    label: "Face Detail",
+    value: "blurry face, distorted face, asymmetric face, cross-eyed, bad eyes, deformed eyes, no face details, flat face, zombie face, deformed nose, unnatural mouth, bad teeth",
+  },
+  {
+    label: "Anatomy",
+    value: "bad anatomy, deformed body, mutated, extra limbs, missing limbs, disproportionate body, floating limbs, disconnected limbs, malformed limbs, twisted spine",
+  },
+  {
+    label: "Artifacts",
+    value: "watermark, text, signature, logo, banner, border, frame, copyright, censored, cropped, out of frame, duplicate, tiling",
+  },
+  {
+    label: "All",
+    value: "low quality, worst quality, blurry, pixelated, noisy, grainy, jpeg artifacts, compression artifacts, deformed fingers, extra fingers, missing fingers, fused fingers, bad hands, mutated hands, ai-looking, uncanny valley, plastic skin, waxy skin, doll face, dead eyes, blurry face, distorted face, asymmetric face, no face details, flat face, bad anatomy, deformed body, mutated, extra limbs, missing limbs, disproportionate, floating limbs, watermark, text, signature, logo, border, frame, out of frame, duplicate",
+  },
+] as const;
+
 const multimodalForm = reactive({
   maxUploadBytes: 20_971_520,
   filesBaseUrl: "",
   filesApiKey: "",
   filesTimeoutMs: 60_000,
   fileToolName: "file_to_markdown",
+  visionModel: "",
+  visionBaseUrl: "",
+  visionApiKey: "",
   sttBaseUrl: "",
   sttApiKey: "",
   sttTimeoutMs: 60_000,
@@ -1104,6 +1436,15 @@ const multimodalForm = reactive({
   ttsVoiceSamplePath: "",
   ttsVoiceSampleText: "",
   ttsDefaultQuality: "medium",
+  imageGenBaseUrl: "",
+  imageGenApiKey: "",
+  imageGenTimeoutMs: 120_000,
+  imageGenModel: "",
+  imageGenDefaultWidth: 1024,
+  imageGenDefaultHeight: 1024,
+  imageGenDefaultSteps: 28,
+  imageGenGuidanceScale: 5.0,
+  imageGenDefaultNegativePrompt: "",
   wakeEnabled: false,
   wakeLanguage: "en-US" as "de-DE" | "en-US" | "pl-PL",
   wakeSilenceTimeoutMs: 4000,
@@ -1111,6 +1452,214 @@ const multimodalForm = reactive({
   wakeStopPhrasesText: "stop recording, end recording, stop listening, luna stop",
   error: "",
 });
+
+const savedVoiceForm = reactive({
+  file: null as File | null,
+  fileName: "",
+  name: "",
+  language: "English",
+  saving: false,
+  error: false,
+  message: "",
+});
+
+interface ModelEndpointEditorConfig {
+  orchestrator: {
+    primary: string;
+    baseUrl?: string;
+    apiKey?: string;
+  };
+  embeddings: {
+    embeddingModel?: string;
+    embeddingBaseUrl?: string;
+    embeddingApiKey?: string;
+  };
+  reranker: {
+    enabled: boolean;
+    model: string;
+    baseUrl: string;
+    apiKey: string;
+  };
+  guard: {
+    enabled: boolean;
+    model: string;
+    baseUrl: string;
+    apiKey: string;
+  };
+}
+
+const modelEndpointForm = reactive({
+  loaded: false,
+  loading: false,
+  saving: false,
+  error: "",
+  lastLoaded: null as ModelEndpointEditorConfig | null,
+  orchestratorModel: "",
+  orchestratorBaseUrl: "",
+  orchestratorApiKey: "",
+  embeddingModel: "",
+  embeddingBaseUrl: "",
+  embeddingApiKey: "",
+  rerankerEnabled: false,
+  rerankerModel: "Qwen/Qwen3-Reranker-4B",
+  rerankerBaseUrl: "http://host.docker.internal:1234/v1",
+  rerankerApiKey: "lm-studio",
+  guardEnabled: false,
+  guardModel: "Qwen/Qwen3Guard-Gen-4B",
+  guardBaseUrl: "http://host.docker.internal:1234/v1",
+  guardApiKey: "lm-studio",
+});
+
+function settingsBaseUrl(): string {
+  return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+}
+
+async function parseSettingsError(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const body = await response.json() as { error?: string; detail?: string };
+      return body.error ?? body.detail ?? response.statusText ?? `HTTP ${response.status}`;
+    } catch {
+      return response.statusText || `HTTP ${response.status}`;
+    }
+  }
+
+  try {
+    const text = (await response.text()).trim();
+    return text || response.statusText || `HTTP ${response.status}`;
+  } catch {
+    return response.statusText || `HTTP ${response.status}`;
+  }
+}
+
+function syncModelEndpointForm(config: ModelEndpointEditorConfig) {
+  modelEndpointForm.lastLoaded = structuredClone(config);
+  modelEndpointForm.loaded = true;
+  modelEndpointForm.orchestratorModel = config.orchestrator.primary;
+  modelEndpointForm.orchestratorBaseUrl = config.orchestrator.baseUrl ?? "";
+  modelEndpointForm.orchestratorApiKey = config.orchestrator.apiKey ?? "";
+  modelEndpointForm.embeddingModel = config.embeddings.embeddingModel ?? "";
+  modelEndpointForm.embeddingBaseUrl = config.embeddings.embeddingBaseUrl ?? "";
+  modelEndpointForm.embeddingApiKey = config.embeddings.embeddingApiKey ?? "";
+  modelEndpointForm.rerankerEnabled = config.reranker.enabled;
+  modelEndpointForm.rerankerModel = config.reranker.model;
+  modelEndpointForm.rerankerBaseUrl = config.reranker.baseUrl;
+  modelEndpointForm.rerankerApiKey = config.reranker.apiKey;
+  modelEndpointForm.guardEnabled = config.guard.enabled;
+  modelEndpointForm.guardModel = config.guard.model;
+  modelEndpointForm.guardBaseUrl = config.guard.baseUrl;
+  modelEndpointForm.guardApiKey = config.guard.apiKey;
+  modelEndpointForm.error = "";
+}
+
+function resetModelEndpointConfig() {
+  if (modelEndpointForm.lastLoaded) syncModelEndpointForm(modelEndpointForm.lastLoaded);
+}
+
+function getModelEndpointStatus(role: string) {
+  return runtime.modelEndpoints?.endpoints.find((endpoint) => endpoint.role === role) ?? null;
+}
+
+async function fetchModelEndpointConfig() {
+  if (!gateway.token) return;
+  modelEndpointForm.loading = true;
+  modelEndpointForm.error = "";
+
+  try {
+    const response = await window.fetch(`${settingsBaseUrl()}/api/model-endpoints/config`, {
+      headers: { Authorization: `Bearer ${gateway.token}` },
+    });
+    if (!response.ok) {
+      throw new Error(await parseSettingsError(response));
+    }
+
+    syncModelEndpointForm(await response.json() as ModelEndpointEditorConfig);
+  } catch (error) {
+    modelEndpointForm.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    modelEndpointForm.loading = false;
+  }
+}
+
+async function submitModelEndpointConfig() {
+  if (!gateway.token) return;
+
+  modelEndpointForm.error = "";
+  if (!modelEndpointForm.orchestratorModel.trim()) {
+    modelEndpointForm.error = "Orchestrator primary model is required";
+    return;
+  }
+  if (!modelEndpointForm.rerankerModel.trim() || !modelEndpointForm.rerankerBaseUrl.trim()) {
+    modelEndpointForm.error = "Reranker model and endpoint are required";
+    return;
+  }
+  if (!modelEndpointForm.guardModel.trim() || !modelEndpointForm.guardBaseUrl.trim()) {
+    modelEndpointForm.error = "Guard model and endpoint are required";
+    return;
+  }
+
+  modelEndpointForm.saving = true;
+  try {
+    const payload: ModelEndpointEditorConfig = {
+      orchestrator: {
+        primary: modelEndpointForm.orchestratorModel.trim(),
+        baseUrl: modelEndpointForm.orchestratorBaseUrl.trim() || undefined,
+        apiKey: modelEndpointForm.orchestratorApiKey.trim() || undefined,
+      },
+      embeddings: {
+        embeddingModel: modelEndpointForm.embeddingModel.trim() || undefined,
+        embeddingBaseUrl: modelEndpointForm.embeddingBaseUrl.trim() || undefined,
+        embeddingApiKey: modelEndpointForm.embeddingApiKey.trim() || undefined,
+      },
+      reranker: {
+        enabled: modelEndpointForm.rerankerEnabled,
+        model: modelEndpointForm.rerankerModel.trim(),
+        baseUrl: modelEndpointForm.rerankerBaseUrl.trim(),
+        apiKey: modelEndpointForm.rerankerApiKey.trim() || "lm-studio",
+      },
+      guard: {
+        enabled: modelEndpointForm.guardEnabled,
+        model: modelEndpointForm.guardModel.trim(),
+        baseUrl: modelEndpointForm.guardBaseUrl.trim(),
+        apiKey: modelEndpointForm.guardApiKey.trim() || "lm-studio",
+      },
+    };
+
+    const response = await window.fetch(`${settingsBaseUrl()}/api/model-endpoints/config`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${gateway.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new Error(await parseSettingsError(response));
+    }
+
+    syncModelEndpointForm(await response.json() as ModelEndpointEditorConfig);
+    await runtime.fetch();
+  } catch (error) {
+    modelEndpointForm.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    modelEndpointForm.saving = false;
+  }
+}
+
+function applyNegativePreset(value: string) {
+  const current = multimodalForm.imageGenDefaultNegativePrompt.trim();
+  if (!current) {
+    multimodalForm.imageGenDefaultNegativePrompt = value;
+  } else {
+    // Append only terms that aren't already present (case-insensitive)
+    const existing = new Set(current.toLowerCase().split(",").map(s => s.trim()));
+    const newTerms = value.split(",").map(s => s.trim()).filter(t => !existing.has(t.toLowerCase()));
+    if (newTerms.length) {
+      multimodalForm.imageGenDefaultNegativePrompt = current + ", " + newTerms.join(", ");
+    }
+  }
+}
 
 function listFromCsv(value: string): string[] {
   return value.split(",").map((entry) => entry.trim()).filter(Boolean);
@@ -1122,6 +1671,9 @@ function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.filesApiKey = config.files.apiKey ?? "";
   multimodalForm.filesTimeoutMs = config.files.timeoutMs;
   multimodalForm.fileToolName = config.files.toolName;
+  multimodalForm.visionModel = config.files.visionModel ?? "";
+  multimodalForm.visionBaseUrl = config.files.visionBaseUrl ?? "";
+  multimodalForm.visionApiKey = config.files.visionApiKey ?? "";
   multimodalForm.sttBaseUrl = config.stt.baseUrl;
   multimodalForm.sttApiKey = config.stt.apiKey ?? "";
   multimodalForm.sttTimeoutMs = config.stt.timeoutMs;
@@ -1136,6 +1688,16 @@ function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.ttsVoiceSamplePath = config.tts.voiceSamplePath ?? "";
   multimodalForm.ttsVoiceSampleText = config.tts.voiceSampleText ?? "";
   multimodalForm.ttsDefaultQuality = config.tts.defaultQuality;
+  savedVoiceForm.language = config.tts.defaultLanguage;
+  multimodalForm.imageGenBaseUrl = config.imageGeneration?.baseUrl ?? "";
+  multimodalForm.imageGenApiKey = config.imageGeneration?.apiKey ?? "";
+  multimodalForm.imageGenTimeoutMs = config.imageGeneration?.timeoutMs ?? 120_000;
+  multimodalForm.imageGenModel = config.imageGeneration?.model ?? "";
+  multimodalForm.imageGenDefaultWidth = config.imageGeneration?.defaultWidth ?? 1024;
+  multimodalForm.imageGenDefaultHeight = config.imageGeneration?.defaultHeight ?? 1024;
+  multimodalForm.imageGenDefaultSteps = config.imageGeneration?.defaultSteps ?? 28;
+  multimodalForm.imageGenGuidanceScale = config.imageGeneration?.defaultGuidanceScale ?? 5.0;
+  multimodalForm.imageGenDefaultNegativePrompt = config.imageGeneration?.defaultNegativePrompt ?? "";
   multimodalForm.wakeEnabled = config.wakeWord.enabled;
   multimodalForm.wakeLanguage = config.wakeWord.language;
   multimodalForm.wakeSilenceTimeoutMs = config.wakeWord.silenceTimeoutMs;
@@ -1146,6 +1708,51 @@ function syncMultimodalForm(config: MultimodalConfig) {
 
 function resetMultimodalForm() {
   syncMultimodalForm(multimodalStore.config);
+}
+
+function onSavedVoiceFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  savedVoiceForm.file = file;
+  savedVoiceForm.fileName = file?.name ?? "";
+  savedVoiceForm.message = "";
+  savedVoiceForm.error = false;
+}
+
+async function saveVoiceSampleToLibrary() {
+  savedVoiceForm.message = "";
+  savedVoiceForm.error = false;
+
+  if (!savedVoiceForm.file) {
+    savedVoiceForm.error = true;
+    savedVoiceForm.message = "Select a voice sample file first";
+    return;
+  }
+  if (!savedVoiceForm.name.trim()) {
+    savedVoiceForm.error = true;
+    savedVoiceForm.message = "Voice name is required";
+    return;
+  }
+
+  savedVoiceForm.saving = true;
+  try {
+    const result = await gateway.saveTtsVoice({
+      file: savedVoiceForm.file,
+      name: savedVoiceForm.name.trim(),
+      language: savedVoiceForm.language.trim() || undefined,
+    });
+    multimodalForm.ttsDefaultVoiceId = result.voice_id;
+    if (!multimodalForm.ttsVoiceSampleText.trim() && result.ref_text) {
+      multimodalForm.ttsVoiceSampleText = result.ref_text;
+    }
+    savedVoiceForm.error = false;
+    savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}'`;
+  } catch (error) {
+    savedVoiceForm.error = true;
+    savedVoiceForm.message = error instanceof Error ? error.message : String(error);
+  } finally {
+    savedVoiceForm.saving = false;
+  }
 }
 
 async function submitMultimodalForm() {
@@ -1167,6 +1774,7 @@ async function submitMultimodalForm() {
     return;
   }
 
+  const imageGenBaseUrl = multimodalForm.imageGenBaseUrl.trim();
   await multimodalStore.save({
     maxUploadBytes: multimodalForm.maxUploadBytes,
     files: {
@@ -1174,6 +1782,9 @@ async function submitMultimodalForm() {
       apiKey: multimodalForm.filesApiKey.trim() || undefined,
       timeoutMs: multimodalForm.filesTimeoutMs,
       toolName: multimodalForm.fileToolName.trim(),
+      visionModel: multimodalForm.visionModel.trim() || undefined,
+      visionBaseUrl: multimodalForm.visionBaseUrl.trim() || undefined,
+      visionApiKey: multimodalForm.visionApiKey.trim() || undefined,
     },
     stt: {
       baseUrl: multimodalForm.sttBaseUrl.trim(),
@@ -1200,6 +1811,18 @@ async function submitMultimodalForm() {
       stopPhrases: wakeStopPhrases,
       silenceTimeoutMs: multimodalForm.wakeSilenceTimeoutMs,
     },
+    imageGeneration: imageGenBaseUrl ? {
+      baseUrl: imageGenBaseUrl,
+      apiKey: multimodalForm.imageGenApiKey.trim() || undefined,
+      timeoutMs: multimodalForm.imageGenTimeoutMs,
+      model: multimodalForm.imageGenModel.trim() || undefined,
+      defaultWidth: multimodalForm.imageGenDefaultWidth,
+      defaultHeight: multimodalForm.imageGenDefaultHeight,
+      defaultSteps: multimodalForm.imageGenDefaultSteps,
+      defaultGuidanceScale: multimodalForm.imageGenGuidanceScale,
+      cpuOffload: true,
+      defaultNegativePrompt: multimodalForm.imageGenDefaultNegativePrompt.trim() || undefined,
+    } : undefined,
   });
 
   if (!multimodalStore.error) {
@@ -1440,6 +2063,10 @@ function formatRuntimeName(name: string | undefined): string {
   return (name ?? "").replace(/_/g, " ");
 }
 
+function formatModelEndpointRole(role: string): string {
+  return role.replace(/^subagent:/, "sub-agent: ").replace(/_/g, " ");
+}
+
 async function runRoutingLab() {
   const query = routingLab.query.trim();
   if (!query) return;
@@ -1464,6 +2091,7 @@ watch(() => gateway.connected, (connected) => {
     runtime.fetch();
     agentsStore.fetch();
     multimodalStore.fetch();
+    fetchModelEndpointConfig();
   }
 }, { immediate: true });
 
@@ -1485,6 +2113,17 @@ watch(() => multimodalStore.config, (config) => {
   gap: 1.25rem;
   max-width: 1400px;
   margin: 0 auto;
+}
+
+.model-endpoint-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(139, 92, 246, 0.12);
+  background: rgba(8, 11, 24, 0.28);
 }
 
 @media (max-width: 900px) {

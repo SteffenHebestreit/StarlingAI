@@ -2,11 +2,12 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { getLMStudioProvider } from "../providers/index.js";
+import { getLMStudioProvider, getLMStudioProviderWithOverride } from "../providers/index.js";
 import type { LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
+import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
@@ -19,13 +20,21 @@ import { getMainAssistantToolNames } from "./default-tools.js";
 const log = childLogger("agent:runtime");
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
+const FRESHNESS_HINT_TERMS = [
+  "2025", "2026", "current", "currently", "fresh", "latest", "live", "new", "news", "now",
+  "recent", "recently", "today", "updated", "updates",
+];
+const SOURCE_HINT_TERMS = [
+  "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
+  "repo", "repository", "roadmap", "source", "sources", "spec", "specification", "standard",
+];
 
 export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   onChunk?: (text: string) => void;
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
-  onToolResult?: (name: string, result: string) => void;
+  onToolResult?: (name: string, result: string, metadata?: Record<string, unknown>) => void;
   onIntervention?: (notice: InterventionNotice) => void;
   onSwarmState?: (state: SwarmState) => void;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -40,6 +49,8 @@ export interface RunTurnOptions {
   maxIterationsOverride?: number;
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). */
   turnTimeoutOverrideMs?: number;
+  /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
+  enableThinking?: boolean;
 }
 
 export interface TurnOutput {
@@ -67,6 +78,39 @@ export interface TurnPerformanceMetrics {
   toolIterations: number;
   finishReason: string;
   blocked: boolean;
+}
+
+export interface DynamicTurnGuidance {
+  prompt: string;
+  sourceSensitive: boolean;
+  freshnessSensitive: boolean;
+}
+
+export function buildDynamicTurnGuidance(userMessage: string): DynamicTurnGuidance | null {
+  const normalized = userMessage.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const freshnessSensitive = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
+  const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term));
+
+  if (!freshnessSensitive && !sourceSensitive) return null;
+
+  const reasons: string[] = [];
+  if (freshnessSensitive) reasons.push("freshness-sensitive");
+  if (sourceSensitive) reasons.push("source-sensitive");
+
+  return {
+    prompt: [
+      `This turn is ${reasons.join(" and ")}.`,
+      "Use direct web tools before answering if they are available.",
+      "A tool-free answer is invalid unless prior tool results already contain the necessary evidence for this exact request.",
+      "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
+      "Prefer official specifications, repositories, release notes, and vendor documentation over commentary.",
+      "If the gathered evidence is incomplete, say that clearly and ask a concise follow-up question only when missing information blocks a correct answer.",
+    ].join(" "),
+    sourceSensitive,
+    freshnessSensitive,
+  };
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
@@ -128,6 +172,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     logAudit("guardrail_flagged", { patterns: inputCheck.detectedPatterns }, { sessionId: session.id, severity: "warn" });
   }
 
+  const moderatedInput = await moderateInputText(userMessage);
+  if (moderatedInput?.blocked) {
+    const details = `Model moderation blocked input: ${moderatedInput.summary}`;
+    logAudit("guardrail_blocked", { type: "input_model", reason: details, categories: moderatedInput.categories }, {
+      sessionId: session.id,
+      severity: "warn",
+    });
+    guardrailEvents.push({ type: "input_model_blocked", details });
+    return blocked(`I can't process that message: ${details}`);
+  }
+
+  if (moderatedInput?.flagged) {
+    const details = `Model moderation flagged input: ${moderatedInput.summary}`;
+    guardrailEvents.push({ type: "input_model_flagged", details });
+    logAudit("guardrail_flagged", { type: "input_model", categories: moderatedInput.categories }, { sessionId: session.id, severity: "warn" });
+  }
+
   // ── Build message history ─────────────────────────────────────────────────
   session.addMessage({ role: "user", content: userMessage });
   session.incrementTurn();
@@ -164,7 +225,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   let totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let iterationCount = 0;
-  const provider = getLMStudioProvider();
+  // Per-tool output tracking within this turn — detects stuck loops (same result ≥N times).
+  const _recentOutputsByTool = new Map<string, string[]>();
+  const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
+  const provider = opts.enableThinking !== undefined
+    ? getLMStudioProviderWithOverride({ enableThinking: opts.enableThinking })
+    : getLMStudioProvider();
   const maxToolIterations = opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
@@ -213,6 +279,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
 
     const systemPrompt = session.getSystemPrompt();
+    const dynamicGuidance = iterationCount === 0 ? buildDynamicTurnGuidance(userMessage) : null;
     const collapsedHistory = session.getCollapsedHistory();
     lastPromptMetrics = measurePrompt(systemPrompt, collapsedHistory);
 
@@ -233,8 +300,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     const messages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
+      ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...collapsedHistory,
     ];
+
+    if (iterationCount === 0 && dynamicGuidance) {
+      logAudit("turn_guidance_applied", {
+        sourceSensitive: dynamicGuidance.sourceSensitive,
+        freshnessSensitive: dynamicGuidance.freshnessSensitive,
+      }, { sessionId: session.id, severity: "info" });
+    }
 
     let llmResponse: LLMResponse;
     const llmStartedAt = Date.now();
@@ -416,6 +491,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           success: result.success,
           error: result.error,
           outputChars: result.output.length,
+          metadata: result.metadata,
           issueCode: intervention?.reasonCode,
           suspiciousReturn: result.success && Boolean(intervention),
           intervention,
@@ -426,6 +502,45 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       let resultText = result.success
         ? result.output
         : `Error: ${result.error ?? "Unknown error"}`;
+
+      // ── Identical output loop detection ──────────────────────────────────
+      if (result.success) {
+        const outputFingerprint = result.output.slice(0, 500);
+        const prev = _recentOutputsByTool.get(tc.name) ?? [];
+        prev.push(outputFingerprint);
+        if (prev.length > IDENTICAL_OUTPUT_LOOP_THRESHOLD) prev.shift();
+        _recentOutputsByTool.set(tc.name, prev);
+
+        if (
+          prev.length >= IDENTICAL_OUTPUT_LOOP_THRESHOLD &&
+          prev.every(o => o === prev[0])
+        ) {
+          const loopIntervention = classifyToolIntervention({
+            toolName: tc.name,
+            success: true,
+            output: result.output,
+            repeatedIdenticalOutput: true,
+          });
+          logAudit(
+            "tool_call_completed",
+            {
+              tool: tc.name,
+              success: true,
+              outputChars: result.output.length,
+              suspiciousReturn: true,
+              repeatedIdenticalOutput: true,
+              issueCode: loopIntervention?.reasonCode,
+              intervention: loopIntervention,
+            },
+            { sessionId: session.id, severity: "warn" },
+          );
+          resultText +=
+            `\n\n[System notice: ${tc.name} has returned identical output ${IDENTICAL_OUTPUT_LOOP_THRESHOLD} times in a row. ` +
+            `You are stuck in a loop. Do NOT call this tool again. Summarise what you have found so far and report it to the user, or try a clearly different approach.]`;
+          if (loopIntervention) opts.onIntervention?.(loopIntervention);
+          _recentOutputsByTool.set(tc.name, []); // reset so alert fires at most once per burst
+        }
+      }
 
       // Prevent indirect prompt injection from tool output payloads
       const outCheck = checkToolOutput(resultText);
@@ -449,7 +564,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         opts.onIntervention?.(intervention);
       }
 
-      if (opts.onToolResult) opts.onToolResult(tc.name, resultText);
+      if (outCheck.allowed) {
+        const moderatedToolResult = await moderateToolResultText(resultText);
+        if (moderatedToolResult?.blocked) {
+          logAudit("tool_output_blocked", {
+            tool: tc.name,
+            reason: `Model moderation blocked tool output: ${moderatedToolResult.summary}`,
+            categories: moderatedToolResult.categories,
+          }, { sessionId: session.id, severity: "error" });
+          resultText = "Error: Tool output blocked by model-backed guardrails.";
+          guardrailEvents.push({ type: "tool_output_model_blocked", details: tc.name });
+        } else if (moderatedToolResult?.flagged) {
+          guardrailEvents.push({ type: "tool_output_model_flagged", details: `${tc.name}: ${moderatedToolResult.summary}` });
+          logAudit("guardrail_flagged", {
+            type: "tool_output_model",
+            tool: tc.name,
+            categories: moderatedToolResult.categories,
+          }, { sessionId: session.id, severity: "warn" });
+        }
+      }
+
+      if (opts.onToolResult) opts.onToolResult(tc.name, resultText, result.metadata);
 
       toolResultMessages.push({
         role: "tool",

@@ -19,9 +19,44 @@ export interface AutonomousTaskBid {
 }
 
 let _unsubscribe: (() => void) | null = null;
-const _handledAnnouncementIds = new Set<string>();
-const _handledBidIds = new Set<string>();
+const _handledAnnouncementIds = new Map<string, number>(); // id → timestamp
+const _handledBidIds = new Map<string, number>();           // id → timestamp
 const _bidsByTask = new Map<string, Map<string, AutonomousTaskBid>>();
+
+// Maximum age for dedup entries before eviction (10 minutes)
+const DEDUP_TTL_MS = 10 * 60 * 1000;
+// Maximum entries before forced pruning
+const DEDUP_MAX_ENTRIES = 5000;
+let _pruneInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Prune stale dedup entries to prevent unbounded memory growth. */
+function pruneDedup(): void {
+  const now = Date.now();
+  const cutoff = now - DEDUP_TTL_MS;
+
+  for (const [id, ts] of _handledAnnouncementIds) {
+    if (ts < cutoff) _handledAnnouncementIds.delete(id);
+  }
+  for (const [id, ts] of _handledBidIds) {
+    if (ts < cutoff) _handledBidIds.delete(id);
+  }
+
+  // Force prune if still too large (keep newest entries)
+  if (_handledAnnouncementIds.size > DEDUP_MAX_ENTRIES) {
+    const sorted = [..._handledAnnouncementIds.entries()].sort((a, b) => b[1] - a[1]);
+    _handledAnnouncementIds.clear();
+    for (const [id, ts] of sorted.slice(0, DEDUP_MAX_ENTRIES / 2)) {
+      _handledAnnouncementIds.set(id, ts);
+    }
+  }
+  if (_handledBidIds.size > DEDUP_MAX_ENTRIES) {
+    const sorted = [..._handledBidIds.entries()].sort((a, b) => b[1] - a[1]);
+    _handledBidIds.clear();
+    for (const [id, ts] of sorted.slice(0, DEDUP_MAX_ENTRIES / 2)) {
+      _handledBidIds.set(id, ts);
+    }
+  }
+}
 
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -33,7 +68,7 @@ function normalizeStringArray(value: unknown): string[] {
 function rememberBid(event: SwarmEvent): void {
   if (event.type !== "task_bid" || !event.taskId || !event.agentName) return;
   if (_handledBidIds.has(event.id)) return;
-  _handledBidIds.add(event.id);
+  _handledBidIds.set(event.id, Date.now());
 
   if (event.data?.["dispatchMode"] !== "autonomous_bidding") return;
 
@@ -69,7 +104,7 @@ function rememberBid(event: SwarmEvent): void {
 async function emitAutonomousBids(event: SwarmEvent): Promise<void> {
   if (event.type !== "task_announced" || !event.taskId) return;
   if (_handledAnnouncementIds.has(event.id)) return;
-  _handledAnnouncementIds.add(event.id);
+  _handledAnnouncementIds.set(event.id, Date.now());
 
   if (event.data?.["dispatchMode"] !== "autonomous_bidding") return;
 
@@ -129,6 +164,10 @@ async function handleEvent(event: SwarmEvent): Promise<void> {
 
 export function startAutonomousBidding(): void {
   if (_unsubscribe) return;
+  if (!_pruneInterval) {
+    _pruneInterval = setInterval(pruneDedup, 60_000);
+    _pruneInterval.unref();
+  }
   _unsubscribe = onSwarmEvent(event => {
     void handleEvent(event);
   });
@@ -140,6 +179,10 @@ export function stopAutonomousBidding(): void {
   _handledAnnouncementIds.clear();
   _handledBidIds.clear();
   _bidsByTask.clear();
+  if (_pruneInterval) {
+    clearInterval(_pruneInterval);
+    _pruneInterval = null;
+  }
 }
 
 export function isAutonomousBiddingStarted(): boolean {

@@ -29,6 +29,14 @@ const MIME_TYPES: Record<string, string> = {
   ".webp": "image/webp",
 };
 
+function bytesToBlob(bytes: Uint8Array, contentType: string): Blob {
+  const arrayBuffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  return new Blob([arrayBuffer], { type: contentType });
+}
+
 registerTool({
   name: "extract_file_content",
   description: "Convert a workspace file into Markdown using the configured file-conversion backend.",
@@ -89,7 +97,7 @@ registerTool({
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
         model: String(args["model"] ?? config.model),
-        audioBlob: new Blob([file.bytes], { type: file.contentType }),
+        audioBlob: bytesToBlob(file.bytes, file.contentType),
         filename: file.filename,
         language: stringArg(args["language"]),
         prompt: stringArg(args["prompt"]),
@@ -274,6 +282,106 @@ registerTool({
   },
 });
 
+registerTool({
+  name: "generate_image",
+  description: "Generate an image from a text prompt using the configured image-generation backend and save it to the workspace.",
+  parameters: {
+    type: "object",
+    properties: {
+      prompt: { type: "string", description: "Text description of the image to generate" },
+      negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
+      width: { type: "number", description: "Image width in pixels (snapped to the nearest supported resolution)" },
+      height: { type: "number", description: "Image height in pixels (snapped to the nearest supported resolution)" },
+      steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower)" },
+      guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt (default 5.0)" },
+      seed: { type: "number", description: "Optional random seed for reproducible results" },
+      outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
+    },
+    required: ["prompt"],
+  },
+  async execute(args, ctx) {
+    const prompt = String(args["prompt"] ?? "").trim();
+    if (!prompt) return fail("prompt is required");
+
+    try {
+      const config = getConfig().multimodal.imageGeneration;
+      if (!config) {
+        return fail("Image generation is not configured. Add multimodal.imageGeneration to starlingai.json.");
+      }
+
+      // Fast health pre-check — avoids hanging on a full generate request when service is down.
+      try {
+        const healthRes = await fetchWithTimeout(`${config.baseUrl}/health`, { method: "GET" }, 3000);
+        if (!healthRes.ok) {
+          const body = await healthRes.json().catch(() => ({})) as Record<string, unknown>;
+          const status = String(body["status"] ?? healthRes.status);
+          if (status === "loading") {
+            return fail(`Image generation service is still loading the model (${String(body["elapsed_s"] ?? "??")}s elapsed). Try again in a few minutes.`);
+          }
+          return fail(`Image generation service is unhealthy (${status}). Do not retry — inform the user.`);
+        }
+      } catch {
+        return fail(`Image generation service is offline (${config.baseUrl}). The container is not running. Do not retry — inform the user the service is unavailable.`);
+      }
+
+      const response = await sendImageGenerationRequest({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        timeoutMs: config.timeoutMs,
+        prompt,
+        negativePrompt: stringArg(args["negativePrompt"]) ?? config.defaultNegativePrompt,
+        width: typeof args["width"] === "number" ? args["width"] : config.defaultWidth,
+        height: typeof args["height"] === "number" ? args["height"] : config.defaultHeight,
+        steps: typeof args["steps"] === "number" ? args["steps"] : config.defaultSteps,
+        guidanceScale: typeof args["guidanceScale"] === "number" ? args["guidanceScale"] : config.defaultGuidanceScale,
+        seed: typeof args["seed"] === "number" ? args["seed"] : undefined,
+      });
+
+      if (!response.ok) {
+        return fail(await extractUpstreamError(response, "Image generation failed"));
+      }
+
+      const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");
+      const imageBase64 = typeof body["image"] === "string" ? body["image"] : "";
+      if (!imageBase64) {
+        return fail("Image generation service returned no image data");
+      }
+
+      const imageBytes = Buffer.from(imageBase64, "base64");
+      const outputPath = stringArg(args["outputPath"]) ?? `.starlingai/generated/image-${Date.now()}.png`;
+      const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
+      await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
+      await writeFile(resolvedOutput.resolved, imageBytes);
+
+      return {
+        success: true,
+        output: `Image generated successfully. Saved to ${outputPath}`,
+        metadata: {
+          outputPath,
+          filename: basename(outputPath),
+          bytes: imageBytes.byteLength,
+          contentType: "image/png",
+          dataUrl: `data:image/png;base64,${imageBase64}`,
+          width: typeof body["width"] === "number" ? body["width"] : undefined,
+          height: typeof body["height"] === "number" ? body["height"] : undefined,
+          seed: typeof body["seed"] === "number" ? body["seed"] : undefined,
+          model: typeof body["model"] === "string" ? body["model"] : undefined,
+          elapsedMs: typeof body["elapsed_ms"] === "number" ? body["elapsed_ms"] : undefined,
+        },
+      };
+    } catch (error) {
+      log.error({ error }, "generate_image failed");
+      const msg = error instanceof Error ? error.message : String(error);
+      // Surface a clear service-down message so the agent doesn't over-explain.
+      if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")) {
+        const config = getConfig().multimodal?.imageGeneration;
+        return fail(`Image generation service is offline (${config?.baseUrl ?? "image-generation-service:5005"}). The container is not running. Do not retry — inform the user the service is unavailable.`);
+      }
+      return fail(msg);
+    }
+  },
+});
+
 registerBrowserTool({
   name: "browser_navigate",
   description: "Navigate the shared browser session to a public URL.",
@@ -448,7 +556,7 @@ async function convertFileToMarkdown(file: WorkspaceBinaryFile): Promise<Record<
   }
 
   const upstreamFormData = new FormData();
-  upstreamFormData.append("file", new Blob([file.bytes], { type: file.contentType }), file.filename);
+  upstreamFormData.append("file", bytesToBlob(file.bytes, file.contentType), file.filename);
 
   try {
     const upstream = await fetchWithTimeout(
@@ -525,9 +633,10 @@ async function callMultimodalToolViaMcp(input: {
 }
 
 async function analyzeImageBytes(bytes: Uint8Array, contentType: string, configuredModel: string, prompt: string): Promise<string> {
-  const providerConfig = getConfig().providers.lmstudio;
-  const baseUrl = (providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-  const apiKey = providerConfig?.apiKey ?? "lm-studio";
+  const config = getConfig();
+  const providerConfig = config.providers.lmstudio;
+  const baseUrl = (config.multimodal.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
+  const apiKey = config.multimodal.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
   const modelId = configuredModel.replace(/^[^/]+\//, "");
   const dataUrl = `data:${contentType};base64,${Buffer.from(bytes).toString("base64")}`;
 
@@ -552,7 +661,7 @@ async function analyzeImageBytes(bytes: Uint8Array, contentType: string, configu
         temperature: 0.1,
       }),
     },
-    getConfig().multimodal.files.timeoutMs,
+    config.multimodal.files.timeoutMs,
   );
 
   if (!response.ok) {
@@ -835,7 +944,7 @@ async function sendTtsRequest(input: {
       const saveForm = new FormData();
       saveForm.append("name", input.saveVoiceAs);
       saveForm.append("lang", language);
-      saveForm.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+      saveForm.append("file", bytesToBlob(input.audioExample.bytes, input.audioExample.contentType), input.audioExample.filename);
       const saveResponse = await fetchWithTimeout(
         upstreamUrl(input.baseUrl, "/voices/save"),
         {
@@ -867,7 +976,7 @@ async function sendTtsRequest(input: {
     const formData = new FormData();
     formData.append("text", input.text);
     formData.append("lang", language);
-    formData.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+    formData.append("file", bytesToBlob(input.audioExample.bytes, input.audioExample.contentType), input.audioExample.filename);
     const route = input.referenceText ? "/clone-with-ref-text" : "/clone";
     if (input.referenceText) {
       formData.append("ref_text", input.referenceText);
@@ -969,6 +1078,37 @@ function parseMcpToolTextResponse(text: string, fallback: string): Record<string
   } catch (error) {
     throw new Error(error instanceof Error ? `${fallback}: ${error.message}` : fallback);
   }
+}
+
+async function sendImageGenerationRequest(input: {
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs: number;
+  prompt: string;
+  negativePrompt?: string;
+  width: number;
+  height: number;
+  steps: number;
+  guidanceScale: number;
+  seed?: number;
+}): Promise<Response> {
+  return fetchWithTimeout(
+    upstreamUrl(input.baseUrl, "/generate"),
+    {
+      method: "POST",
+      headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        prompt: input.prompt,
+        negative_prompt: input.negativePrompt ?? null,
+        width: input.width,
+        height: input.height,
+        num_inference_steps: input.steps,
+        guidance_scale: input.guidanceScale,
+        seed: input.seed ?? null,
+      }),
+    },
+    input.timeoutMs,
+  );
 }
 
 function inferMimeType(path: string): string {

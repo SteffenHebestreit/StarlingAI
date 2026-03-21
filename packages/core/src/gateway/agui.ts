@@ -124,10 +124,10 @@ export async function handleAguiStream(
           ._lastToolCallName = name;
       },
 
-      onToolResult: (name, result) => {
+      onToolResult: (name, result, metadata) => {
         const r = res as ServerResponse & { _lastToolCallId?: string };
         const toolCallId = r._lastToolCallId ?? randomUUID();
-        sseEvent(res, { type: "TOOL_CALL_ENDED", toolCallId, toolCallName: name, output: result });
+        sseEvent(res, { type: "TOOL_CALL_ENDED", toolCallId, toolCallName: name, output: result, metadata });
       },
 
       onIntervention: (notice: InterventionNotice) => {

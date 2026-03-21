@@ -4,14 +4,12 @@
  *
  * Usage:
  *   node scripts/gen-token.mjs                     # admin token (24h)
- *   node scripts/gen-token.mjs --user bob           # custom userId
- *   node scripts/gen-token.mjs --role viewer        # custom role
- *   node scripts/gen-token.mjs --ttl 7d             # custom expiry
+ *   node scripts/gen-token.mjs --user bob          # custom userId
+ *   node scripts/gen-token.mjs --role viewer       # custom role
+ *   node scripts/gen-token.mjs --ttl 7d            # custom expiry
  */
-import { SignJWT } from "jose";
-import JSON5 from "json5";
-import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHmac, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -56,9 +54,9 @@ function getSecret() {
 function readConfigJwtSecret() {
   const configPath = resolveConfigPath();
   try {
-    const parsed = JSON5.parse(readFileSync(configPath, "utf8"));
-    const jwtSecret = parsed?.gateway?.jwtSecret;
-    return typeof jwtSecret === "string" ? jwtSecret.trim() : undefined;
+    const raw = readFileSync(configPath, "utf8");
+    const match = raw.match(/["']jwtSecret["']\s*:\s*["']([^"']+)["']/);
+    return match?.[1]?.trim();
   } catch {
     return undefined;
   }
@@ -70,14 +68,49 @@ function resolveConfigPath() {
   return resolve(process.cwd(), "starlingai.json");
 }
 
+function parseTtlSeconds(value) {
+  const match = /^([0-9]+)([smhd])?$/.exec(value.trim());
+  if (!match) {
+    throw new Error(`Unsupported TTL format: ${value}`);
+  }
+
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2] ?? "s";
+  const multiplier = unit === "s"
+    ? 1
+    : unit === "m"
+      ? 60
+      : unit === "h"
+        ? 3600
+        : 86400;
+
+  return amount * multiplier;
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function signHs256(data, secret) {
+  return createHmac("sha256", secret)
+    .update(data)
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
 // ── Sign ─────────────────────────────────────────────────────────────────────
 const secret = getSecret();
-const key    = new TextEncoder().encode(secret);
+const now = Math.floor(Date.now() / 1000);
+const exp = now + parseTtlSeconds(ttl);
 
-const token = await new SignJWT({ sub: userId, role })
-  .setProtectedHeader({ alg: "HS256" })
-  .setIssuedAt()
-  .setExpirationTime(ttl)
-  .sign(key);
+const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+const payload = base64UrlEncode(JSON.stringify({ sub: userId, role, iat: now, exp }));
+const signature = signHs256(`${header}.${payload}`, secret);
 
-console.log(token);
+console.log(`${header}.${payload}.${signature}`);

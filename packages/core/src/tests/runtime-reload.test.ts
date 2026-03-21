@@ -45,6 +45,7 @@ vi.mock("../providers/lmstudio.js", () => ({
 describe("runtime reload reconciliation", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
+    vi.unstubAllGlobals();
     vi.resetModules();
     disconnectSpies.clear();
     providerInstances.length = 0;
@@ -190,6 +191,185 @@ describe("runtime reload reconciliation", () => {
       expect(providerInstances[1]?.baseUrl).toBe("http://localhost:4321/v1");
       expect(providerInstances[1]?.apiKey).toBe("second-key");
       expect(providerInstances[1]?.modelConfig).toMatchObject({ primary: "lmstudio/second-model" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers model-level endpoint overrides over the global LM Studio provider config", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-provider-override-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      providers: {
+        lmstudio: { baseUrl: "http://localhost:1234/v1", apiKey: "global-key" },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/external-model",
+            baseUrl: "http://localhost:8000/v1",
+            apiKey: "external-key",
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const providers = await import("../providers/index.js");
+
+    try {
+      providers.getLMStudioProvider();
+      expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:8000/v1");
+      expect(providerInstances.at(-1)?.apiKey).toBe("external-key");
+
+      providers.getLMStudioProviderWithOverride({ enableThinking: true });
+      expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:8000/v1");
+      expect(providerInstances.at(-1)?.apiKey).toBe("external-key");
+      expect(providerInstances.at(-1)?.modelConfig).toMatchObject({
+        primary: "lmstudio/external-model",
+        enableThinking: true,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses dedicated embedding endpoint overrides when configured", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-embedding-override-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      providers: {
+        lmstudio: { baseUrl: "http://localhost:1234/v1", apiKey: "global-key" },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/general-model",
+            embeddingModel: "lmstudio/qwen-embed",
+            embeddingBaseUrl: "http://localhost:7000/v1",
+            embeddingApiKey: "embed-key",
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const providers = await import("../providers/index.js");
+
+    try {
+      providers.getEmbeddingProvider();
+      expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:7000/v1");
+      expect(providerInstances.at(-1)?.apiKey).toBe("embed-key");
+      expect(providerInstances.at(-1)?.modelConfig).toMatchObject({
+        embeddingModel: "lmstudio/qwen-embed",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tracks external model endpoint health in runtime status", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-model-endpoints-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      providers: {
+        lmstudio: { baseUrl: "http://localhost:1234/v1", apiKey: "global-key" },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/general-model",
+            embeddingModel: "lmstudio/embed-model",
+            embeddingBaseUrl: "http://localhost:7000/v1",
+          },
+        },
+      },
+      subAgents: {
+        repo_engineer: {
+          description: "Repo work",
+          tools: ["read_file"],
+          model: {
+            primary: "lmstudio/coder-model",
+            baseUrl: "http://localhost:8000/v1",
+          },
+        },
+      },
+      retrieval: {
+        reranker: {
+          enabled: true,
+          baseUrl: "http://localhost:8100/v1",
+          apiKey: "reranker",
+          model: "Qwen/Qwen3-Reranker-4B",
+        },
+      },
+      guardrails: {
+        modelModeration: {
+          enabled: true,
+          baseUrl: "http://localhost:8200/v1",
+          apiKey: "guard",
+          model: "Qwen/Qwen3Guard-Gen-4B",
+        },
+      },
+      multimodal: {
+        files: {
+          baseUrl: "http://files.local",
+          visionModel: "lmstudio/vision-model",
+          visionBaseUrl: "http://localhost:8300/v1",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("http://localhost:8100/")) {
+        return new Response("down", { status: 503 });
+      }
+
+      const advertisedModels = url.startsWith("http://localhost:7000/")
+        ? [{ id: "embed-model" }]
+        : url.startsWith("http://localhost:8000/")
+          ? [{ id: "coder-model" }]
+          : url.startsWith("http://localhost:8200/")
+            ? [{ id: "Qwen/Qwen3Guard-Gen-4B" }]
+            : url.startsWith("http://localhost:8300/")
+              ? [{ id: "vision-model" }]
+              : [{ id: "general-model" }];
+
+      return new Response(JSON.stringify({ data: advertisedModels }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [{ syncModelEndpointRuntimeStatus }, runtimeStatus] = await Promise.all([
+      import("../runtime/model-endpoints.js"),
+      import("../runtime/status.js"),
+    ]);
+
+    try {
+      const endpoints = await syncModelEndpointRuntimeStatus();
+      expect(endpoints.some((endpoint) => endpoint.role === "orchestrator")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "embeddings")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "subagent:repo_engineer")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "vision")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "guard")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "reranker" && endpoint.ok === false)).toBe(true);
+
+      const snapshot = runtimeStatus.getRuntimeStatusSnapshot();
+      const component = snapshot.components.find((entry) => entry.name === "model_endpoints");
+      expect(component?.healthy).toBe(false);
+      expect(component?.lastError).toContain("1 model endpoint");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

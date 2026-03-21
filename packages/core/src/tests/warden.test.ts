@@ -233,6 +233,38 @@ describe("Warden — turn SLO breach detection", () => {
     const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
     expect(calls.some(([, data]) => (data as Record<string, unknown>)["alertType"] === "tool_failure_spike")).toBe(true);
   });
+
+  it("fires repeated_identical_output immediately when runtime flags a loop", () => {
+    // The runtime emits a tool_call_completed event with repeatedIdenticalOutput: true
+    // when the same tool returns identical output ≥3 times in a row.
+    fireEvent({
+      type: "tool_call_completed",
+      sessionId: "sess-loop",
+      data: {
+        tool: "browser_snapshot",
+        success: true,
+        suspiciousReturn: true,
+        repeatedIdenticalOutput: true,
+        issueCode: "repeated_identical_output",
+      },
+    });
+    // Alert fires immediately (not on sweep)
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls.some(([, data]) => (data as Record<string, unknown>)["alertType"] === "repeated_identical_output")).toBe(true);
+    const alert = calls.find(([, data]) => (data as Record<string, unknown>)["alertType"] === "repeated_identical_output");
+    expect(alert).toBeDefined();
+    expect((alert![1] as Record<string, unknown>)["subject"]).toContain("browser_snapshot");
+  });
+
+  it("does not fire repeated_identical_output for a normal tool completion", () => {
+    fireEvent({
+      type: "tool_call_completed",
+      sessionId: "sess-ok",
+      data: { tool: "web_search", success: true, suspiciousReturn: false },
+    });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls.some(([, data]) => (data as Record<string, unknown>)["alertType"] === "repeated_identical_output")).toBe(false);
+  });
 });
 
 describe("Warden — stats and lifecycle", () => {

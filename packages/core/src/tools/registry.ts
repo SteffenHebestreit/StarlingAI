@@ -122,7 +122,13 @@ export async function executeTool(
 
   const handler = _registry.get(name);
   if (!handler) {
-    return { success: false, output: "", error: `Tool '${name}' is not registered` };
+    // Suggest tools that share the same prefix (e.g. "browser") so the LLM can self-correct
+    const prefix = name.split("_")[0] ?? "";
+    const similar = prefix
+      ? [..._registry.keys()].filter(n => n.startsWith(prefix + "_") || n === prefix).sort()
+      : [];
+    const hint = similar.length > 0 ? ` Similar available tools: ${similar.join(", ")}.` : "";
+    return { success: false, output: "", error: `Tool '${name}' is not registered.${hint}` };
   }
 
   // Tier 2+ require sandbox — enforce here

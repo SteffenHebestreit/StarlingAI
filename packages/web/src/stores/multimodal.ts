@@ -10,6 +10,9 @@ export interface MultimodalServiceConfig {
 
 export interface MultimodalFileConfig extends MultimodalServiceConfig {
   toolName: string;
+  visionModel?: string;
+  visionBaseUrl?: string;
+  visionApiKey?: string;
 }
 
 export interface MultimodalSttConfig extends MultimodalServiceConfig {
@@ -30,6 +33,16 @@ export interface MultimodalTtsConfig extends MultimodalServiceConfig {
   speakReplySummaryMaxSentences?: number;
 }
 
+export interface MultimodalImageGenerationConfig extends MultimodalServiceConfig {
+  model?: string;
+  defaultWidth: number;
+  defaultHeight: number;
+  defaultSteps: number;
+  defaultGuidanceScale: number;
+  cpuOffload: boolean;
+  defaultNegativePrompt?: string;
+}
+
 export interface MultimodalWakeWordConfig {
   enabled: boolean;
   language: "de-DE" | "en-US" | "pl-PL";
@@ -44,6 +57,7 @@ export interface MultimodalConfig {
   stt: MultimodalSttConfig;
   tts: MultimodalTtsConfig;
   wakeWord: MultimodalWakeWordConfig;
+  imageGeneration?: MultimodalImageGenerationConfig;
 }
 
 export interface MultimodalServiceStatus {
@@ -54,8 +68,10 @@ export interface MultimodalServiceStatus {
 
 export interface MultimodalStatus {
   files: MultimodalServiceStatus;
+  vision: MultimodalServiceStatus | null;
   stt: MultimodalServiceStatus;
   tts: MultimodalServiceStatus;
+  imageGeneration: MultimodalServiceStatus | null;
   wakeWord: MultimodalWakeWordConfig;
 }
 
@@ -66,6 +82,9 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     apiKey: "",
     timeoutMs: 60_000,
     toolName: "file_to_markdown",
+    visionModel: "",
+    visionBaseUrl: "",
+    visionApiKey: "",
   },
   stt: {
     baseUrl: "http://qwen3-asr-service:5002",
@@ -77,7 +96,7 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     baseUrl: "http://qwen3-tts-service:5004",
     apiKey: "",
     timeoutMs: 60_000,
-    model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
     defaultLanguage: "English",
     defaultSpeaker: "Vivian",
     defaultVoiceId: "",
@@ -94,6 +113,8 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     stopPhrases: ["stop recording", "end recording", "stop listening", "luna stop"],
     silenceTimeoutMs: 4000,
   },
+  // imageGeneration is optional — not added to defaults so the section only
+  // appears in Settings when the user explicitly configures it.
 };
 
 function cloneConfig(config: MultimodalConfig): MultimodalConfig {
@@ -206,8 +227,10 @@ export const useMultimodalStore = defineStore("multimodal", () => {
     } catch {
       status.value = {
         files: { ok: false },
+        vision: config.value.files.visionModel ? { ok: false } : null,
         stt: { ok: false },
         tts: { ok: false },
+        imageGeneration: config.value.imageGeneration ? { ok: false } : null,
         wakeWord: config.value.wakeWord,
       };
     } finally {

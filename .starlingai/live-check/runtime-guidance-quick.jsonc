@@ -1,0 +1,22 @@
+{
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "outputPath": "./.starlingai/live-check/runtime-guidance-quick-report.json",
+  "cases": [
+    {
+      "name": "mcp-official-sources-natural",
+      "message": "Find the official Model Context Protocol specification and repository, and keep the answer short.",
+      "expectToolIncludes": ["web_search"],
+      "expectTextIncludes": ["Model Context Protocol"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 45000
+    },
+    {
+      "name": "timeless-control-binary-search",
+      "message": "Explain how binary search works in one paragraph.",
+      "expectToolExcludes": ["web_search", "web_fetch"],
+      "expectTextIncludes": ["binary search"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 20000
+    }
+  ]
+}

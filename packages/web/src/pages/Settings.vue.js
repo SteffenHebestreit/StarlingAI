@@ -23,22 +23,64 @@ const routingLab = reactive({
     minConfidence: "medium",
 });
 const multimodalLoaded = computed(() => Boolean(multimodalStore.config.files.baseUrl));
+const IMAGE_GEN_NEGATIVE_PRESETS = [
+    {
+        label: "Quality",
+        value: "low quality, worst quality, blurry, pixelated, noisy, grainy, jpeg artifacts, compression artifacts, oversaturated, washed out, overexposed, underexposed",
+    },
+    {
+        label: "Human Realism",
+        value: "deformed fingers, extra fingers, missing fingers, fused fingers, bad hands, mutated hands, distorted hands, ai-looking, uncanny valley, plastic skin, waxy skin, doll face, dead eyes, empty eyes",
+    },
+    {
+        label: "Face Detail",
+        value: "blurry face, distorted face, asymmetric face, cross-eyed, bad eyes, deformed eyes, no face details, flat face, zombie face, deformed nose, unnatural mouth, bad teeth",
+    },
+    {
+        label: "Anatomy",
+        value: "bad anatomy, deformed body, mutated, extra limbs, missing limbs, disproportionate body, floating limbs, disconnected limbs, malformed limbs, twisted spine",
+    },
+    {
+        label: "Artifacts",
+        value: "watermark, text, signature, logo, banner, border, frame, copyright, censored, cropped, out of frame, duplicate, tiling",
+    },
+    {
+        label: "All",
+        value: "low quality, worst quality, blurry, pixelated, noisy, grainy, jpeg artifacts, compression artifacts, deformed fingers, extra fingers, missing fingers, fused fingers, bad hands, mutated hands, ai-looking, uncanny valley, plastic skin, waxy skin, doll face, dead eyes, blurry face, distorted face, asymmetric face, no face details, flat face, bad anatomy, deformed body, mutated, extra limbs, missing limbs, disproportionate, floating limbs, watermark, text, signature, logo, border, frame, out of frame, duplicate",
+    },
+];
 const multimodalForm = reactive({
     maxUploadBytes: 20_971_520,
     filesBaseUrl: "",
     filesApiKey: "",
     filesTimeoutMs: 60_000,
     fileToolName: "file_to_markdown",
+    visionModel: "",
+    visionBaseUrl: "",
+    visionApiKey: "",
     sttBaseUrl: "",
     sttApiKey: "",
     sttTimeoutMs: 60_000,
-    sttModel: "whisper-1",
+    sttModel: "Qwen/Qwen3-ASR-1.7B",
     ttsBaseUrl: "",
     ttsApiKey: "",
     ttsTimeoutMs: 60_000,
     ttsModel: "",
-    ttsDefaultLanguage: "en_US",
+    ttsDefaultLanguage: "English",
+    ttsDefaultSpeaker: "Vivian",
+    ttsDefaultVoiceId: "",
+    ttsVoiceSamplePath: "",
+    ttsVoiceSampleText: "",
     ttsDefaultQuality: "medium",
+    imageGenBaseUrl: "",
+    imageGenApiKey: "",
+    imageGenTimeoutMs: 120_000,
+    imageGenModel: "",
+    imageGenDefaultWidth: 1024,
+    imageGenDefaultHeight: 1024,
+    imageGenDefaultSteps: 28,
+    imageGenGuidanceScale: 5.0,
+    imageGenDefaultNegativePrompt: "",
     wakeEnabled: false,
     wakeLanguage: "en-US",
     wakeSilenceTimeoutMs: 4000,
@@ -46,6 +88,182 @@ const multimodalForm = reactive({
     wakeStopPhrasesText: "stop recording, end recording, stop listening, luna stop",
     error: "",
 });
+const savedVoiceForm = reactive({
+    file: null,
+    fileName: "",
+    name: "",
+    language: "English",
+    saving: false,
+    error: false,
+    message: "",
+});
+const modelEndpointForm = reactive({
+    loaded: false,
+    loading: false,
+    saving: false,
+    error: "",
+    lastLoaded: null,
+    orchestratorModel: "",
+    orchestratorBaseUrl: "",
+    orchestratorApiKey: "",
+    embeddingModel: "",
+    embeddingBaseUrl: "",
+    embeddingApiKey: "",
+    rerankerEnabled: false,
+    rerankerModel: "Qwen/Qwen3-Reranker-4B",
+    rerankerBaseUrl: "http://host.docker.internal:1234/v1",
+    rerankerApiKey: "lm-studio",
+    guardEnabled: false,
+    guardModel: "Qwen/Qwen3Guard-Gen-4B",
+    guardBaseUrl: "http://host.docker.internal:1234/v1",
+    guardApiKey: "lm-studio",
+});
+function settingsBaseUrl() {
+    return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+}
+async function parseSettingsError(response) {
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (contentType.includes("application/json")) {
+        try {
+            const body = await response.json();
+            return body.error ?? body.detail ?? response.statusText ?? `HTTP ${response.status}`;
+        }
+        catch {
+            return response.statusText || `HTTP ${response.status}`;
+        }
+    }
+    try {
+        const text = (await response.text()).trim();
+        return text || response.statusText || `HTTP ${response.status}`;
+    }
+    catch {
+        return response.statusText || `HTTP ${response.status}`;
+    }
+}
+function syncModelEndpointForm(config) {
+    modelEndpointForm.lastLoaded = structuredClone(config);
+    modelEndpointForm.loaded = true;
+    modelEndpointForm.orchestratorModel = config.orchestrator.primary;
+    modelEndpointForm.orchestratorBaseUrl = config.orchestrator.baseUrl ?? "";
+    modelEndpointForm.orchestratorApiKey = config.orchestrator.apiKey ?? "";
+    modelEndpointForm.embeddingModel = config.embeddings.embeddingModel ?? "";
+    modelEndpointForm.embeddingBaseUrl = config.embeddings.embeddingBaseUrl ?? "";
+    modelEndpointForm.embeddingApiKey = config.embeddings.embeddingApiKey ?? "";
+    modelEndpointForm.rerankerEnabled = config.reranker.enabled;
+    modelEndpointForm.rerankerModel = config.reranker.model;
+    modelEndpointForm.rerankerBaseUrl = config.reranker.baseUrl;
+    modelEndpointForm.rerankerApiKey = config.reranker.apiKey;
+    modelEndpointForm.guardEnabled = config.guard.enabled;
+    modelEndpointForm.guardModel = config.guard.model;
+    modelEndpointForm.guardBaseUrl = config.guard.baseUrl;
+    modelEndpointForm.guardApiKey = config.guard.apiKey;
+    modelEndpointForm.error = "";
+}
+function resetModelEndpointConfig() {
+    if (modelEndpointForm.lastLoaded)
+        syncModelEndpointForm(modelEndpointForm.lastLoaded);
+}
+function getModelEndpointStatus(role) {
+    return runtime.modelEndpoints?.endpoints.find((endpoint) => endpoint.role === role) ?? null;
+}
+async function fetchModelEndpointConfig() {
+    if (!gateway.token)
+        return;
+    modelEndpointForm.loading = true;
+    modelEndpointForm.error = "";
+    try {
+        const response = await window.fetch(`${settingsBaseUrl()}/api/model-endpoints/config`, {
+            headers: { Authorization: `Bearer ${gateway.token}` },
+        });
+        if (!response.ok) {
+            throw new Error(await parseSettingsError(response));
+        }
+        syncModelEndpointForm(await response.json());
+    }
+    catch (error) {
+        modelEndpointForm.error = error instanceof Error ? error.message : String(error);
+    }
+    finally {
+        modelEndpointForm.loading = false;
+    }
+}
+async function submitModelEndpointConfig() {
+    if (!gateway.token)
+        return;
+    modelEndpointForm.error = "";
+    if (!modelEndpointForm.orchestratorModel.trim()) {
+        modelEndpointForm.error = "Orchestrator primary model is required";
+        return;
+    }
+    if (!modelEndpointForm.rerankerModel.trim() || !modelEndpointForm.rerankerBaseUrl.trim()) {
+        modelEndpointForm.error = "Reranker model and endpoint are required";
+        return;
+    }
+    if (!modelEndpointForm.guardModel.trim() || !modelEndpointForm.guardBaseUrl.trim()) {
+        modelEndpointForm.error = "Guard model and endpoint are required";
+        return;
+    }
+    modelEndpointForm.saving = true;
+    try {
+        const payload = {
+            orchestrator: {
+                primary: modelEndpointForm.orchestratorModel.trim(),
+                baseUrl: modelEndpointForm.orchestratorBaseUrl.trim() || undefined,
+                apiKey: modelEndpointForm.orchestratorApiKey.trim() || undefined,
+            },
+            embeddings: {
+                embeddingModel: modelEndpointForm.embeddingModel.trim() || undefined,
+                embeddingBaseUrl: modelEndpointForm.embeddingBaseUrl.trim() || undefined,
+                embeddingApiKey: modelEndpointForm.embeddingApiKey.trim() || undefined,
+            },
+            reranker: {
+                enabled: modelEndpointForm.rerankerEnabled,
+                model: modelEndpointForm.rerankerModel.trim(),
+                baseUrl: modelEndpointForm.rerankerBaseUrl.trim(),
+                apiKey: modelEndpointForm.rerankerApiKey.trim() || "lm-studio",
+            },
+            guard: {
+                enabled: modelEndpointForm.guardEnabled,
+                model: modelEndpointForm.guardModel.trim(),
+                baseUrl: modelEndpointForm.guardBaseUrl.trim(),
+                apiKey: modelEndpointForm.guardApiKey.trim() || "lm-studio",
+            },
+        };
+        const response = await window.fetch(`${settingsBaseUrl()}/api/model-endpoints/config`, {
+            method: "PUT",
+            headers: {
+                Authorization: `Bearer ${gateway.token}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            throw new Error(await parseSettingsError(response));
+        }
+        syncModelEndpointForm(await response.json());
+        await runtime.fetch();
+    }
+    catch (error) {
+        modelEndpointForm.error = error instanceof Error ? error.message : String(error);
+    }
+    finally {
+        modelEndpointForm.saving = false;
+    }
+}
+function applyNegativePreset(value) {
+    const current = multimodalForm.imageGenDefaultNegativePrompt.trim();
+    if (!current) {
+        multimodalForm.imageGenDefaultNegativePrompt = value;
+    }
+    else {
+        // Append only terms that aren't already present (case-insensitive)
+        const existing = new Set(current.toLowerCase().split(",").map(s => s.trim()));
+        const newTerms = value.split(",").map(s => s.trim()).filter(t => !existing.has(t.toLowerCase()));
+        if (newTerms.length) {
+            multimodalForm.imageGenDefaultNegativePrompt = current + ", " + newTerms.join(", ");
+        }
+    }
+}
 function listFromCsv(value) {
     return value.split(",").map((entry) => entry.trim()).filter(Boolean);
 }
@@ -55,6 +273,9 @@ function syncMultimodalForm(config) {
     multimodalForm.filesApiKey = config.files.apiKey ?? "";
     multimodalForm.filesTimeoutMs = config.files.timeoutMs;
     multimodalForm.fileToolName = config.files.toolName;
+    multimodalForm.visionModel = config.files.visionModel ?? "";
+    multimodalForm.visionBaseUrl = config.files.visionBaseUrl ?? "";
+    multimodalForm.visionApiKey = config.files.visionApiKey ?? "";
     multimodalForm.sttBaseUrl = config.stt.baseUrl;
     multimodalForm.sttApiKey = config.stt.apiKey ?? "";
     multimodalForm.sttTimeoutMs = config.stt.timeoutMs;
@@ -64,7 +285,21 @@ function syncMultimodalForm(config) {
     multimodalForm.ttsTimeoutMs = config.tts.timeoutMs;
     multimodalForm.ttsModel = config.tts.model ?? "";
     multimodalForm.ttsDefaultLanguage = config.tts.defaultLanguage;
+    multimodalForm.ttsDefaultSpeaker = config.tts.defaultSpeaker;
+    multimodalForm.ttsDefaultVoiceId = config.tts.defaultVoiceId ?? "";
+    multimodalForm.ttsVoiceSamplePath = config.tts.voiceSamplePath ?? "";
+    multimodalForm.ttsVoiceSampleText = config.tts.voiceSampleText ?? "";
     multimodalForm.ttsDefaultQuality = config.tts.defaultQuality;
+    savedVoiceForm.language = config.tts.defaultLanguage;
+    multimodalForm.imageGenBaseUrl = config.imageGeneration?.baseUrl ?? "";
+    multimodalForm.imageGenApiKey = config.imageGeneration?.apiKey ?? "";
+    multimodalForm.imageGenTimeoutMs = config.imageGeneration?.timeoutMs ?? 120_000;
+    multimodalForm.imageGenModel = config.imageGeneration?.model ?? "";
+    multimodalForm.imageGenDefaultWidth = config.imageGeneration?.defaultWidth ?? 1024;
+    multimodalForm.imageGenDefaultHeight = config.imageGeneration?.defaultHeight ?? 1024;
+    multimodalForm.imageGenDefaultSteps = config.imageGeneration?.defaultSteps ?? 28;
+    multimodalForm.imageGenGuidanceScale = config.imageGeneration?.defaultGuidanceScale ?? 5.0;
+    multimodalForm.imageGenDefaultNegativePrompt = config.imageGeneration?.defaultNegativePrompt ?? "";
     multimodalForm.wakeEnabled = config.wakeWord.enabled;
     multimodalForm.wakeLanguage = config.wakeWord.language;
     multimodalForm.wakeSilenceTimeoutMs = config.wakeWord.silenceTimeoutMs;
@@ -74,6 +309,49 @@ function syncMultimodalForm(config) {
 }
 function resetMultimodalForm() {
     syncMultimodalForm(multimodalStore.config);
+}
+function onSavedVoiceFileSelected(event) {
+    const input = event.target;
+    const file = input.files?.[0] ?? null;
+    savedVoiceForm.file = file;
+    savedVoiceForm.fileName = file?.name ?? "";
+    savedVoiceForm.message = "";
+    savedVoiceForm.error = false;
+}
+async function saveVoiceSampleToLibrary() {
+    savedVoiceForm.message = "";
+    savedVoiceForm.error = false;
+    if (!savedVoiceForm.file) {
+        savedVoiceForm.error = true;
+        savedVoiceForm.message = "Select a voice sample file first";
+        return;
+    }
+    if (!savedVoiceForm.name.trim()) {
+        savedVoiceForm.error = true;
+        savedVoiceForm.message = "Voice name is required";
+        return;
+    }
+    savedVoiceForm.saving = true;
+    try {
+        const result = await gateway.saveTtsVoice({
+            file: savedVoiceForm.file,
+            name: savedVoiceForm.name.trim(),
+            language: savedVoiceForm.language.trim() || undefined,
+        });
+        multimodalForm.ttsDefaultVoiceId = result.voice_id;
+        if (!multimodalForm.ttsVoiceSampleText.trim() && result.ref_text) {
+            multimodalForm.ttsVoiceSampleText = result.ref_text;
+        }
+        savedVoiceForm.error = false;
+        savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}'`;
+    }
+    catch (error) {
+        savedVoiceForm.error = true;
+        savedVoiceForm.message = error instanceof Error ? error.message : String(error);
+    }
+    finally {
+        savedVoiceForm.saving = false;
+    }
 }
 async function submitMultimodalForm() {
     multimodalForm.error = "";
@@ -91,6 +369,7 @@ async function submitMultimodalForm() {
         multimodalForm.error = "At least one wake stop phrase is required";
         return;
     }
+    const imageGenBaseUrl = multimodalForm.imageGenBaseUrl.trim();
     await multimodalStore.save({
         maxUploadBytes: multimodalForm.maxUploadBytes,
         files: {
@@ -98,6 +377,9 @@ async function submitMultimodalForm() {
             apiKey: multimodalForm.filesApiKey.trim() || undefined,
             timeoutMs: multimodalForm.filesTimeoutMs,
             toolName: multimodalForm.fileToolName.trim(),
+            visionModel: multimodalForm.visionModel.trim() || undefined,
+            visionBaseUrl: multimodalForm.visionBaseUrl.trim() || undefined,
+            visionApiKey: multimodalForm.visionApiKey.trim() || undefined,
         },
         stt: {
             baseUrl: multimodalForm.sttBaseUrl.trim(),
@@ -111,6 +393,10 @@ async function submitMultimodalForm() {
             timeoutMs: multimodalForm.ttsTimeoutMs,
             model: multimodalForm.ttsModel.trim() || undefined,
             defaultLanguage: multimodalForm.ttsDefaultLanguage.trim(),
+            defaultSpeaker: multimodalForm.ttsDefaultSpeaker.trim(),
+            defaultVoiceId: multimodalForm.ttsDefaultVoiceId.trim() || undefined,
+            voiceSamplePath: multimodalForm.ttsVoiceSamplePath.trim() || undefined,
+            voiceSampleText: multimodalForm.ttsVoiceSampleText.trim() || undefined,
             defaultQuality: multimodalForm.ttsDefaultQuality.trim(),
         },
         wakeWord: {
@@ -120,6 +406,18 @@ async function submitMultimodalForm() {
             stopPhrases: wakeStopPhrases,
             silenceTimeoutMs: multimodalForm.wakeSilenceTimeoutMs,
         },
+        imageGeneration: imageGenBaseUrl ? {
+            baseUrl: imageGenBaseUrl,
+            apiKey: multimodalForm.imageGenApiKey.trim() || undefined,
+            timeoutMs: multimodalForm.imageGenTimeoutMs,
+            model: multimodalForm.imageGenModel.trim() || undefined,
+            defaultWidth: multimodalForm.imageGenDefaultWidth,
+            defaultHeight: multimodalForm.imageGenDefaultHeight,
+            defaultSteps: multimodalForm.imageGenDefaultSteps,
+            defaultGuidanceScale: multimodalForm.imageGenGuidanceScale,
+            cpuOffload: true,
+            defaultNegativePrompt: multimodalForm.imageGenDefaultNegativePrompt.trim() || undefined,
+        } : undefined,
     });
     if (!multimodalStore.error) {
         syncMultimodalForm(multimodalStore.config);
@@ -372,6 +670,9 @@ function closeChannelForm() {
 function formatRuntimeName(name) {
     return (name ?? "").replace(/_/g, " ");
 }
+function formatModelEndpointRole(role) {
+    return role.replace(/^subagent:/, "sub-agent: ").replace(/_/g, " ");
+}
 async function runRoutingLab() {
     const query = routingLab.query.trim();
     if (!query)
@@ -395,6 +696,7 @@ watch(() => gateway.connected, (connected) => {
         runtime.fetch();
         agentsStore.fetch();
         multimodalStore.fetch();
+        fetchModelEndpointConfig();
     }
 }, { immediate: true });
 watch(() => multimodalStore.config, (config) => {
@@ -566,6 +868,71 @@ else if (__VLS_ctx.runtime.snapshot) {
         (component.healthy ? 'ok' : 'degraded');
     }
 }
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div)({
+    ...{ class: "border-t border-purple-500/10" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "flex justify-between items-center" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+    ...{ class: "text-gray-400" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "flex items-center gap-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span)({
+    ...{ class: (['status-dot', __VLS_ctx.runtime.modelEndpoints?.healthy ? 'status-dot--on' : 'status-dot--off']) },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+    ...{ class: (__VLS_ctx.runtime.modelEndpoints?.healthy ? 'text-green-400' : 'text-amber-400') },
+});
+(__VLS_ctx.runtime.modelEndpoints?.healthy ? 'Healthy' : 'Needs Attention');
+if (__VLS_ctx.runtime.modelEndpointError) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs text-red-400" },
+    });
+    (__VLS_ctx.runtime.modelEndpointError);
+}
+else if (__VLS_ctx.runtime.modelEndpoints?.endpoints?.length) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "space-y-2 pt-1" },
+    });
+    for (const [endpoint] of __VLS_getVForSourceType((__VLS_ctx.runtime.modelEndpoints.endpoints))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            key: (`${endpoint.role}-${endpoint.baseUrl}-${endpoint.model}`),
+            ...{ class: "model-endpoint-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "min-w-0" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-gray-300 text-xs" },
+        });
+        (__VLS_ctx.formatModelEndpointRole(endpoint.role));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-gray-500 font-mono truncate" },
+            title: (endpoint.model),
+        });
+        (endpoint.model);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-gray-600 font-mono truncate" },
+            title: (endpoint.baseUrl),
+        });
+        (endpoint.baseUrl);
+        if (endpoint.error) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "text-[11px] text-red-400 truncate" },
+                title: (endpoint.error),
+            });
+            (endpoint.error);
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: (endpoint.ok ? 'text-green-400' : 'text-amber-400') },
+            ...{ class: "text-xs shrink-0" },
+        });
+        (endpoint.ok ? 'ok' : 'down');
+    }
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "glass-card p-5" },
 });
@@ -672,6 +1039,35 @@ else {
             });
             (__VLS_ctx.multimodalStore.status.files.error);
         }
+        if (__VLS_ctx.multimodalStore.status.vision !== null) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "multimodal-health-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "flex items-center justify-between gap-2" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "text-gray-300 text-sm" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: (__VLS_ctx.multimodalStore.status.vision?.ok ? 'badge-running' : 'badge-health-bad') },
+            });
+            (__VLS_ctx.multimodalStore.status.vision?.ok ? 'available' : 'offline');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "mt-2 text-[11px] text-gray-500 font-mono break-all" },
+            });
+            (__VLS_ctx.multimodalForm.visionBaseUrl || __VLS_ctx.multimodalForm.filesBaseUrl);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "mt-1 text-[11px] text-gray-600 font-mono break-all" },
+            });
+            (__VLS_ctx.multimodalForm.visionModel || 'uses default model');
+            if (__VLS_ctx.multimodalStore.status.vision?.error) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "mt-1 text-[11px] text-red-300" },
+                });
+                (__VLS_ctx.multimodalStore.status.vision.error);
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "multimodal-health-card" },
         });
@@ -717,6 +1113,31 @@ else {
                 ...{ class: "mt-1 text-[11px] text-red-300" },
             });
             (__VLS_ctx.multimodalStore.status.tts.error);
+        }
+        if (__VLS_ctx.multimodalStore.status.imageGeneration !== null) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "multimodal-health-card" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "flex items-center justify-between gap-2" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: "text-gray-300 text-sm" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ class: (__VLS_ctx.multimodalStore.status.imageGeneration?.ok ? 'badge-running' : 'badge-health-bad') },
+            });
+            (__VLS_ctx.multimodalStore.status.imageGeneration?.ok ? 'available' : 'offline');
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "mt-2 text-[11px] text-gray-500 font-mono break-all" },
+            });
+            (__VLS_ctx.multimodalForm.imageGenBaseUrl);
+            if (__VLS_ctx.multimodalStore.status.imageGeneration?.error) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "mt-1 text-[11px] text-red-300" },
+                });
+                (__VLS_ctx.multimodalStore.status.imageGeneration.error);
+            }
         }
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -807,6 +1228,61 @@ else {
     });
     (__VLS_ctx.multimodalForm.filesApiKey);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2 border-t border-purple-500/10 pt-3 mt-1" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500 mb-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.visionModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "lmstudio/qwen/qwen3.5-9b or Qwen/Qwen2.5-VL-7B-Instruct",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.visionBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "defaults to orchestrator endpoint",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "uses provider or dedicated vision key",
+    });
+    (__VLS_ctx.multimodalForm.visionApiKey);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -835,7 +1311,7 @@ else {
         value: (__VLS_ctx.multimodalForm.sttModel),
         type: "text",
         ...{ class: "input-box font-mono" },
-        placeholder: "whisper-1",
+        placeholder: "Qwen/Qwen3-ASR-1.7B",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
@@ -905,17 +1381,30 @@ else {
         value: (__VLS_ctx.multimodalForm.ttsDefaultLanguage),
         type: "text",
         ...{ class: "input-box font-mono" },
-        placeholder: "en_US",
+        placeholder: "English",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
         ...{ class: "field-label" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
-        value: (__VLS_ctx.multimodalForm.ttsDefaultQuality),
+        value: (__VLS_ctx.multimodalForm.ttsDefaultSpeaker),
         type: "text",
         ...{ class: "input-box font-mono" },
-        placeholder: "medium",
+        placeholder: "Vivian",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.ttsDefaultVoiceId),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "saved voice id from Qwen3 /voices",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
@@ -941,6 +1430,265 @@ else {
         placeholder: "Bearer token if required",
     });
     (__VLS_ctx.multimodalForm.ttsApiKey);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.ttsVoiceSamplePath),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "workspace-relative sample, e.g. samples/my-voice.wav",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.multimodalForm.ttsVoiceSampleText),
+        ...{ class: "input-box font-mono text-xs resize-none" },
+        rows: "3",
+        placeholder: "Exact words spoken in the audio example for higher quality cloning",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs text-gray-500 mt-1" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.savedVoiceForm.name),
+        type: "text",
+        ...{ class: "input-box" },
+        placeholder: "e.g. Steffen Voice",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.savedVoiceForm.language),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "English",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.onSavedVoiceFileSelected) },
+        type: "file",
+        accept: "audio/*",
+        ...{ class: "input-box" },
+    });
+    if (__VLS_ctx.savedVoiceForm.fileName) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-2 text-[11px] text-gray-500" },
+        });
+        (__VLS_ctx.savedVoiceForm.fileName);
+    }
+    if (__VLS_ctx.savedVoiceForm.message) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-xs" },
+            ...{ class: (__VLS_ctx.savedVoiceForm.error ? 'text-red-400' : 'text-green-300') },
+        });
+        (__VLS_ctx.savedVoiceForm.message);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex justify-end" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveVoiceSampleToLibrary) },
+        disabled: (__VLS_ctx.savedVoiceForm.saving || !__VLS_ctx.savedVoiceForm.file),
+        ...{ class: "btn-ghost px-4 py-2 rounded-xl text-xs" },
+    });
+    (__VLS_ctx.savedVoiceForm.saving ? 'Saving Voice…' : 'Upload And Save Voice');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.imageGenBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "http://qwen-image-service:5005",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.multimodalForm.imageGenModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "Qwen/Qwen-Image",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "1000",
+        ...{ class: "input-box" },
+    });
+    (__VLS_ctx.multimodalForm.imageGenTimeoutMs);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "256",
+        max: "2048",
+        step: "64",
+        ...{ class: "input-box" },
+    });
+    (__VLS_ctx.multimodalForm.imageGenDefaultWidth);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "256",
+        max: "2048",
+        step: "64",
+        ...{ class: "input-box" },
+    });
+    (__VLS_ctx.multimodalForm.imageGenDefaultHeight);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "1",
+        max: "100",
+        ...{ class: "input-box" },
+    });
+    (__VLS_ctx.multimodalForm.imageGenDefaultSteps);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "0",
+        max: "20",
+        step: "0.5",
+        ...{ class: "input-box" },
+    });
+    (__VLS_ctx.multimodalForm.imageGenGuidanceScale);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "Bearer token if required",
+    });
+    (__VLS_ctx.multimodalForm.imageGenApiKey);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2 space-y-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.multimodalForm.imageGenDefaultNegativePrompt),
+        ...{ class: "input-box font-mono text-xs resize-none w-full" },
+        rows: "3",
+        placeholder: "e.g. low quality, blurry, deformed fingers, watermark",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "space-y-1.5" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-[11px] text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex flex-wrap gap-1.5" },
+    });
+    for (const [preset] of __VLS_getVForSourceType((__VLS_ctx.IMAGE_GEN_NEGATIVE_PRESETS))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.gateway.connected))
+                        return;
+                    if (!!(__VLS_ctx.multimodalStore.loading && !__VLS_ctx.multimodalLoaded))
+                        return;
+                    __VLS_ctx.applyNegativePreset(preset.value);
+                } },
+            key: (preset.label),
+            ...{ class: "px-2.5 py-1 rounded-lg text-xs border border-purple-500/20 bg-purple-900/20 text-purple-200 hover:bg-purple-700/30 hover:border-purple-400/40 transition-colors" },
+            title: (preset.value),
+        });
+        (preset.label);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!!(!__VLS_ctx.gateway.connected))
+                    return;
+                if (!!(__VLS_ctx.multimodalStore.loading && !__VLS_ctx.multimodalLoaded))
+                    return;
+                __VLS_ctx.multimodalForm.imageGenDefaultNegativePrompt = '';
+            } },
+        ...{ class: "px-2.5 py-1 rounded-lg text-xs border border-red-500/20 bg-red-900/10 text-red-300 hover:bg-red-800/20 transition-colors" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
     });
@@ -2059,12 +2807,435 @@ else if (__VLS_ctx.agentsStore.agents.length) {
             autocomplete: "off",
             ...{ class: "input-box text-sm" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "md:col-span-2 flex items-center justify-between gap-4 pt-1" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "field-label text-xs" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "text-gray-600 font-normal" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "text-[11px] text-gray-600 mt-0.5" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({
+            ...{ class: "text-gray-400" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({
+            ...{ class: "text-gray-400" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+            ...{ onChange: (...[$event]) => {
+                    if (!!(!__VLS_ctx.gateway.connected))
+                        return;
+                    if (!!(__VLS_ctx.agentsStore.loading && !__VLS_ctx.agentsStore.agents.length))
+                        return;
+                    if (!!(__VLS_ctx.agentsStore.error))
+                        return;
+                    if (!(__VLS_ctx.agentsStore.agents.length))
+                        return;
+                    __VLS_ctx.agentsStore.patchModel(agent.name, { enableThinking: $event.target.value === '' ? undefined : $event.target.value === 'on' });
+                } },
+            value: (agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'),
+            ...{ class: "input-box text-sm w-24 shrink-0" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "on",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            value: "off",
+        });
     }
 }
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "empty-state" },
     });
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "glass-card p-5" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "flex items-center justify-between mb-4 gap-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({
+    ...{ class: "section-title mb-0" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "text-xs text-gray-500 mt-1" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "flex items-center gap-2" },
+});
+if (__VLS_ctx.gateway.connected) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.fetchModelEndpointConfig) },
+        disabled: (__VLS_ctx.modelEndpointForm.loading || __VLS_ctx.modelEndpointForm.saving),
+        ...{ class: "btn-ghost px-3 py-1.5 rounded-lg text-xs" },
+    });
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (__VLS_ctx.resetModelEndpointConfig) },
+    disabled: (!__VLS_ctx.modelEndpointForm.lastLoaded || __VLS_ctx.modelEndpointForm.loading || __VLS_ctx.modelEndpointForm.saving),
+    ...{ class: "btn-ghost px-3 py-1.5 rounded-lg text-xs" },
+});
+if (!__VLS_ctx.gateway.connected) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "empty-state" },
+    });
+}
+else if (__VLS_ctx.modelEndpointForm.loading && !__VLS_ctx.modelEndpointForm.loaded) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "empty-state" },
+    });
+}
+else {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "space-y-4" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center justify-between gap-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    if (__VLS_ctx.getModelEndpointStatus('orchestrator')) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: (__VLS_ctx.getModelEndpointStatus('orchestrator')?.ok ? 'badge-running' : 'badge-health-bad') },
+        });
+        (__VLS_ctx.getModelEndpointStatus('orchestrator')?.ok ? 'healthy' : 'mismatch');
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.orchestratorModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "lmstudio/qwen/qwen3.5-35b-a3b",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.orchestratorBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "uses provider default when empty",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "uses provider default when empty",
+    });
+    (__VLS_ctx.modelEndpointForm.orchestratorApiKey);
+    if (__VLS_ctx.getModelEndpointStatus('orchestrator')?.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-red-300" },
+        });
+        (__VLS_ctx.getModelEndpointStatus('orchestrator')?.error);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center justify-between gap-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    if (__VLS_ctx.getModelEndpointStatus('embeddings')) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: (__VLS_ctx.getModelEndpointStatus('embeddings')?.ok ? 'badge-running' : 'badge-health-bad') },
+        });
+        (__VLS_ctx.getModelEndpointStatus('embeddings')?.ok ? 'healthy' : 'mismatch');
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.embeddingModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "leave empty to disable semantic embeddings",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.embeddingBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "uses orchestrator/provider endpoint when empty",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-gray-600 font-normal" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "uses orchestrator/provider key when empty",
+    });
+    (__VLS_ctx.modelEndpointForm.embeddingApiKey);
+    if (__VLS_ctx.getModelEndpointStatus('embeddings')?.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-red-300" },
+        });
+        (__VLS_ctx.getModelEndpointStatus('embeddings')?.error);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center justify-between gap-4" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs text-gray-500 mt-1" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center gap-2" },
+    });
+    if (__VLS_ctx.getModelEndpointStatus('reranker')) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: (__VLS_ctx.getModelEndpointStatus('reranker')?.ok ? 'badge-running' : 'badge-health-bad') },
+        });
+        (__VLS_ctx.getModelEndpointStatus('reranker')?.ok ? 'healthy' : 'mismatch');
+    }
+    /** @type {[typeof ToggleSwitch, ]} */ ;
+    // @ts-ignore
+    const __VLS_24 = __VLS_asFunctionalComponent(ToggleSwitch, new ToggleSwitch({
+        ...{ 'onChange': {} },
+        value: (__VLS_ctx.modelEndpointForm.rerankerEnabled),
+    }));
+    const __VLS_25 = __VLS_24({
+        ...{ 'onChange': {} },
+        value: (__VLS_ctx.modelEndpointForm.rerankerEnabled),
+    }, ...__VLS_functionalComponentArgsRest(__VLS_24));
+    let __VLS_27;
+    let __VLS_28;
+    let __VLS_29;
+    const __VLS_30 = {
+        onChange: (...[$event]) => {
+            if (!!(!__VLS_ctx.gateway.connected))
+                return;
+            if (!!(__VLS_ctx.modelEndpointForm.loading && !__VLS_ctx.modelEndpointForm.loaded))
+                return;
+            __VLS_ctx.modelEndpointForm.rerankerEnabled = $event;
+        }
+    };
+    var __VLS_26;
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.rerankerModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "Qwen/Qwen3-Reranker-4B",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.rerankerBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "http://host.docker.internal:1234/v1",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "lm-studio",
+    });
+    (__VLS_ctx.modelEndpointForm.rerankerApiKey);
+    if (__VLS_ctx.getModelEndpointStatus('reranker')?.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-red-300" },
+        });
+        (__VLS_ctx.getModelEndpointStatus('reranker')?.error);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "border-t border-purple-500/10 pt-3 space-y-3" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center justify-between gap-4" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs uppercase tracking-[0.18em] text-gray-500" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "text-xs text-gray-500 mt-1" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex items-center gap-2" },
+    });
+    if (__VLS_ctx.getModelEndpointStatus('guard')) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: (__VLS_ctx.getModelEndpointStatus('guard')?.ok ? 'badge-running' : 'badge-health-bad') },
+        });
+        (__VLS_ctx.getModelEndpointStatus('guard')?.ok ? 'healthy' : 'mismatch');
+    }
+    /** @type {[typeof ToggleSwitch, ]} */ ;
+    // @ts-ignore
+    const __VLS_31 = __VLS_asFunctionalComponent(ToggleSwitch, new ToggleSwitch({
+        ...{ 'onChange': {} },
+        value: (__VLS_ctx.modelEndpointForm.guardEnabled),
+    }));
+    const __VLS_32 = __VLS_31({
+        ...{ 'onChange': {} },
+        value: (__VLS_ctx.modelEndpointForm.guardEnabled),
+    }, ...__VLS_functionalComponentArgsRest(__VLS_31));
+    let __VLS_34;
+    let __VLS_35;
+    let __VLS_36;
+    const __VLS_37 = {
+        onChange: (...[$event]) => {
+            if (!!(!__VLS_ctx.gateway.connected))
+                return;
+            if (!!(__VLS_ctx.modelEndpointForm.loading && !__VLS_ctx.modelEndpointForm.loaded))
+                return;
+            __VLS_ctx.modelEndpointForm.guardEnabled = $event;
+        }
+    };
+    var __VLS_33;
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "multimodal-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.guardModel),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "Qwen/Qwen3Guard-Gen-4B",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        value: (__VLS_ctx.modelEndpointForm.guardBaseUrl),
+        type: "text",
+        ...{ class: "input-box font-mono" },
+        placeholder: "http://host.docker.internal:1234/v1",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "md:col-span-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field-label" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "password",
+        ...{ class: "input-box" },
+        autocomplete: "off",
+        placeholder: "lm-studio",
+    });
+    (__VLS_ctx.modelEndpointForm.guardApiKey);
+    if (__VLS_ctx.getModelEndpointStatus('guard')?.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-[11px] text-red-300" },
+        });
+        (__VLS_ctx.getModelEndpointStatus('guard')?.error);
+    }
+    if (__VLS_ctx.modelEndpointForm.error) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-sm text-red-400" },
+        });
+        (__VLS_ctx.modelEndpointForm.error);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex justify-end" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.submitModelEndpointConfig) },
+        disabled: (__VLS_ctx.modelEndpointForm.loading || __VLS_ctx.modelEndpointForm.saving),
+        ...{ class: "btn-grad px-5 py-2 rounded-xl text-sm" },
+    });
+    (__VLS_ctx.modelEndpointForm.saving ? 'Saving…' : 'Save Model Routing');
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "glass-card p-5" },
@@ -2178,14 +3349,14 @@ else {
         });
         /** @type {[typeof ChannelIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_24 = __VLS_asFunctionalComponent(ChannelIcon, new ChannelIcon({
+        const __VLS_38 = __VLS_asFunctionalComponent(ChannelIcon, new ChannelIcon({
             type: (def.type),
             ...{ class: "shrink-0" },
         }));
-        const __VLS_25 = __VLS_24({
+        const __VLS_39 = __VLS_38({
             type: (def.type),
             ...{ class: "shrink-0" },
-        }, ...__VLS_functionalComponentArgsRest(__VLS_24));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_38));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "min-w-0" },
         });
@@ -2695,25 +3866,25 @@ if (__VLS_ctx.channelForm.open) {
     });
     /** @type {[typeof ToggleSwitch, ]} */ ;
     // @ts-ignore
-    const __VLS_27 = __VLS_asFunctionalComponent(ToggleSwitch, new ToggleSwitch({
+    const __VLS_41 = __VLS_asFunctionalComponent(ToggleSwitch, new ToggleSwitch({
         ...{ 'onChange': {} },
         value: (!!__VLS_ctx.channelForm.config.enabled),
     }));
-    const __VLS_28 = __VLS_27({
+    const __VLS_42 = __VLS_41({
         ...{ 'onChange': {} },
         value: (!!__VLS_ctx.channelForm.config.enabled),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_27));
-    let __VLS_30;
-    let __VLS_31;
-    let __VLS_32;
-    const __VLS_33 = {
+    }, ...__VLS_functionalComponentArgsRest(__VLS_41));
+    let __VLS_44;
+    let __VLS_45;
+    let __VLS_46;
+    const __VLS_47 = {
         onChange: (...[$event]) => {
             if (!(__VLS_ctx.channelForm.open))
                 return;
             __VLS_ctx.channelForm.config.enabled = $event;
         }
     };
-    var __VLS_29;
+    var __VLS_43;
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div)({
         ...{ class: "border-t border-purple-500/10" },
     });
@@ -3241,6 +4412,36 @@ if (__VLS_ctx.sceneForm.open) {
 /** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-red-400']} */ ;
 /** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['model-endpoint-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['min-w-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['shrink-0']} */ ;
 /** @type {__VLS_StyleScopedClasses['glass-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['p-5']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
@@ -3328,6 +4529,41 @@ if (__VLS_ctx.sceneForm.open) {
 /** @type {__VLS_StyleScopedClasses['break-all']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['break-all']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-health-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['break-all']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-health-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['break-all']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['multimodal-health-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
@@ -3372,6 +4608,34 @@ if (__VLS_ctx.sceneForm.open) {
 /** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
 /** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-t']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
 /** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
@@ -3420,11 +4684,137 @@ if (__VLS_ctx.sceneForm.open) {
 /** @type {__VLS_StyleScopedClasses['input-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
 /** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['input-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['field-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
 /** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['resize-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-gray-950/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-end']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['resize-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex-wrap']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-purple-900/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-purple-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-purple-700/30']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:border-purple-400/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-red-500/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-red-900/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-red-800/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-t']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
 /** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
@@ -3866,7 +5256,197 @@ if (__VLS_ctx.sceneForm.open) {
 /** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
 /** @type {__VLS_StyleScopedClasses['input-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-0.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-24']} */ ;
+/** @type {__VLS_StyleScopedClasses['shrink-0']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
+/** @type {__VLS_StyleScopedClasses['glass-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-5']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
+/** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-cyan-500/15']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-cyan-500/5']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-cyan-100/80']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-normal']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['pt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
+/** @type {__VLS_StyleScopedClasses['tracking-[0.18em]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:col-span-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['input-box']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-red-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-end']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-grad']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-5']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['glass-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['p-5']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
@@ -4295,8 +5875,18 @@ const __VLS_self = (await import('vue')).defineComponent({
             multimodalStore: multimodalStore,
             routingLab: routingLab,
             multimodalLoaded: multimodalLoaded,
+            IMAGE_GEN_NEGATIVE_PRESETS: IMAGE_GEN_NEGATIVE_PRESETS,
             multimodalForm: multimodalForm,
+            savedVoiceForm: savedVoiceForm,
+            modelEndpointForm: modelEndpointForm,
+            resetModelEndpointConfig: resetModelEndpointConfig,
+            getModelEndpointStatus: getModelEndpointStatus,
+            fetchModelEndpointConfig: fetchModelEndpointConfig,
+            submitModelEndpointConfig: submitModelEndpointConfig,
+            applyNegativePreset: applyNegativePreset,
             resetMultimodalForm: resetMultimodalForm,
+            onSavedVoiceFileSelected: onSavedVoiceFileSelected,
+            saveVoiceSampleToLibrary: saveVoiceSampleToLibrary,
             submitMultimodalForm: submitMultimodalForm,
             siteForm: siteForm,
             openSiteForm: openSiteForm,
@@ -4321,6 +5911,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             submitChannelForm: submitChannelForm,
             closeChannelForm: closeChannelForm,
             formatRuntimeName: formatRuntimeName,
+            formatModelEndpointRole: formatModelEndpointRole,
             runRoutingLab: runRoutingLab,
             clearRoutingLab: clearRoutingLab,
         };

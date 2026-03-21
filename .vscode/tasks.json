@@ -1,0 +1,51 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "core test suite",
+			"type": "shell",
+			"command": "source \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1 || true; nvm use --silent default >/dev/null 2>&1 || true; if command -v pnpm >/dev/null 2>&1; then pnpm --filter @starlingai/core test; else corepack pnpm --filter @starlingai/core test; fi",
+			"options": {
+				"shell": {
+					"executable": "bash",
+					"args": [
+						"-lc"
+					]
+				}
+			},
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "docker compose ps debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"ps"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "gateway health curl debug",
+			"type": "shell",
+			"command": "curl",
+			"args": [
+				"-i",
+				"http://localhost:8765/healthz"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "web head curl debug",
+			"type": "shell",
+			"command": "curl",
+			"args": [
+				"-I",
+				"http://localhost:3001/"
+			],
+			"isBackground": false
+		}
+	]
+}

@@ -27,6 +27,7 @@
         <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
         <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
         <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+        <a class="nav-link" href="pentest.html"><span class="nav-icon">🔐</span> Pentest</a>
       </div>
       <div class="nav-section">
         <div class="nav-section-title">Channels</div>
@@ -93,6 +94,13 @@
           <div class="card-title">Channels</div>
           <div class="card-desc">Connect Telegram, Slack, Discord, WhatsApp, and Email as entry points into the swarm.</div>
           <div class="card-arrow">Connect channels →</div>
+        </a>
+
+        <a class="nav-card" href="pentest.html">
+          <div class="card-icon">🔐</div>
+          <div class="card-title">Pentest</div>
+          <div class="card-desc">Run authorized security assessments with the full Kali Linux toolchain — nmap, nikto, wpscan, gobuster, sqlmap, Metasploit and more.</div>
+          <div class="card-arrow">Start pentesting →</div>
         </a>
       </div>
 
@@ -216,7 +224,12 @@
             <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI</td></tr>
             <tr><td><code>postgres</code></td><td>internal</td><td>Audit logs, session store</td></tr>
             <tr><td><code>redis</code></td><td>internal</td><td>Rate limiting, pub/sub</td></tr>
+            <tr><td><code>qwen3-asr-service</code></td><td>internal</td><td>Speech-to-text (Qwen3-ASR)</td></tr>
+            <tr><td><code>qwen3-tts-service</code></td><td>internal</td><td>Text-to-speech with voice cloning (Qwen3-TTS)</td></tr>
+            <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP)</td></tr>
             <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
+            <tr><td><code>kali-pentest</code> <em>(optional)</em></td><td>internal</td><td>Kali Linux pentest toolchain — start with <code>./extras.sh pentest on</code></td></tr>
+            <tr><td><code>image-generation-service</code> <em>(optional)</em></td><td>internal</td><td>FLUX image generation — start with <code>./extras.sh image on</code></td></tr>
           </tbody>
         </table>
       </div>

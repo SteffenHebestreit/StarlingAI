@@ -24,7 +24,11 @@ export type SwarmEventType =
   | "task_completed"  // agent finished successfully
   | "task_failed"     // agent returned a failure or weak result
   | "task_requeued"   // task re-queued after heartbeat loss / container timeout
-  | "agent_promoted"; // ephemeral agent auto-promoted to the permanent catalog
+  | "agent_promoted"  // ephemeral agent auto-promoted to the permanent catalog
+  | "graph_started"   // task graph execution started
+  | "graph_node_ready"   // a graph node's dependencies are satisfied, execution starting
+  | "graph_node_blocked" // a graph node is blocked due to failed dependency
+  | "graph_completed";   // task graph execution finished
 
 export interface SwarmEvent {
   id: string;

@@ -9,7 +9,7 @@ import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, t
 import { runSubAgent } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
-import { getLMStudioProvider } from "../providers/index.js";
+import { getEmbeddingProvider, getLMStudioProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
@@ -18,6 +18,7 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
 import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact } from "../swarm/memory.js";
+import { rerankCandidates } from "../retrieval/reranker.js";
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
@@ -149,7 +150,7 @@ export async function resolveAgentRouting(
 
   if (isEmbeddingAvailable()) {
     try {
-      const provider = getLMStudioProvider();
+      const provider = getEmbeddingProvider();
       const results = await searchByEmbedding(raw, provider, 8);
       for (const result of results) {
         if (opts?.allowedAgents && !opts.allowedAgents.includes(result.agentName)) continue;
@@ -161,7 +162,7 @@ export async function resolveAgentRouting(
     }
   }
 
-  const ranked = entries
+  let ranked = entries
     .map(([name, cfg]) => {
       const keywordMatch = scoreAgentKeywordMatch(raw, name, cfg);
       const semanticScore = semanticScores.get(name) ?? 0;
@@ -190,6 +191,33 @@ export async function resolveAgentRouting(
     .filter((result) => result.combinedScore > 0)
     .sort((left, right) => right.combinedScore - left.combinedScore)
     .slice(0, 5);
+
+  const rerankScores = await rerankCandidates(
+    raw,
+    ranked.map((result) => ({
+      id: result.name,
+      title: result.name,
+      content: [
+        result.cfg.description,
+        `Capabilities: ${(result.cfg.capabilities ?? []).join(", ")}`,
+        `Tags: ${(result.cfg.tags ?? []).join(", ")}`,
+        `Tools: ${(result.cfg.tools ?? []).join(", ")}`,
+      ].filter(Boolean).join("\n"),
+    })),
+  );
+
+  if (rerankScores) {
+    ranked = ranked
+      .map((result) => {
+        const rerankScore = rerankScores.get(result.name);
+        if (rerankScore === undefined) return result;
+        return {
+          ...result,
+          combinedScore: Math.max(0, Math.min(1, result.combinedScore * 0.7 + rerankScore * 0.3)),
+        };
+      })
+      .sort((left, right) => right.combinedScore - left.combinedScore);
+  }
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
   const weakCandidates = ranked
@@ -371,6 +399,7 @@ function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskSt
 }
 
 function looksLikeFailureResult(result: string): boolean {
+  if (!result.trim()) return true;
   return /\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(result.slice(0, 600));
 }
 
@@ -651,7 +680,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     request.agentName ?? "",
     ...(request.fallbackAgents ?? []),
   ]);
-  let routingTried = false;
+  let biddingTried = false;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
 
@@ -689,8 +718,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     if (candidateQueue.length === 0) {
-      if (routingTried) break;
-      if (usesAutonomousBidding && isAutonomousBiddingStarted()) {
+      if (usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
+        biddingTried = true;
         const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
         for (const bid of bids) {
           routingCandidateMap.set(bid.agentName, {
@@ -704,17 +733,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
       if (candidateQueue.length === 0) {
         const routingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
-        for (const candidate of routingCandidates) {
-          routingCandidateMap.set(candidate.name, {
-            confidence: candidate.confidence,
-            matchedTerms: candidate.matchedTerms,
-            score: candidate.score,
+        if (routingCandidates.length > 0) {
+          const topCandidate = routingCandidates[0]!;
+          routingCandidateMap.set(topCandidate.name, {
+            confidence: topCandidate.confidence,
+            matchedTerms: topCandidate.matchedTerms,
+            score: topCandidate.score,
           });
+          candidateQueue.push(topCandidate.name);
         }
-        candidateQueue = routingCandidates.map(candidate => candidate.name);
       }
 
-      routingTried = true;
       if (candidateQueue.length === 0) break;
     }
 
@@ -971,10 +1000,22 @@ registerTool({
     const completed = new Set<string>();
     const failed = new Set<string>();
     const blocked = new Set<string>();
+    const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
 
     for (const node of rawNodes) {
       getOrCreateSwarmTask(ctx, node.id, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
     }
+
+    // Emit graph-level lifecycle event
+    emitSwarmEvent("graph_started", {
+      sessionId: ctx.sessionId,
+      taskId: graphId,
+      task: String(args["objective"] ?? "Swarm task graph"),
+      data: {
+        nodeCount: rawNodes.length,
+        nodeIds: rawNodes.map(n => n.id),
+      },
+    });
 
     while (remaining.size > 0) {
       for (const [nodeId, node] of [...remaining.entries()]) {
@@ -985,6 +1026,12 @@ registerTool({
           publishSwarmState(ctx);
           blocked.add(nodeId);
           remaining.delete(nodeId);
+
+          emitSwarmEvent("graph_node_blocked", {
+            sessionId: ctx.sessionId,
+            taskId: nodeId,
+            data: { graphId, reason: "dependency_failed" },
+          });
         }
       }
 
@@ -996,9 +1043,30 @@ registerTool({
           task.error = task.error ?? "Task graph could not make progress; check dependencies for cycles.";
           publishSwarmState(ctx);
           blocked.add(nodeId);
+
+          emitSwarmEvent("graph_node_blocked", {
+            sessionId: ctx.sessionId,
+            taskId: nodeId,
+            data: { graphId, reason: "cycle_detected" },
+          });
         }
         remaining.clear();
         break;
+      }
+
+      // Emit ready events for all nodes about to execute
+      for (const node of ready) {
+        emitSwarmEvent("graph_node_ready", {
+          sessionId: ctx.sessionId,
+          taskId: node.id,
+          agentName: node.agentName,
+          task: node.task,
+          data: {
+            graphId,
+            dependsOn: node.dependsOn ?? [],
+            completedDeps: [...completed],
+          },
+        });
       }
 
       const results = await Promise.all(ready.map(async (node) => ({
@@ -1021,6 +1089,18 @@ registerTool({
         else failed.add(node.id);
       }
     }
+
+    // Emit graph completion event
+    emitSwarmEvent("graph_completed", {
+      sessionId: ctx.sessionId,
+      taskId: graphId,
+      data: {
+        completedNodes: [...completed],
+        failedNodes: [...failed],
+        blockedNodes: [...blocked],
+        success: failed.size === 0,
+      },
+    });
 
     const summary = rawNodes.map((node) => {
       const task = swarmState.tasks[node.id];

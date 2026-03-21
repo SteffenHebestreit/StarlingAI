@@ -41,6 +41,15 @@ export const ModelConfigSchema = z.object({
   repeatPenalty: z.number().min(0.5).max(2).optional(),
   seed: z.number().int().optional(),
   embeddingModel: z.string().max(200).optional(),
+  /** Optional dedicated endpoint for embeddings when they must run on a separate server from the main chat model. */
+  embeddingBaseUrl: z.string().url().optional(),
+  /** Optional API key for the dedicated embedding endpoint. */
+  embeddingApiKey: z.string().optional(),
+  /** Enable or disable extended chain-of-thought reasoning for Qwen3.5 models.
+   *  true  → sends chat_template_kwargs: { enable_thinking: true }  (temp 0.6 / top_p 0.95 auto-applied unless overridden)
+   *  false → sends chat_template_kwargs: { enable_thinking: false } (temp 0.7 / top_p 0.8  auto-applied unless overridden)
+   *  undefined → no thinking parameter sent (model default) */
+  enableThinking: z.boolean().optional(),
 });
 
 export const RateLimitSchema = z.object({
@@ -165,6 +174,10 @@ export const MultimodalFileServiceSchema = MultimodalServiceSchema.extend({
    *  Format: same as agents.defaults.model.primary, e.g. "lmstudio/qwen2-vl-7b-instruct"
    *  When set, the gateway encodes the image as base64 and calls the LM Studio vision API. */
   visionModel: z.string().min(1).optional(),
+  /** Optional dedicated OpenAI-compatible endpoint for the vision model fallback. */
+  visionBaseUrl: z.string().url().optional(),
+  /** Optional API key for the dedicated vision endpoint. */
+  visionApiKey: z.string().optional(),
 });
 
 export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
@@ -174,7 +187,7 @@ export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
 
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   baseUrl: z.string().url().default("http://qwen3-tts-service:5004"),
-  model: z.string().min(1).default("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+  model: z.string().min(1).default("Qwen/Qwen3-TTS-12Hz-0.6B-Instruct"),
   defaultLanguage: z.string().min(2).default("English"),
   defaultSpeaker: z.string().min(1).default("Vivian"),
   defaultVoiceId: z.string().min(1).optional(),
@@ -185,6 +198,19 @@ export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   speakReplySummary: z.boolean().default(false),
   /** Maximum number of spoken sentences in the auto-generated reply summary. */
   speakReplySummaryMaxSentences: z.number().int().min(1).max(5).default(3),
+});
+
+export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
+  baseUrl: z.string().url().default("http://image-generation-service:5005"),
+  model: z.string().min(1).default("black-forest-labs/FLUX.1-schnell"),
+  defaultWidth: z.number().int().min(256).max(2048).default(768),
+  defaultHeight: z.number().int().min(256).max(2048).default(768),
+  defaultSteps: z.number().int().min(1).max(100).default(4),
+  defaultGuidanceScale: z.number().min(0).max(20).default(0),
+  /** Disable CPU offloading when the GPU has enough VRAM (>= 24 GB). */
+  cpuOffload: z.boolean().default(true),
+  /** Default negative prompt appended to every generate_image call unless the agent supplies one. */
+  defaultNegativePrompt: z.string().optional(),
 });
 
 export const MultimodalWakeWordSchema = z.object({
@@ -201,6 +227,20 @@ export const MultimodalSchema = z.object({
   stt: MultimodalSpeechToTextSchema.default({}),
   tts: MultimodalTextToSpeechSchema.default({}),
   wakeWord: MultimodalWakeWordSchema.default({}),
+  imageGeneration: MultimodalImageGenerationSchema.optional(),
+});
+
+export const RetrievalRerankerSchema = z.object({
+  enabled: z.boolean().default(false),
+  baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
+  apiKey: z.string().default("lm-studio"),
+  model: z.string().min(1).default("Qwen/Qwen3-Reranker-4B"),
+  timeoutMs: z.number().int().min(1000).max(120000).default(15000),
+  topK: z.number().int().min(2).max(12).default(6),
+});
+
+export const RetrievalSchema = z.object({
+  reranker: RetrievalRerankerSchema.default({}),
 });
 
 // ─── MCP Server configuration ────────────────────────────────────────────────
@@ -398,6 +438,12 @@ export const WebhooksSchema = z.record(WebhookToolSchema);
 export type WebhookToolConfig = z.infer<typeof WebhookToolSchema>;
 
 
+// ─── Pentest service ──────────────────────────────────────────────────────────
+
+export const PentestSchema = z.object({
+  serviceUrl: z.string().url().default("http://kali-pentest:5010"),
+});
+
 // ─── Guardrails ───────────────────────────────────────────────────────────────
 
 export const GuardrailsSchema = z.object({
@@ -405,6 +451,17 @@ export const GuardrailsSchema = z.object({
   outputSecretScan: z.boolean().default(true),
   maxInputLength: z.number().int().min(100).max(100000).default(32000),
   sandboxShellExec: z.boolean().default(true), // ALWAYS sandbox shell — hard override in code
+  modelModeration: z.object({
+    enabled: z.boolean().default(false),
+    baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
+    apiKey: z.string().default("lm-studio"),
+    model: z.string().min(1).default("Qwen/Qwen3Guard-Gen-4B"),
+    timeoutMs: z.number().int().min(1000).max(120000).default(15000),
+    moderateInputs: z.boolean().default(true),
+    moderateToolOutputs: z.boolean().default(true),
+    maxChars: z.number().int().min(256).max(32000).default(6000),
+    blockOn: z.enum(["unsafe", "controversial_or_unsafe"]).default("unsafe"),
+  }).default({}),
 });
 
 // ─── Scenes ───────────────────────────────────────────────────────────────────
@@ -459,10 +516,12 @@ export const ConfigSchema = z.object({
   gateway: GatewaySchema.default({}),
   guardrails: GuardrailsSchema.default({}),
   multimodal: MultimodalSchema.default({}),
+  retrieval: RetrievalSchema.default({}),
   mcp: McpConfigSchema.default({}),
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
+  pentest: PentestSchema.default({}),
   workspacePath: z.string().default("/workspace"),
 });
 

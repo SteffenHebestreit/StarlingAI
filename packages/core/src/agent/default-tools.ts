@@ -13,6 +13,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "synthesize_speech",
   "list_tts_voices",
   "analyze_image",
+  "generate_image",
   "get_site_credentials",
   "browser_navigate",
   "browser_snapshot",
@@ -21,6 +22,17 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "browser_type",
   "browser_select_option",
   "browser_screenshot",
+  // Pentest tools — available to main assistant; active tools require PENTEST_SCOPE
+  "searchsploit_query",
+  "pentest_report",
+  "nmap_scan",
+  "nikto_scan",
+  "gobuster_scan",
+  "sqlmap_scan",
+  "hydra_attack",
+  "metasploit_exec",
+  "pentest_exec",
+  "pentest_set_scope",
 ] as const;
 
 export const ORCHESTRATION_TOOL_NAMES = [

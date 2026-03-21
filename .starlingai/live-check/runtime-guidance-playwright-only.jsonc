@@ -1,0 +1,14 @@
+{
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "outputPath": "./.starlingai/live-check/runtime-guidance-playwright-only-report.json",
+  "cases": [
+    {
+      "name": "playwright-docs-natural",
+      "message": "Find the official Playwright tracing documentation and summarize the main ways to record a trace.",
+      "expectToolIncludes": ["web_search"],
+      "expectTextIncludes": ["Playwright"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 60000
+    }
+  ]
+}
