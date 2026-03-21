@@ -1,0 +1,153 @@
+services:
+  # Optional OpenAI-compatible model servers for checkpoints that LM Studio
+  # cannot host or download reliably. This overlay is a vLLM-oriented template.
+  # Replace image/command per service if you prefer SGLang, llama.cpp server,
+  # TGI, or host-side processes exposing the same OpenAI-compatible routes.
+
+  qwen3-coder-openai:
+    image: ${QWEN_CODER_SERVER_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["model-servers", "coder-model"]
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${QWEN_CODER_MODEL:-Qwen/Qwen3-Coder-30B-A3B-Instruct}
+      - --served-model-name
+      - ${QWEN_CODER_SERVED_NAME:-Qwen/Qwen3-Coder-30B-A3B-Instruct}
+      - --api-key
+      - ${QWEN_CODER_API_KEY:-local-vllm}
+      - --max-model-len
+      - ${QWEN_CODER_MAX_MODEL_LEN:-32768}
+      - --tensor-parallel-size
+      - ${QWEN_CODER_TP_SIZE:-1}
+      - --gpu-memory-utilization
+      - ${QWEN_CODER_GPU_UTIL:-0.92}
+      - --trust-remote-code
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    shm_size: "16gb"
+    networks:
+      - starlingai-internal
+
+  qwen3-vision-openai:
+    image: ${QWEN_VISION_SERVER_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["model-servers", "vision-model"]
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${QWEN_VISION_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --served-model-name
+      - ${QWEN_VISION_SERVED_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --api-key
+      - ${QWEN_VISION_API_KEY:-local-vision}
+      - --max-model-len
+      - ${QWEN_VISION_MAX_MODEL_LEN:-16384}
+      - --tensor-parallel-size
+      - ${QWEN_VISION_TP_SIZE:-1}
+      - --gpu-memory-utilization
+      - ${QWEN_VISION_GPU_UTIL:-0.9}
+      - --limit-mm-per-prompt
+      - image=4
+      - --trust-remote-code
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    shm_size: "16gb"
+    networks:
+      - starlingai-internal
+
+  qwen3-reranker-openai:
+    image: ${QWEN_RERANKER_SERVER_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["model-servers", "reranker-model"]
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${QWEN_RERANKER_MODEL:-Qwen/Qwen3-Reranker-4B}
+      - --served-model-name
+      - ${QWEN_RERANKER_SERVED_NAME:-Qwen/Qwen3-Reranker-4B}
+      - --api-key
+      - ${QWEN_RERANKER_API_KEY:-reranker}
+      - --max-model-len
+      - ${QWEN_RERANKER_MAX_MODEL_LEN:-8192}
+      - --gpu-memory-utilization
+      - ${QWEN_RERANKER_GPU_UTIL:-0.85}
+      - --trust-remote-code
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    shm_size: "8gb"
+    networks:
+      - starlingai-internal
+
+  qwen3guard-openai:
+    image: ${QWEN_GUARD_SERVER_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["model-servers", "guard-model"]
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${QWEN_GUARD_MODEL:-Qwen/Qwen3Guard-Gen-4B}
+      - --served-model-name
+      - ${QWEN_GUARD_SERVED_NAME:-Qwen/Qwen3Guard-Gen-4B}
+      - --api-key
+      - ${QWEN_GUARD_API_KEY:-guard}
+      - --max-model-len
+      - ${QWEN_GUARD_MAX_MODEL_LEN:-8192}
+      - --gpu-memory-utilization
+      - ${QWEN_GUARD_GPU_UTIL:-0.85}
+      - --trust-remote-code
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    shm_size: "8gb"
+    networks:
+      - starlingai-internal
+
+  qwen3-embedding-openai:
+    image: ${QWEN_EMBED_SERVER_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["model-servers", "embedding-model"]
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - ${QWEN_EMBED_MODEL:-Qwen/Qwen3-Embedding-8B}
+      - --served-model-name
+      - ${QWEN_EMBED_SERVED_NAME:-Qwen/Qwen3-Embedding-8B}
+      - --api-key
+      - ${QWEN_EMBED_API_KEY:-local-embed}
+      - --task
+      - embed
+      - --max-model-len
+      - ${QWEN_EMBED_MAX_MODEL_LEN:-8192}
+      - --gpu-memory-utilization
+      - ${QWEN_EMBED_GPU_UTIL:-0.8}
+      - --trust-remote-code
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - gc-qwen-model-cache:/root/.cache/huggingface
+    shm_size: "8gb"
+    networks:
+      - starlingai-internal

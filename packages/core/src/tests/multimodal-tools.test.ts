@@ -28,12 +28,14 @@ const BASE_CONFIG = {
     stt: {
       baseUrl: "http://stt.local",
       timeoutMs: 5_000,
-      model: "whisper-1",
+      model: "Qwen/Qwen3-ASR-1.7B",
     },
     tts: {
       baseUrl: "http://tts.local",
       timeoutMs: 5_000,
-      defaultLanguage: "en",
+      model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+      defaultLanguage: "English",
+      defaultSpeaker: "Vivian",
       defaultQuality: "medium",
     },
   },
@@ -279,15 +281,32 @@ describe("multimodal and browser direct tools", () => {
   // ── list_tts_voices ────────────────────────────────────────────────────────
 
   it("lists TTS voices from the configured backend", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      voices: [
-        { id: "en_US-amy-medium", name: "Amy" },
-        { id: "en_US-joe-medium", name: "Joe" },
-      ],
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    })));
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/voices")) {
+        return new Response(JSON.stringify({
+          voices: [
+            { id: "saved-amy", name: "Amy", lang: "English" },
+            { id: "saved-joe", name: "Joe", lang: "German" },
+          ],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/speakers")) {
+        return new Response(JSON.stringify({ speakers: ["Vivian", "Ryan"] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({
+        models: { "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "voice_clone"] } },
+        current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }));
 
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("list_tts_voices");
@@ -370,34 +389,54 @@ describe("multimodal and browser direct tools", () => {
 
   it("sends voice and language overrides in the TTS request body", async () => {
     const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
-    const fetchMock = vi.fn(async () => new Response(fakeWav, {
-      status: 200,
-      headers: { "Content-Type": "audio/wav" },
-    }));
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/load_model")) {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const body = JSON.parse(String(init?.body));
+      expect(body.lang).toBe("German");
+      expect(body.speaker).toBe("de_DE-thorsten-medium");
+      expect(body.text).toBe("Guten Tag");
+      return new Response(fakeWav, {
+        status: 200,
+        headers: { "Content-Type": "audio/wav" },
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("synthesize_speech");
 
     await tool!.execute(
-      { text: "Guten Tag", voice: "de_DE-thorsten-medium", language: "de", outputPath: "de.wav" },
+      { text: "Guten Tag", speaker: "de_DE-thorsten-medium", language: "de", outputPath: "de.wav" },
       { sessionId: "session-tts-de", workspacePath: tempDir },
     );
 
-    const ttsCall = fetchMock.mock.calls[0] as unknown[] | undefined;
+    const ttsCall = fetchMock.mock.calls[1] as unknown[] | undefined;
     const initArg = ttsCall?.[1] as RequestInit;
     const body = JSON.parse(String(initArg.body));
-    expect(body.voice).toBe("de_DE-thorsten-medium");
-    expect(body.language).toBe("de");
+    expect(body.speaker).toBe("de_DE-thorsten-medium");
+    expect(body.lang).toBe("German");
     expect(body.text).toBe("Guten Tag");
   });
 
   it("posts to the correct TTS URL", async () => {
     const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
-    const fetchMock = vi.fn(async () => new Response(fakeWav, {
-      status: 200,
-      headers: { "Content-Type": "audio/wav" },
-    }));
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/load_model")) {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(fakeWav, {
+        status: 200,
+        headers: { "Content-Type": "audio/wav" },
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const { getTool } = await import("../tools/registry.js");
@@ -408,7 +447,7 @@ describe("multimodal and browser direct tools", () => {
       workspacePath: tempDir,
     });
 
-    const ttsUrlCall = fetchMock.mock.calls[0] as unknown[] | undefined;
+    const ttsUrlCall = fetchMock.mock.calls[1] as unknown[] | undefined;
     const url = String(ttsUrlCall?.[0]);
     expect(url).toBe("http://tts.local/tts");
   });
@@ -518,6 +557,51 @@ describe("multimodal and browser direct tools", () => {
     expect(body.messages[0].content).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "image_url" })]),
     );
+  });
+
+  it("prefers a dedicated vision endpoint when configured", async () => {
+    const pngBytes = Buffer.from("89504e470d0a1a0a", "hex");
+    writeFileSync(join(tempDir, "dedicated-vision.png"), pngBytes);
+
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        files: {
+          ...realConfig.multimodal.files,
+          visionBaseUrl: "http://vision-dedicated.local/v1",
+          visionApiKey: "vision-key",
+        },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "Dedicated vision endpoint." } }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("analyze_image");
+
+      await tool!.execute({ path: "dedicated-vision.png", prompt: "Describe the image" }, {
+        sessionId: "session-dedicated-vision",
+        workspacePath: tempDir,
+      });
+
+      const visionCall = fetchMock.mock.calls[0] as unknown[] | undefined;
+      const url = String(visionCall?.[0]);
+      const init = visionCall?.[1] as RequestInit;
+      expect(url).toBe("http://vision-dedicated.local/v1/chat/completions");
+      expect(init.headers).toMatchObject({ Authorization: "Bearer vision-key" });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("returns failure when no vision model is configured for analyze_image", async () => {

@@ -27,6 +27,11 @@ const log = childLogger("agent:sub-agent");
 
 const DEFAULT_MAX_ITERATIONS = 5;
 
+function normalizeSubAgentOutput(content: string | null | undefined): string {
+  const normalized = typeof content === "string" ? content.trim() : "";
+  return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
+}
+
 export interface SubAgentRunOptions {
   agentName: string;
   task: string;
@@ -283,7 +288,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
-        let result = response.content ?? "(no response)";
+        let result = normalizeSubAgentOutput(response.content);
 
         // Scan for secrets before returning to parent session
         const outputScan = scanOutput(result);
@@ -423,8 +428,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
 
-        if (synthResponse.tool_calls.length === 0 && synthResponse.content) {
-          let result = synthResponse.content;
+        if (synthResponse.tool_calls.length === 0) {
+          let result = normalizeSubAgentOutput(synthResponse.content);
           const outputScan = scanOutput(result);
           if (!outputScan.safe && outputScan.redacted) {
             logAudit(

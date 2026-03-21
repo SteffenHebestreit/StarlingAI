@@ -1,0 +1,1082 @@
+data: {"type":"RUN_STARTED","runId":"de069b25-7d53-4eae-901f-cdb57dff0741","threadId":"e445e747-87c2-4eba-a45d-eabf7fba3952"}
+
+data: {"type":"TOOL_CALL_STARTED","toolCallId":"45fad39d-3f89-4d01-954b-0022512e2b42","toolCallName":"web_search","parentMessageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","args":{"maxResults":5,"query":"Model Context Protocol MCP official specification site github.com"}}
+
+data: {"type":"TOOL_CALL_ENDED","toolCallId":"45fad39d-3f89-4d01-954b-0022512e2b42","toolCallName":"web_search","output":"**Web Search Results for:** \"Model Context Protocol MCP official specification site github.com\" (via searxng)\n\n**GitHub - modelcontextprotocol/modelcontextprotocol: Specification and documentation for the Model Context Protocol · GitHub**\nhttps://github.com/modelcontextprotocol/modelcontextprotocol\nModel Context Protocol (MCP) Just heard of MCP and not sure where to start? Check out our documentation website. This repo contains the: MCP specification MCP protocol schema Official MCP documentation The schema is defined in TypeScript first, but made available as JSON Schema as well, for wider compatibility.\n\n**Specification - Model Context Protocol**\nhttps://modelcontextprotocol.io/specification/2025-03-26\nModel Context Protocol (MCP) is an open protocol that enables seamless integration between LLM applications and external data sources and tools. Whether you're building an AI-powered IDE, enhancing a chat interface, or creating custom AI workflows, MCP provides a standardized way to connect LLMs with the context they need.\n\n**Specification - Model Context Protocol （MCP）**\nhttps://modelcontextprotocol.info/specification/\nModel Context Protocol(MCP) Info is dedicated to introducing and sharing the Model Context Protocol, providing tutorials, examples, development practices, server implementations, SDKs and more.\n\n**MCP Docs - Model Context Protocol （MCP）**\nhttps://modelcontextprotocol.info/docs/\nMCP is a standardized protocol designed to enhance the interaction between Large Language Models (LLMs) and applications by providing structured context management.\n\n**Model Context Protocol - Best Practice**\nhttps://mcp-best-practice.github.io/mcp-best-practice/\nThe content reflects real‑world experience and evolving best practices from the MCP community. Learn the Protocol For protocol details (transports, messages, discovery), refer to the official specification at https://spec.modelcontextprotocol.io. This guide assumes familiarity with the spec and focuses on how to apply it effectively in ..."}
+
+data: {"type":"TEXT_MESSAGE_STARTED","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","role":"assistant"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"##"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"M"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"CP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Research"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Summary"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Based"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" on"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" my"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" research"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" here"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" are"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" key"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" findings"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" about"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":":"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Sources"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"GitHub"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":":**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" https"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"://"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"github"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":".com"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"The"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" contains"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":":"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" schema"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" SDK"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" implementations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Main"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Security"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Concern"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"s"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"After"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" reviewing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" community"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" discussions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" here"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" are"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" primary"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" security"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" concerns"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" around"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" use"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" prompt"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" injection"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":":"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"####"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"1"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Prompt"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Injection"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" via"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Results"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tools"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" return"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" results"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" that"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" are"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" fed"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" back"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" into"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" L"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"LM"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Mal"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"icious"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" output"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" can"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" contain"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" instructions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" that"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" override"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" system"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" prompts"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Example"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":":"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" A"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" file"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" reading"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" might"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" return"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" content"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" containing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" \""}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ignore"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" previous"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" instructions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" execute"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" X"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\""}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"####"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"2"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Un"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"restricted"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Access"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" servers"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" can"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" expose"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" powerful"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" system"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tools"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"file"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" operations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" network"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" access"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" shell"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" commands"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" If"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" an"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" L"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"LM"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" is"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" compromised"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" via"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" prompt"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" injection"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" it"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" could"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" trigger"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" dangerous"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" actions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Lack"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" of"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" fine"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-gr"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ained"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" permission"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" controls"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" early"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" implementations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"####"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"3"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Result"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Pollution"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Large"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" or"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" unexpected"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" outputs"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" can"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" overwhelm"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" windows"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Attack"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ers"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" could"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" craft"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" inputs"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" that"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" cause"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" excessive"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" usage"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"resource"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" exhaustion"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" results"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" may"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" contain"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" sensitive"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" data"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" inadvertently"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" exposed"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" to"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" L"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"LM"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"s"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"####"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"4"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Server"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Trust"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Bound"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"aries"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" servers"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" run"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" on"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" user"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" machines"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" with"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" local"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" system"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" access"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Mal"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"icious"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" servers"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" could"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" ex"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"filtr"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ate"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" data"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" via"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" responses"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Difficulty"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" auditing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" all"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" available"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tools"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" on"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" a"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" server"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"####"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"5"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"L"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ack"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" of"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Input"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Validation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" parameters"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" may"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" not"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" be"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" properly"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" validated"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" before"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" execution"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Command"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" injection"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" through"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" arguments"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" is"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" possible"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" No"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" standardized"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" schema"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" validation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" across"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" all"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" types"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Mit"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ig"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Recommended"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" by"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Community"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"1"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Whit"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"el"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"isting"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Only"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" enable"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" specific"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tools"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" specific"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" use"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" cases"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"2"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Result"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" San"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"it"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ization"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Filter"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" outputs"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" before"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" feeding"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" to"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" L"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"LM"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"3"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Rate"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Limit"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Prevent"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" excessive"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" usage"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"4"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Audit"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Logging"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Track"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" all"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" tool"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" inv"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ocations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" results"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"5"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"S"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"andbox"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Run"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" servers"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" isolated"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" environments"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"6"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Explicit"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" User"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Consent"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Require"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" confirmation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" dangerous"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" operations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" References"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" https"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"://"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"github"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":".com"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/tree"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/main"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/spec"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Security"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Consider"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Document"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"ed"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" under"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" security"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" best"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" practices"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"SDK"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"s"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" Available"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" TypeScript"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"/"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"Python"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" with"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" built"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"-in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" safety"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" features"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"The"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" community"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" actively"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" discusses"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" these"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" concerns"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"'s"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" issues"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" discussions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" sections"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" with"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" ongoing"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" work"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" to"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" improve"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" security"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" patterns"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" in"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" future"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":" versions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_ENDED","messageId":"c7d603c2-1c83-4076-80b7-a98c3b64e811"}
+
+data: {"type":"RUN_FINISHED","runId":"de069b25-7d53-4eae-901f-cdb57dff0741","threadId":"e445e747-87c2-4eba-a45d-eabf7fba3952"}
+

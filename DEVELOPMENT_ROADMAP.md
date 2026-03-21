@@ -2,7 +2,7 @@
 
 This roadmap evolves StarlingAI from a centrally orchestrated agent system into a true decentralized "Starling Swarm" — a general-purpose agent platform governed by local rules, emergent behavior, self-healing, and robust dynamic sandboxing. The system is designed to tackle any task domain by composing the right specialists, not by building one-off pipelines.
 
-## Current State: Stages 2–7 Complete
+## Current State: Stages 2–8 Complete, Remaining Backlog in Progress
 
 The system has functional centralized orchestration with several swarm and evaluation capabilities now live:
 
@@ -29,11 +29,21 @@ The system has functional centralized orchestration with several swarm and evalu
 | Area | Current State | Impact |
 |---|---|---|
 | **Routing centralization** | All delegation paths funnel through single `resolveAgentRouting()` | No autonomous agent-to-agent discovery |
-| **Autonomous bidding (first-pass only)** | `startAutonomousBidding()` gathers ranked bids over the swarm bus; fully independent long-running bidder processes are deferred | Decentralization stops at event emission rather than process-level autonomous discovery |
+| ~~Autonomous bidding (first-pass only)~~ | ✅ Resolved — `startBidderWorker()` runs a fully independent long-running bidder process alongside first-pass `startAutonomousBidding()` | — |
 | **No dynamic replica scaling** | Per-agent concurrency caps and backpressure signals exist, but container replica count is static | Bottlenecked specialists still require manual operator tuning (requires K8s/Swarm) |
 | ~~No vector-backed shared-memory retrieval~~ | ✅ Resolved — `read_shared_facts(query=...)` uses embedding-backed lookup with keyword fallback | — |
 | ~~No cold-start timing hooks~~ | ✅ Resolved — container worker emits `READY:<ms>`; runner records `containerColdStartMs`, `containerBootstrapMs`, `containerRuntimeMs` | — |
 | ~~No adaptive timeout policy~~ | ✅ Resolved — rate-adaptive timeout derives bounded recommendation from recent outcome history | — |
+
+### Current Priority Before New Platform Work
+
+Before adding Keycloak/SSO or other new platform scope, the remaining roadmap backlog should be closed first:
+
+- ✅ Complete fully independent long-running bidder processes so swarm discovery is no longer limited to first-pass event bidding.
+- ✅ Replace the remaining centralized `run_task_graph` path with a true event-driven execution flow.
+- ✅ Finish adaptive routing improvements by re-evaluating outcome boost during fallback chains, not only at initial delegation.
+- Decide the production approach for dynamic replica scaling and resource reservation, or explicitly move it to an orchestration-specific roadmap.
+- ✅ Expand the evaluation suite depth so new agents ship with stronger regression coverage by default.
 
 ---
 
@@ -50,14 +60,17 @@ The system has functional centralized orchestration with several swarm and evalu
 - ✅ Bus lifecycle wired into gateway startup/shutdown.
 - ✅ 11 unit tests across bus delivery, event types, and lock behaviour (99 total passing).
 - ✅ First-pass autonomous bidding — `task_announced` events with `dispatchMode: "autonomous_bidding"` now gather ranked `task_bid` offers over the swarm bus before local claim/execution
-- Fully independent long-running agent processes — deferred
-- Event-driven `run_task_graph` replacement — deferred
+- ✅ Fully independent long-running bidder worker — `packages/core/src/swarm/bidder-worker.ts` runs a persistent process that scores every `task_announced` event against a keyword-based agent catalog, emits `task_bid` offers, and auto-refreshes the agent index on config changes.
+- ✅ Event-driven `run_task_graph` — emits `graph_started`, `graph_node_ready`, `graph_node_blocked`, `graph_completed` lifecycle events over the swarm bus at every state transition.
 
 Relevant code paths:
-- `packages/core/src/swarm/bus.ts` — event bus
+- `packages/core/src/swarm/bus.ts` — event bus (includes `graph_started`, `graph_node_ready`, `graph_node_blocked`, `graph_completed` event types)
 - `packages/core/src/swarm/locks.ts` — distributed locks
-- `packages/core/src/tools/sub-agent.ts` — delegation emits swarm events
+- `packages/core/src/swarm/bidder-worker.ts` — long-running bidder worker process with keyword-based scoring and periodic catalog refresh
+- `packages/core/src/tools/sub-agent.ts` — delegation emits swarm events; `run_task_graph` emits graph lifecycle events
 - `packages/core/src/agent/container-runner.ts` — `task_requeued` on heartbeat loss
+- `packages/core/src/tests/bidder-worker.test.ts` — 5 tests for bidder worker
+- `packages/core/src/tests/graph-events.test.ts` — 3 tests for graph lifecycle events
 
 ### 2.2 Container Heartbeats and Self-Healing (Rule_Heal) ✅
 
@@ -435,11 +448,24 @@ The full response is often structured (bullet lists, code, tables) and cannot be
 
 ---
 
+## Deferred: Keycloak / SSO Support
+
+Keycloak-based single sign-on and delegated token support remain valid future work, but they are explicitly deferred until the existing roadmap backlog is complete.
+
+When this work resumes, it should cover two areas:
+
+- OIDC login for the dashboard and gateway.
+- Delegated token handling for protected MCP endpoints and downstream services.
+
+That future phase should only be reopened after the current unfinished swarm, routing, scaling, and evaluation items above are closed or intentionally moved to a later operations roadmap.
+
+---
+
 ## Delivery Sequence
 
 | Phase | Focus | Status |
 |---|---|---|
-| **Phase 1** | Event-driven swarm bus + container heartbeats | ✅ Complete (bus infrastructure + heartbeats + first-pass bidding; fully independent bidders deferred) |
+| **Phase 1** | Event-driven swarm bus + container heartbeats | ✅ Complete (bus infrastructure + heartbeats + first-pass bidding + long-running bidder worker + event-driven task graph) |
 | **Phase 2** | Emergent architect + collective memory | ✅ Complete (architect + collective memory + concurrency) |
 | **Phase 3** | Warden agent + adaptive routing + circuit breakers | ✅ Complete (Warden + routing rationale + circuit breaker + swarm morphing) |
 | **Phase 4** | Agent catalog enrichment + evaluation CI + model tuning | ✅ Complete |
@@ -447,6 +473,7 @@ The full response is often structured (bullet lists, code, tables) and cannot be
 | **Phase 6** | Performance SLOs + latency budgets + regression gates | ✅ Complete (6.1 + 6.2 + 6.3) |
 | **Phase 7** | Multimodal tools + human-in-the-loop approvals + intervention diagnostics | ✅ Complete (7.1 + 7.2 + 7.3) |
 | **Phase 8** | Voice interaction UX — smart spoken summaries + speak-reply toggle | ✅ Complete (8.1) |
+| **Future** | Single sign-on + federated Keycloak token access for agents and MCP endpoints | Deferred until current backlog is complete |
 
 ## Success Criteria
 

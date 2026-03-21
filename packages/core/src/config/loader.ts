@@ -59,7 +59,9 @@ export function watchConfig(onChange: (config: Config, changedSections: string[]
   }
 }
 
-export function resetConfigForTests(): void {
+export function resetConfigForTests(): void { 
+  import("node:fs").then(fs => fs.unwatchFile(BASE_CONFIG_PATH)); 
+  import("node:fs").then(fs => fs.unwatchFile(MUTABLE_CONFIG_PATH));
   _config = null;
 }
 

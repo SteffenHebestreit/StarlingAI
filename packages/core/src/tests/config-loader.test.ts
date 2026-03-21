@@ -29,12 +29,14 @@ describe("config loader mutable overlay", () => {
         stt: {
           baseUrl: "http://stt-base",
           timeoutMs: 30_000,
-          model: "whisper-1",
+          model: "Qwen/Qwen3-ASR-1.7B",
         },
         tts: {
           baseUrl: "http://tts-base",
           timeoutMs: 30_000,
-          defaultLanguage: "en_US",
+          model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+          defaultLanguage: "English",
+          defaultSpeaker: "Vivian",
           defaultQuality: "medium",
         },
         wakeWord: {
@@ -55,7 +57,7 @@ describe("config loader mutable overlay", () => {
 
     try {
       const initialConfig = configLoader.loadConfig();
-      expect(initialConfig.multimodal.stt.model).toBe("whisper-1");
+      expect(initialConfig.multimodal.stt.model).toBe("Qwen/Qwen3-ASR-1.7B");
       expect(existsSync(mutableConfigPath)).toBe(false);
 
       const updatedConfig = configLoader.updateConfig((raw) => {
@@ -69,12 +71,14 @@ describe("config loader mutable overlay", () => {
           stt: {
             baseUrl: "http://stt-overlay",
             timeoutMs: 45_000,
-            model: "whisper-large-v3",
+            model: "Qwen/Qwen3-ASR-1.7B-quantized",
           },
           tts: {
             baseUrl: "http://tts-overlay",
             timeoutMs: 45_000,
-            defaultLanguage: "de_DE",
+            model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+            defaultLanguage: "German",
+            defaultSpeaker: "Ryan",
             defaultQuality: "high",
           },
           wakeWord: {
@@ -87,21 +91,21 @@ describe("config loader mutable overlay", () => {
         };
       });
 
-      expect(updatedConfig.multimodal.stt.model).toBe("whisper-large-v3");
+      expect(updatedConfig.multimodal.stt.model).toBe("Qwen/Qwen3-ASR-1.7B-quantized");
       expect(updatedConfig.multimodal.wakeWord.language).toBe("de-DE");
       expect(existsSync(mutableConfigPath)).toBe(true);
 
       const baseContents = readFileSync(baseConfigPath, "utf8");
-      expect(baseContents).toContain("whisper-1");
-      expect(baseContents).not.toContain("whisper-large-v3");
+      expect(baseContents).toContain("Qwen/Qwen3-ASR-1.7B");
+      expect(baseContents).not.toContain("Qwen/Qwen3-ASR-1.7B-quantized");
 
       const mutableContents = readFileSync(mutableConfigPath, "utf8");
-      expect(mutableContents).toContain("whisper-large-v3");
+      expect(mutableContents).toContain("Qwen/Qwen3-ASR-1.7B-quantized");
       expect(mutableContents).toContain("Hallo Guarded");
 
       configLoader.resetConfigForTests();
       const reloadedConfig = configLoader.loadConfig();
-      expect(reloadedConfig.multimodal.stt.model).toBe("whisper-large-v3");
+      expect(reloadedConfig.multimodal.stt.model).toBe("Qwen/Qwen3-ASR-1.7B-quantized");
       expect(reloadedConfig.multimodal.files.baseUrl).toBe("http://files-overlay");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

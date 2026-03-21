@@ -19,6 +19,7 @@
     "gateway:dev": "pnpm --filter @starlingai/core dev",
     "web:dev": "pnpm --filter @starlingai/web dev",
     "agents:evaluate": "pnpm --filter @starlingai/core agents:evaluate",
+    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate",
     "setup": "node scripts/setup.mjs",
     "token": "node scripts/gen-token.mjs"
   }

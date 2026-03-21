@@ -4,10 +4,11 @@
  * Subscribes to the live audit stream to track rolling-window counters for
  * four classes of suspicious behaviour:
  *
- *   tool_storm         — a session accumulates >15 tool calls within 5 minutes
- *   repeated_failures  — an agent fails ≥3 times within 2 minutes
- *   tool_escape_attempt — a sub-agent has ≥3 blocked tool calls in one session
- *   rate_limit_flood   — a channel sender is rate-limited ≥5 times within 1 minute
+ *   tool_storm              — a session accumulates >15 tool calls within 5 minutes
+ *   repeated_failures       — an agent fails ≥3 times within 2 minutes
+ *   tool_escape_attempt     — a sub-agent has ≥3 blocked tool calls in one session
+ *   rate_limit_flood        — a channel sender is rate-limited ≥5 times within 1 minute
+ *   repeated_identical_output — a tool returns the same output ≥3 times in a row (loop)
  *
  * On detection:
  *   - A `warden_alert` audit event is emitted (visible in dashboard and JSONL).
@@ -71,7 +72,7 @@ let _unsubscribeAudit: (() => void) | null = null;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "turn_slo_breach" | "tool_failure_spike";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -143,6 +144,25 @@ export function startWarden(): void {
         hits.push(now);
         _rateLimitHits.set(key, hits);
       }
+    }
+
+    // ── Identical output loop detection ──────────────────────────────────────
+    // Fires immediately when the runtime reports a tool returning the same output
+    // multiple times in a row — indicating the agent is stuck in a loop.
+    if (
+      event.type === "tool_call_completed" &&
+      event.data["repeatedIdenticalOutput"] === true &&
+      event.sessionId
+    ) {
+      const toolName = String(event.data["tool"] ?? "unknown");
+      const alert = makeAlert(
+        "repeated_identical_output",
+        "warn",
+        `${toolName}@${event.sessionId.slice(0, 20)}`,
+        `Tool '${toolName}' returned identical output repeatedly in session ${event.sessionId.slice(0, 20)} — loop detected`,
+        "logged",
+      );
+      emitAlert(alert);
     }
 
     // ── Turn SLO breach detection ────────────────────────────────────────────
@@ -226,6 +246,10 @@ function sweepAnomalies(): WardenAlert[] {
   // 1. Tool storm ──────────────────────────────────────────────────────────────
   for (const [sessionId, timestamps] of _toolCallsBySession) {
     const recent = timestamps.filter(t => now - t < TOOL_STORM_WINDOW_MS);
+    if (recent.length === 0) {
+      _toolCallsBySession.delete(sessionId);
+      continue;
+    }
     _toolCallsBySession.set(sessionId, recent);
 
     if (recent.length >= TOOL_STORM_THRESHOLD) {
@@ -246,6 +270,10 @@ function sweepAnomalies(): WardenAlert[] {
   // 2. Suspicious tool failure spike ─────────────────────────────────────────
   for (const [sessionId, issues] of _toolIssuesBySession) {
     const recent = issues.filter(issue => now - issue.ts < TOOL_ISSUE_WINDOW_MS);
+    if (recent.length === 0) {
+      _toolIssuesBySession.delete(sessionId);
+      continue;
+    }
     _toolIssuesBySession.set(sessionId, recent);
 
     if (recent.length >= TOOL_ISSUE_THRESHOLD) {
@@ -269,6 +297,10 @@ function sweepAnomalies(): WardenAlert[] {
   // 3. Repeated agent failures ─────────────────────────────────────────────────
   for (const [agentName, timestamps] of _agentFailures) {
     const recent = timestamps.filter(t => now - t < FAILURE_WINDOW_MS);
+    if (recent.length === 0) {
+      _agentFailures.delete(agentName);
+      continue;
+    }
     _agentFailures.set(agentName, recent);
 
     if (recent.length >= FAILURE_THRESHOLD) {
@@ -327,6 +359,10 @@ function sweepAnomalies(): WardenAlert[] {
   // 5. Rate limit flood ────────────────────────────────────────────────────────
   for (const [key, timestamps] of _rateLimitHits) {
     const recent = timestamps.filter(t => now - t < RATE_FLOOD_WINDOW_MS);
+    if (recent.length === 0) {
+      _rateLimitHits.delete(key);
+      continue;
+    }
     _rateLimitHits.set(key, recent);
 
     if (recent.length >= RATE_FLOOD_THRESHOLD) {

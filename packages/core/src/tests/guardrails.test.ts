@@ -109,6 +109,25 @@ describe("tool-tiers", () => {
     expect(tier.requiresPerCallApproval).toBe(true);
   });
 
+  it("classifies remote infrastructure tools as privileged", () => {
+    expect(getToolTier("ssh_exec").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("ssh_exec").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("ssh_upload").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("ssh_upload").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("ssh_download").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("ssh_download").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("ansible_playbook").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("ansible_playbook").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("ansible_task").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("ansible_task").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("proxmox_vm").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("proxmox_vm").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("terraform_exec").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("terraform_exec").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("service_check").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("service_check").requiresPerCallApproval).toBe(true);
+  });
+
   it("blocks Tier 4 tools", () => {
     expect(isToolAllowed("host_shell")).toBe(false);
     expect(isToolAllowed("docker_socket")).toBe(false);

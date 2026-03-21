@@ -38,12 +38,24 @@ export interface ToolInterventionInput {
   error?: string;
   malformedArguments?: boolean;
   outputBlocked?: boolean;
+  repeatedIdenticalOutput?: boolean;
 }
 
 export function classifyToolIntervention(input: ToolInterventionInput): InterventionNotice | null {
   const toolName = input.toolName;
   const normalizedError = (input.error ?? "").toLowerCase();
   const normalizedOutput = (input.output ?? "").trim();
+
+  if (input.repeatedIdenticalOutput) {
+    return {
+      reasonCode: "repeated_identical_output",
+      severity: "warn",
+      toolName,
+      summary: `${toolName} is stuck returning the same output`,
+      detail: `${toolName} has returned identical output multiple times in a row. The run is looping. Stop this run or start a fresh one with a different approach.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
 
   if (input.malformedArguments) {
     return {
@@ -137,6 +149,16 @@ export function buildWardenIntervention(
   detail: string,
   subject?: string,
 ): InterventionNotice {
+  if (reasonCode === "repeated_identical_output") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Agent stuck in a tool loop",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} The agent is calling the same tool repeatedly with identical results. Stop this run and start a fresh one with a narrower scope.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
   if (reasonCode === "tool_failure_spike") {
     return {
       reasonCode,

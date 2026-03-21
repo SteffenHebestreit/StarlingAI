@@ -7,6 +7,7 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, basename, extname } from "node:path";
 import JSON5 from "json5";
+import { z } from "zod";
 import { WebSocketServer } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
@@ -29,12 +30,14 @@ import { getChannelStatuses } from "../channels/registry.js";
 import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
 import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
+import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
 import { getConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
-import { MultimodalSchema } from "../config/schema.js";
+import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
+import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("gateway");
@@ -44,6 +47,31 @@ export function createGateway() {
   const app = new Hono();
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
   const currentMultimodalConfig = () => getConfig().multimodal;
+  const ModelEndpointGuardSchema = z.object({
+    enabled: z.boolean(),
+    model: z.string().min(1),
+    baseUrl: z.string().url(),
+    apiKey: z.string(),
+  });
+  const ModelEndpointConfigSchema = z.object({
+    orchestrator: ModelConfigSchema.pick({
+      primary: true,
+      baseUrl: true,
+      apiKey: true,
+    }),
+    embeddings: z.object({
+      embeddingModel: z.string().min(1).optional(),
+      embeddingBaseUrl: z.string().url().optional(),
+      embeddingApiKey: z.string().optional(),
+    }),
+    reranker: RetrievalRerankerSchema.pick({
+      enabled: true,
+      model: true,
+      baseUrl: true,
+      apiKey: true,
+    }),
+    guard: ModelEndpointGuardSchema,
+  });
 
   // ── Request body size limit ──────────────────────────────────────────────
   const maxBodyBytes = config.gateway.maxBodyBytes ?? 1_048_576;
@@ -77,6 +105,41 @@ export function createGateway() {
       headers.set("Authorization", `Bearer ${apiKey}`);
     }
     return headers;
+  }
+
+  function bytesToBlob(bytes: Uint8Array, contentType: string): Blob {
+    const arrayBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    return new Blob([arrayBuffer], { type: contentType });
+  }
+
+  function currentModelEndpointConfig(cfg = getConfig()) {
+    return {
+      orchestrator: {
+        primary: cfg.agents.defaults.model.primary,
+        baseUrl: cfg.agents.defaults.model.baseUrl,
+        apiKey: cfg.agents.defaults.model.apiKey,
+      },
+      embeddings: {
+        embeddingModel: cfg.agents.defaults.model.embeddingModel,
+        embeddingBaseUrl: cfg.agents.defaults.model.embeddingBaseUrl,
+        embeddingApiKey: cfg.agents.defaults.model.embeddingApiKey,
+      },
+      reranker: {
+        enabled: cfg.retrieval.reranker.enabled,
+        model: cfg.retrieval.reranker.model,
+        baseUrl: cfg.retrieval.reranker.baseUrl,
+        apiKey: cfg.retrieval.reranker.apiKey,
+      },
+      guard: {
+        enabled: cfg.guardrails.modelModeration.enabled,
+        model: cfg.guardrails.modelModeration.model,
+        baseUrl: cfg.guardrails.modelModeration.baseUrl,
+        apiKey: cfg.guardrails.modelModeration.apiKey,
+      },
+    };
   }
 
   async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -504,7 +567,7 @@ export function createGateway() {
         const saveForm = new FormData();
         saveForm.append("name", input.saveVoiceAs);
         saveForm.append("lang", language);
-        saveForm.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+        saveForm.append("file", bytesToBlob(input.audioExample.bytes, input.audioExample.contentType), input.audioExample.filename);
         const saveResponse = await fetchWithTimeout(
           upstreamUrl(input.baseUrl, "/voices/save"),
           { method: "POST", headers: upstreamHeaders(input.apiKey), body: saveForm },
@@ -526,7 +589,7 @@ export function createGateway() {
       const formData = new FormData();
       formData.append("text", input.text);
       formData.append("lang", language);
-      formData.append("file", new Blob([input.audioExample.bytes], { type: input.audioExample.contentType }), input.audioExample.filename);
+      formData.append("file", bytesToBlob(input.audioExample.bytes, input.audioExample.contentType), input.audioExample.filename);
       const route = input.referenceText ? "/clone-with-ref-text" : "/clone";
       if (input.referenceText) formData.append("ref_text", input.referenceText);
       return fetchWithTimeout(
@@ -583,12 +646,119 @@ export function createGateway() {
     return c.json(getRuntimeStatusSnapshot());
   });
 
+  app.get("/api/model-endpoints/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const endpoints = await syncModelEndpointRuntimeStatus();
+    return c.json({
+      healthy: endpoints.every((endpoint) => endpoint.ok),
+      endpoints: endpoints.length > 0 ? endpoints : getModelEndpointHealthSnapshot(),
+    });
+  });
+
+  app.get("/api/model-endpoints/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(currentModelEndpointConfig());
+  });
+
+  app.put("/api/model-endpoints/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = ModelEndpointConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid model endpoint configuration", details: parsed.error.flatten() }, 400);
+    }
+
+    try {
+      const updatedConfig = updateConfig((raw) => {
+        const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
+        const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+        const defaultModel = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
+        const retrieval = (raw["retrieval"] as Record<string, unknown> | undefined) ?? {};
+        const reranker = (retrieval["reranker"] as Record<string, unknown> | undefined) ?? {};
+        const guardrails = (raw["guardrails"] as Record<string, unknown> | undefined) ?? {};
+        const modelModeration = (guardrails["modelModeration"] as Record<string, unknown> | undefined) ?? {};
+
+        raw["agents"] = {
+          ...agents,
+          defaults: {
+            ...defaults,
+            model: {
+              ...defaultModel,
+              primary: parsed.data.orchestrator.primary,
+              baseUrl: parsed.data.orchestrator.baseUrl,
+              apiKey: parsed.data.orchestrator.apiKey,
+              embeddingModel: parsed.data.embeddings.embeddingModel,
+              embeddingBaseUrl: parsed.data.embeddings.embeddingBaseUrl,
+              embeddingApiKey: parsed.data.embeddings.embeddingApiKey,
+            },
+          },
+        };
+
+        raw["retrieval"] = {
+          ...retrieval,
+          reranker: {
+            ...reranker,
+            enabled: parsed.data.reranker.enabled,
+            model: parsed.data.reranker.model,
+            baseUrl: parsed.data.reranker.baseUrl,
+            apiKey: parsed.data.reranker.apiKey,
+          },
+        };
+
+        raw["guardrails"] = {
+          ...guardrails,
+          modelModeration: {
+            ...modelModeration,
+            enabled: parsed.data.guard.enabled,
+            model: parsed.data.guard.model,
+            baseUrl: parsed.data.guard.baseUrl,
+            apiKey: parsed.data.guard.apiKey,
+          },
+        };
+      });
+
+      await syncModelEndpointRuntimeStatus();
+      return c.json(currentModelEndpointConfig(updatedConfig));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
   app.get("/api/multimodal/status", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const multimodalConfig = currentMultimodalConfig();
 
-    const [files, stt, tts] = await Promise.all([
+    const imageGenHealthPromise = multimodalConfig.imageGeneration
+      ? checkEndpointHealth({
+          baseUrl: multimodalConfig.imageGeneration.baseUrl,
+          apiKey: multimodalConfig.imageGeneration.apiKey,
+          timeoutMs: multimodalConfig.imageGeneration.timeoutMs,
+          path: "/health",
+        })
+      : Promise.resolve(null);
+
+    const visionModel = multimodalConfig.files.visionModel;
+    const vision = visionModel
+      ? checkEndpointHealth({
+          baseUrl: multimodalConfig.files.visionBaseUrl ?? (getConfig().providers.lmstudio?.baseUrl ?? "http://host.docker.internal:1234/v1"),
+          apiKey: multimodalConfig.files.visionApiKey ?? getConfig().providers.lmstudio?.apiKey,
+          timeoutMs: multimodalConfig.files.timeoutMs,
+          path: "/models",
+        })
+      : Promise.resolve(null);
+
+    const [files, stt, tts, imageGeneration, visionHealth] = await Promise.all([
       checkEndpointHealth({
         baseUrl: multimodalConfig.files.baseUrl,
         apiKey: multimodalConfig.files.apiKey,
@@ -602,12 +772,16 @@ export function createGateway() {
         timeoutMs: multimodalConfig.tts.timeoutMs,
         path: "/health",
       }),
+      imageGenHealthPromise,
+      vision,
     ]);
 
     return c.json({
       files,
+      vision: visionHealth,
       stt,
       tts,
+      imageGeneration,
       wakeWord: multimodalConfig.wakeWord,
     });
   });
@@ -728,8 +902,8 @@ export function createGateway() {
         const base64 = Buffer.from(imageBytes).toString("base64");
         const dataUrl = `data:${uploadedFile.type};base64,${base64}`;
         const providerConfig = getConfig().providers?.lmstudio;
-        const visionBaseUrl = (providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-        const visionApiKey = providerConfig?.apiKey ?? "lm-studio";
+        const visionBaseUrl = (multimodalConfig.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
+        const visionApiKey = multimodalConfig.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
         // Strip provider prefix (e.g. "lmstudio/qwen2-vl-7b-instruct" → "qwen2-vl-7b-instruct")
         const modelId = multimodalConfig.files.visionModel.replace(/^[^/]+\//, "");
 
@@ -837,6 +1011,75 @@ export function createGateway() {
 
     try {
       return c.json(await fetchTtsVoiceCatalog(multimodalConfig.tts));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  app.post("/api/multimodal/voices/save", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    const formData = await c.req.raw.formData();
+    const uploadedFile = formData.get("file");
+    if (!(uploadedFile instanceof File)) {
+      return c.json({ error: "file is required" }, 400);
+    }
+
+    const nameValue = formData.get("name");
+    const name = typeof nameValue === "string" ? nameValue.trim() : "";
+    if (!name) {
+      return c.json({ error: "name is required" }, 400);
+    }
+
+    const languageValue = formData.get("language");
+    const language = typeof languageValue === "string" && languageValue.trim()
+      ? normalizeQwenLanguage(languageValue.trim())
+      : normalizeQwenLanguage(multimodalConfig.tts.defaultLanguage);
+
+    try {
+      if (multimodalConfig.tts.model?.trim()) {
+        const loadModelResponse = await fetchWithTimeout(
+          upstreamUrl(multimodalConfig.tts.baseUrl, "/load_model"),
+          {
+            method: "POST",
+            headers: upstreamHeaders(multimodalConfig.tts.apiKey, { "Content-Type": "application/json" }),
+            body: JSON.stringify({ model: multimodalConfig.tts.model }),
+          },
+          multimodalConfig.tts.timeoutMs,
+        );
+        if (!loadModelResponse.ok) {
+          return new Response(JSON.stringify({ error: await extractUpstreamError(loadModelResponse, "Failed to load Qwen3 TTS model") }), {
+            status: loadModelResponse.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      }
+
+      const upstreamForm = new FormData();
+      upstreamForm.append("name", name);
+      upstreamForm.append("lang", language);
+      upstreamForm.append("file", uploadedFile, uploadedFile.name);
+
+      const upstream = await fetchWithTimeout(
+        upstreamUrl(multimodalConfig.tts.baseUrl, "/voices/save"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(multimodalConfig.tts.apiKey),
+          body: upstreamForm,
+        },
+        multimodalConfig.tts.timeoutMs,
+      );
+
+      if (!upstream.ok) {
+        return new Response(JSON.stringify({ error: await extractUpstreamError(upstream, "Saving voice sample failed") }), {
+          status: upstream.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return c.json(await parseUpstreamJsonResponse(upstream, "Saved voice response was not JSON"));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
@@ -987,8 +1230,8 @@ export function createGateway() {
     const cfg = getConfig();
     const multimodalConfig = currentMultimodalConfig();
     const providerConfig = cfg.providers?.lmstudio;
-    const visionBaseUrl = (providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-    const visionApiKey = providerConfig?.apiKey ?? "lm-studio";
+    const visionBaseUrl = (multimodalConfig.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
+    const visionApiKey = multimodalConfig.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
 
     // Use dedicated vision model if configured, otherwise fall back to default LLM
     // (qwen3.5-35b is vision-enabled so no separate model is needed)
@@ -1026,6 +1269,63 @@ export function createGateway() {
       if (!analysis) return c.json({ error: "Vision model returned empty analysis" }, 500);
 
       return c.json({ analysis, model: modelId, filename: uploadedFile.name });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // ── Image generation ─────────────────────────────────────────────────────
+  // POST /api/multimodal/generate-image
+  //   Body: { prompt, negativePrompt?, width?, height?, steps?, guidanceScale?, seed? }
+  //   Returns: { image: "<base64-png>", width, height, seed, model, elapsed_ms }
+  // Proxies to the configured image-generation service. The agent generate_image tool uses the
+  // same service directly; this endpoint is for dashboard / programmatic use.
+
+  app.post("/api/multimodal/generate-image", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    if (!multimodalConfig.imageGeneration) {
+      return c.json({ error: "Image generation is not configured. Add multimodal.imageGeneration to starlingai.json." }, 503);
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json() as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const prompt = typeof body["prompt"] === "string" ? body["prompt"].trim() : "";
+    if (!prompt) return c.json({ error: "prompt is required" }, 400);
+
+    const imgConfig = multimodalConfig.imageGeneration;
+    try {
+      const upstream = await fetchWithTimeout(
+        upstreamUrl(imgConfig.baseUrl, "/generate"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(imgConfig.apiKey, { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            prompt,
+            negative_prompt: typeof body["negativePrompt"] === "string" ? body["negativePrompt"] : null,
+            width: typeof body["width"] === "number" ? body["width"] : imgConfig.defaultWidth,
+            height: typeof body["height"] === "number" ? body["height"] : imgConfig.defaultHeight,
+            num_inference_steps: typeof body["steps"] === "number" ? body["steps"] : imgConfig.defaultSteps,
+            guidance_scale: typeof body["guidanceScale"] === "number" ? body["guidanceScale"] : imgConfig.defaultGuidanceScale,
+            seed: typeof body["seed"] === "number" ? body["seed"] : null,
+          }),
+        },
+        imgConfig.timeoutMs,
+      );
+
+      if (!upstream.ok) {
+        const err = await extractUpstreamError(upstream, "Image generation failed");
+        return c.json({ error: err }, upstream.status as 400 | 500 | 502 | 503);
+      }
+
+      return c.json(await upstream.json());
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
@@ -1225,7 +1525,7 @@ export function createGateway() {
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-    const allowed = ["primary", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow"];
+    const allowed = ["primary", "baseUrl", "apiKey", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow", "enableThinking"];
     const patch: Record<string, unknown> = {};
     for (const key of allowed) {
       if (key in body) patch[key] = body[key];
@@ -1570,6 +1870,7 @@ export function createGateway() {
 
     return c.json({
       bus: { connected: busConnected, mode: busConnected ? "redis" : "in-process" },
+      bidderWorker: getBidderWorkerStatus(),
       concurrency,
       bottlenecks,
       summary: {
@@ -1756,6 +2057,7 @@ export function createGateway() {
           const task  = String(rpc.params?.["task"] ?? "");
           const ctx   = rpc.params?.["context"] ? String(rpc.params["context"]) : undefined;
           const sessId = rpc.params?.["sessionId"] ? String(rpc.params["sessionId"]) : `a2a:${Date.now()}`;
+          const autoApprove = rpc.params?.["autoApprove"] === true;
 
           const result = await runSubAgent({
             agentName,
@@ -1763,6 +2065,9 @@ export function createGateway() {
             context: ctx,
             parentSessionId: sessId,
             workspacePath: getConfig().workspacePath,
+            approvalCallback: autoApprove
+              ? async () => true
+              : undefined,
           });
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -1785,8 +2090,12 @@ export function createGateway() {
       duplex: method === "GET" || method === "HEAD" ? undefined : "half",
     } as RequestInit & { duplex?: "half" });
     void Promise.resolve(app.fetch(honoReq)).then((honoRes: Response) => {
-      res.writeHead(honoRes.status, Object.fromEntries(honoRes.headers.entries()));
-      return honoRes.text().then((body: string) => res.end(body));
+      const responseHeaders: Record<string, string> = {};
+      honoRes.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+      res.writeHead(honoRes.status, responseHeaders);
+      return honoRes.arrayBuffer().then((body) => res.end(Buffer.from(body)));
     }).catch(() => {
       res.writeHead(500);
       res.end("Internal Server Error");
@@ -1916,10 +2225,20 @@ export function createGateway() {
   });
 
   return {
-    start(): void {
+    start(): Promise<void> {
       const port = config.gateway.port;
-      httpServer.listen(port, "0.0.0.0", () => {
-        log.info({ port }, `Gateway listening — ws://0.0.0.0:${port}/ws`);
+      return new Promise((resolve, reject) => {
+        const handleError = (error: Error) => {
+          httpServer.off("error", handleError);
+          reject(error);
+        };
+
+        httpServer.once("error", handleError);
+        httpServer.listen(port, "0.0.0.0", () => {
+          httpServer.off("error", handleError);
+          log.info({ port }, `Gateway listening — ws://0.0.0.0:${port}/ws`);
+          resolve();
+        });
       });
     },
     stop(): Promise<void> {

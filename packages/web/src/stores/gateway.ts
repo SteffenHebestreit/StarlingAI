@@ -37,6 +37,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: Date;
+  attachments?: Array<{ filename: string; dataUrl: string }>;
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string }>;
   guardrailEvents?: Array<{ type: string; details: string }>;
   blocked?: boolean;
@@ -108,9 +109,42 @@ export interface SpeechToTextResult {
   duration?: number;
 }
 
+export interface SavedTtsVoiceResult {
+  status: string;
+  voice_id: string;
+  name: string;
+  ref_text?: string;
+  processing_time?: number;
+}
+
 export interface SceneInfo {
   name: string;
   description: string;
+}
+
+interface ChatAttachment {
+  filename: string;
+  dataUrl: string;
+}
+
+function extractToolAttachments(name: string, metadata: unknown): ChatAttachment[] {
+  if (name !== "generate_image" || !metadata || typeof metadata !== "object") {
+    return [];
+  }
+
+  const value = metadata as Record<string, unknown>;
+  const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : "";
+  if (!dataUrl.startsWith("data:image/")) {
+    return [];
+  }
+
+  const filename = typeof value["filename"] === "string"
+    ? value["filename"]
+    : typeof value["outputPath"] === "string"
+      ? String(value["outputPath"]).split(/[\\/]/).pop() || "generated-image.png"
+      : "generated-image.png";
+
+  return [{ filename, dataUrl }];
 }
 
 export const useGatewayStore = defineStore("gateway", () => {
@@ -417,6 +451,12 @@ export const useGatewayStore = defineStore("gateway", () => {
           const tc = last.toolCalls.find(t => t.name === String(data["name"]));
           if (tc) tc.result = String(data["result"] ?? "");
         }
+        if (last) {
+          const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
+          if (attachments.length) {
+            last.attachments = [...(last.attachments ?? []), ...attachments];
+          }
+        }
       }
       return;
     }
@@ -433,13 +473,15 @@ export const useGatewayStore = defineStore("gateway", () => {
         const isBlocked = status === "blocked";
         const swarmState = normalizeSwarmState(data["swarmState"]) ?? liveSwarmState.value;
         const rawPerf = data["performance"] as Record<string, unknown> | undefined;
+        const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
         const finalMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "assistant",
           content: String(data["response"] ?? ""),
           timestamp: new Date(),
           guardrailEvents: data["guardrailEvents"] as ChatMessage["guardrailEvents"],
-          toolCalls: idx >= 0 ? messages.value[idx]?.toolCalls : undefined,
+          toolCalls: streamingMessage?.toolCalls,
+          attachments: streamingMessage?.attachments,
           blocked: isBlocked,
           swarmState: swarmState ?? undefined,
           usage: data["usage"] as TurnUsage | undefined,
@@ -553,14 +595,15 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
-  async function sendMessage(text: string): Promise<void> {
+  async function sendMessage(text: string, enableThinking?: boolean, displayContent?: string, attachments?: Array<{ filename: string; dataUrl: string }>): Promise<void> {
     if (!currentSessionId.value) await createSession();
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
-      content: text,
+      content: displayContent ?? text,
       timestamp: new Date(),
+      ...(attachments?.length && { attachments }),
     };
     messages.value.push(userMsg);
 
@@ -583,6 +626,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         sessionId: currentSessionId.value,
         message: text,
         requestId,
+        ...(enableThinking !== undefined && { enableThinking }),
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -622,6 +666,23 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function listVoices(): Promise<Record<string, unknown>> {
     const response = await authorizedFetch("/api/multimodal/voices");
     return await response.json() as Record<string, unknown>;
+  }
+
+  async function saveTtsVoice(input: {
+    file: File;
+    name: string;
+    language?: string;
+  }): Promise<SavedTtsVoiceResult> {
+    const formData = new FormData();
+    formData.append("file", input.file, input.file.name);
+    formData.append("name", input.name);
+    if (input.language) formData.append("language", input.language);
+
+    const response = await authorizedFetch("/api/multimodal/voices/save", {
+      method: "POST",
+      body: formData,
+    });
+    return await response.json() as SavedTtsVoiceResult;
   }
 
   async function synthesizeSpeech(input: {
@@ -745,6 +806,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     convertFileToMarkdown,
     transcribeAudio,
     listVoices,
+    saveTtsVoice,
     synthesizeSpeech,
     summarizeForSpeech,
     analyzeImageFile,

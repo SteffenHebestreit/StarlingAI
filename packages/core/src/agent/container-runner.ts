@@ -328,6 +328,11 @@ export async function runSubAgentInContainer(
       gracefulKill(proc.pid, proc);
     };
     opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+    // Remove the abort listener when the process exits to prevent memory leaks
+    proc.on("close", () => {
+      opts.signal?.removeEventListener("abort", onAbort);
+    });
     proc.on("close", () => {
       opts.signal?.removeEventListener("abort", onAbort);
     });

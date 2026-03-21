@@ -4,8 +4,8 @@
     <div :class="['message-bubble', message.role === 'user' ? 'message-bubble--user' : 'message-bubble--ai', message.blocked && 'message-bubble--error']">
 
       <!-- Guardrail / blocked badge -->
-      <div v-if="message.blocked" class="guardrail-badge guardrail-badge--blocked">
-        ⛔ Blocked by guardrails
+      <div v-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
+        {{ blockLabel }}
       </div>
       <div v-if="message.guardrailEvents?.length" class="guardrail-events">
         <div v-for="(ev, i) in message.guardrailEvents" :key="i" class="guardrail-badge guardrail-badge--warn">
@@ -54,6 +54,19 @@
         </div>
       </div>
 
+      <!-- Image attachments (user messages only) -->
+      <div v-if="message.attachments?.length" class="message-attachments">
+        <img
+          v-for="(att, i) in message.attachments"
+          :key="i"
+          :src="att.dataUrl"
+          :alt="att.filename"
+          class="message-attachment-img"
+          @click="lightboxUrl = att.dataUrl"
+          title="Click to enlarge"
+        />
+      </div>
+
       <!-- Main content -->
       <div
         v-if="isStreaming"
@@ -84,6 +97,24 @@
     </div>
 
   </div>
+
+  <!-- Image lightbox -->
+  <Teleport to="body">
+    <div
+      v-if="lightboxUrl"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      @click.self="lightboxUrl = null"
+      @keydown.esc.window="lightboxUrl = null"
+    >
+      <div class="relative max-w-4xl max-h-[90vh] p-2">
+        <img :src="lightboxUrl" alt="Attachment preview" class="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl" />
+        <button
+          @click="lightboxUrl = null"
+          class="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 flex items-center justify-center text-sm transition-colors"
+        >✕</button>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -100,6 +131,7 @@ const props = defineProps<{
 
 const toolHistoryOpen = ref(false);
 const thinkingOpen = ref(false);
+const lightboxUrl = ref<string | null>(null);
 
 // ── Parse thinking blocks out of content ─────────────────────────────────────
 const THINKING_RE = /<(thinking|think)>([\s\S]*?)<\/(thinking|think)>/gi;
@@ -129,6 +161,15 @@ const isThinking = computed(() => {
 const mainStreamingText = computed(() => {
   const text = props.streamingText ?? "";
   return text.replace(/<(thinking|think)>[\s\S]*$/i, "").trim();
+});
+
+// ── Block label — distinguish guardrail blocks from technical errors ──────────
+const blockLabel = computed((): string => {
+  const details = props.message.guardrailEvents?.[0]?.details ?? props.message.content ?? "";
+  if (details.startsWith("LLM error:")) return "⚠ LLM connection error";
+  if (details.startsWith("Request cancelled")) return "⚠ Request cancelled";
+  if (/prompt injection|secret scan|output guardrail/i.test(details)) return "⛔ Blocked by guardrails";
+  return "⚠ Request blocked";
 });
 
 // ── Tool call label ───────────────────────────────────────────────────────────
@@ -229,6 +270,24 @@ function formatDuration(ms: number): string {
 </script>
 
 <style scoped>
+/* ── Image attachments ───────────────────────────────────────────────────────── */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-bottom: 0.5rem;
+}
+.message-attachment-img {
+  max-width: 220px;
+  max-height: 160px;
+  object-fit: cover;
+  border-radius: 0.5rem;
+  cursor: zoom-in;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  transition: opacity 0.15s;
+}
+.message-attachment-img:hover { opacity: 0.85; }
+
 /* ── Layout ──────────────────────────────────────────────────────────────────── */
 .message-row {
   display: flex;

@@ -8,19 +8,29 @@ const DEFAULT_MULTIMODAL_CONFIG = {
         apiKey: "",
         timeoutMs: 60_000,
         toolName: "file_to_markdown",
+        visionModel: "",
+        visionBaseUrl: "",
+        visionApiKey: "",
     },
     stt: {
-        baseUrl: "http://host.docker.internal:8000",
+        baseUrl: "http://qwen3-asr-service:5002",
         apiKey: "",
         timeoutMs: 60_000,
-        model: "whisper-1",
+        model: "Qwen/Qwen3-ASR-1.7B",
     },
     tts: {
-        baseUrl: "http://host.docker.internal:5000",
+        baseUrl: "http://qwen3-tts-service:5004",
         apiKey: "",
         timeoutMs: 60_000,
-        defaultLanguage: "en_US",
+        model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+        defaultLanguage: "English",
+        defaultSpeaker: "Vivian",
+        defaultVoiceId: "",
+        voiceSamplePath: "",
+        voiceSampleText: "",
         defaultQuality: "medium",
+        speakReplySummary: false,
+        speakReplySummaryMaxSentences: 3,
     },
     wakeWord: {
         enabled: false,
@@ -29,6 +39,8 @@ const DEFAULT_MULTIMODAL_CONFIG = {
         stopPhrases: ["stop recording", "end recording", "stop listening", "luna stop"],
         silenceTimeoutMs: 4000,
     },
+    // imageGeneration is optional — not added to defaults so the section only
+    // appears in Settings when the user explicitly configures it.
 };
 function cloneConfig(config) {
     return structuredClone(config);
@@ -49,6 +61,23 @@ function syncWakeWordStorage(config) {
     localStorage.setItem("gc_wake_stop_phrases", JSON.stringify(config.wakeWord.stopPhrases));
     localStorage.setItem("gc_wake_language", config.wakeWord.language);
     localStorage.setItem("gc_wake_silence_ms", JSON.stringify(config.wakeWord.silenceTimeoutMs));
+}
+/** Read/write the speak-reply-summary toggle from localStorage (client-side only, not persisted to server). */
+export function readSpeakReplySummaryStorage() {
+    try {
+        return localStorage.getItem("sai_speak_reply") === "true";
+    }
+    catch {
+        return false;
+    }
+}
+export function writeSpeakReplySummaryStorage(enabled) {
+    try {
+        localStorage.setItem("sai_speak_reply", enabled ? "true" : "false");
+    }
+    catch {
+        // ignore — best-effort localStorage
+    }
 }
 function mergeBrowserWakeWord(config) {
     const merged = cloneConfig(config);
@@ -82,6 +111,30 @@ export const useMultimodalStore = defineStore("multimodal", () => {
     function baseUrl() {
         return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
     }
+    async function parseErrorResponse(response) {
+        const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+        if (contentType.includes("application/json")) {
+            try {
+                const body = await response.json();
+                return body.error ?? body.detail ?? response.statusText ?? `HTTP ${response.status}`;
+            }
+            catch {
+                return response.statusText || `HTTP ${response.status}`;
+            }
+        }
+        try {
+            const text = (await response.text()).trim();
+            if (!text)
+                return response.statusText || `HTTP ${response.status}`;
+            if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
+                return "Received HTML instead of JSON from the gateway. Check the web server API proxy and configured gateway URL.";
+            }
+            return text.slice(0, 240);
+        }
+        catch {
+            return response.statusText || `HTTP ${response.status}`;
+        }
+    }
     async function fetchStatus() {
         if (!gateway.token)
             return;
@@ -91,16 +144,17 @@ export const useMultimodalStore = defineStore("multimodal", () => {
                 headers: { Authorization: `Bearer ${gateway.token}` },
             });
             if (!response.ok) {
-                const body = await response.json();
-                throw new Error(body.error ?? `HTTP ${response.status}`);
+                throw new Error(await parseErrorResponse(response));
             }
             status.value = await response.json();
         }
         catch {
             status.value = {
                 files: { ok: false },
+                vision: config.value.files.visionModel ? { ok: false } : null,
                 stt: { ok: false },
                 tts: { ok: false },
+                imageGeneration: config.value.imageGeneration ? { ok: false } : null,
                 wakeWord: config.value.wakeWord,
             };
         }
@@ -118,8 +172,7 @@ export const useMultimodalStore = defineStore("multimodal", () => {
                 headers: { Authorization: `Bearer ${gateway.token}` },
             });
             if (!response.ok) {
-                const body = await response.json();
-                throw new Error(body.error ?? `HTTP ${response.status}`);
+                throw new Error(await parseErrorResponse(response));
             }
             const body = await response.json();
             config.value = mergeBrowserWakeWord(body);
@@ -148,8 +201,7 @@ export const useMultimodalStore = defineStore("multimodal", () => {
                 body: JSON.stringify(nextConfig),
             });
             if (!response.ok) {
-                const body = await response.json();
-                throw new Error(body.error ?? `HTTP ${response.status}`);
+                throw new Error(await parseErrorResponse(response));
             }
             const body = await response.json();
             config.value = cloneConfig(body);

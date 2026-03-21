@@ -231,6 +231,11 @@ export class RpcConnection {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
         let message = String(params["message"] ?? "");
         const requestId = String(params["requestId"] ?? randomUUID());
+        const enableThinkingRaw = params["enableThinking"];
+        const enableThinking: boolean | undefined =
+          enableThinkingRaw === true || enableThinkingRaw === "true" ? true :
+          enableThinkingRaw === false || enableThinkingRaw === "false" ? false :
+          undefined;
 
         // Parse inline override flags (--auto, --iter N, --agent NAME) before scene handling
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
@@ -339,14 +344,23 @@ export class RpcConnection {
           autoApprove: overrideFlags.autoApprove,
           maxIterationsOverride: overrideFlags.maxIterationsOverride,
           turnTimeoutOverrideMs: overrideFlags.turnTimeoutSec !== undefined ? overrideFlags.turnTimeoutSec * 1000 : undefined,
+          enableThinking,
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
           onToolCall: (name, args) => {
             this.sendEvent({ type: "agent.tool_start", data: { requestId, name, args } });
           },
-          onToolResult: (name, result) => {
-            this.sendEvent({ type: "agent.tool_done", data: { requestId, name, result: result.substring(0, 500) } });
+          onToolResult: (name, result, metadata) => {
+            this.sendEvent({
+              type: "agent.tool_done",
+              data: {
+                requestId,
+                name,
+                result: result.substring(0, 500),
+                metadata,
+              },
+            });
           },
           onIntervention: (notice: InterventionNotice) => {
             this.sendEvent({ type: "agent.intervention", data: { requestId, notice } });

@@ -10,6 +10,8 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:qwen-speech-smoke": "tsx src/scripts/qwen-speech-smoke.ts",
+    "runtime-guidance:evaluate": "tsx src/scripts/runtime-guidance-live-eval.ts",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
     "lint": "eslint src",

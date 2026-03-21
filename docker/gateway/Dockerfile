@@ -9,6 +9,16 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
 RUN pnpm install --frozen-lockfile
 
+# Test — runs vitest inside the container, exits non-zero on failure
+FROM deps AS test
+COPY packages/core ./packages/core
+# Stub a minimal config so config-dependent tools don't fail to import
+RUN echo '{"workspacePath":"/tmp/test-workspace"}' > /app/starlingai.json && \
+    mkdir -p /tmp/test-workspace
+ENV SAI_CONFIG_PATH=/app/starlingai.json
+ENV NODE_ENV=test
+CMD ["pnpm", "--filter", "@starlingai/core", "test"]
+
 # Build
 FROM deps AS build
 COPY packages/core ./packages/core

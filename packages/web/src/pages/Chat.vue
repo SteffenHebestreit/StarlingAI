@@ -213,6 +213,32 @@
         </div>
       </div>
 
+      <!-- Pending image attachment chips -->
+      <div v-if="pendingImageContexts.length > 0" class="flex flex-wrap gap-2 mb-2">
+        <div
+          v-for="(img, idx) in pendingImageContexts"
+          :key="img.filename + idx"
+          class="flex items-center gap-1.5 rounded-xl border border-purple-500/40 bg-purple-900/20 overflow-hidden pr-1"
+        >
+          <!-- Thumbnail — click opens preview modal -->
+          <button
+            @click="previewModalUrl = img.previewUrl"
+            class="shrink-0 focus:outline-none"
+            title="Preview image"
+          >
+            <img :src="img.previewUrl" :alt="img.filename" class="h-9 w-9 object-cover rounded-l-xl" />
+          </button>
+          <!-- Filename -->
+          <span class="text-xs text-purple-300 max-w-[8rem] truncate select-none">{{ img.filename }}</span>
+          <!-- Remove -->
+          <button
+            @click="removeImage(idx)"
+            class="text-purple-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            title="Remove"
+          >✕</button>
+        </div>
+      </div>
+
       <!-- Inline override flag chips -->
       <div v-if="activeFlags.length > 0" class="flex flex-wrap gap-1.5 mb-2">
         <button
@@ -369,6 +395,32 @@
           rows="1"
           style="min-height: 48px; max-height: 200px"
         />
+        <!-- Thinking mode toggle: cycles auto → on → off -->
+        <button
+          @click="cycleThinkingMode"
+          class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
+          :class="thinkingMode === true
+            ? 'multimodal-action-active'
+            : thinkingMode === false
+              ? 'opacity-40 border-dashed'
+              : 'opacity-60 hover:opacity-100'"
+          :title="thinkingMode === undefined
+            ? 'Thinking: auto — click to enable extended reasoning'
+            : thinkingMode
+              ? 'Thinking: ON — click to disable'
+              : 'Thinking: OFF — click to reset to auto'"
+          :aria-label="thinkingMode === undefined ? 'Thinking auto' : thinkingMode ? 'Thinking on' : 'Thinking off'"
+          :aria-pressed="thinkingMode === true"
+        >
+          <!-- Brain / chain-of-thought icon -->
+          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
+            <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
+          </svg>
+          <span v-if="thinkingMode !== undefined" class="text-[10px] leading-none mt-0.5">
+            {{ thinkingMode ? 'on' : 'off' }}
+          </span>
+        </button>
         <button
           v-if="gateway.isLoading"
           @click="gateway.cancelTurn()"
@@ -381,7 +433,7 @@
         <button
           v-else
           @click="sendMessage"
-          :disabled="!inputText.trim() || !gateway.connected"
+          :disabled="(!inputText.trim() && pendingImageContexts.length === 0) || !gateway.connected"
           class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
         >
           Send
@@ -393,6 +445,29 @@
       </div>
     </div>
   </div>
+
+  <!-- Image preview modal -->
+  <Teleport to="body">
+    <div
+      v-if="previewModalUrl"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm"
+      @click.self="previewModalUrl = null"
+      @keydown.esc.window="previewModalUrl = null"
+    >
+      <div class="relative max-w-4xl max-h-[90vh] p-2">
+        <img
+          :src="previewModalUrl"
+          alt="Image preview"
+          class="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl"
+        />
+        <button
+          @click="previewModalUrl = null"
+          class="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 flex items-center justify-center text-sm transition-colors"
+          title="Close"
+        >✕</button>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -430,6 +505,32 @@ const wakeLanguage = useStorage<string>("gc_wake_language", "en-US");
 const wakeSilenceTimeoutMs = useStorage<number>("gc_wake_silence_ms", 4000);
 const speakReplyEnabled = useStorage<boolean>("sai_speak_reply", false);
 const lastSpokenSummary = ref<string | null>(null);
+/** Per-message Qwen3.5 thinking toggle: undefined = auto, true = on, false = off */
+const thinkingMode = ref<boolean | undefined>(undefined);
+/** Images queued for the current composer message — analyzed and sent together on submit. */
+const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
+const previewModalUrl = ref<string | null>(null);
+
+function removeImage(idx: number) {
+  const img = pendingImageContexts.value[idx];
+  if (img) URL.revokeObjectURL(img.previewUrl);
+  pendingImageContexts.value.splice(idx, 1);
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function cycleThinkingMode() {
+  if (thinkingMode.value === undefined) thinkingMode.value = true;
+  else if (thinkingMode.value === true) thinkingMode.value = false;
+  else thinkingMode.value = undefined;
+}
 
 interface SpeechRecognitionResultItem {
   transcript: string;
@@ -509,11 +610,14 @@ function flagChipClass(color: "purple" | "sky" | "amber"): string {
   return "border-purple-500/40 bg-purple-900/25 text-purple-300 hover:border-red-500/40 hover:text-red-300";
 }
 
+/** True while image analysis is in-flight before the backend call starts. */
+const analysing = ref(false);
+
 const orbAiState = computed(() => {
   if (!gateway.connected) return "default";
   if (gateway.isError)     return "error";
   if (gateway.isStreaming)  return "output";
-  if (gateway.isLoading)   return "activity";
+  if (gateway.isLoading || analysing.value) return "activity";
   return "default";
 });
 
@@ -816,12 +920,10 @@ async function onDocumentSelected(event: Event) {
   const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
 
   try {
-    // ── Image: base64 → vision LLM → inject analysis as context (no disk write) ──
+    // ── Image: queue the file — analysis happens at send time ────────────────
     if (isImage) {
-      wakeStatus.value = `Analysing ${file.name}`;
-      const analysis = await gateway.analyzeImageFile(file);
-      appendToComposer(`Image analysis (${file.name}):\n\n${analysis}`);
-      wakeStatus.value = `Image analysed: ${file.name}`;
+      pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
+      wakeStatus.value = `Image attached — click Send`;
       return;
     }
 
@@ -923,10 +1025,39 @@ function toggleSpeakReply() {
 }
 
 async function sendMessage() {
-  const text = inputText.value.trim();
-  if (!text || gateway.isLoading) return;
+  const trimmedText = inputText.value.trim();
+  if ((!trimmedText && pendingImageContexts.value.length === 0) || gateway.isLoading) return;
+
+  const pending = pendingImageContexts.value;
+  pendingImageContexts.value = [];
   inputText.value = "";
-  await gateway.sendMessage(text);
+
+  // What the user sees in their own bubble — filenames only, no analysis dump
+  const displayParts: string[] = [];
+  if (pending.length > 0) displayParts.push(`📎 ${pending.map(p => p.filename).join(", ")}`);
+  if (trimmedText) displayParts.push(trimmedText);
+  const displayContent = displayParts.join("\n");
+
+  if (pending.length > 0) {
+    analysing.value = true;
+    wakeStatus.value = `Analysing image${pending.length > 1 ? "s" : ""}…`;
+    try {
+      const [analyses, dataUrls] = await Promise.all([
+        Promise.all(pending.map(p => gateway.analyzeImageFile(p.file))),
+        Promise.all(pending.map(p => fileToDataUrl(p.file))),
+      ]);
+      const imageContext = pending.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
+      const attachments = pending.map((p, i) => ({ filename: p.filename, dataUrl: dataUrls[i] }));
+      const fullText = [imageContext, trimmedText].filter(Boolean).join("\n\n");
+      wakeStatus.value = "";
+      await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments);
+    } finally {
+      analysing.value = false;
+      for (const p of pending) URL.revokeObjectURL(p.previewUrl);
+    }
+  } else {
+    await gateway.sendMessage(trimmedText, thinkingMode.value);
+  }
 }
 
 async function triggerScene(name: string) {

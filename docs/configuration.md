@@ -24,6 +24,7 @@ Top-level keys accepted by the current schema:
   "scenes": {},
   "channels": {},
   "gateway": {},
+  "retrieval": {},
   "guardrails": {},
   "mcp": {},
   "sites": {},
@@ -78,7 +79,9 @@ Top-level keys accepted by the current schema:
       "minP": 0.05,
       "repeatPenalty": 1.05,
       "seed": 42,
-      "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-8b"
+      "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-8b",
+      "embeddingBaseUrl": "http://host.docker.internal:8004/v1",
+      "embeddingApiKey": "local-embed"
     }
   },
   "rateLimit": {
@@ -90,6 +93,24 @@ Top-level keys accepted by the current schema:
 ```
 
 The dashboard can hot-patch most model fields for configured sub-agents through `PATCH /api/agents/:name/model`.
+
+`baseUrl` and `apiKey` can be set directly on any model config to route that model to a separate OpenAI-compatible server instead of the global LM Studio endpoint. That applies both to `agents.defaults.model` and to per-sub-agent `model` blocks.
+
+```jsonc
+"agents": {
+  "defaults": {
+    "model": {
+      "primary": "lmstudio/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "baseUrl": "http://host.docker.internal:8000/v1",
+      "apiKey": "local-vllm"
+    }
+  }
+}
+```
+
+This is the right pattern when a model cannot be downloaded or served by LM Studio and must run under vLLM, SGLang, llama.cpp server, or another OpenAI-compatible runtime.
+
+If embeddings need to run separately as well, use `embeddingBaseUrl` and `embeddingApiKey` on the same model block. Semantic agent search and shared-memory retrieval will use that dedicated endpoint.
 
 ## Sub-Agents
 
@@ -137,6 +158,20 @@ Each entry in `subAgents` defines one specialist agent. The current schema suppo
 
 `turnTimeoutMs` is an optional wall-clock limit for that specific sub-agent run. If it fires, the delegated task is aborted and returned as a timeout instead of consuming the full gateway-wide turn budget.
 
+Sub-agents can also override the endpoint at the model level when only some specialists need a separate server:
+
+```jsonc
+"subAgents": {
+  "repo_engineer": {
+    "model": {
+      "primary": "lmstudio/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "baseUrl": "http://host.docker.internal:8000/v1",
+      "apiKey": "local-vllm"
+    }
+  }
+}
+```
+
 ## Gateway
 
 ```jsonc
@@ -169,6 +204,9 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
   "files": {
     "baseUrl": "http://fastapi-mcp-template:8000",
     "toolName": "file_to_markdown",
+    "visionModel": "lmstudio/qwen/qwen3.5-9b",
+    "visionBaseUrl": "http://host.docker.internal:8001/v1",
+    "visionApiKey": "local-vision",
     "timeoutMs": 60000
   },
   "stt": {
@@ -178,12 +216,22 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
   },
   "tts": {
     "baseUrl": "http://qwen3-tts-service:5004",
-    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
     "defaultLanguage": "English",
     "defaultSpeaker": "Vivian",
     "voiceSamplePath": "samples/assistant-voice.wav",
     "voiceSampleText": "Hello, this is the reference voice sample used by StarlingAI.",
     "timeoutMs": 60000
+  },
+  "imageGeneration": {
+    "baseUrl": "http://image-generation-service:5005",
+    "model": "black-forest-labs/FLUX.1-schnell",
+    "timeoutMs": 120000,
+    "defaultWidth": 768,
+    "defaultHeight": 768,
+    "defaultSteps": 4,
+    "defaultGuidanceScale": 0,
+    "cpuOffload": true
   },
   "wakeWord": {
     "enabled": false,
@@ -197,10 +245,70 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
 
 Notes:
 
+- `files.visionModel` enables direct screenshot and image analysis through the configured OpenAI-compatible vision model. This is useful for screenshot-heavy browser agents and image QA flows even when the file-conversion backend returns little or no OCR text.
+- `files.visionBaseUrl` and `files.visionApiKey` are optional overrides for running the vision model on a separate server from the main orchestrator.
 - `tts.defaultVoiceId` is optional and uses Qwen3-TTS's fast saved-voice route when present.
 - `tts.voiceSamplePath` is a workspace-relative audio file used for one-shot cloning when no saved voice ID is configured.
 - `tts.voiceSampleText` is optional but improves cloning quality because it maps to Qwen3's `ref_text` input.
-- `tts.defaultQuality` remains in the schema for backward compatibility with older Piper-oriented configs, but Qwen3-TTS mainly uses `defaultSpeaker`, `defaultVoiceId`, and the optional voice sample fields.
+- `tts.defaultQuality` remains in the schema for backward compatibility with older non-Qwen configs, but Qwen3-TTS mainly uses `defaultSpeaker`, `defaultVoiceId`, and the optional voice sample fields.
+- `imageGeneration` enables the `generate_image` tool and the dashboard image-generation status/API path.
+- The default image backend now uses `black-forest-labs/FLUX.1-schnell`, the official Flux Schnell repository, with Flux-tuned defaults of low step count and zero guidance for the fast checkpoint. Because Hugging Face gates file access behind terms acceptance, set `HF_TOKEN` in `.env` so the image-generation container can authenticate during model download.
+
+## Retrieval
+
+`retrieval` contains optional retrieval-quality upgrades that sit below the swarm routing layer.
+
+```jsonc
+"retrieval": {
+  "reranker": {
+    "enabled": true,
+    "baseUrl": "http://host.docker.internal:1234/v1",
+    "apiKey": "lm-studio",
+    "model": "Qwen/Qwen3-Reranker-4B",
+    "timeoutMs": 15000,
+    "topK": 6
+  }
+}
+```
+
+Notes:
+
+- The reranker is optional. If the model is unavailable or the request fails, StarlingAI falls back to the existing keyword-plus-embedding ranking.
+- Today the reranker is applied to agent routing candidates, improving `search_agents` and `delegate_to_agent` selection quality.
+- The intended model family here is `Qwen3-Reranker`.
+- `retrieval.reranker.baseUrl` does not need to match `providers.lmstudio.baseUrl`; it is designed for a separate reranker service when LM Studio cannot host that checkpoint.
+
+## Guardrails
+
+`guardrails` still controls the deterministic runtime protections, and can now optionally call a model-backed moderation pass.
+
+```jsonc
+"guardrails": {
+  "promptInjectionBlock": true,
+  "outputSecretScan": true,
+  "maxInputLength": 32000,
+  "sandboxShellExec": true,
+  "modelModeration": {
+    "enabled": true,
+    "baseUrl": "http://host.docker.internal:1234/v1",
+    "apiKey": "lm-studio",
+    "model": "Qwen/Qwen3Guard-Gen-4B",
+    "timeoutMs": 15000,
+    "moderateInputs": true,
+    "moderateToolOutputs": true,
+    "maxChars": 6000,
+    "blockOn": "unsafe"
+  }
+}
+```
+
+Notes:
+
+- The regex and policy-based guardrails remain the first enforcement layer.
+- `modelModeration` is optional and failure-tolerant. If the moderation model is missing or unreachable, the deterministic guardrails still operate normally.
+- `blockOn` can be `unsafe` or `controversial_or_unsafe` depending on how aggressively you want the runtime to block content.
+- The intended model family here is `Qwen3Guard-Gen`.
+- `modelModeration.baseUrl` can point at a dedicated moderation server, separate from the orchestrator or coding-model endpoint.
 
 ## Channels
 

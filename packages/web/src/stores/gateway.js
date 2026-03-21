@@ -24,6 +24,30 @@ export const useGatewayStore = defineStore("gateway", () => {
     const pendingApproval = ref(null);
     let ws = null;
     const messageHandlers = new Map();
+    async function parseErrorResponse(response) {
+        const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+        if (contentType.includes("application/json")) {
+            try {
+                const body = await response.json();
+                return String(body["error"] ?? body["detail"] ?? response.statusText ?? `HTTP ${response.status}`);
+            }
+            catch {
+                return response.statusText || `HTTP ${response.status}`;
+            }
+        }
+        try {
+            const text = (await response.text()).trim();
+            if (!text)
+                return response.statusText || `HTTP ${response.status}`;
+            if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
+                return "Received HTML instead of JSON from the gateway. Check the web server API proxy and configured gateway URL.";
+            }
+            return text.slice(0, 240);
+        }
+        catch {
+            return response.statusText || `HTTP ${response.status}`;
+        }
+    }
     function restBaseUrl() {
         return (wsUrl.value ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
     }
@@ -36,14 +60,7 @@ export const useGatewayStore = defineStore("gateway", () => {
             headers,
         });
         if (!response.ok) {
-            let message = response.statusText;
-            try {
-                const body = await response.json();
-                message = String(body["error"] ?? body["detail"] ?? message);
-            }
-            catch {
-                // ignore non-JSON error payloads
-            }
+            const message = await parseErrorResponse(response);
             throw new Error(message);
         }
         return response;
@@ -407,14 +424,15 @@ export const useGatewayStore = defineStore("gateway", () => {
             selectedSwarmRunId.value = null;
         }
     }
-    async function sendMessage(text) {
+    async function sendMessage(text, enableThinking, displayContent, attachments) {
         if (!currentSessionId.value)
             await createSession();
         const userMsg = {
             id: crypto.randomUUID(),
             role: "user",
-            content: text,
+            content: displayContent ?? text,
             timestamp: new Date(),
+            ...(attachments?.length && { attachments }),
         };
         messages.value.push(userMsg);
         const requestId = Math.random().toString(36).slice(2);
@@ -434,6 +452,7 @@ export const useGatewayStore = defineStore("gateway", () => {
                 sessionId: currentSessionId.value,
                 message: text,
                 requestId,
+                ...(enableThinking !== undefined && { enableThinking }),
             });
         }
         catch (error) {
@@ -474,6 +493,18 @@ export const useGatewayStore = defineStore("gateway", () => {
         const response = await authorizedFetch("/api/multimodal/voices");
         return await response.json();
     }
+    async function saveTtsVoice(input) {
+        const formData = new FormData();
+        formData.append("file", input.file, input.file.name);
+        formData.append("name", input.name);
+        if (input.language)
+            formData.append("language", input.language);
+        const response = await authorizedFetch("/api/multimodal/voices/save", {
+            method: "POST",
+            body: formData,
+        });
+        return await response.json();
+    }
     async function synthesizeSpeech(input) {
         const response = await authorizedFetch("/api/multimodal/tts", {
             method: "POST",
@@ -481,6 +512,44 @@ export const useGatewayStore = defineStore("gateway", () => {
             body: JSON.stringify(input),
         });
         return await response.blob();
+    }
+    async function analyzeImageFile(file) {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await authorizedFetch("/api/multimodal/analyze-image", { method: "POST", body: form });
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error ?? `Image analysis failed: ${response.status}`);
+        }
+        const body = await response.json();
+        if (!body.analysis)
+            throw new Error(body.error ?? "No analysis returned");
+        return body.analysis;
+    }
+    async function uploadToWorkspace(file, subdir = "uploads") {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("subdir", subdir);
+        const response = await authorizedFetch("/api/workspace/upload", { method: "POST", body: form });
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error ?? `Upload failed: ${response.status}`);
+        }
+        return await response.json();
+    }
+    async function summarizeForSpeech(input) {
+        const response = await authorizedFetch("/api/multimodal/summarize-for-speech", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(input),
+        });
+        if (!response.ok) {
+            throw new Error(`Summarisation failed: ${response.status}`);
+        }
+        const body = await response.json();
+        if (!body.summary)
+            throw new Error(body.error ?? "Empty summary returned");
+        return body.summary;
     }
     const isLoading = computed(() => pendingRequestId.value !== null);
     const currentSessionSwarmRuns = computed(() => {
@@ -550,7 +619,11 @@ export const useGatewayStore = defineStore("gateway", () => {
         convertFileToMarkdown,
         transcribeAudio,
         listVoices,
+        saveTtsVoice,
         synthesizeSpeech,
+        summarizeForSpeech,
+        analyzeImageFile,
+        uploadToWorkspace,
         respondApproval,
         dismissIntervention,
         cancelTurn,

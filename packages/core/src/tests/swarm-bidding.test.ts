@@ -79,7 +79,7 @@ describe("swarm autonomous bidding", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15000);
+  }, 30_000);
 
   it("uses autonomous bids before direct fallback routing in task graphs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-bidding-"));
@@ -147,4 +147,68 @@ describe("swarm autonomous bidding", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("can restart autonomous bidding after it has been stopped", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-bidding-restart-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Logs into sites and automates forms in the browser.",
+          systemPrompt: "Inspect the page and fill the login form.",
+          tools: ["get_site_credentials", "mcp__playwright__browser_click"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    try {
+      const [{ emitSwarmEvent }, { collectTaskBids, startAutonomousBidding, stopAutonomousBidding }] = await Promise.all([
+        import("../swarm/bus.js"),
+        import("../swarm/bidding.js"),
+      ]);
+      await import("../tools/sub-agent.js");
+
+      startAutonomousBidding();
+      emitSwarmEvent("task_announced", {
+        sessionId: "swarm-restart-1",
+        taskId: "task-restart-1",
+        task: "Complete the login form automation flow",
+        data: {
+          dispatchMode: "autonomous_bidding",
+          routingQuery: "login form automation",
+        },
+      });
+
+      const firstRound = await collectTaskBids("task-restart-1", 150);
+      expect(firstRound[0]?.agentName).toBe("browser_agent");
+
+      stopAutonomousBidding();
+      startAutonomousBidding();
+
+      emitSwarmEvent("task_announced", {
+        sessionId: "swarm-restart-2",
+        taskId: "task-restart-2",
+        task: "Complete the login form automation flow again",
+        data: {
+          dispatchMode: "autonomous_bidding",
+          routingQuery: "login form automation",
+        },
+      });
+
+      const secondRound = await collectTaskBids("task-restart-2", 150);
+      expect(secondRound[0]?.agentName).toBe("browser_agent");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

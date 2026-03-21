@@ -5,6 +5,7 @@ import { useStorage } from "@vueuse/core";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
+import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
@@ -27,6 +28,35 @@ const wakeKeywords = useStorage("gc_wake_keywords", ["Hey Guarded", "Okay Guarde
 const wakeStopPhrases = useStorage("gc_wake_stop_phrases", ["stop recording", "end recording", "stop listening", "luna stop"]);
 const wakeLanguage = useStorage("gc_wake_language", "en-US");
 const wakeSilenceTimeoutMs = useStorage("gc_wake_silence_ms", 4000);
+const speakReplyEnabled = useStorage("sai_speak_reply", false);
+const lastSpokenSummary = ref(null);
+/** Per-message Qwen3.5 thinking toggle: undefined = auto, true = on, false = off */
+const thinkingMode = ref(undefined);
+/** Images queued for the current composer message — analyzed and sent together on submit. */
+const pendingImageContexts = ref([]);
+const previewModalUrl = ref(null);
+function removeImage(idx) {
+    const img = pendingImageContexts.value[idx];
+    if (img)
+        URL.revokeObjectURL(img.previewUrl);
+    pendingImageContexts.value.splice(idx, 1);
+}
+function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+function cycleThinkingMode() {
+    if (thinkingMode.value === undefined)
+        thinkingMode.value = true;
+    else if (thinkingMode.value === true)
+        thinkingMode.value = false;
+    else
+        thinkingMode.value = undefined;
+}
 let wakeRecognition = null;
 let wakeRestartTimer = null;
 let mediaRecorder = null;
@@ -63,6 +93,8 @@ function flagChipClass(color) {
         return "border-sky-500/40 bg-sky-900/25 text-sky-300 hover:border-red-500/40 hover:text-red-300";
     return "border-purple-500/40 bg-purple-900/25 text-purple-300 hover:border-red-500/40 hover:text-red-300";
 }
+/** True while image analysis is in-flight before the backend call starts. */
+const analysing = ref(false);
 const orbAiState = computed(() => {
     if (!gateway.connected)
         return "default";
@@ -70,7 +102,7 @@ const orbAiState = computed(() => {
         return "error";
     if (gateway.isStreaming)
         return "output";
-    if (gateway.isLoading)
+    if (gateway.isLoading || analysing.value)
         return "activity";
     return "default";
 });
@@ -90,23 +122,64 @@ const filesAvailable = computed(() => Boolean(multimodalStatus.value?.files.ok))
 const sttAvailable = computed(() => Boolean(multimodalStatus.value?.stt.ok));
 const ttsAvailable = computed(() => Boolean(multimodalStatus.value?.tts.ok));
 const wakeConfigured = computed(() => Boolean(multimodalStore.config.wakeWord.enabled));
-const showFileInput = computed(() => filesAvailable.value);
+const browserRecordingAvailable = computed(() => typeof MediaRecorder !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia));
+const browserSpeechRecognitionAvailable = computed(() => typeof window !== "undefined" && Boolean(window.SpeechRecognition ?? window.webkitSpeechRecognition));
+const browserSpeechPlaybackAvailable = computed(() => typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined");
+const showFileInput = computed(() => filesAvailable.value || typeof FileReader !== "undefined");
 const showAudioUpload = computed(() => sttAvailable.value);
-const showRecording = computed(() => sttAvailable.value);
-const showWakeMode = computed(() => sttAvailable.value && wakeConfigured.value);
-const showSpeechPlayback = computed(() => ttsAvailable.value);
-const showMultimodalStatus = computed(() => showFileInput.value || showAudioUpload.value || showRecording.value || showWakeMode.value || showSpeechPlayback.value);
+const showRecording = computed(() => sttAvailable.value && browserRecordingAvailable.value);
+const showWakeMode = computed(() => sttAvailable.value && wakeConfigured.value && browserSpeechRecognitionAvailable.value);
+const showSpeechPlayback = computed(() => ttsAvailable.value || browserSpeechPlaybackAvailable.value);
+const showMultimodalStatus = computed(() => showFileInput.value ||
+    showAudioUpload.value ||
+    showRecording.value ||
+    showWakeMode.value ||
+    showSpeechPlayback.value ||
+    (sttAvailable.value && !browserRecordingAvailable.value) ||
+    (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value));
 const voiceStatus = computed(() => {
     if (recordingState.value === "recording")
         return "Recording from microphone";
     if (recordingState.value === "processing")
         return "Transcribing audio";
+    if (sttAvailable.value && !browserRecordingAvailable.value)
+        return "Microphone recording is unavailable in this browser";
+    if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value)
+        return "Wake-word detection is unavailable in this browser";
     return wakeStatus.value;
 });
 function appendToComposer(text) {
     inputText.value = inputText.value.trim()
         ? `${inputText.value.trim()}\n\n${text.trim()}`
         : text.trim();
+}
+function isTextLikeFile(file) {
+    if (file.type.startsWith("text/"))
+        return true;
+    return /\.(txt|md|markdown|csv|json|log|yaml|yml|xml)$/i.test(file.name);
+}
+async function convertLocalTextFileToMarkdown(file) {
+    const rawText = await file.text();
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+        throw new Error("Selected file is empty");
+    }
+    if (/\.(md|markdown)$/i.test(file.name)) {
+        return trimmed;
+    }
+    if (/\.(json)$/i.test(file.name)) {
+        return `\`\`\`json\n${trimmed}\n\`\`\``;
+    }
+    if (/\.(ya?ml)$/i.test(file.name)) {
+        return `\`\`\`yaml\n${trimmed}\n\`\`\``;
+    }
+    if (/\.(xml)$/i.test(file.name)) {
+        return `\`\`\`xml\n${trimmed}\n\`\`\``;
+    }
+    if (/\.(csv)$/i.test(file.name)) {
+        return `\`\`\`csv\n${trimmed}\n\`\`\``;
+    }
+    return trimmed;
 }
 function revokeAudioPreview() {
     if (!audioPreviewUrl.value)
@@ -320,13 +393,32 @@ async function onDocumentSelected(event) {
     if (!file)
         return;
     multimodalBusy.value = true;
-    wakeStatus.value = `Converting ${file.name}`;
+    const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
     try {
-        const result = await gateway.convertFileToMarkdown(file);
-        const markdown = result.markdown?.trim();
-        if (!markdown)
-            throw new Error(result.error ?? "File conversion returned no markdown");
-        appendToComposer(`Context extracted from ${result.filename ?? file.name}:\n\n${markdown}`);
+        // ── Image: queue the file — analysis happens at send time ────────────────
+        if (isImage) {
+            pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
+            wakeStatus.value = `Image attached — click Send`;
+            return;
+        }
+        // ── Document: convert to markdown and inline the text ──
+        wakeStatus.value = `Converting ${file.name}`;
+        let markdown = "";
+        let sourceName = file.name;
+        if (filesAvailable.value) {
+            const result = await gateway.convertFileToMarkdown(file);
+            markdown = result.markdown?.trim() ?? "";
+            sourceName = result.filename ?? file.name;
+            if (!markdown)
+                throw new Error(result.error ?? "File conversion returned no markdown");
+        }
+        else {
+            if (!isTextLikeFile(file)) {
+                throw new Error("File conversion service is offline. Only text, markdown, CSV, JSON, YAML, and XML files can be attached locally right now.");
+            }
+            markdown = await convertLocalTextFileToMarkdown(file);
+        }
+        appendToComposer(`Context from ${sourceName}:\n\n${markdown}`);
         wakeStatus.value = `Attached ${file.name}`;
     }
     catch (error) {
@@ -358,19 +450,51 @@ async function onAudioSelected(event) {
         multimodalBusy.value = false;
     }
 }
-async function speakLatestAssistant() {
+async function speakLatestAssistant(forceFullText = false) {
     const text = latestAssistantText.value.trim();
     if (!text)
         return;
     multimodalBusy.value = true;
-    wakeStatus.value = "Generating speech";
+    lastSpokenSummary.value = null;
+    wakeStatus.value = "Summarising reply";
     try {
-        const audioBlob = await gateway.synthesizeSpeech({ text });
-        revokeAudioPreview();
-        audioPreviewUrl.value = URL.createObjectURL(audioBlob);
-        await nextTick();
-        await audioPlayerEl.value?.play().catch(() => undefined);
-        wakeStatus.value = "Reply ready for playback";
+        // Summarise first unless caller explicitly wants the full text
+        let spoken = text;
+        if (!forceFullText && ttsAvailable.value) {
+            try {
+                const maxSentences = multimodalStore.config.tts.speakReplySummaryMaxSentences ?? 3;
+                spoken = await gateway.summarizeForSpeech({ text, maxSentences });
+                lastSpokenSummary.value = spoken;
+            }
+            catch {
+                // Summarisation failed — fall back to speaking the full text
+                spoken = text;
+            }
+        }
+        wakeStatus.value = "Generating speech";
+        if (ttsAvailable.value) {
+            const audioBlob = await gateway.synthesizeSpeech({ text: spoken });
+            revokeAudioPreview();
+            audioPreviewUrl.value = URL.createObjectURL(audioBlob);
+            await nextTick();
+            await audioPlayerEl.value?.play().catch(() => undefined);
+            wakeStatus.value = "Reply spoken";
+        }
+        else if (browserSpeechPlaybackAvailable.value) {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(spoken);
+            utterance.lang = multimodalStore.config.tts.defaultLanguage.replace("_", "-");
+            await new Promise((resolve, reject) => {
+                utterance.onend = () => resolve();
+                utterance.onerror = () => reject(new Error("Browser speech playback failed"));
+                window.speechSynthesis.speak(utterance);
+            });
+            lastSpokenSummary.value = spoken;
+            wakeStatus.value = "Reply spoken in browser";
+        }
+        else {
+            throw new Error("Speech playback is unavailable in this browser");
+        }
     }
     catch (error) {
         wakeStatus.value = error instanceof Error ? error.message : String(error);
@@ -379,12 +503,47 @@ async function speakLatestAssistant() {
         multimodalBusy.value = false;
     }
 }
+function toggleSpeakReply() {
+    speakReplyEnabled.value = !speakReplyEnabled.value;
+    writeSpeakReplySummaryStorage(speakReplyEnabled.value);
+}
 async function sendMessage() {
-    const text = inputText.value.trim();
-    if (!text || gateway.isLoading)
+    const trimmedText = inputText.value.trim();
+    if ((!trimmedText && pendingImageContexts.value.length === 0) || gateway.isLoading)
         return;
+    const pending = pendingImageContexts.value;
+    pendingImageContexts.value = [];
     inputText.value = "";
-    await gateway.sendMessage(text);
+    // What the user sees in their own bubble — filenames only, no analysis dump
+    const displayParts = [];
+    if (pending.length > 0)
+        displayParts.push(`📎 ${pending.map(p => p.filename).join(", ")}`);
+    if (trimmedText)
+        displayParts.push(trimmedText);
+    const displayContent = displayParts.join("\n");
+    if (pending.length > 0) {
+        analysing.value = true;
+        wakeStatus.value = `Analysing image${pending.length > 1 ? "s" : ""}…`;
+        try {
+            const [analyses, dataUrls] = await Promise.all([
+                Promise.all(pending.map(p => gateway.analyzeImageFile(p.file))),
+                Promise.all(pending.map(p => fileToDataUrl(p.file))),
+            ]);
+            const imageContext = pending.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
+            const attachments = pending.map((p, i) => ({ filename: p.filename, dataUrl: dataUrls[i] }));
+            const fullText = [imageContext, trimmedText].filter(Boolean).join("\n\n");
+            wakeStatus.value = "";
+            await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments);
+        }
+        finally {
+            analysing.value = false;
+            for (const p of pending)
+                URL.revokeObjectURL(p.previewUrl);
+        }
+    }
+    else {
+        await gateway.sendMessage(trimmedText, thinkingMode.value);
+    }
 }
 async function triggerScene(name) {
     if (gateway.isLoading)
@@ -563,6 +722,15 @@ function scrollToBottom() {
 }
 watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
+// Auto-speak: fires when a turn finishes (isLoading flips false → true → false)
+// and the speak-reply toggle is on and the user is in voice-input mode.
+let _wasLoading = false;
+watch(() => gateway.isLoading, (loading) => {
+    if (_wasLoading && !loading && speakReplyEnabled.value && showSpeechPlayback.value) {
+        speakLatestAssistant();
+    }
+    _wasLoading = loading;
+});
 watch(() => gateway.connected, async (connected) => {
     if (!connected)
         return;
@@ -984,6 +1152,44 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
         (__VLS_ctx.scenesStore.runError);
     }
 }
+if (__VLS_ctx.pendingImageContexts.length > 0) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "flex flex-wrap gap-2 mb-2" },
+    });
+    for (const [img, idx] of __VLS_getVForSourceType((__VLS_ctx.pendingImageContexts))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            key: (img.filename + idx),
+            ...{ class: "flex items-center gap-1.5 rounded-xl border border-purple-500/40 bg-purple-900/20 overflow-hidden pr-1" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.pendingImageContexts.length > 0))
+                        return;
+                    __VLS_ctx.previewModalUrl = img.previewUrl;
+                } },
+            ...{ class: "shrink-0 focus:outline-none" },
+            title: "Preview image",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            src: (img.previewUrl),
+            alt: (img.filename),
+            ...{ class: "h-9 w-9 object-cover rounded-l-xl" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "text-xs text-purple-300 max-w-[8rem] truncate select-none" },
+        });
+        (img.filename);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.pendingImageContexts.length > 0))
+                        return;
+                    __VLS_ctx.removeImage(idx);
+                } },
+            ...{ class: "text-purple-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none" },
+            title: "Remove",
+        });
+    }
+}
 if (__VLS_ctx.activeFlags.length > 0) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "flex flex-wrap gap-1.5 mb-2" },
@@ -1180,7 +1386,7 @@ if (__VLS_ctx.showSpeechPlayback) {
             } },
         disabled: (__VLS_ctx.multimodalBusy || !__VLS_ctx.latestAssistantText),
         ...{ class: "btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40" },
-        title: "Generate spoken playback for the latest assistant reply",
+        title: "Speak a summary of the latest assistant reply",
         'aria-label': "Speak reply",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
@@ -1209,6 +1415,39 @@ if (__VLS_ctx.showSpeechPlayback) {
         d: "M19 5a7.5 7.5 0 0 1 0 14",
     });
 }
+if (__VLS_ctx.showSpeechPlayback) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.showSpeechPlayback))
+                    return;
+                __VLS_ctx.toggleSpeakReply();
+            } },
+        ...{ class: "btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl" },
+        ...{ class: (__VLS_ctx.speakReplyEnabled ? 'multimodal-action-active' : '') },
+        title: (__VLS_ctx.speakReplyEnabled ? 'Auto-speak reply summary is ON — click to disable' : 'Auto-speak reply summary is OFF — click to enable'),
+        'aria-label': (__VLS_ctx.speakReplyEnabled ? 'Disable auto-speak' : 'Enable auto-speak'),
+        'aria-pressed': (__VLS_ctx.speakReplyEnabled),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
+        ...{ class: "multimodal-icon" },
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        'stroke-width': "1.75",
+        'stroke-linecap': "round",
+        'stroke-linejoin': "round",
+        'aria-hidden': "true",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+        d: "M11 5 6 9H3v6h3l5 4V5Z",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+        d: "M19.07 4.93a10 10 0 0 1 0 14.14",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+        d: "M15.54 8.46a5 5 0 0 1 0 7.07",
+    });
+}
 if (__VLS_ctx.showMultimodalStatus) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
         ...{ class: "multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide" },
@@ -1232,6 +1471,15 @@ if (__VLS_ctx.audioPreviewUrl) {
         ...{ class: "w-full" },
     });
     /** @type {typeof __VLS_ctx.audioPlayerEl} */ ;
+    if (__VLS_ctx.lastSpokenSummary) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-[11px] text-gray-500 italic leading-relaxed" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "text-gray-600 not-italic" },
+        });
+        (__VLS_ctx.lastSpokenSummary);
+    }
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "flex gap-3 items-end" },
@@ -1248,6 +1496,44 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
     rows: "1",
     ...{ style: {} },
 });
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (__VLS_ctx.cycleThinkingMode) },
+    ...{ class: "btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors" },
+    ...{ class: (__VLS_ctx.thinkingMode === true
+            ? 'multimodal-action-active'
+            : __VLS_ctx.thinkingMode === false
+                ? 'opacity-40 border-dashed'
+                : 'opacity-60 hover:opacity-100') },
+    title: (__VLS_ctx.thinkingMode === undefined
+        ? 'Thinking: auto — click to enable extended reasoning'
+        : __VLS_ctx.thinkingMode
+            ? 'Thinking: ON — click to disable'
+            : 'Thinking: OFF — click to reset to auto'),
+    'aria-label': (__VLS_ctx.thinkingMode === undefined ? 'Thinking auto' : __VLS_ctx.thinkingMode ? 'Thinking on' : 'Thinking off'),
+    'aria-pressed': (__VLS_ctx.thinkingMode === true),
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.svg, __VLS_intrinsicElements.svg)({
+    ...{ class: "multimodal-icon" },
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    'stroke-width': "1.75",
+    'stroke-linecap': "round",
+    'stroke-linejoin': "round",
+    'aria-hidden': "true",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+    d: "M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.path)({
+    d: "M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z",
+});
+if (__VLS_ctx.thinkingMode !== undefined) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "text-[10px] leading-none mt-0.5" },
+    });
+    (__VLS_ctx.thinkingMode ? 'on' : 'off');
+}
 if (__VLS_ctx.gateway.isLoading) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
@@ -1262,7 +1548,7 @@ if (__VLS_ctx.gateway.isLoading) {
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.sendMessage) },
-        disabled: (!__VLS_ctx.inputText.trim() || !__VLS_ctx.gateway.connected),
+        disabled: ((!__VLS_ctx.inputText.trim() && __VLS_ctx.pendingImageContexts.length === 0) || !__VLS_ctx.gateway.connected),
         ...{ class: "btn-grad px-5 py-3 rounded-2xl text-sm shrink-0" },
     });
 }
@@ -1281,6 +1567,49 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({
     ...{ class: "font-mono" },
 });
+const __VLS_23 = {}.Teleport;
+/** @type {[typeof __VLS_components.Teleport, typeof __VLS_components.Teleport, ]} */ ;
+// @ts-ignore
+const __VLS_24 = __VLS_asFunctionalComponent(__VLS_23, new __VLS_23({
+    to: "body",
+}));
+const __VLS_25 = __VLS_24({
+    to: "body",
+}, ...__VLS_functionalComponentArgsRest(__VLS_24));
+__VLS_26.slots.default;
+if (__VLS_ctx.previewModalUrl) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.previewModalUrl))
+                    return;
+                __VLS_ctx.previewModalUrl = null;
+            } },
+        ...{ onKeydown: (...[$event]) => {
+                if (!(__VLS_ctx.previewModalUrl))
+                    return;
+                __VLS_ctx.previewModalUrl = null;
+            } },
+        ...{ class: "fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "relative max-w-4xl max-h-[90vh] p-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+        src: (__VLS_ctx.previewModalUrl),
+        alt: "Image preview",
+        ...{ class: "max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.previewModalUrl))
+                    return;
+                __VLS_ctx.previewModalUrl = null;
+            } },
+        ...{ class: "absolute -top-2 -right-2 w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 flex items-center justify-center text-sm transition-colors" },
+        title: "Close",
+    });
+}
+var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['relative']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex-col']} */ ;
@@ -1562,6 +1891,36 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['text-red-200']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex-wrap']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-purple-900/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-hidden']} */ ;
+/** @type {__VLS_StyleScopedClasses['pr-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['shrink-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['focus:outline-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['object-cover']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-l-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-purple-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-w-[8rem]']} */ ;
+/** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['select-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-purple-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:text-red-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-0.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['leading-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex-wrap']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-1.5']} */ ;
 /** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['opacity-50']} */ ;
@@ -1615,6 +1974,13 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
 /** @type {__VLS_StyleScopedClasses['disabled:opacity-40']} */ ;
 /** @type {__VLS_StyleScopedClasses['multimodal-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-brand-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-icon-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['multimodal-status']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
 /** @type {__VLS_StyleScopedClasses['px-3']} */ ;
@@ -1638,6 +2004,13 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['px-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['py-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['italic']} */ ;
+/** @type {__VLS_StyleScopedClasses['leading-relaxed']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['not-italic']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['items-end']} */ ;
@@ -1659,6 +2032,17 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['placeholder-gray-600']} */ ;
 /** @type {__VLS_StyleScopedClasses['transition-all']} */ ;
 /** @type {__VLS_StyleScopedClasses['duration-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-brand-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-icon-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-2xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['shrink-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
+/** @type {__VLS_StyleScopedClasses['multimodal-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[10px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['leading-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-0.5']} */ ;
 /** @type {__VLS_StyleScopedClasses['px-5']} */ ;
 /** @type {__VLS_StyleScopedClasses['py-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-2xl']} */ ;
@@ -1685,6 +2069,40 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-mono']} */ ;
+/** @type {__VLS_StyleScopedClasses['fixed']} */ ;
+/** @type {__VLS_StyleScopedClasses['inset-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['z-50']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/75']} */ ;
+/** @type {__VLS_StyleScopedClasses['backdrop-blur-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['relative']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-w-4xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-[90vh]']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-[85vh]']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['object-contain']} */ ;
+/** @type {__VLS_StyleScopedClasses['shadow-2xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['absolute']} */ ;
+/** @type {__VLS_StyleScopedClasses['-top-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['-right-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-7']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-7']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-gray-800']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:text-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-gray-700']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -1704,6 +2122,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             recordingState: recordingState,
             wakeListening: wakeListening,
             wakeKeywords: wakeKeywords,
+            speakReplyEnabled: speakReplyEnabled,
+            lastSpokenSummary: lastSpokenSummary,
+            thinkingMode: thinkingMode,
+            pendingImageContexts: pendingImageContexts,
+            previewModalUrl: previewModalUrl,
+            removeImage: removeImage,
+            cycleThinkingMode: cycleThinkingMode,
             activeFlags: activeFlags,
             removeFlag: removeFlag,
             flagChipClass: flagChipClass,
@@ -1723,6 +2148,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             onDocumentSelected: onDocumentSelected,
             onAudioSelected: onAudioSelected,
             speakLatestAssistant: speakLatestAssistant,
+            toggleSpeakReply: toggleSpeakReply,
             sendMessage: sendMessage,
             triggerScene: triggerScene,
             approveAction: approveAction,

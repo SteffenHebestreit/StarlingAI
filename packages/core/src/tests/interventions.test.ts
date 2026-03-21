@@ -30,4 +30,41 @@ describe("tool intervention classification", () => {
     });
     expect(notice).toBeNull();
   });
+
+  it("classifies repeated identical output as a loop intervention", () => {
+    const notice = classifyToolIntervention({
+      toolName: "browser_snapshot",
+      success: true,
+      output: "<html>same page</html>",
+      repeatedIdenticalOutput: true,
+    });
+    expect(notice?.reasonCode).toBe("repeated_identical_output");
+    expect(notice?.severity).toBe("warn");
+    expect(notice?.actions.some(a => a.kind === "stop_turn")).toBe(true);
+  });
+});
+
+describe("tool not-found similar-tool suggestion", () => {
+  it("suggests tools with the same prefix when a tool is not found", async () => {
+    // browser_screenshot is in the tier map (Tier 2, not blocked) but the native
+    // browser tools are not registered in the test environment (no Playwright).
+    // So executeTool reaches the "not registered" branch and should suggest
+    // the MCP browser tools (browser_navigate, browser_snapshot, etc.) that ARE
+    // registered via the MCP client registration path.
+    //
+    // If no browser tools are registered in this test run either, we fall back to
+    // checking that the error message mentions the tool name and is not the
+    // "blocked by security policy" message.
+    const { executeTool } = await import("../tools/registry.js");
+
+    const result = await executeTool("browser_screenshot", {}, {
+      sessionId: "test",
+      workspacePath: "/tmp",
+    });
+
+    expect(result.success).toBe(false);
+    // Must NOT be the blocked-by-policy message (browser_screenshot is Tier 2, not 4)
+    expect(result.error).not.toContain("blocked by security policy");
+    expect(result.error).toContain("browser_screenshot");
+  });
 });

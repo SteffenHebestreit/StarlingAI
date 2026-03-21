@@ -138,6 +138,20 @@ export class LMStudioProvider {
     const maxAttempts = 2;
     const retryDelay = 2000;
 
+    // Qwen3.5 thinking-mode: auto-apply recommended sampling params when enableThinking is set
+    // and the user has not explicitly overridden topP. Explicit topP always wins.
+    let effectiveTemp = this.modelConfig.temperature;
+    let effectiveTopP = this.modelConfig.topP;
+    if (this.modelConfig.enableThinking !== undefined && effectiveTopP === undefined) {
+      if (this.modelConfig.enableThinking) {
+        effectiveTemp = 0.6;
+        effectiveTopP = 0.95;
+      } else {
+        effectiveTemp = 0.7;
+        effectiveTopP = 0.8;
+      }
+    }
+
     while (attempt < maxAttempts) {
       try {
         const response = await this.client.chat.completions.create(
@@ -146,13 +160,18 @@ export class LMStudioProvider {
             messages: openAIMessages,
             tools: openAITools.length > 0 ? openAITools : undefined,
             tool_choice: openAITools.length > 0 ? "auto" : undefined,
-            temperature: this.modelConfig.temperature,
+            temperature: effectiveTemp,
             max_tokens: this.modelConfig.maxTokens,
-            ...(this.modelConfig.topP !== undefined && { top_p: this.modelConfig.topP }),
+            ...(effectiveTopP !== undefined && { top_p: effectiveTopP }),
             ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
             ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
             ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
+            // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
+            // The outer `as Parameters<...>[0]` cast suppresses the unknown-property error.
+            ...(this.modelConfig.enableThinking !== undefined && {
+              extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
+            }),
           } as Parameters<typeof this.client.chat.completions.create>[0],
           { signal }
         ) as ChatCompletion;
@@ -209,19 +228,36 @@ export class LMStudioProvider {
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
 
+    // Qwen3.5 thinking-mode: same auto-sampling logic as complete()
+    let streamEffectiveTemp = this.modelConfig.temperature;
+    let streamEffectiveTopP = this.modelConfig.topP;
+    if (this.modelConfig.enableThinking !== undefined && streamEffectiveTopP === undefined) {
+      if (this.modelConfig.enableThinking) {
+        streamEffectiveTemp = 0.6;
+        streamEffectiveTopP = 0.95;
+      } else {
+        streamEffectiveTemp = 0.7;
+        streamEffectiveTopP = 0.8;
+      }
+    }
+
     const stream = await this.client.chat.completions.create(
       {
         model: modelId,
         messages: openAIMessages,
         tools: openAITools.length > 0 ? openAITools : undefined,
         tool_choice: openAITools.length > 0 ? "auto" : undefined,
-        temperature: this.modelConfig.temperature,
+        temperature: streamEffectiveTemp,
         max_tokens: this.modelConfig.maxTokens,
-        ...(this.modelConfig.topP !== undefined && { top_p: this.modelConfig.topP }),
+        ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
         ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
         ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
+        // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
+        ...(this.modelConfig.enableThinking !== undefined && {
+          extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
+        }),
         stream: true,
         stream_options: { include_usage: true },
       } as Parameters<typeof this.client.chat.completions.create>[0],

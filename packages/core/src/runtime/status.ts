@@ -1,4 +1,4 @@
-export type RuntimeComponentName = "config_reload" | "channels" | "webhooks" | "mcp" | "providers" | "approvals";
+export type RuntimeComponentName = "config_reload" | "channels" | "webhooks" | "mcp" | "providers" | "approvals" | "model_endpoints";
 
 export interface RuntimeComponentStatus {
   name: RuntimeComponentName;
@@ -14,7 +14,7 @@ export interface RuntimeStatusSnapshot {
   components: RuntimeComponentStatus[];
 }
 
-const componentNames: RuntimeComponentName[] = ["config_reload", "channels", "webhooks", "mcp", "providers", "approvals"];
+const componentNames: RuntimeComponentName[] = ["config_reload", "channels", "webhooks", "mcp", "providers", "approvals", "model_endpoints"];
 
 const componentStatus = new Map<RuntimeComponentName, RuntimeComponentStatus>(
   componentNames.map((name) => [name, { name, healthy: true }]),

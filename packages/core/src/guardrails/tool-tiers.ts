@@ -180,6 +180,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  generate_image: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate an image from text and save it inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   share_finding: {
     tier: ToolTier.ONE_WRITE,
     description: "Publish a finding into shared swarm memory for sibling agents",
@@ -257,6 +263,70 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresSandbox: false,
   },
 
+  // ─── Pentest / Security Assessment ──────────────────────────────────────
+  // searchsploit is read-only (offline Exploit-DB search, no network to target)
+  searchsploit_query: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search Exploit-DB / SearchSploit for known CVEs and exploit PoCs (offline, no network traffic to target)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  pentest_report: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a structured pentest report from collected findings and save it to the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  // Active scanning tools — Tier 3, per-call approval, require authorized scope
+  nmap_scan: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Nmap port/service/OS scan — requires authorized pentest scope configured in the Kali service",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  nikto_scan: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Nikto web server vulnerability scan — requires authorized pentest scope",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  sqlmap_scan: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "SQLMap SQL injection test — requires authorized pentest scope",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  gobuster_scan: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Gobuster directory/DNS/vhost brute-force — requires authorized pentest scope",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  hydra_attack: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Hydra credential brute-force against an authorized service endpoint",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  metasploit_exec: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Metasploit Framework module/exploit execution — requires authorized pentest scope",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  pentest_exec: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Generic Kali Linux tool execution in the isolated pentest container — requires authorized pentest scope",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  pentest_set_scope: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Configure the authorized target scope for the current pentest engagement — requires per-call user approval",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+
   // ─── Tier 3: Privileged ──────────────────────────────────────────────────
   // Note: MCP tools are bridged as mcp__<server>__<tool> — matched by the
   // pattern in getToolTier() below. There is no generic "mcp_call" tool.
@@ -269,6 +339,54 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   cron_create: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Create scheduled cron task",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  ssh_exec: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Execute commands on a remote system over SSH",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  ssh_upload: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Upload workspace files or directories to a remote system over SCP",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  ssh_download: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Download files or directories from a remote system into the workspace over SCP",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  ansible_playbook: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Run an Ansible playbook for infrastructure automation",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  ansible_task: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Run a single Ansible ad-hoc task against a remote inventory",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  proxmox_vm: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Manage Proxmox virtual machines through the Proxmox VE API",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  terraform_exec: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Run Terraform for infrastructure provisioning and stateful changes",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  service_check: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Check remote infrastructure readiness over HTTP, TCP, SSH, or DNS from the host",
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },

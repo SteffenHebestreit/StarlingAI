@@ -5,6 +5,7 @@ import DOMPurify from "dompurify";
 const props = defineProps();
 const toolHistoryOpen = ref(false);
 const thinkingOpen = ref(false);
+const lightboxUrl = ref(null);
 // ── Parse thinking blocks out of content ─────────────────────────────────────
 const THINKING_RE = /<(thinking|think)>([\s\S]*?)<\/(thinking|think)>/gi;
 function splitContent(raw) {
@@ -30,6 +31,17 @@ const isThinking = computed(() => {
 const mainStreamingText = computed(() => {
     const text = props.streamingText ?? "";
     return text.replace(/<(thinking|think)>[\s\S]*$/i, "").trim();
+});
+// ── Block label — distinguish guardrail blocks from technical errors ──────────
+const blockLabel = computed(() => {
+    const details = props.message.guardrailEvents?.[0]?.details ?? props.message.content ?? "";
+    if (details.startsWith("LLM error:"))
+        return "⚠ LLM connection error";
+    if (details.startsWith("Request cancelled"))
+        return "⚠ Request cancelled";
+    if (/prompt injection|secret scan|output guardrail/i.test(details))
+        return "⛔ Blocked by guardrails";
+    return "⚠ Request blocked";
 });
 // ── Tool call label ───────────────────────────────────────────────────────────
 const activeToolLabel = computed(() => {
@@ -130,6 +142,7 @@ debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
+/** @type {__VLS_StyleScopedClasses['message-attachment-img']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-status']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-history__item']} */ ;
 /** @type {__VLS_StyleScopedClasses['thinking-dot']} */ ;
@@ -175,8 +188,9 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.d
 });
 if (__VLS_ctx.message.blocked) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "guardrail-badge guardrail-badge--blocked" },
+        ...{ class: (['guardrail-badge', __VLS_ctx.blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']) },
     });
+    (__VLS_ctx.blockLabel);
 }
 if (__VLS_ctx.message.guardrailEvents?.length) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -286,6 +300,25 @@ if (__VLS_ctx.thinkingContent || __VLS_ctx.isThinking) {
         (__VLS_ctx.thinkingContent);
     }
 }
+if (__VLS_ctx.message.attachments?.length) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "message-attachments" },
+    });
+    for (const [att, i] of __VLS_getVForSourceType((__VLS_ctx.message.attachments))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.message.attachments?.length))
+                        return;
+                    __VLS_ctx.lightboxUrl = att.dataUrl;
+                } },
+            key: (i),
+            src: (att.dataUrl),
+            alt: (att.filename),
+            ...{ class: "message-attachment-img" },
+            title: "Click to enlarge",
+        });
+    }
+}
 if (__VLS_ctx.isStreaming) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div)({
         ...{ class: "message-content prose-content" },
@@ -330,8 +363,48 @@ if (__VLS_ctx.message.usage && __VLS_ctx.message.role === 'assistant') {
         (__VLS_ctx.formatDuration(__VLS_ctx.message.perf.turnDurationMs));
     }
 }
-/** @type {__VLS_StyleScopedClasses['guardrail-badge']} */ ;
-/** @type {__VLS_StyleScopedClasses['guardrail-badge--blocked']} */ ;
+const __VLS_0 = {}.Teleport;
+/** @type {[typeof __VLS_components.Teleport, typeof __VLS_components.Teleport, ]} */ ;
+// @ts-ignore
+const __VLS_1 = __VLS_asFunctionalComponent(__VLS_0, new __VLS_0({
+    to: "body",
+}));
+const __VLS_2 = __VLS_1({
+    to: "body",
+}, ...__VLS_functionalComponentArgsRest(__VLS_1));
+__VLS_3.slots.default;
+if (__VLS_ctx.lightboxUrl) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.lightboxUrl))
+                    return;
+                __VLS_ctx.lightboxUrl = null;
+            } },
+        ...{ onKeydown: (...[$event]) => {
+                if (!(__VLS_ctx.lightboxUrl))
+                    return;
+                __VLS_ctx.lightboxUrl = null;
+            } },
+        ...{ class: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "relative max-w-4xl max-h-[90vh] p-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.img)({
+        src: (__VLS_ctx.lightboxUrl),
+        alt: "Attachment preview",
+        ...{ class: "max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.lightboxUrl))
+                    return;
+                __VLS_ctx.lightboxUrl = null;
+            } },
+        ...{ class: "absolute -top-2 -right-2 w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 flex items-center justify-center text-sm transition-colors" },
+    });
+}
+var __VLS_3;
 /** @type {__VLS_StyleScopedClasses['guardrail-events']} */ ;
 /** @type {__VLS_StyleScopedClasses['guardrail-badge']} */ ;
 /** @type {__VLS_StyleScopedClasses['guardrail-badge--warn']} */ ;
@@ -354,6 +427,8 @@ if (__VLS_ctx.message.usage && __VLS_ctx.message.role === 'assistant') {
 /** @type {__VLS_StyleScopedClasses['thinking-toggle-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['thinking-chevron']} */ ;
 /** @type {__VLS_StyleScopedClasses['thinking-body']} */ ;
+/** @type {__VLS_StyleScopedClasses['message-attachments']} */ ;
+/** @type {__VLS_StyleScopedClasses['message-attachment-img']} */ ;
 /** @type {__VLS_StyleScopedClasses['message-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['prose-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['message-content']} */ ;
@@ -364,15 +439,51 @@ if (__VLS_ctx.message.usage && __VLS_ctx.message.role === 'assistant') {
 /** @type {__VLS_StyleScopedClasses['export-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['export-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['message-usage']} */ ;
+/** @type {__VLS_StyleScopedClasses['fixed']} */ ;
+/** @type {__VLS_StyleScopedClasses['inset-0']} */ ;
+/** @type {__VLS_StyleScopedClasses['z-50']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/80']} */ ;
+/** @type {__VLS_StyleScopedClasses['backdrop-blur-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['relative']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-w-4xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-[90vh]']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-[85vh]']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['object-contain']} */ ;
+/** @type {__VLS_StyleScopedClasses['shadow-2xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['absolute']} */ ;
+/** @type {__VLS_StyleScopedClasses['-top-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['-right-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-7']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-7']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-gray-800']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-gray-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:text-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-gray-700']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-colors']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             toolHistoryOpen: toolHistoryOpen,
             thinkingOpen: thinkingOpen,
+            lightboxUrl: lightboxUrl,
             thinkingContent: thinkingContent,
             mainContent: mainContent,
             isThinking: isThinking,
+            blockLabel: blockLabel,
             activeToolLabel: activeToolLabel,
             renderedContent: renderedContent,
             renderedStreamingContent: renderedStreamingContent,

@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig } from "./config/loader.js";
 import { initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
@@ -9,25 +11,36 @@ import { initMcpServers, shutdownMcpServers, syncMcpServers } from "./mcp/regist
 import { stopManagedChannels, syncAllChannels } from "./channels/runtime.js";
 import { runChannelHealthChecks } from "./channels/registry.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./runtime/status.js";
+import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
+import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 
 // Import tools to register them (side-effect imports)
 import "./tools/filesystem.js";
 import "./tools/shell.js";
+import "./tools/ssh.js";
+import "./tools/ssh-upload.js";
+import "./tools/ssh-download.js";
+import "./tools/service-check.js";
+import "./tools/ansible.js";
+import "./tools/ansible-task.js";
+import "./tools/proxmox.js";
+import "./tools/terraform.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/memory.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
 import "./tools/multimodal.js";
+import "./tools/pentest.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 const log = childLogger("main");
 
-async function main() {
+export async function main() {
   log.info("StarlingAI starting...");
 
   // Load and validate config
@@ -39,6 +52,7 @@ async function main() {
 
   // Check LLM provider health
   await initProviders();
+  await syncModelEndpointRuntimeStatus();
 
   // Validate approval routing configuration
   syncApprovalRuntimeStatus();
@@ -51,7 +65,7 @@ async function main() {
 
   // Start gateway (WS + REST)
   const gateway = createGateway();
-  gateway.start();
+  await gateway.start();
 
   // Start and reconcile dashboard-managed channels
   await syncAllChannels();
@@ -65,6 +79,9 @@ async function main() {
   // Start first-pass autonomous bidding over the swarm bus
   startAutonomousBidding();
 
+  // Start long-running bidder worker (independent autonomous bidding process)
+  await startBidderWorker();
+
   // Start Warden — background anomaly monitor
   startWarden();
 
@@ -76,6 +93,9 @@ async function main() {
       try {
         if (changedSections.includes("providers") || changedSections.includes("_initial")) {
           await initProviders();
+        }
+        if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {
+          await syncModelEndpointRuntimeStatus();
         }
         syncApprovalRuntimeStatus();
         if (changedSections.includes("webhooks") || changedSections.includes("_initial")) {
@@ -100,6 +120,7 @@ async function main() {
     clearInterval(healthInterval);
     stopWarden();
     stopAutonomousBidding();
+    stopBidderWorker();
     await stopSwarmBus();
     await stopManagedChannels();
     await gateway.stop();
@@ -124,7 +145,15 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error("Fatal startup error:", err);
-  process.exit(1);
-});
+function isDirectExecution(): boolean {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+  return resolve(entrypoint) === fileURLToPath(import.meta.url);
+}
+
+if (isDirectExecution()) {
+  main().catch(err => {
+    console.error("Fatal startup error:", err);
+    process.exit(1);
+  });
+}

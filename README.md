@@ -15,7 +15,10 @@
 <a href="docs/architecture.md">Architecture</a> ·
 <a href="docs/agents.md">Agents</a> ·
 <a href="docs/api.md">API</a> ·
+<a href="docs/model-serving.md">Model Serving</a> ·
 <a href="docs/security.md">Security</a> ·
+<a href="docs/pentest.md">Pentesting</a> ·
+<a href="docs/strix-halo.md">Strix Halo</a> ·
 <a href="QUICKSTART.md">Quick Start</a>
 
 ---
@@ -77,7 +80,9 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Multi-Channel Messaging** — Webchat, Telegram, Slack, Discord, WhatsApp, and email with consistent delivery SLOs, dead-letter queues, and retry with backoff.
 - **Warden Monitoring** — A background warden detects tool storms, escape attempts, failure spikes, and SLO breaches in real time.
 - **Live Observability** — Token streaming to the dashboard via AG-UI SSE, full per-turn performance telemetry, and a complete audit trail in JSONL + PostgreSQL.
+- **Model Routing UI** — The dashboard can now edit separate OpenAI-compatible endpoints for the orchestrator, embeddings, reranker, and guard moderation roles, with live model-advertisement health checks.
 - **Scenes** — Reusable workflows launchable from chat, the dashboard, or webhooks and tracked as async jobs.
+- **Penetration Testing** — Full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit and more via `pentest_exec`) wrapped in a scope-enforcing swarm. A mandatory authorization workflow prevents any active scanning without written consent. Partial results are preserved on timeout. Loop detection and tool-suggestion hints prevent agents getting stuck. Findings are compiled into a structured Markdown report.
 
 ---
 
@@ -86,15 +91,27 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 ```bash
 git clone https://github.com/SteffenHebestreit/StarlingAI starlingai
 cd starlingai
-pnpm setup
-pnpm install
-docker compose up -d --build
-pnpm token
+node scripts/setup.mjs   # generates .env secrets (first run only)
+cp starlingai.example.json starlingai.json
+./start.sh               # builds images + starts all core services
 ```
+
+Windows CMD: `start.bat`
 
 Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup guide. The gateway listens on `http://localhost:8765`.
 
 The bundled multimodal stack defaults to Qwen3 across the board: Qwen3.5 for agent reasoning, Qwen3-ASR for speech-to-text, and Qwen3-TTS for speech synthesis with optional voice cloning.
+
+### Optional services
+
+```bash
+./extras.sh pentest on   # start Kali Linux pentest service
+./extras.sh image on     # start image-generation service
+./extras.sh all on       # start both
+./extras.sh status       # show what's running
+```
+
+Windows CMD: `extras.bat pentest on` etc.
 
 > See [QUICKSTART.md](QUICKSTART.md) for detailed setup steps and configuration options.
 
@@ -106,12 +123,14 @@ The bundled multimodal stack defaults to Qwen3 across the board: Qwen3.5 for age
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | System layout, swarm principles, and runtime boundaries |
 | [docs/configuration.md](docs/configuration.md) | `starlingai.json` schema and environment variables |
+| [docs/model-serving.md](docs/model-serving.md) | Running unsupported Qwen checkpoints on separate OpenAI-compatible servers |
 | [docs/agents.md](docs/agents.md) | Agent catalog, routing, ephemeral agents, and evaluation |
 | [docs/channels.md](docs/channels.md) | Channel support matrix, policies, runtime behavior, and APIs |
 | [docs/channel-setup.md](docs/channel-setup.md) | Practical setup steps for each channel |
 | [docs/api.md](docs/api.md) | REST, WebSocket, scene job, approval, and A2A interfaces |
 | [docs/security.md](docs/security.md) | Auth, credential storage, sandboxing, and audit behavior |
 | [docs/tool-tiers.md](docs/tool-tiers.md) | Hard-coded tool permission tiers and approval rules |
+| [docs/pentest.md](docs/pentest.md) | Kali Linux pentest swarm — setup, authorization workflow, tools, and agents |
 
 ---
 

@@ -35,14 +35,18 @@ registerTool({
     }
 
     try {
-      const results = await searchSearxng(query, maxResults, SEARXNG_BASE);
+      const searchOutcome = await searchSearxng(query, maxResults, SEARXNG_BASE);
+      const { results, rewrittenQuery, ranking } = searchOutcome;
       const backend = "searxng";
+      const queryNote = rewrittenQuery !== query.trim()
+        ? `\nSearched as: "${rewrittenQuery}"`
+        : "";
 
       if (results.length === 0) {
         return {
           success: true,
-          output: `No results found for "${query}" from the configured SearXNG backend. Try rephrasing or use different keywords.`,
-          metadata: { query, backend },
+          output: `No results found for "${query}" from the configured SearXNG backend.${queryNote}\nTry rephrasing or use different keywords.`,
+          metadata: { query, rewrittenQuery, backend, ranking },
         };
       }
 
@@ -52,8 +56,8 @@ registerTool({
 
       return {
         success: true,
-        output: `**Web Search Results for:** "${query}" (via ${backend})\n\n${formatted}`,
-        metadata: { query, resultCount: results.length, backend },
+        output: `**Web Search Results for:** "${query}" (via ${backend})${queryNote}\n\n${formatted}`,
+        metadata: { query, rewrittenQuery, resultCount: results.length, backend, ranking },
       };
     } catch (err) {
       log.error({ err, query }, "web_search failed");
@@ -222,10 +226,191 @@ interface SearchResult {
   snippet: string;
 }
 
+const SEARCH_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "into",
+  "is", "it", "latest", "of", "on", "or", "roadmap", "the", "to", "what", "when", "where",
+  "which", "who", "with",
+]);
+
+interface AcronymExpansionRule {
+  acronym: string;
+  expansion: string;
+  triggerTerms: string[];
+}
+
+const SEARCH_ACRONYM_EXPANSIONS: AcronymExpansionRule[] = [
+  {
+    acronym: "mcp",
+    expansion: '"Model Context Protocol"',
+    triggerTerms: [
+      "ai", "agent", "agents", "anthropic", "api", "apis", "assistant", "assistants",
+      "context", "documentation", "docs", "github", "llm", "llms", "model", "models",
+      "prompt", "prompts", "protocol", "server", "servers", "spec", "specification",
+      "tool", "tools",
+    ],
+  },
+];
+
+interface RankedSearchResult extends SearchResult {
+  score: number;
+}
+
+interface SearchHeuristicsMetadata {
+  phrases: string[];
+  keywordTerms: string[];
+  acronymTerms: string[];
+}
+
+interface SearchRankingMetadata {
+  topResults: Array<{ title: string; url: string; score: number }>;
+  heuristics: SearchHeuristicsMetadata;
+}
+
+interface QuerySignals {
+  phrases: string[];
+  keywordTerms: string[];
+  acronymTerms: string[];
+}
+
+function extractQuerySignals(query: string): QuerySignals {
+  const normalized = query.trim().toLowerCase();
+  const phrases = [...normalized.matchAll(/"([^"]+)"/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter((phrase) => phrase.length >= 3);
+
+  const keywordTerms: string[] = [];
+  const acronymTerms: string[] = [];
+
+  for (const rawToken of normalized.split(/[^a-z0-9]+/i)) {
+    if (!rawToken) continue;
+    if (SEARCH_STOP_WORDS.has(rawToken)) continue;
+    if (/^[a-z]+\d+$/.test(rawToken)) {
+      keywordTerms.push(rawToken);
+      continue;
+    }
+    if (rawToken.length >= 3 && /\d/.test(rawToken)) {
+      keywordTerms.push(rawToken);
+      continue;
+    }
+    if (rawToken.length <= 4) {
+      acronymTerms.push(rawToken);
+      continue;
+    }
+    keywordTerms.push(rawToken);
+  }
+
+  return {
+    phrases,
+    keywordTerms: [...new Set(keywordTerms)],
+    acronymTerms: [...new Set(acronymTerms)],
+  };
+}
+
+function countWholeWordMatches(haystack: string, term: string): number {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matches = haystack.match(new RegExp(`\\b${escaped}\\b`, "g"));
+  return matches?.length ?? 0;
+}
+
+function scoreSearchResult(result: SearchResult, signals: QuerySignals): number {
+  const title = result.title.toLowerCase();
+  const url = result.url.toLowerCase();
+  const snippet = result.snippet.toLowerCase();
+  const combined = `${title}\n${url}\n${snippet}`;
+
+  let score = 0;
+  let matchedKeywordTerms = 0;
+  let matchedAcronymTerms = 0;
+
+  for (const phrase of signals.phrases) {
+    if (combined.includes(phrase)) score += 8;
+    else if (title.includes(phrase)) score += 6;
+  }
+
+  for (const term of signals.keywordTerms) {
+    const titleMatches = countWholeWordMatches(title, term);
+    const urlMatches = countWholeWordMatches(url, term);
+    const snippetMatches = countWholeWordMatches(snippet, term);
+    const termScore = titleMatches * 4 + urlMatches * 2.5 + snippetMatches * 1.5;
+    if (termScore > 0) {
+      matchedKeywordTerms += 1;
+      score += termScore;
+    }
+  }
+
+  for (const term of signals.acronymTerms) {
+    const titleMatches = countWholeWordMatches(title, term);
+    const urlMatches = countWholeWordMatches(url, term);
+    const snippetMatches = countWholeWordMatches(snippet, term);
+    const termScore = titleMatches * 1.2 + urlMatches * 0.8 + snippetMatches * 0.4;
+    if (termScore > 0) {
+      matchedAcronymTerms += 1;
+      score += termScore;
+    }
+  }
+
+  if (signals.keywordTerms.length > 0) {
+    score += (matchedKeywordTerms / signals.keywordTerms.length) * 6;
+  }
+
+  if (signals.keywordTerms.length >= 2 && matchedKeywordTerms === 0 && matchedAcronymTerms > 0) {
+    score -= 6;
+  }
+
+  if (signals.keywordTerms.length >= 3 && matchedKeywordTerms === 1 && matchedAcronymTerms > 0) {
+    score -= 3;
+  }
+
+  return score;
+}
+
+export function rankSearchResults(query: string, results: SearchResult[], maxResults: number): RankedSearchResult[] {
+  const signals = extractQuerySignals(query);
+  const ranked = results
+    .map((result) => ({ ...result, score: scoreSearchResult(result, signals) }))
+    .sort((left, right) => right.score - left.score) as RankedSearchResult[];
+
+  const positive = ranked.filter((result) => result.score > 0);
+  const selected = positive.length > 0 ? positive : ranked;
+  return selected.slice(0, maxResults);
+}
+
+export function rerankSearchResults(query: string, results: SearchResult[], maxResults: number): SearchResult[] {
+  return rankSearchResults(query, results, maxResults).map(({ score: _score, ...result }) => result);
+}
+
+export function expandSearchQuery(query: string): string {
+  const trimmed = query.trim();
+  if (!trimmed) return trimmed;
+
+  const normalized = trimmed.toLowerCase();
+  const signals = extractQuerySignals(trimmed);
+  const signalTerms = new Set([...signals.keywordTerms, ...signals.acronymTerms]);
+
+  let expanded = trimmed;
+  for (const rule of SEARCH_ACRONYM_EXPANSIONS) {
+    const acronymPattern = new RegExp(`\\b${rule.acronym}\\b`, "i");
+    if (!acronymPattern.test(normalized)) continue;
+    if (normalized.includes(rule.expansion.toLowerCase().replace(/"/g, ""))) continue;
+
+    const matchedTrigger = rule.triggerTerms.some((term) => signalTerms.has(term));
+    if (!matchedTrigger) continue;
+
+    expanded = `${expanded} ${rule.expansion}`;
+  }
+
+  return expanded;
+}
+
 // ─── SearXNG (self-hosted, most reliable) ────────────────────────────────────
 
-async function searchSearxng(query: string, maxResults: number, baseUrl: string): Promise<SearchResult[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=auto`;
+async function searchSearxng(query: string, maxResults: number, baseUrl: string): Promise<{
+  results: SearchResult[];
+  rewrittenQuery: string;
+  ranking: SearchRankingMetadata;
+}> {
+  const rewrittenQuery = expandSearchQuery(query);
+  const url = `${baseUrl.replace(/\/$/, "")}/search?q=${encodeURIComponent(rewrittenQuery)}&format=json&categories=general&language=auto`;
   const res = await fetchWithTimeout(url, 12000, {
     headers: {
       "Accept": "application/json",
@@ -236,10 +421,30 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string)
   if (!res.ok) throw new Error(`SearXNG returned HTTP ${res.status}`);
   const data = await res.json() as { results?: Array<{ title?: string; url?: string; content?: string }> };
 
-  return (data.results ?? []).slice(0, maxResults).map(r => ({
+  const rawResults = (data.results ?? []).map(r => ({
     title: r.title ?? "",
     url: r.url ?? "",
     snippet: r.content ?? "",
   })).filter(r => r.title && r.url);
+
+  const rankedResults = rankSearchResults(rewrittenQuery, rawResults, maxResults);
+  const signals = extractQuerySignals(rewrittenQuery);
+
+  return {
+    results: rankedResults.map(({ score: _score, ...result }) => result),
+    rewrittenQuery,
+    ranking: {
+      topResults: rankedResults.slice(0, 3).map((result) => ({
+        title: result.title,
+        url: result.url,
+        score: Number(result.score.toFixed(3)),
+      })),
+      heuristics: {
+        phrases: signals.phrases,
+        keywordTerms: signals.keywordTerms,
+        acronymTerms: signals.acronymTerms,
+      },
+    },
+  };
 }
 

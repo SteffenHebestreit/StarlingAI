@@ -14,6 +14,8 @@ export interface AgentModelConfig {
   repeatPenalty?: number;
   seed?: number;
   contextWindow?: number;
+  /** Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
+  enableThinking?: boolean;
 }
 
 export interface AgentInfo {

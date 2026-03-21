@@ -27,6 +27,7 @@
         <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
         <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
         <a class="nav-link active" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+        <a class="nav-link" href="pentest.html"><span class="nav-icon">🔐</span> Pentest</a>
       </div>
       <div class="nav-section">
         <div class="nav-section-title">Channels</div>
@@ -136,16 +137,17 @@
           <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   "multimodal": {
-    // Speech-to-text (Whisper-compatible REST API)
+    // Speech-to-text (Qwen3-ASR service)
     "stt": {
-      "baseUrl": "http://localhost:8080",
-      "defaultLanguage": "en"
+      "baseUrl": "http://localhost:5002",
+      "model": "Qwen/Qwen3-ASR-1.7B"
     },
-    // Text-to-speech (Piper TTS or compatible REST API)
+    // Text-to-speech (Qwen3-TTS service)
     "tts": {
-      "baseUrl": "http://localhost:5500",
-      "defaultVoice": "en_US-lessac-medium",
-      "outputDir": "/workspace/audio"
+      "baseUrl": "http://localhost:5004",
+      "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+      "defaultLanguage": "English",
+      "defaultSpeaker": "Vivian"
     },
     // Vision model for image analysis
     "vision": {
@@ -174,21 +176,20 @@
       <div class="section">
         <div class="section-title">Speech-to-text (STT)</div>
         <p>
-          The <code>transcribe_audio</code> tool POSTs an audio file to a Whisper-compatible transcription endpoint.
-          The recommended self-hosted option is <strong>whisper.cpp</strong> with its built-in HTTP server,
-          but any service that accepts a <code>multipart/form-data</code> upload on <code>/inference</code>
-          (returning <code>{ text: "..." }</code>) will work.
+          The <code>transcribe_audio</code> tool POSTs an audio file to the configured Qwen3-ASR endpoint.
+          StarlingAI first tries the OpenAI-style <code>/v1/audio/transcriptions</code> route and falls back to
+          Qwen3-ASR's native <code>/transcribe</code> route when needed.
         </p>
 
-        <h3>Quick start with whisper.cpp</h3>
-        <p>The Docker Compose stack includes a Piper TTS + whisper playground container. To start just the STT service:</p>
+        <h3>Quick start with Qwen3-ASR</h3>
+        <p>The Docker Compose stack includes a dedicated Qwen3-ASR container. To start just the STT service:</p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-          <pre><code># Start the whisper.cpp server on port 8080
-docker compose up -d whisper
+          <pre><code># Start the Qwen3-ASR server on port 5002
+docker compose up -d qwen3-asr-service
 
 # Verify it is reachable
-curl http://localhost:8080/api/health</code></pre>
+curl http://localhost:5002/health</code></pre>
         </div>
 
         <h3>Example — transcribing a file</h3>
@@ -226,17 +227,18 @@ curl http://localhost:8080/api/health</code></pre>
         <div class="section-title">Text-to-speech (TTS)</div>
         <p>
           The <code>synthesize_speech</code> tool sends text to a TTS REST API and saves the returned audio
-          as a WAV file. The recommended self-hosted option is <strong>Piper TTS</strong>.
+          as a WAV file. The default self-hosted option in this stack is <strong>Qwen3-TTS</strong>, with built-in
+          speakers, saved voices, and voice cloning.
         </p>
 
-        <h3>Quick start with Piper TTS</h3>
+        <h3>Quick start with Qwen3-TTS</h3>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-          <pre><code># Start Piper on port 5500
-docker compose up -d piper
+          <pre><code># Start Qwen3-TTS on port 5004
+docker compose up -d qwen3-tts-service
 
-# List available voices
-curl http://localhost:5500/api/voices</code></pre>
+# List saved voices
+curl http://localhost:5004/voices</code></pre>
         </div>
 
         <h3>Example — generating speech</h3>
@@ -247,7 +249,7 @@ curl http://localhost:5500/api/voices</code></pre>
   "tool": "synthesize_speech",
   "input": {
     "text": "Your weekly digest is ready. Here are the top five stories.",
-    "voice": "en_US-lessac-medium",
+    "speaker": "Vivian",
     "outputPath": "/workspace/audio/digest.wav"
   }
 }
@@ -255,7 +257,7 @@ curl http://localhost:5500/api/voices</code></pre>
 // Result
 {
   "filePath": "/workspace/audio/digest.wav",
-  "voice": "en_US-lessac-medium",
+  "speaker": "Vivian",
   "durationSeconds": 4.2
 }</code></pre>
         </div>
@@ -441,9 +443,10 @@ curl http://localhost:5500/api/voices</code></pre>
             <tr><td><code>PUT</code></td><td><code>/api/multimodal/config</code></td><td>Update multimodal configuration live</td></tr>
             <tr><td><code>GET</code></td><td><code>/api/multimodal/status</code></td><td>Health check for all multimodal services</td></tr>
             <tr><td><code>POST</code></td><td><code>/api/tools/file_to_markdown</code></td><td>Convert uploaded file to Markdown</td></tr>
-            <tr><td><code>POST</code></td><td><code>/api/tools/transcribe</code></td><td>Transcribe an uploaded audio file</td></tr>
-            <tr><td><code>GET</code></td><td><code>/api/tools/tts/voices</code></td><td>List available TTS voices</td></tr>
-            <tr><td><code>POST</code></td><td><code>/api/tools/tts/synthesize</code></td><td>Synthesize speech from text</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/multimodal/transcribe</code></td><td>Transcribe an uploaded audio file</td></tr>
+            <tr><td><code>GET</code></td><td><code>/api/multimodal/voices</code></td><td>List saved voices, built-in speakers, and TTS models</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/multimodal/voices/save</code></td><td>Upload a reusable voice sample to Qwen3-TTS</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/multimodal/tts</code></td><td>Synthesize speech from text</td></tr>
           </tbody>
         </table>
 
@@ -456,9 +459,8 @@ curl http://localhost:5500/api/voices</code></pre>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
-  "stt":   { "ok": true,  "model": "whisper-small" },
-  "tts":   { "ok": true,  "voices": 12 },
-  "vision":{ "ok": true,  "model": "lmstudio/qwen/qwen3.5-35b-a3b" },
+  "stt":   { "ok": true },
+  "tts":   { "ok": true },
   "files": { "ok": false, "error": "Service unreachable at http://localhost:7700" }
 }</code></pre>
         </div>

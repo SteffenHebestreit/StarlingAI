@@ -1,0 +1,394 @@
+data: {"type":"RUN_STARTED","runId":"112838a8-5562-41e4-af8c-09ca7a0dd0dc","threadId":"9f1e0562-45e2-4278-9633-dd82371c6cbf"}
+
+data: {"type":"TOOL_CALL_STARTED","toolCallId":"0e985621-cb8e-42c9-b0b4-101250dea867","toolCallName":"web_search","parentMessageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","args":{"query":"MCP official documentation specification repository","maxResults":5}}
+
+data: {"type":"TOOL_CALL_ENDED","toolCallId":"0e985621-cb8e-42c9-b0b4-101250dea867","toolCallName":"web_search","output":"**Web Search Results for:** \"MCP official documentation specification repository\" (via searxng)\nSearched as: \"MCP official documentation specification repository \"Model Context Protocol\"\"\n\n**GitHub - modelcontextprotocol/modelcontextprotocol: Specification and documentation for the Model Context Protocol · GitHub**\nhttps://github.com/modelcontextprotocol/modelcontextprotocol\nJust heard of MCP and not sure where to start? Check out our documentation website. This repo contains the: MCP specification MCP protocol schema Official MCP documentation The schema is defined in TypeScript first, but made available as JSON Schema as well, for wider compatibility. The official MCP documentation is built using Mintlify and available at modelcontextprotocol.io.\n\n**Specification – Model Context Protocol （MCP）**\nhttps://modelcontextprotocol.info/specification/\nModel Context Protocol SpecificationThe Model Context Protocol (MCP) is an open protocol that enables seamless integration between LLM applications and external data sources and tools. This section contains the detailed technical specifications for implementing the protocol.\n\n**model-context-protocol-resources/guides/mcp-server-development-guide.md at main · cyanheads/model-context-protocol-resources**\nhttps://github.com/cyanheads/model-context-protocol-resources/blob/main/guides/mcp-server-development-guide.md\nYou can find the official server quickstart documentation here. ... Protocol Handling: Logic to manage the MCP connection lifecycle, negotiate capabilities, and handle incoming/outgoing JSON-RPC messages (Requests, Responses, Notifications). SDKs abstract much of this. Transport Layer: The mechanism for sending/receiving messages (e.g., Stdio, Streamable HTTP). The SDK provides implementations. Capability Implementation: The core logic defining the specific Tools, Resources, and/or Prompts the server offers.\n\n**Specification - Model Context Protocol**\nhttps://modelcontextprotocol.io/specification/2025-03-26\nModel Context Protocol (MCP) is an open protocol that enables seamless integration between LLM applications and external data sources and tools. Whether you're building an AI-powered IDE, enhancing a chat interface, or creating custom AI workflows, MCP provides a standardized way to connect LLMs with the context they need. This specification defines the authoritative protocol requirements ...\n\n**GitHub - microsoft/mcp: Catalog of official Microsoft MCP (Model Context Protocol) server implementations for AI-powered data access and tool integration · GitHub**\nhttps://github.com/microsoft/mcp\nCatalog of official Microsoft MCP (Model Context Protocol) server implementations for AI-powered data access and tool integration - microsoft/mcp"}
+
+data: {"type":"TEXT_MESSAGE_STARTED","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","role":"assistant"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"##"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Resources"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Based"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" on"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" my"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" search"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":","}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" here"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" are"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" resources"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":":"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"GitHub"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" https"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"://"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"github"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":".com"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" -"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Contains"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" MCP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" core"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" implementation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Website"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" The"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" mentions"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" a"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" website"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"typically"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" at"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":".io"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" or"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" similar"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**:"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Located"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" within"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" main"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" GitHub"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" under"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" `"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"spec"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"ification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"`"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" directory"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"###"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Key"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Points"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"M"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"CP"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" stands"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" **"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"Model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"**"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" It"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"'s"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" an"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" open"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" for"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" connecting"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" AI"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" models"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" to"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" external"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" data"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" sources"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" tools"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" The"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" official"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" repo"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" contains"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" both"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" reference"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" implementations"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"-"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" Documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" is"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" available"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" through"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" their"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" website"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" ("}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"linked"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" from"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" main"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":")"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"\n\n"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"The"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" primary"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" starting"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" point"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" is"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" GitHub"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" repository"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" at"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" `"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"/model"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"context"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"protocol"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"`,"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" which"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" hosts"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" both"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" specification"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" documentation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" and"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" the"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" implementation"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":" code"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f","delta":"."}
+
+data: {"type":"TEXT_MESSAGE_ENDED","messageId":"21e976e9-b7f1-419b-b1bc-8c35789f6b1f"}
+
+data: {"type":"RUN_FINISHED","runId":"112838a8-5562-41e4-af8c-09ca7a0dd0dc","threadId":"9f1e0562-45e2-4278-9633-dd82371c6cbf"}
+

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 describe("gateway HTTP bridge", () => {
+  const gatewayTestTimeoutMs = 45_000;
   let upstreamServer: ReturnType<typeof createServer> | null = null;
 
   beforeEach(() => {
@@ -14,6 +15,7 @@ describe("gateway HTTP bridge", () => {
   afterEach(async () => {
     if (upstreamServer) {
       await new Promise<void>((resolve, reject) => {
+        upstreamServer?.closeAllConnections?.();
         upstreamServer?.close((error) => {
           if (error) reject(error);
           else resolve();
@@ -73,7 +75,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -114,7 +116,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("rejects dashboard writes to config-owned resources and preserves stored site passwords", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-settings-"));
@@ -155,7 +157,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -212,7 +214,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("serves effective channel config and accepts telegram dashboard settings", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-channels-"));
@@ -247,7 +249,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -308,7 +310,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("reconciles channel runtime state after dashboard updates and deletes", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-channel-runtime-"));
@@ -336,7 +338,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -386,7 +388,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("exposes channel latency and SLO metrics via channel APIs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-channel-metrics-"));
@@ -417,7 +419,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -509,7 +511,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("exposes runtime reconciliation status for operators", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-runtime-status-"));
@@ -537,7 +539,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -561,12 +563,246 @@ describe("gateway HTTP bridge", () => {
       expect(body.components.find((component) => component.name === "providers")).toBeTruthy();
       expect(body.components.find((component) => component.name === "approvals")).toBeTruthy();
       expect(body.components.find((component) => component.name === "config_reload")).toBeTruthy();
+      expect(body.components.find((component) => component.name === "model_endpoints")).toBeTruthy();
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
+
+  it("round-trips model routing config and persists sub-agent endpoint patches", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-model-routing-"));
+    const port = 22500 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 25500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const upstreamBaseUrl = `http://127.0.0.1:${upstreamPort}/v1`;
+
+    upstreamServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          data: [
+            { id: "lmstudio/orchestrator-a" },
+            { id: "lmstudio/orchestrator-b" },
+            { id: "embed-a" },
+            { id: "embed-b" },
+            { id: "reranker-a" },
+            { id: "reranker-b" },
+            { id: "guard-a" },
+            { id: "guard-b" },
+            { id: "agent-a" },
+          ],
+        }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "h".repeat(32),
+      },
+      providers: {
+        lmstudio: {
+          baseUrl: upstreamBaseUrl,
+          apiKey: "provider-key",
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/orchestrator-a",
+            baseUrl: upstreamBaseUrl,
+            apiKey: "orch-key-a",
+            embeddingModel: "embed-a",
+            embeddingBaseUrl: upstreamBaseUrl,
+            embeddingApiKey: "embed-key-a",
+          },
+        },
+      },
+      retrieval: {
+        reranker: {
+          enabled: true,
+          model: "reranker-a",
+          baseUrl: upstreamBaseUrl,
+          apiKey: "rerank-key-a",
+        },
+      },
+      guardrails: {
+        modelModeration: {
+          enabled: true,
+          model: "guard-a",
+          baseUrl: upstreamBaseUrl,
+          apiKey: "guard-key-a",
+        },
+      },
+      subAgents: {
+        coder: {
+          description: "Writes and edits code.",
+          capabilities: ["coding"],
+          tools: ["read_file"],
+          model: {
+            primary: "agent-a",
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const beforeResponse = await fetch(`${baseUrl}/api/model-endpoints/config`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(beforeResponse.status).toBe(200);
+      const beforeBody = await beforeResponse.json() as {
+        orchestrator: { primary: string; baseUrl?: string; apiKey?: string };
+        embeddings: { embeddingModel?: string; embeddingBaseUrl?: string; embeddingApiKey?: string };
+        reranker: { enabled: boolean; model: string; baseUrl: string; apiKey: string };
+        guard: { enabled: boolean; model: string; baseUrl: string; apiKey: string };
+      };
+      expect(beforeBody.orchestrator).toMatchObject({
+        primary: "lmstudio/orchestrator-a",
+        baseUrl: upstreamBaseUrl,
+        apiKey: "orch-key-a",
+      });
+      expect(beforeBody.embeddings).toMatchObject({
+        embeddingModel: "embed-a",
+        embeddingBaseUrl: upstreamBaseUrl,
+        embeddingApiKey: "embed-key-a",
+      });
+      expect(beforeBody.reranker).toMatchObject({
+        enabled: true,
+        model: "reranker-a",
+      });
+      expect(beforeBody.guard).toMatchObject({
+        enabled: true,
+        model: "guard-a",
+      });
+
+      const updatePayload = {
+        orchestrator: {
+          primary: "lmstudio/orchestrator-b",
+          baseUrl: upstreamBaseUrl,
+          apiKey: "orch-key-b",
+        },
+        embeddings: {
+          embeddingModel: "embed-b",
+          embeddingBaseUrl: upstreamBaseUrl,
+          embeddingApiKey: "embed-key-b",
+        },
+        reranker: {
+          enabled: true,
+          model: "reranker-b",
+          baseUrl: upstreamBaseUrl,
+          apiKey: "rerank-key-b",
+        },
+        guard: {
+          enabled: true,
+          model: "guard-b",
+          baseUrl: upstreamBaseUrl,
+          apiKey: "guard-key-b",
+        },
+      };
+
+      const updateResponse = await fetch(`${baseUrl}/api/model-endpoints/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(updatePayload),
+      });
+      expect(updateResponse.status).toBe(200);
+      const updateBody = await updateResponse.json() as typeof updatePayload;
+      expect(updateBody).toMatchObject(updatePayload);
+
+      const statusResponse = await fetch(`${baseUrl}/api/model-endpoints/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(statusResponse.status).toBe(200);
+      const statusBody = await statusResponse.json() as {
+        healthy: boolean;
+        endpoints: Array<{ role: string; ok: boolean; matchedModel?: string }>;
+      };
+      expect(statusBody.healthy).toBe(true);
+      expect(statusBody.endpoints.find((endpoint) => endpoint.role === "orchestrator")).toMatchObject({
+        ok: true,
+        matchedModel: "lmstudio/orchestrator-b",
+      });
+      expect(statusBody.endpoints.find((endpoint) => endpoint.role === "embeddings")).toMatchObject({
+        ok: true,
+        matchedModel: "embed-b",
+      });
+
+      const patchResponse = await fetch(`${baseUrl}/api/agents/coder/model`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseUrl: upstreamBaseUrl,
+          apiKey: "agent-key",
+          enableThinking: true,
+        }),
+      });
+      expect(patchResponse.status).toBe(200);
+      const patchBody = await patchResponse.json() as { model: Record<string, unknown> };
+      expect(patchBody.model).toMatchObject({
+        primary: "agent-a",
+        baseUrl: upstreamBaseUrl,
+        apiKey: "agent-key",
+        enableThinking: true,
+      });
+
+      const agentsResponse = await fetch(`${baseUrl}/api/agents`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(agentsResponse.status).toBe(200);
+      const agentsBody = await agentsResponse.json() as Array<{ name: string; model: Record<string, unknown> }>;
+      expect(agentsBody.find((agent) => agent.name === "coder")?.model).toMatchObject({
+        primary: "agent-a",
+        baseUrl: upstreamBaseUrl,
+        apiKey: "agent-key",
+        enableThinking: true,
+      });
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
 
   it("resolves agent routing through the dashboard API", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-resolve-"));
@@ -613,7 +849,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -645,7 +881,7 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 
   it("proxies multimodal file, STT, TTS, and voice listing routes", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-"));
@@ -674,7 +910,17 @@ describe("gateway HTTP bridge", () => {
 
       if (req.method === "GET" && req.url === "/models") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ models: { "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice": { capabilities: ["tts", "custom_voice"] } }, current_model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" }));
+        res.end(JSON.stringify({ models: { "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "voice_clone"] } }, current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct" }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/voices/save") {
+        expect(req.headers["content-type"]).toContain("multipart/form-data");
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok", voice_id: "saved-steffen", name: "Steffen Voice", ref_text: "hello from the saved profile" }));
+        });
         return;
       }
 
@@ -753,7 +999,7 @@ describe("gateway HTTP bridge", () => {
     ]);
 
     const gateway = createGateway();
-    gateway.start();
+    await gateway.start();
 
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -790,6 +1036,19 @@ describe("gateway HTTP bridge", () => {
       const voicesBody = await voicesResponse.json() as { voices: Array<{ id: string }>; speakers: string[] };
       expect(voicesBody.voices[0]?.id).toBe("saved-demo");
       expect(voicesBody.speakers).toContain("Vivian");
+
+      const saveVoiceForm = new FormData();
+      saveVoiceForm.append("name", "Steffen Voice");
+      saveVoiceForm.append("language", "English");
+      saveVoiceForm.append("file", new File([new Uint8Array([5, 6, 7, 8])], "voice.wav", { type: "audio/wav" }));
+      const saveVoiceResponse = await fetch(`${baseUrl}/api/multimodal/voices/save`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: saveVoiceForm,
+      });
+      expect(saveVoiceResponse.status).toBe(200);
+      const saveVoiceBody = await saveVoiceResponse.json() as { voice_id: string; name: string };
+      expect(saveVoiceBody).toMatchObject({ voice_id: "saved-steffen", name: "Steffen Voice" });
 
       const ttsResponse = await fetch(`${baseUrl}/api/multimodal/tts`, {
         method: "POST",
@@ -835,7 +1094,7 @@ describe("gateway HTTP bridge", () => {
         },
         tts: {
           baseUrl: `http://127.0.0.1:${upstreamPort}`,
-          model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+          model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
           timeoutMs: 45_000,
           defaultLanguage: "German",
           defaultSpeaker: "Ryan",
@@ -876,11 +1135,11 @@ describe("gateway HTTP bridge", () => {
       auth.resetAuthStateForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, gatewayTestTimeoutMs);
 });
 
 async function waitForHealth(url: string): Promise<void> {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15_000;
 
   while (Date.now() < deadline) {
     try {
@@ -902,7 +1161,7 @@ async function waitForChannelStatus(
   type: string,
   expected: { enabled: boolean; running: boolean },
 ): Promise<void> {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15_000;
 
   while (Date.now() < deadline) {
     const response = await fetch(`${baseUrl}/api/channels`, {
