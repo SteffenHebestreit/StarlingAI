@@ -7,9 +7,11 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import {
+  executeAutomationWebhook,
   formatCliExecutionError,
   materializeInventory,
   normalizeExecutionTimeout,
+  resolveAutomationProfile,
   resolveSecretRef,
   resolveWorkspaceRelativePath,
   safeDelete,
@@ -36,6 +38,10 @@ registerTool({
       projectDir: {
         type: "string",
         description: "Optional workspace-relative Ansible project directory used as cwd for ansible-playbook.",
+      },
+      profile: {
+        type: "string",
+        description: "Optional infrastructure.automation profile name. Supports local-cli and webhook profiles.",
       },
       inventory: {
         type: "string",
@@ -109,13 +115,27 @@ registerTool({
     required: [],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const automationProfile = resolveAutomationProfile(args["profile"]);
+    if (automationProfile.error) {
+      return { success: false, output: "", error: automationProfile.error };
+    }
+    if (automationProfile.profile?.type === "webhook" && automationProfile.profileName) {
+      return executeAutomationWebhook(
+        "ansible_playbook",
+        automationProfile.profileName,
+        automationProfile.profile,
+        args,
+        EXEC_TIMEOUT_MS,
+      );
+    }
+
     const playbookYaml = String(args["playbookYaml"] ?? "");
     const playbookPathInput = typeof args["playbookPath"] === "string" ? String(args["playbookPath"]).trim() : "";
     const projectDirInput = typeof args["projectDir"] === "string" ? String(args["projectDir"]).trim() : "";
     const inventoryInput = args["inventory"] ?? args["inventoryUrl"];
     const inventory = inventoryInput ? String(inventoryInput) : undefined;
     const extraVars = (args["extraVars"] as Record<string, unknown> | undefined) ?? {};
-    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"], EXEC_TIMEOUT_MS);
+    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? automationProfile.profile?.timeoutMs, EXEC_TIMEOUT_MS);
     const projectDir = projectDirInput
       ? resolveWorkspaceRelativePath(projectDirInput, ctx.workspacePath)
       : undefined;
@@ -141,6 +161,9 @@ registerTool({
     let vaultPasswordFilePath: string | undefined;
     let shouldDeleteVaultPasswordFile = false;
     const cliArgs: string[] = [];
+    const binary = automationProfile.profile?.type === "local-cli"
+      ? automationProfile.profile.ansiblePlaybookBinary
+      : "ansible-playbook";
 
     try {
       if (playbookYaml.trim()) {
@@ -207,7 +230,7 @@ registerTool({
 
       log.debug({ playbookPath, projectDir, args: cliArgs }, "Running ansible-playbook");
 
-      const { stdout, stderr } = await execFileAsync("ansible-playbook", cliArgs, {
+      const { stdout, stderr } = await execFileAsync(binary, cliArgs, {
         cwd: projectDir,
         timeout: timeoutMs,
       });
@@ -222,7 +245,7 @@ registerTool({
       return {
         success: false,
         output: errOutput.trim(),
-        error: formatCliExecutionError(error, "ansible-playbook"),
+        error: formatCliExecutionError(error, binary),
       };
     } finally {
       if (shouldDeletePlaybook) {

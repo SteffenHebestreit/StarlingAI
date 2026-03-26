@@ -4,7 +4,15 @@
  */
 import type WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { createSession, getSession, endSession, getAllSessions } from "../agent/session.js";
+import {
+  archiveSession,
+  createSession,
+  deleteSession,
+  getSession,
+  getSessionRecord,
+  getSessionTranscript,
+  listSessions,
+} from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { subscribeToAudit } from "../audit/logger.js";
@@ -19,7 +27,10 @@ export type RpcMethod =
   | "chat.cancel"
   | "session.create"
   | "session.end"
+  | "session.get"
   | "session.list"
+  | "session.archive"
+  | "session.delete"
   | "session.reset"
   | "audit.subscribe"
   | "audit.unsubscribe"
@@ -135,7 +146,7 @@ export class RpcConnection {
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
-      sessions: getAllSessions().map(s => ({ id: s.id, channel: s.channel })),
+      sessions: listSessions({ includeArchived: true }),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
   }
@@ -166,7 +177,7 @@ export class RpcConnection {
 
     switch (method) {
       case "gateway.status":
-        return { status: "running", sessions: getAllSessions().length, uptime: process.uptime() };
+        return { status: "running", sessions: listSessions().length, uptime: process.uptime() };
 
       case "session.create": {
         let workspacePath: string | undefined = undefined;
@@ -193,22 +204,47 @@ export class RpcConnection {
 
       case "session.end": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
-        endSession(sid);
+        archiveSession(sid);
         if (this.activeSessionId === sid) this.activeSessionId = null;
         return { ended: true };
       }
 
+      case "session.archive": {
+        const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        const archived = archiveSession(sid);
+        if (this.activeSessionId === sid) this.activeSessionId = null;
+        return { archived, sessionId: sid };
+      }
+
+      case "session.delete": {
+        const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        const deleted = deleteSession(sid);
+        if (this.activeSessionId === sid) this.activeSessionId = null;
+        return { deleted, sessionId: sid };
+      }
+
+      case "session.get": {
+        const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        const limitRaw = params["limit"];
+        const beforeMessageId = typeof params["beforeMessageId"] === "string" && params["beforeMessageId"].trim()
+          ? String(params["beforeMessageId"])
+          : undefined;
+        const limit = typeof limitRaw === "number"
+          ? limitRaw
+          : typeof limitRaw === "string" && limitRaw.trim()
+            ? Number.parseInt(limitRaw, 10)
+            : undefined;
+        const transcript = getSessionTranscript(sid, { limit, beforeMessageId });
+        if (!transcript) throw new Error(`Session not found: ${sid}`);
+        return transcript;
+      }
+
       case "session.list":
-        return getAllSessions().map(s => ({
-          id: s.id,
-          channel: s.channel,
-          createdAt: s.createdAt,
-          turns: s.getTurnCount(),
-        }));
+        return listSessions({ includeArchived: true });
 
       case "session.reset": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
-        getSession(sid)?.reset();
+        getSessionRecord(sid)?.reset();
         return { reset: true };
       }
 
@@ -312,13 +348,13 @@ export class RpcConnection {
           ac.abort();
           cleanupTurn();
           if (this.activeSessionId === session.id) this.activeSessionId = null;
-          endSession(session.id);
+          archiveSession(session.id);
           this.sendEvent({
             type: "status",
             data: {
               status: "error",
               requestId,
-              error: `Turn timed out after ${Math.round(effectiveTurnTimeoutMs / 60000)} minutes. Session ended.`,
+              error: `Turn timed out after ${Math.round(effectiveTurnTimeoutMs / 60000)} minutes. Session archived.`,
             },
           });
         };

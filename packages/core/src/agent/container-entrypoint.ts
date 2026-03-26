@@ -8,11 +8,11 @@
  * All configuration is passed in the stdin payload.
  */
 
-import { LMStudioProvider } from "../providers/lmstudio.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { ContainerTaskPayload, ContainerTaskResult } from "./container-runner.js";
+import { createChatProvider } from "../providers/index.js";
 
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -48,10 +48,23 @@ async function main(): Promise<void> {
 
   process.stderr.write(`READY:${Date.now() - processStartedAt}\n`);
 
-  const { agentName, task, context, parentSessionId, workspacePath,
-          agentConfig, resolvedModelConfig, lmsBaseUrl, lmsApiKey } = payload;
+  const {
+    agentName,
+    task,
+    context,
+    parentSessionId,
+    workspacePath,
+    agentConfig,
+    resolvedModelConfig,
+    providerBaseUrl,
+    providerApiKey,
+  } = payload;
 
-  const provider = new LMStudioProvider(lmsBaseUrl, lmsApiKey, resolvedModelConfig);
+  const provider = createChatProvider(resolvedModelConfig, {
+    providerId: resolvedModelConfig.primary.split("/")[0] || "lmstudio",
+    baseUrl: providerBaseUrl,
+    apiKey: providerApiKey,
+  });
 
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long", year: "numeric", month: "long", day: "numeric",

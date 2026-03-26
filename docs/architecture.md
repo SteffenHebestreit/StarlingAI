@@ -57,7 +57,7 @@ At the infrastructure level:
 - Docker Compose restarts failed service containers automatically.
 - Outbound channel messages use `deliverWithRetry` across all five channels with exponential-backoff and fall back to the dead-letter queue. Per-channel latency percentiles (p50/p95/p99) and SLO pass rates are tracked in the channel registry.
 - Container heartbeats run on a 15-second interval with a 45-second watchdog. Containers that miss the deadline receive SIGTERM followed by SIGKILL. OOM events are detected and partial results are recovered where possible.
-- Active chat sessions are in-memory and time out; durable state such as credentials, stored scenes, channel overrides, and audit logs persists separately.
+- Chat sessions are durable and resumable until explicitly archived or deleted; durable state such as scene jobs, credentials, stored scenes, channel overrides, and audit logs persists separately, with Postgres used for scene jobs when `DATABASE_URL` is configured.
 - Fallback routing exhausts explicit candidates, then auto-routes using semantic search for general-purpose coverage. A circuit breaker triggers when an agent exceeds a 60% failure rate, marking it unavailable until it recovers.
 - Per-agent `turnTimeoutMs` overrides and a rate-adaptive timeout derived from outcome history prevent slow agents from blocking the swarm.
 
@@ -109,6 +109,7 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 | **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; one-click HTTP callbacks; WebSocket `approval.respond` RPC |
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
 | **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
+| **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
 
 ---
 
@@ -201,7 +202,7 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 
 | Layer | Protocol | Path | Purpose |
 |-------|----------|------|---------|
-| WebSocket RPC | JSON over WS | `ws://host:8765/ws` | Interactive chat, session management, audit streaming, approval responses, intervention events |
+| WebSocket RPC | JSON over WS | `ws://host:8765/ws` | Interactive chat, durable session management, audit streaming, approval responses, intervention events |
 | AG-UI SSE | Server-Sent Events | `POST /api/chat/stream` | Token-level streaming to the Vue dashboard |
 | REST API | HTTP/JSON | `/api/*` | Programmatic control, health, metrics, multimodal file/STT/TTS endpoints |
 | A2A JSON-RPC 2.0 | HTTP/JSON | `POST /a2a/agents/:name` | Agent-to-agent delegation |
@@ -214,7 +215,7 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 User message
     │
     ▼
-[1] Gateway authenticates JWT, enforces IP rate limit
+[1] Gateway authenticates JWT, enforces IP rate limit, and restores durable session context when a sessionId is supplied
     │
     ▼
 [2] Input guardrail scans for prompt injection

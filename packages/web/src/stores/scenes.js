@@ -22,8 +22,8 @@ export const useScenesStore = defineStore("scenes", () => {
         const withoutCurrent = recentJobs.value.filter((entry) => entry.id !== job.id);
         recentJobs.value = [job, ...withoutCurrent]
             .sort((left, right) => {
-            const leftTs = left.completedAt ?? left.startedAt;
-            const rightTs = right.completedAt ?? right.startedAt;
+            const leftTs = left.completedAt ?? left.startedAt ?? left.createdAt ?? "";
+            const rightTs = right.completedAt ?? right.startedAt ?? right.createdAt ?? "";
             return rightTs.localeCompare(leftTs);
         })
             .slice(0, 12);
@@ -48,7 +48,7 @@ export const useScenesStore = defineStore("scenes", () => {
                 throw new Error(`HTTP ${res.status}`);
             const job = await res.json();
             upsertJob(job);
-            if (job.status !== "running")
+            if (!["queued", "running", "cancelling"].includes(job.status))
                 stopPolling(job.id);
             return job;
         }
@@ -64,7 +64,7 @@ export const useScenesStore = defineStore("scenes", () => {
         const timer = setTimeout(async () => {
             pollTimers.delete(jobId);
             const job = await fetchJob(jobId);
-            if (job?.status === "running") {
+            if (job && ["queued", "running", "cancelling"].includes(job.status)) {
                 schedulePoll(jobId, 2000);
             }
         }, delayMs);
@@ -74,7 +74,7 @@ export const useScenesStore = defineStore("scenes", () => {
         if (!gateway.token)
             return;
         recentJobs.value
-            .filter((job) => job.status === "running")
+            .filter((job) => ["queued", "running", "cancelling"].includes(job.status))
             .forEach((job) => schedulePoll(job.id, 0));
     }
     async function fetch() {
@@ -149,8 +149,20 @@ export const useScenesStore = defineStore("scenes", () => {
                 id: data.jobId,
                 sceneName: data.sceneName,
                 sessionId: data.sessionId,
-                status: "running",
-                startedAt: new Date().toISOString(),
+                status: data.status,
+                createdAt: new Date().toISOString(),
+                progress: {
+                    stage: data.status,
+                    message: data.status === "queued" ? "Queued for worker execution" : "Worker claimed job",
+                    percent: data.status === "queued" ? 0 : 5,
+                    toolCallsRequested: 0,
+                    toolCallsCompleted: 0,
+                    approvalsRequested: 0,
+                    subAgentsStarted: 0,
+                    swarmTasksTotal: 0,
+                    swarmTasksCompleted: 0,
+                    lastEventAt: new Date().toISOString(),
+                },
             };
             upsertJob(job);
             schedulePoll(job.id, 0);
@@ -161,7 +173,33 @@ export const useScenesStore = defineStore("scenes", () => {
             return null;
         }
     }
-    const runningJobs = computed(() => recentJobs.value.filter((job) => job.status === "running"));
+    async function cancel(jobId) {
+        runError.value = null;
+        try {
+            const res = await globalThis.fetch(restUrl(`/api/scenes/jobs/${encodeURIComponent(jobId)}/cancel`), {
+                method: "POST",
+                headers: authHeaders(),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? `HTTP ${res.status}`);
+            }
+            const job = (await res.json()).job;
+            upsertJob(job);
+            if (["queued", "running", "cancelling"].includes(job.status)) {
+                schedulePoll(job.id, 0);
+            }
+            else {
+                stopPolling(job.id);
+            }
+            return job;
+        }
+        catch (e) {
+            runError.value = String(e);
+            return null;
+        }
+    }
+    const runningJobs = computed(() => recentJobs.value.filter((job) => ["queued", "running", "cancelling"].includes(job.status)));
     watch(() => gateway.token, (token) => {
         if (token)
             resumeRunningJobs();
@@ -178,6 +216,7 @@ export const useScenesStore = defineStore("scenes", () => {
         save,
         remove,
         run,
+        cancel,
         dismissJob,
     };
 });

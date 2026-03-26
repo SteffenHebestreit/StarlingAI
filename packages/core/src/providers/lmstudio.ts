@@ -4,7 +4,7 @@ import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
 
-const log = childLogger("provider:lmstudio");
+const log = childLogger("provider:openai-compatible");
 
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -44,6 +44,15 @@ export interface StreamChunk {
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
+export interface ChatProvider {
+  checkHealth(): Promise<{ healthy: boolean; loadedModel?: string; error?: string }>;
+  verifyToolCallSupport(modelId: string): Promise<boolean>;
+  complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse>;
+  stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): AsyncGenerator<StreamChunk>;
+  embed(texts: string[], model: string): Promise<Float32Array[]>;
+  isHealthy(): boolean;
+}
+
 export class LMStudioProvider {
   private client: OpenAI;
   private modelConfig: ModelConfig;
@@ -72,7 +81,7 @@ export class LMStudioProvider {
       ]);
       const modelList = modelsPage.data ?? [];
       if (modelList.length === 0) {
-        return { healthy: false, error: "No models loaded in LM Studio" };
+        return { healthy: false, error: "No models loaded in the configured OpenAI-compatible provider" };
       }
       const first = modelList[0];
       this.healthy = true;
@@ -177,7 +186,7 @@ export class LMStudioProvider {
         ) as ChatCompletion;
 
         const choice = response.choices[0];
-        if (!choice) throw new Error("Empty response from LM Studio");
+        if (!choice) throw new Error("Empty response from OpenAI-compatible provider");
 
         const toolCalls = (choice.message.tool_calls ?? []).map(tc => ({
           id: tc.id,
@@ -204,16 +213,16 @@ export class LMStudioProvider {
       } catch (err: unknown) {
         attempt++;
         if (signal?.aborted || attempt >= maxAttempts) {
-          log.error({ err, attempt, model: modelId }, "LM Studio completion failed");
+          log.error({ err, attempt, model: modelId }, "OpenAI-compatible completion failed");
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(`LM Studio request failed (model: ${modelId}): ${msg}`);
+          throw new Error(`OpenAI-compatible request failed (model: ${modelId}): ${msg}`);
         }
-        log.warn({ err, attempt, retryDelay }, "LM Studio request failed — retrying once");
+        log.warn({ err, attempt, retryDelay }, "OpenAI-compatible request failed — retrying once");
         await new Promise(r => setTimeout(r, retryDelay));
       }
     }
 
-    throw new Error("LM Studio completion failed after max retries");
+    throw new Error("OpenAI-compatible completion failed after max retries");
   }
 
   async *stream(

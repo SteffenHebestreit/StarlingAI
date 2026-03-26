@@ -372,6 +372,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  vm_manage: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Manage virtual machines through configured infrastructure backends",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
   proxmox_vm: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Manage Proxmox virtual machines through the Proxmox VE API",

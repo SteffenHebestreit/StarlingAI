@@ -15,7 +15,7 @@
 
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { getSession, createSession, endSession } from "../agent/session.js";
+import { archiveSession, getSession, createSession } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
@@ -80,11 +80,11 @@ export async function handleAguiStream(
     if (timedOut) return;
     timedOut = true;
     abortController.abort();
-    endSession(session.id);
+    archiveSession(session.id);
     sseEvent(res, {
       type: "RUN_ERROR",
       runId,
-      message: `Turn timed out after ${Math.round(turnTimeoutMs / 60000)} minutes. Session ended.`,
+      message: `Turn timed out after ${Math.round(turnTimeoutMs / 60000)} minutes. Session archived.`,
     });
   };
 

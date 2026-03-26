@@ -16,10 +16,12 @@ export interface MultimodalFileConfig extends MultimodalServiceConfig {
 }
 
 export interface MultimodalSttConfig extends MultimodalServiceConfig {
+  api: "auto" | "openai-compatible" | "transcribe-only";
   model: string;
 }
 
 export interface MultimodalTtsConfig extends MultimodalServiceConfig {
+  api: "qwen-compatible" | "openai-compatible";
   model?: string;
   defaultLanguage: string;
   defaultSpeaker: string;
@@ -90,12 +92,14 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     baseUrl: "http://qwen3-asr-service:5002",
     apiKey: "",
     timeoutMs: 60_000,
+    api: "auto",
     model: "Qwen/Qwen3-ASR-1.7B",
   },
   tts: {
     baseUrl: "http://qwen3-tts-service:5004",
     apiKey: "",
     timeoutMs: 60_000,
+    api: "qwen-compatible",
     model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
     defaultLanguage: "English",
     defaultSpeaker: "Vivian",

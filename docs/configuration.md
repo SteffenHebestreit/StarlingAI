@@ -6,7 +6,7 @@
 
 StarlingAI reads a single project-root `starlingai.json` file plus optional environment variables from `.env`. The configuration defines the swarm's local rules — which agents exist, what tools they can use, how they connect to models, and what channels they serve. The file is validated against `packages/core/src/config/schema.ts`, and most changes hot-reload without restarting the stack.
 
-`web_search` requires `SEARXNG_BASE_URL` to point at a reachable SearXNG instance. The default runtime relies exclusively on that SearXNG backend.
+`web_search` now reads `retrieval.search`. In `auto` mode it prefers a configured SearXNG instance and falls back to DuckDuckGo when SearXNG is absent or temporarily unavailable.
 
 Hot-reload follows the swarm principle of adaptability: the swarm can evolve its specialist roster, model parameters, and channel configuration at runtime — like a murmuration reshaping in response to changing conditions.
 
@@ -28,7 +28,7 @@ Top-level keys accepted by the current schema:
   "guardrails": {},
   "mcp": {},
   "sites": {},
-  "integrations": {},
+  "infrastructure": {},
   "webhooks": {},
   "approvalChannels": {},
   "workspacePath": "/workspace"
@@ -47,6 +47,12 @@ Top-level keys accepted by the current schema:
     "timeoutMs": 30000,
     "maxRetries": 3
   },
+  "openaiCompatible": {
+    "coder_vllm": {
+      "baseUrl": "http://host.docker.internal:8000/v1",
+      "apiKey": "local-vllm"
+    }
+  },
   "ollama": {
     "baseUrl": "http://host.docker.internal:11434",
     "api": "ollama-native"
@@ -59,6 +65,19 @@ Top-level keys accepted by the current schema:
 ```
 
 `host.docker.internal` is the right default when the gateway runs in Docker and LM Studio or Ollama runs on the Windows host.
+
+`providers.openaiCompatible` lets you register additional named OpenAI-compatible backends without overloading the global LM Studio entry. Any model whose `primary` or `embeddingModel` starts with that provider name will resolve through the matching backend.
+
+```jsonc
+"agents": {
+  "defaults": {
+    "model": {
+      "primary": "coder_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "embeddingModel": "coder_vllm/text-embedding-qwen3-embedding-8b"
+    }
+  }
+}
+```
 
 ## Agents Defaults
 
@@ -211,11 +230,13 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
   },
   "stt": {
     "baseUrl": "http://qwen3-asr-service:5002",
+    "api": "auto",
     "model": "Qwen/Qwen3-ASR-1.7B",
     "timeoutMs": 60000
   },
   "tts": {
     "baseUrl": "http://qwen3-tts-service:5004",
+    "api": "qwen-compatible",
     "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
     "defaultLanguage": "English",
     "defaultSpeaker": "Vivian",
@@ -246,9 +267,11 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
 Notes:
 
 - `files.visionModel` enables direct screenshot and image analysis through the configured OpenAI-compatible vision model. This is useful for screenshot-heavy browser agents and image QA flows even when the file-conversion backend returns little or no OCR text.
-- `files.visionBaseUrl` and `files.visionApiKey` are optional overrides for running the vision model on a separate server from the main orchestrator.
-- `tts.defaultVoiceId` is optional and uses Qwen3-TTS's fast saved-voice route when present.
-- `tts.voiceSamplePath` is a workspace-relative audio file used for one-shot cloning when no saved voice ID is configured.
+- `files.visionBaseUrl` and `files.visionApiKey` are optional overrides for running the vision model on a separate server from the main orchestrator. When omitted, the vision model's provider prefix is resolved the same way as the main agent provider configuration.
+- `stt.api` controls how speech-to-text requests are sent. `auto` keeps the current Qwen-friendly behavior: try OpenAI-compatible `/v1/audio/transcriptions` first, then fall back to `/transcribe`. Use `openai-compatible` or `transcribe-only` when a backend only supports one style.
+- `tts.api` controls the text-to-speech backend protocol. Keep `qwen-compatible` when using Qwen3-TTS so saved voices, cloning, and language normalization continue to work. Use `openai-compatible` for backends that expose `/v1/audio/speech`.
+- `tts.defaultVoiceId` is optional and uses the Qwen3-TTS saved-voice route when `tts.api = qwen-compatible`.
+- `tts.voiceSamplePath` is a workspace-relative audio file used for one-shot cloning when `tts.api = qwen-compatible` and no saved voice ID is configured.
 - `tts.voiceSampleText` is optional but improves cloning quality because it maps to Qwen3's `ref_text` input.
 - `tts.defaultQuality` remains in the schema for backward compatibility with older non-Qwen configs, but Qwen3-TTS mainly uses `defaultSpeaker`, `defaultVoiceId`, and the optional voice sample fields.
 - `imageGeneration` enables the `generate_image` tool and the dashboard image-generation status/API path.
@@ -260,6 +283,11 @@ Notes:
 
 ```jsonc
 "retrieval": {
+  "search": {
+    "backend": "auto",
+    "searxngBaseUrl": "http://search.k2o",
+    "timeoutMs": 12000
+  },
   "reranker": {
     "enabled": true,
     "baseUrl": "http://host.docker.internal:1234/v1",
@@ -273,10 +301,72 @@ Notes:
 
 Notes:
 
+- `retrieval.search.backend` supports `auto`, `searxng`, and `duckduckgo`.
+- `auto` keeps SearXNG as the preferred local backend when available, but the swarm can continue web research through DuckDuckGo if that endpoint is missing or unhealthy.
+- `retrieval.search.searxngBaseUrl` overrides `SEARXNG_BASE_URL` when both are set.
 - The reranker is optional. If the model is unavailable or the request fails, StarlingAI falls back to the existing keyword-plus-embedding ranking.
 - Today the reranker is applied to agent routing candidates, improving `search_agents` and `delegate_to_agent` selection quality.
 - The intended model family here is `Qwen3-Reranker`.
 - `retrieval.reranker.baseUrl` does not need to match `providers.lmstudio.baseUrl`; it is designed for a separate reranker service when LM Studio cannot host that checkpoint.
+
+## Infrastructure
+
+`infrastructure` contains named adapters for privileged infrastructure tools. VM management and Terraform/Ansible automation now share the same profile-driven approach.
+
+```jsonc
+"infrastructure": {
+  "automation": {
+    "defaultProfile": "ops_webhook",
+    "profiles": {
+      "ops_webhook": {
+        "type": "webhook",
+        "url": "https://ops.example.com/automation",
+        "headers": {
+          "Authorization": "Bearer $INFRA_AUTOMATION_TOKEN"
+        },
+        "timeoutMs": 45000
+      },
+      "local_cli": {
+        "type": "local-cli",
+        "terraformBinary": "terraform",
+        "ansibleBinary": "ansible",
+        "ansiblePlaybookBinary": "ansible-playbook"
+      }
+    }
+  },
+  "virtualization": {
+    "profiles": {
+      "lab_proxmox": {
+        "type": "proxmox",
+        "apiUrl": "https://proxmox.example.com:8006",
+        "node": "pve-01",
+        "tokenId": "root@pam!starlingai",
+        "tokenSecret": "$PROXMOX_TOKEN_SECRET",
+        "timeoutMs": 120000
+      },
+      "lab_webhook": {
+        "type": "webhook",
+        "url": "https://n8n.example.com/webhook/vm-manage",
+        "headers": {
+          "Authorization": "Bearer $INFRA_WEBHOOK_TOKEN"
+        },
+        "timeoutMs": 45000
+      }
+    }
+  }
+}
+```
+
+Notes:
+
+- `infrastructure.automation.profiles` controls how `terraform_exec`, `ansible_playbook`, and `ansible_task` run.
+- `local-cli` preserves the current host-side workflow while letting you swap binaries such as `tofu` or a custom Ansible wrapper.
+- `webhook` forwards `{ action, profile, params }` to a remote automation endpoint so the swarm can target AWX, Terraform runners, CI jobs, or other self-hosted orchestration backends without new hard-coded tools.
+- Each automation tool accepts an optional `profile` argument to override `infrastructure.automation.defaultProfile` for a single call.
+- `vm_manage` is the generic privileged VM tool. It can target `proxmox` or `webhook` backends.
+- `proxmox_vm` remains available as the Proxmox-specialized path and now supports `profile` references for named Proxmox connections.
+- Webhook VM profiles let you front arbitrary self-hosted infrastructure systems behind a stable JSON contract without hard-coding more vendor-specific tools into the swarm.
+- Webhook responses may return `{ "success": boolean, "output": string, "error"?: string, "metadata"?: object }`.
 
 ## Guardrails
 
@@ -345,7 +435,40 @@ Shared channel fields for Slack, Discord, WhatsApp, Email, and Signal:
 - `perSenderRateLimitCount`
 - `perSenderRateLimitWindowMs`
 
-Signal can be configured but is currently reported as unsupported at runtime.
+Signal uses the local `signal-cli` binary. `channels.signal.account` must already be registered or linked in `signal-cli`, and `signalCliPath` can be overridden when the binary is not on `PATH`.
+
+## Pentest
+
+`pentest` configures how the pentest tools reach their execution backend. The legacy `serviceUrl` path still targets the bundled Kali service by default.
+
+```jsonc
+"pentest": {
+  "serviceUrl": "http://kali-pentest:5010",
+  "defaultProfile": "ops_webhook",
+  "profiles": {
+    "ops_webhook": {
+      "type": "webhook",
+      "url": "https://ops.example.com/pentest",
+      "headers": {
+        "Authorization": "Bearer $PENTEST_WEBHOOK_TOKEN"
+      },
+      "timeoutMs": 45000
+    },
+    "local_kali": {
+      "type": "kali-service",
+      "serviceUrl": "http://kali-pentest:5010",
+      "timeoutMs": 300000
+    }
+  }
+}
+```
+
+Notes:
+
+- Without `defaultProfile`, StarlingAI keeps using `pentest.serviceUrl` as the compatibility path.
+- Each pentest tool that reaches a backend accepts an optional `profile` argument, so one engagement can temporarily switch between named Kali or webhook backends without changing global config.
+- `kali-service` preserves the existing `/api/<tool>` contract, timeout recovery behavior, and `SAI_PENTEST_SERVICE_URL` override.
+- `webhook` sends `{ action, payload, profile }` to a single endpoint so you can front alternative scanners or orchestration systems behind one stable tool surface.
 
 ## Approval Channels
 

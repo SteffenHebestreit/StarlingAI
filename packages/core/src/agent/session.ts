@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -26,35 +29,123 @@ export interface TurnResult {
   guardrailEvents: string[];
 }
 
+export interface SessionHistoryMessage extends LLMMessage {
+  timestamp: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  channel: string;
+  userId?: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+  turns: number;
+  messageCount: number;
+  lastMessageAt?: string;
+  preview?: string;
+}
+
+export interface SessionTranscriptMessage {
+  id: string;
+  role: "system" | "user" | "assistant";
+  content: string;
+  timestamp: string;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string }>;
+}
+
+export interface SessionTranscriptPage {
+  session: SessionSummary;
+  transcript: SessionTranscriptMessage[];
+  totalMessages: number;
+  nextBeforeMessageId?: string;
+}
+
+interface PersistedSessionRecord {
+  id: string;
+  channel: string;
+  userId?: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+  systemPrompt: string;
+  workspacePath: string;
+  turnCount: number;
+  history: SessionHistoryMessage[];
+}
+
 export class AgentSession {
   readonly id: string;
   readonly channel: string;
   readonly userId: string | undefined;
   readonly createdAt: Date;
 
-  private history: LLMMessage[] = [];
+  private history: SessionHistoryMessage[] = [];
   private systemPrompt: string;
   private workspacePath: string;
   private turnCount = 0;
+  private updatedAt: Date;
+  private archivedAt?: Date;
+  private endLogged = false;
 
-  constructor(opts: AgentSessionOptions) {
+  constructor(opts: AgentSessionOptions & {
+    createdAt?: Date;
+    updatedAt?: Date;
+    archivedAt?: Date;
+    turnCount?: number;
+    history?: SessionHistoryMessage[];
+  }) {
     this.id = opts.sessionId ?? randomUUID();
     this.channel = opts.channel;
     this.userId = opts.userId;
-    this.createdAt = new Date();
+    this.createdAt = opts.createdAt ?? new Date();
     this.workspacePath = opts.workspacePath ?? getConfig().workspacePath;
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
+    this.updatedAt = opts.updatedAt ?? this.createdAt;
+    this.archivedAt = opts.archivedAt;
+    this.turnCount = opts.turnCount ?? 0;
+    this.history = opts.history ? [...opts.history] : [];
+    this.endLogged = Boolean(this.archivedAt);
 
-    logAudit("session_created", { channel: opts.channel, workspacePath: this.workspacePath }, {
-      sessionId: this.id,
-      userId: opts.userId,
-      channel: opts.channel,
-    });
-    log.info({ sessionId: this.id, channel: opts.channel }, "Session created");
+    if (!opts.createdAt) {
+      logAudit("session_created", { channel: opts.channel, workspacePath: this.workspacePath }, {
+        sessionId: this.id,
+        userId: opts.userId,
+        channel: opts.channel,
+      });
+      log.info({ sessionId: this.id, channel: opts.channel }, "Session created");
+    }
   }
 
-  getHistory(): readonly LLMMessage[] {
+  static fromRecord(record: PersistedSessionRecord): AgentSession {
+    return new AgentSession({
+      sessionId: record.id,
+      channel: record.channel,
+      userId: record.userId,
+      systemPrompt: record.systemPrompt,
+      workspacePath: record.workspacePath,
+      createdAt: new Date(record.createdAt),
+      updatedAt: new Date(record.updatedAt),
+      archivedAt: record.archivedAt ? new Date(record.archivedAt) : undefined,
+      turnCount: record.turnCount,
+      history: record.history,
+    });
+  }
+
+  getHistory(): readonly SessionHistoryMessage[] {
     return this.history;
+  }
+
+  getUpdatedAt(): Date {
+    return this.updatedAt;
+  }
+
+  getArchivedAt(): Date | undefined {
+    return this.archivedAt;
+  }
+
+  isArchived(): boolean {
+    return Boolean(this.archivedAt);
   }
 
   /**
@@ -146,17 +237,23 @@ export class AgentSession {
   }
 
   addMessage(msg: LLMMessage): void {
-    this.history.push(msg);
+    this.history.push(withTimestamp(msg));
+    this.touch();
     this.maybeTrimHistory();
+    persistSessionStore();
   }
 
   addMessages(msgs: LLMMessage[]): void {
-    this.history.push(...msgs);
+    this.history.push(...msgs.map(withTimestamp));
+    this.touch();
     this.maybeTrimHistory();
+    persistSessionStore();
   }
 
   incrementTurn(): void {
     this.turnCount++;
+    this.touch();
+    persistSessionStore();
   }
 
   getTurnCount(): number {
@@ -166,16 +263,117 @@ export class AgentSession {
   reset(): void {
     this.history = [];
     this.turnCount = 0;
+    this.touch();
     logAudit("session_reset", { reason: "manual_reset" }, { sessionId: this.id });
+    persistSessionStore();
   }
 
   end(): void {
+    if (this.endLogged) return;
+    this.endLogged = true;
     logAudit("session_ended", { turnCount: this.turnCount }, {
       sessionId: this.id,
       userId: this.userId,
       channel: this.channel,
     });
     log.info({ sessionId: this.id, turns: this.turnCount }, "Session ended");
+  }
+
+  archive(): void {
+    if (this.archivedAt) return;
+    this.archivedAt = new Date();
+    this.touch(this.archivedAt);
+    this.end();
+    persistSessionStore();
+  }
+
+  toRecord(): PersistedSessionRecord {
+    return {
+      id: this.id,
+      channel: this.channel,
+      userId: this.userId,
+      createdAt: this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+      archivedAt: this.archivedAt?.toISOString(),
+      systemPrompt: this.systemPrompt,
+      workspacePath: this.workspacePath,
+      turnCount: this.turnCount,
+      history: this.history.map((message) => ({ ...message })),
+    };
+  }
+
+  toSummary(): SessionSummary {
+    const previewSource = [...this.history].reverse().find((message) =>
+      (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0,
+    );
+
+    return {
+      id: this.id,
+      channel: this.channel,
+      userId: this.userId,
+      createdAt: this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+      archivedAt: this.archivedAt?.toISOString(),
+      turns: this.turnCount,
+      messageCount: this.history.length,
+      lastMessageAt: this.history.at(-1)?.timestamp,
+      preview: previewSource?.content ? previewSource.content.slice(0, 160) : undefined,
+    };
+  }
+
+  toTranscript(): SessionTranscriptMessage[] {
+    const transcript: SessionTranscriptMessage[] = [];
+    let index = 0;
+
+    while (index < this.history.length) {
+      const message = this.history[index]!;
+      if (message.role === "tool") {
+        index += 1;
+        continue;
+      }
+
+      if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        const results = new Map<string, string>();
+        let cursor = index + 1;
+        while (cursor < this.history.length && this.history[cursor]?.role === "tool") {
+          const toolMessage = this.history[cursor]!;
+          if (toolMessage.tool_call_id) results.set(toolMessage.tool_call_id, toolMessage.content ?? "");
+          cursor += 1;
+        }
+
+        transcript.push({
+          id: `${this.id}:${index}`,
+          role: "assistant",
+          content: message.content ?? "",
+          timestamp: message.timestamp,
+          toolCalls: message.tool_calls.map((toolCall) => {
+            let args: Record<string, unknown> = {};
+            try {
+              args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+            } catch {
+              args = { raw: toolCall.function.arguments };
+            }
+            return {
+              name: toolCall.function.name,
+              args,
+              result: results.get(toolCall.id),
+            };
+          }),
+        });
+        index = cursor;
+        continue;
+      }
+
+      transcript.push({
+        id: `${this.id}:${index}`,
+        role: message.role,
+        content: message.content ?? "",
+        timestamp: message.timestamp,
+      });
+      index += 1;
+    }
+
+    return transcript;
   }
 
   private maybeTrimHistory(): void {
@@ -209,8 +407,14 @@ export class AgentSession {
     }
 
     if (trimmed) {
+      this.touch();
+      persistSessionStore();
       log.debug({ sessionId: this.id, remaining: this.history.length }, "Trimmed history for context window");
     }
+  }
+
+  private touch(date = new Date()): void {
+    this.updatedAt = date;
   }
 }
 
@@ -223,63 +427,144 @@ function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage
   return systemPromptTokens + historyTokens;
 }
 
-// In-memory session store with TTL pruning and max session enforcement
 const _sessions = new Map<string, AgentSession>();
+const SESSION_STORE_PATH = resolveSessionStorePath();
 
-// Prune expired sessions periodically (interval configurable via agents.sessionPruneIntervalMs)
-const _pruneIntervalMs = (() => {
-  try { return getConfig().agents.sessionPruneIntervalMs ?? 60_000; }
-  catch { return 60_000; }
-})();
-setInterval(() => {
-  const config = getConfig();
-  const ttl = config.gateway.sessionTtlMs;
-  const now = Date.now();
-  for (const [id, session] of _sessions) {
-    if (now - session.createdAt.getTime() > ttl) {
-      log.info({ sessionId: id, age: now - session.createdAt.getTime() }, "Session expired (TTL) — pruning");
-      session.end();
-      _sessions.delete(id);
-    }
-  }
-}, _pruneIntervalMs).unref();
+loadPersistedSessions();
 
 export function createSession(opts: AgentSessionOptions): AgentSession {
-  const config = getConfig();
-  const maxConcurrent = config.agents.rateLimit.concurrentSessions;
-
-  // Enforce concurrent session limit — evict oldest if at capacity
-  if (_sessions.size >= maxConcurrent) {
-    let oldest: AgentSession | null = null;
-    for (const s of _sessions.values()) {
-      if (!oldest || s.createdAt < oldest.createdAt) oldest = s;
-    }
-    if (oldest) {
-      log.warn({ evicted: oldest.id, channel: oldest.channel }, "Max concurrent sessions reached — evicting oldest");
-      oldest.end();
-      _sessions.delete(oldest.id);
+  if (opts.sessionId) {
+    const existing = _sessions.get(opts.sessionId);
+    if (existing && !existing.isArchived()) {
+      return existing;
     }
   }
 
   const session = new AgentSession(opts);
   _sessions.set(session.id, session);
+  persistSessionStore();
   return session;
 }
 
 export function getSession(id: string): AgentSession | undefined {
+  const session = _sessions.get(id);
+  if (!session || session.isArchived()) return undefined;
+  return session;
+}
+
+export function getSessionRecord(id: string): AgentSession | undefined {
   return _sessions.get(id);
 }
 
-export function endSession(id: string): void {
+export function archiveSession(id: string): boolean {
   const session = _sessions.get(id);
-  if (session) {
-    session.end();
-    _sessions.delete(id);
+  if (!session || session.isArchived()) return false;
+  session.archive();
+  return true;
+}
+
+export function deleteSession(id: string): boolean {
+  const session = _sessions.get(id);
+  if (!session) return false;
+  session.end();
+  _sessions.delete(id);
+  persistSessionStore();
+  return true;
+}
+
+export function endSession(id: string): void {
+  deleteSession(id);
+}
+
+export function getAllSessions(opts?: { includeArchived?: boolean }): AgentSession[] {
+  return [..._sessions.values()]
+    .filter((session) => opts?.includeArchived || !session.isArchived())
+    .sort((left, right) => right.getUpdatedAt().getTime() - left.getUpdatedAt().getTime());
+}
+
+export function listSessions(opts?: { includeArchived?: boolean }): SessionSummary[] {
+  return getAllSessions(opts).map((session) => session.toSummary());
+}
+
+export function getSessionTranscript(id: string, opts?: { limit?: number; beforeMessageId?: string }): SessionTranscriptPage | undefined {
+  const session = _sessions.get(id);
+  if (!session) return undefined;
+  const transcript = session.toTranscript();
+  const totalMessages = transcript.length;
+  const limit = normalizeTranscriptLimit(opts?.limit);
+
+  let endExclusive = transcript.length;
+  if (opts?.beforeMessageId) {
+    const beforeIndex = transcript.findIndex((message) => message.id === opts.beforeMessageId);
+    if (beforeIndex >= 0) {
+      endExclusive = beforeIndex;
+    }
+  }
+
+  const start = limit ? Math.max(0, endExclusive - limit) : 0;
+  const page = transcript.slice(start, endExclusive);
+
+  return {
+    session: session.toSummary(),
+    transcript: page,
+    totalMessages,
+    nextBeforeMessageId: start > 0 && page.length > 0 ? page[0]!.id : undefined,
+  };
+}
+
+export function resetSessionsForTests(): void {
+  _sessions.clear();
+  persistSessionStore();
+}
+
+function withTimestamp(message: LLMMessage): SessionHistoryMessage {
+  return {
+    ...message,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function loadPersistedSessions(): void {
+  if (!existsSync(SESSION_STORE_PATH)) return;
+
+  try {
+    const raw = JSON.parse(readFileSync(SESSION_STORE_PATH, "utf8")) as { sessions?: PersistedSessionRecord[] };
+    for (const record of raw.sessions ?? []) {
+      const session = AgentSession.fromRecord(record);
+      _sessions.set(session.id, session);
+    }
+  } catch (err) {
+    log.error({ err, path: SESSION_STORE_PATH }, "Failed to load persisted sessions — starting with an empty session store");
   }
 }
 
-export function getAllSessions(): AgentSession[] {
-  return [..._sessions.values()];
+function persistSessionStore(): void {
+  try {
+    mkdirSync(dirname(SESSION_STORE_PATH), { recursive: true });
+    writeFileSync(SESSION_STORE_PATH, JSON.stringify({
+      sessions: [..._sessions.values()]
+        .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+        .map((session) => session.toRecord()),
+    }, null, 2) + "\n", "utf8");
+  } catch (err) {
+    log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
+  }
+}
+
+function resolveSessionStorePath(): string {
+  const explicit = process.env["SAI_SESSION_STORE"]?.trim();
+  if (explicit) return resolve(explicit);
+
+  const workspacePath = resolve(process.cwd(), ".starlingai", "sessions.json");
+  const homePath = resolve(homedir(), ".starlingai", "sessions.json");
+  if (existsSync(workspacePath)) return workspacePath;
+  if (existsSync(homePath)) return homePath;
+  return workspacePath;
+}
+
+function normalizeTranscriptLimit(value: number | undefined): number | undefined {
+  if (!Number.isFinite(value) || !value || value <= 0) return undefined;
+  return Math.max(1, Math.min(500, Math.trunc(value)));
 }
 
 function defaultSystemPrompt(workspacePath?: string): string {

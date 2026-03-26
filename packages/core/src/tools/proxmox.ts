@@ -1,157 +1,332 @@
-import { getCredential } from "../credentials/store.js";
+import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { normalizeExecutionTimeout, resolveSecretRef, resolveSecretRefs } from "./infrastructure-shared.js";
 
 const log = childLogger("tool:proxmox");
 const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_TIMEOUT_MS = 15 * 60_000;
 const TASK_POLL_MS = 2_000;
 const IP_POLL_MS = 3_000;
+
+type VmAction = "clone" | "start" | "stop" | "status" | "delete" | "get_ip";
+type VmBackend = "proxmox" | "webhook";
+
+const VM_ACTIONS: VmAction[] = ["clone", "start", "stop", "status", "delete", "get_ip"];
+const VM_TOOL_PARAMETERS = {
+  type: "object",
+  properties: {
+    backend: {
+      type: "string",
+      enum: ["auto", "proxmox", "webhook"],
+      description: "Backend to use. vm_manage supports proxmox and webhook backends. Defaults to auto.",
+    },
+    profile: {
+      type: "string",
+      description: "Optional infrastructure.virtualization profile name from config.",
+    },
+    action: {
+      type: "string",
+      enum: VM_ACTIONS,
+      description: "VM action to perform",
+    },
+    apiUrl: {
+      type: "string",
+      description: "Base Proxmox API URL, e.g. https://proxmox.example.com:8006/api2/json",
+    },
+    username: {
+      type: "string",
+      description: "Proxmox username for password login, e.g. root@pam",
+    },
+    password: {
+      type: "string",
+      description: "Password, $ENV_VAR, or secret:key for password login",
+    },
+    tokenId: {
+      type: "string",
+      description: "API token identifier, e.g. root@pam!starlingai",
+    },
+    tokenSecret: {
+      type: "string",
+      description: "API token secret, $ENV_VAR, or secret:key",
+    },
+    node: {
+      type: "string",
+      description: "Target node name",
+    },
+    vmId: {
+      type: "number",
+      description: "Target VM ID",
+    },
+    sourceVmid: {
+      type: "number",
+      description: "Template or source VM ID used for clone",
+    },
+    name: {
+      type: "string",
+      description: "VM name for clone operations",
+    },
+    targetNode: {
+      type: "string",
+      description: "Optional target node for the clone; defaults to node",
+    },
+    storage: {
+      type: "string",
+      description: "Optional target storage name for the cloned disks",
+    },
+    pool: {
+      type: "string",
+      description: "Optional pool name",
+    },
+    fullClone: {
+      type: "boolean",
+      description: "Whether to perform a full clone. Defaults to true.",
+    },
+    cores: {
+      type: "number",
+      description: "Optional CPU core count to apply after clone",
+    },
+    memoryMb: {
+      type: "number",
+      description: "Optional RAM in MB to apply after clone",
+    },
+    cloudInitUser: {
+      type: "string",
+      description: "Optional cloud-init username to apply after clone",
+    },
+    sshPublicKeys: {
+      type: "string",
+      description: "Optional SSH public keys to apply through cloud-init after clone",
+    },
+    startAfterClone: {
+      type: "boolean",
+      description: "Whether to start the VM after cloning. Defaults to true.",
+    },
+    waitForIp: {
+      type: "boolean",
+      description: "When true, waits for a guest-agent-reported IP after start. Requires qemu-guest-agent in the guest.",
+    },
+    timeoutMs: {
+      type: "number",
+      description: "Optional timeout in milliseconds. Defaults to 120000 and is capped at 900000.",
+    },
+  },
+  required: ["action", "vmId"],
+} as const;
+
+registerTool({
+  name: "vm_manage",
+  description: "Manage virtual machines through configured infrastructure backends. Supports Proxmox profiles and generic webhook adapters.",
+  parameters: VM_TOOL_PARAMETERS,
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return executeVmTool(args, ctx, { allowWebhook: true, legacyProxmoxOnly: false });
+  },
+});
 
 registerTool({
   name: "proxmox_vm",
   description: "Manage Proxmox virtual machines through the Proxmox VE API. Supports cloning from templates, starting/stopping VMs, checking status, and retrieving guest IPs.",
-  parameters: {
-    type: "object",
-    properties: {
-      action: {
-        type: "string",
-        enum: ["clone", "start", "stop", "status", "delete", "get_ip"],
-        description: "VM action to perform",
-      },
-      apiUrl: {
-        type: "string",
-        description: "Base Proxmox API URL, e.g. https://proxmox.example.com:8006/api2/json",
-      },
-      username: {
-        type: "string",
-        description: "Proxmox username for password login, e.g. root@pam",
-      },
-      password: {
-        type: "string",
-        description: "Password, $ENV_VAR, or secret:key for password login",
-      },
-      tokenId: {
-        type: "string",
-        description: "API token identifier, e.g. root@pam!starlingai",
-      },
-      tokenSecret: {
-        type: "string",
-        description: "API token secret, $ENV_VAR, or secret:key",
-      },
-      node: {
-        type: "string",
-        description: "Target Proxmox node name",
-      },
-      vmId: {
-        type: "number",
-        description: "Target VM ID",
-      },
-      sourceVmid: {
-        type: "number",
-        description: "Template or source VM ID used for clone",
-      },
-      name: {
-        type: "string",
-        description: "VM name for clone operations",
-      },
-      targetNode: {
-        type: "string",
-        description: "Optional target node for the clone; defaults to node",
-      },
-      storage: {
-        type: "string",
-        description: "Optional target storage name for the cloned disks",
-      },
-      pool: {
-        type: "string",
-        description: "Optional Proxmox pool name",
-      },
-      fullClone: {
-        type: "boolean",
-        description: "Whether to perform a full clone. Defaults to true.",
-      },
-      cores: {
-        type: "number",
-        description: "Optional CPU core count to apply after clone",
-      },
-      memoryMb: {
-        type: "number",
-        description: "Optional RAM in MB to apply after clone",
-      },
-      cloudInitUser: {
-        type: "string",
-        description: "Optional cloud-init username to apply after clone",
-      },
-      sshPublicKeys: {
-        type: "string",
-        description: "Optional SSH public keys to apply through cloud-init after clone",
-      },
-      startAfterClone: {
-        type: "boolean",
-        description: "Whether to start the VM after cloning. Defaults to true.",
-      },
-      waitForIp: {
-        type: "boolean",
-        description: "When true, waits for a guest-agent-reported IP after start. Requires qemu-guest-agent in the guest.",
-      },
-      timeoutMs: {
-        type: "number",
-        description: "Optional timeout in milliseconds. Defaults to 120000 and is capped at 900000.",
-      },
-    },
-    required: ["action", "apiUrl", "node", "vmId"],
-  },
-  async execute(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
-    const action = String(args["action"] ?? "").trim();
-    const apiUrl = normalizeApiUrl(String(args["apiUrl"] ?? ""));
-    const node = String(args["node"] ?? "").trim();
-    const vmId = toPositiveInt(args["vmId"]);
-    const timeoutMs = normalizeTimeout(args["timeoutMs"]);
-
-    if (!action || !apiUrl || !node || !vmId) {
-      return { success: false, output: "", error: "action, apiUrl, node, and vmId are required" };
-    }
-
-    const auth = await createAuthContext({
-      apiUrl,
-      username: optionalString(args["username"]),
-      password: optionalString(args["password"]),
-      tokenId: optionalString(args["tokenId"]),
-      tokenSecret: optionalString(args["tokenSecret"]),
-    }, timeoutMs);
-
-    if (!auth.success) {
-      return { success: false, output: "", error: auth.error };
-    }
-
-    try {
-      switch (action) {
-        case "clone":
-          return await cloneVm(apiUrl, node, vmId, args, auth.value, timeoutMs);
-        case "start":
-          return await runStatusAction(apiUrl, node, vmId, "start", auth.value, timeoutMs);
-        case "stop":
-          return await runStatusAction(apiUrl, node, vmId, "stop", auth.value, timeoutMs);
-        case "status":
-          return await readStatus(apiUrl, node, vmId, auth.value, timeoutMs);
-        case "delete":
-          return await deleteVm(apiUrl, node, vmId, auth.value, timeoutMs);
-        case "get_ip":
-          return await getVmIp(apiUrl, node, vmId, auth.value, timeoutMs);
-        default:
-          return { success: false, output: "", error: `Unsupported action '${action}'` };
-      }
-    } catch (error) {
-      log.error({ err: error, action, node, vmId }, "Proxmox VM action failed");
-      return {
-        success: false,
-        output: "",
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+  parameters: VM_TOOL_PARAMETERS,
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return executeVmTool(args, ctx, { allowWebhook: false, legacyProxmoxOnly: true });
   },
 });
+
+async function executeVmTool(
+  args: Record<string, unknown>,
+  _ctx: ToolContext,
+  options: { allowWebhook: boolean; legacyProxmoxOnly: boolean },
+): Promise<ToolResult> {
+  const action = String(args["action"] ?? "").trim() as VmAction;
+  const vmId = toPositiveInt(args["vmId"]);
+  const requestedBackend = optionalString(args["backend"]);
+  const profileName = optionalString(args["profile"]);
+  const profile = profileName ? getConfig().infrastructure.virtualization.profiles[profileName] : undefined;
+
+  if (!action || !VM_ACTIONS.includes(action)) {
+    return { success: false, output: "", error: "action is required and must be a supported VM operation" };
+  }
+  if (!vmId) {
+    return { success: false, output: "", error: "vmId is required" };
+  }
+  if (profileName && !profile) {
+    return { success: false, output: "", error: `Unknown virtualization profile '${profileName}'` };
+  }
+
+  const backendResolution = resolveVmBackend(requestedBackend, profile?.type, options);
+  if (!backendResolution.success) {
+    return { success: false, output: "", error: backendResolution.error };
+  }
+
+  if (backendResolution.backend === "webhook") {
+    return executeWebhookVmAction(action, vmId, args, profileName, profile as { type: "webhook"; url: string; headers?: Record<string, string>; timeoutMs: number });
+  }
+
+  const apiUrl = normalizeApiUrl(optionalString(args["apiUrl"]) ?? (profile?.type === "proxmox" ? profile.apiUrl : ""));
+  const node = optionalString(args["node"]) ?? (profile?.type === "proxmox" ? profile.node : undefined);
+  const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? profile?.timeoutMs, DEFAULT_TIMEOUT_MS);
+
+  if (!apiUrl || !node) {
+    return { success: false, output: "", error: "apiUrl and node are required unless provided by a proxmox profile" };
+  }
+
+  const auth = await createAuthContext({
+    apiUrl,
+    username: optionalString(args["username"]) ?? (profile?.type === "proxmox" ? profile.username : undefined),
+    password: optionalString(args["password"]) ?? (profile?.type === "proxmox" ? profile.password : undefined),
+    tokenId: optionalString(args["tokenId"]) ?? (profile?.type === "proxmox" ? profile.tokenId : undefined),
+    tokenSecret: optionalString(args["tokenSecret"]) ?? (profile?.type === "proxmox" ? profile.tokenSecret : undefined),
+  }, timeoutMs);
+
+  if (!auth.success) {
+    return { success: false, output: "", error: auth.error };
+  }
+
+  try {
+    switch (action) {
+      case "clone":
+        return await cloneVm(apiUrl, node, vmId, args, auth.value, timeoutMs);
+      case "start":
+        return await runStatusAction(apiUrl, node, vmId, "start", auth.value, timeoutMs);
+      case "stop":
+        return await runStatusAction(apiUrl, node, vmId, "stop", auth.value, timeoutMs);
+      case "status":
+        return await readStatus(apiUrl, node, vmId, auth.value, timeoutMs);
+      case "delete":
+        return await deleteVm(apiUrl, node, vmId, auth.value, timeoutMs);
+      case "get_ip":
+        return await getVmIp(apiUrl, node, vmId, auth.value, timeoutMs);
+      default:
+        return { success: false, output: "", error: `Unsupported action '${action}'` };
+    }
+  } catch (error) {
+    log.error({ err: error, action, node, vmId }, "VM action failed");
+    return {
+      success: false,
+      output: "",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function resolveVmBackend(
+  requestedBackend: string | undefined,
+  profileType: string | undefined,
+  options: { allowWebhook: boolean; legacyProxmoxOnly: boolean },
+): { success: true; backend: VmBackend } | { success: false; error: string } {
+  const normalizedRequested = requestedBackend === "auto" || !requestedBackend ? undefined : requestedBackend;
+
+  if (options.legacyProxmoxOnly) {
+    if (profileType && profileType !== "proxmox") {
+      return { success: false, error: "proxmox_vm only supports proxmox profiles. Use vm_manage for generic backends." };
+    }
+    if (normalizedRequested && normalizedRequested !== "proxmox") {
+      return { success: false, error: "proxmox_vm only supports the proxmox backend. Use vm_manage for generic backends." };
+    }
+    return { success: true, backend: "proxmox" };
+  }
+
+  const resolvedBackend = (normalizedRequested ?? profileType ?? "proxmox") as VmBackend;
+  if (resolvedBackend === "webhook" && !options.allowWebhook) {
+    return { success: false, error: "This tool does not allow the webhook backend." };
+  }
+  if (profileType && normalizedRequested && profileType !== normalizedRequested) {
+    return { success: false, error: `Profile backend '${profileType}' does not match requested backend '${normalizedRequested}'` };
+  }
+  return { success: true, backend: resolvedBackend };
+}
+
+async function executeWebhookVmAction(
+  action: VmAction,
+  vmId: number,
+  args: Record<string, unknown>,
+  profileName: string | undefined,
+  profile: { type: "webhook"; url: string; headers?: Record<string, string>; timeoutMs: number },
+): Promise<ToolResult> {
+  if (!profile) {
+    return { success: false, output: "", error: "vm_manage with backend=webhook requires a webhook profile" };
+  }
+
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    ...resolveWebhookHeaders(profile.headers ?? {}),
+  };
+  const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? profile.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const payload = {
+    action,
+    vmId,
+    profile: profileName,
+    params: Object.fromEntries(Object.entries(args).filter(([key]) => key !== "backend" && key !== "profile")),
+  };
+
+  try {
+    const response = await fetchWithTimeout(profile.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }, timeoutMs);
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      return { success: false, output: "", error: `VM webhook returned HTTP ${response.status}: ${body.slice(0, 400)}` };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("json")) {
+      const body = await response.json() as Record<string, unknown>;
+      if (typeof body["success"] === "boolean") {
+        return {
+          success: Boolean(body["success"]),
+          output: typeof body["output"] === "string" ? body["output"] : "",
+          error: typeof body["error"] === "string" ? body["error"] : undefined,
+          metadata: {
+            backend: "webhook",
+            profile: profileName,
+            ...(body["metadata"] && typeof body["metadata"] === "object" ? body["metadata"] as Record<string, unknown> : {}),
+          },
+        };
+      }
+
+      return {
+        success: true,
+        output: JSON.stringify(body).slice(0, 4000),
+        metadata: { backend: "webhook", profile: profileName },
+      };
+    }
+
+    return {
+      success: true,
+      output: (await response.text()).slice(0, 4000),
+      metadata: { backend: "webhook", profile: profileName },
+    };
+  } catch (error) {
+    log.error({ err: error, action, vmId, profile: profileName }, "VM webhook action failed");
+    return {
+      success: false,
+      output: "",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolveWebhookHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key,
+      value.replace(/\$([A-Z0-9_]+)/gi, (_match, envName: string) => process.env[envName] ?? ""),
+    ]),
+  );
+}
 
 interface AuthHeaders {
   headers: Record<string, string>;
@@ -515,17 +690,6 @@ function withCsrf(auth: AuthHeaders, headers: Record<string, string>): Record<st
   };
 }
 
-function resolveSecretRef(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  if (value.startsWith("$")) {
-    return process.env[value.slice(1)];
-  }
-  if (value.startsWith("secret:")) {
-    return getCredential(value.slice("secret:".length));
-  }
-  return value;
-}
-
 function optionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -546,10 +710,7 @@ function normalizeApiUrl(apiUrl: string): string {
 }
 
 function normalizeTimeout(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_TIMEOUT_MS;
-  }
-  return Math.max(1_000, Math.min(MAX_TIMEOUT_MS, Math.trunc(value)));
+  return normalizeExecutionTimeout(value, DEFAULT_TIMEOUT_MS);
 }
 
 function delay(ms: number): Promise<void> {

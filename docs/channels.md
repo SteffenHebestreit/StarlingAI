@@ -20,7 +20,7 @@ See also: [Channel Setup Guide](channel-setup.md) · [Security Model](security.m
 | Discord | `channels.discord` | supported |
 | WhatsApp | `channels.whatsapp` | supported |
 | Email | `channels.email` | supported |
-| Signal | `channels.signal` | config accepted, runtime currently unsupported |
+| Signal | `channels.signal` | supported via `signal-cli` polling |
 
 The dashboard channel management API covers the external runtimes, not the built-in webchat transport.
 

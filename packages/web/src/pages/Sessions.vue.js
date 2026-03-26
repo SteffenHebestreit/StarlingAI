@@ -6,15 +6,15 @@ import { useGatewayStore } from "@/stores/gateway";
 const gateway = useGatewayStore();
 const route = useRoute();
 const router = useRouter();
-const sessions = ref([]);
 const selectedSessionId = ref(null);
 const selectedRunId = ref(null);
 const searchQuery = ref("");
 const statusFilter = ref("all");
 const sessionCards = computed(() => {
-    const activeById = new Map(sessions.value.map((session) => [session.id, session]));
+    const sessions = gateway.sessions;
+    const activeById = new Map(sessions.map((session) => [session.id, session]));
     const ids = new Set([
-        ...sessions.value.map((session) => session.id),
+        ...sessions.map((session) => session.id),
         ...gateway.swarmSessionHistory.map((entry) => entry.sessionId),
     ]);
     return Array.from(ids).map((id) => {
@@ -25,7 +25,8 @@ const sessionCards = computed(() => {
             channel: activeSession?.channel ?? null,
             createdAt: activeSession?.createdAt ?? null,
             turns: activeSession?.turns ?? null,
-            isActive: Boolean(activeSession),
+            preview: activeSession?.preview ?? null,
+            isActive: Boolean(activeSession && !activeSession.archivedAt),
             runCount: history?.runCount ?? 0,
             lastStatus: history?.lastStatus ?? null,
             lastRecordedAt: history?.lastRecordedAt ?? null,
@@ -97,14 +98,24 @@ function ensureSelection() {
     selectedRunId.value = runs[runs.length - 1]?.id ?? null;
 }
 async function refresh() {
-    const result = await gateway.rpc("session.list");
-    sessions.value = result;
+    await gateway.refreshSessions();
+    ensureSelection();
+}
+async function continueSession(sessionId) {
+    await gateway.switchSession(sessionId);
+    await router.push({ path: "/" });
+}
+async function archive(sessionId) {
+    await gateway.archiveSession(sessionId);
+    await gateway.refreshSessions();
+    if (selectedSessionId.value === sessionId) {
+        selectedSessionId.value = null;
+        selectedRunId.value = null;
+    }
     ensureSelection();
 }
 async function removeSession(sessionId) {
     await gateway.deleteSession(sessionId);
-    // Remove from local sessions list too
-    sessions.value = sessions.value.filter(s => s.id !== sessionId);
     if (selectedSessionId.value === sessionId) {
         selectedSessionId.value = null;
         selectedRunId.value = null;
@@ -112,11 +123,10 @@ async function removeSession(sessionId) {
     ensureSelection();
 }
 async function clearArchivedSessions() {
-    const archived = filteredSessionCards.value.filter(s => !s.isActive);
+    const archived = gateway.archivedSessions;
     for (const s of archived) {
         await gateway.deleteSession(s.id);
     }
-    sessions.value = sessions.value.filter(s => archived.every(a => a.id !== s.id));
     ensureSelection();
 }
 function selectSession(id) {
@@ -170,6 +180,8 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['session-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__top']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__delete']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__action']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__action--secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__meta']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__history']} */ ;
 /** @type {__VLS_StyleScopedClasses['sessions-layout']} */ ;
@@ -268,12 +280,34 @@ for (const [session] of __VLS_getVForSourceType((__VLS_ctx.filteredSessionCards)
         ...{ class: (['session-card__badge', session.isActive ? 'session-card__badge--active' : 'session-card__badge--archived']) },
     });
     (session.isActive ? 'Active' : 'Archived');
+    if (session.isActive) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(session.isActive))
+                        return;
+                    __VLS_ctx.continueSession(session.id);
+                } },
+            ...{ class: "session-card__action" },
+            title: "Continue this session in chat",
+        });
+    }
+    if (session.isActive) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(session.isActive))
+                        return;
+                    __VLS_ctx.archive(session.id);
+                } },
+            ...{ class: "session-card__action session-card__action--secondary" },
+            title: "Archive this session",
+        });
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
                 __VLS_ctx.removeSession(session.id);
             } },
         ...{ class: "session-card__delete" },
-        title: (session.isActive ? 'End and remove session' : 'Remove session history'),
+        title: (session.isActive ? 'Delete this session' : 'Remove session history'),
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "session-card__meta" },
@@ -304,7 +338,13 @@ for (const [session] of __VLS_getVForSourceType((__VLS_ctx.filteredSessionCards)
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (session.lastRecordedAt ? __VLS_ctx.formatDate(session.lastRecordedAt) : 'unknown');
     }
-    if (session.lastObjective) {
+    if (session.preview) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "session-card__preview" },
+        });
+        (session.preview);
+    }
+    else if (session.lastObjective) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "session-card__objective" },
         });
@@ -358,9 +398,13 @@ else {
 /** @type {__VLS_StyleScopedClasses['session-card__top']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__id']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__top-right']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__action']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__action']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__action--secondary']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__delete']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__meta']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__history']} */ ;
+/** @type {__VLS_StyleScopedClasses['session-card__preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['session-card__objective']} */ ;
 /** @type {__VLS_StyleScopedClasses['sessions-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['sessions-preview__empty']} */ ;
@@ -377,6 +421,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedRuns: selectedRuns,
             selectedRun: selectedRun,
             refresh: refresh,
+            continueSession: continueSession,
+            archive: archive,
             removeSession: removeSession,
             clearArchivedSessions: clearArchivedSessions,
             selectSession: selectSession,

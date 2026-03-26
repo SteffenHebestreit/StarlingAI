@@ -108,6 +108,7 @@ const orbAiState = computed(() => {
 });
 const displayMessages = computed(() => gateway.messages);
 const sceneJobs = computed(() => scenesStore.recentJobs);
+const activeSessions = computed(() => gateway.activeSessions);
 const latestAssistantText = computed(() => {
     for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
         const message = gateway.messages[index];
@@ -572,7 +573,23 @@ async function handleInterventionAction(action) {
     }
 }
 async function resetSession() {
-    await gateway.createSession();
+    if (!gateway.currentSessionId) {
+        await gateway.createSession();
+        return;
+    }
+    await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
+    await gateway.loadSession(gateway.currentSessionId);
+}
+async function archiveCurrentSession() {
+    if (!gateway.currentSessionId)
+        return;
+    await gateway.archiveSession(gateway.currentSessionId);
+}
+async function handleSessionSwitch(event) {
+    const sessionId = event.target.value;
+    if (!sessionId)
+        return;
+    await gateway.switchSession(sessionId);
 }
 function openInSessions() {
     if (!gateway.currentSessionId)
@@ -587,6 +604,9 @@ function openInSessions() {
         },
     });
 }
+function openJobs() {
+    router.push({ path: "/jobs" });
+}
 function isSceneRunning(name) {
     return scenesStore.runningJobs.some((job) => job.sceneName === name);
 }
@@ -596,12 +616,41 @@ function formatSceneName(name) {
 function shortJobId(jobId) {
     return `${jobId.slice(0, 8)}…`;
 }
+function isSceneJobCancelable(status) {
+    return status === "queued" || status === "running" || status === "cancelling";
+}
 function sceneStatusClass(status) {
     if (status === "completed")
         return "rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-emerald-300";
     if (status === "failed")
         return "rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-red-300";
+    if (status === "cancelled")
+        return "rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-gray-300";
+    if (status === "cancelling")
+        return "rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-amber-300";
+    if (status === "queued")
+        return "rounded-full bg-indigo-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-indigo-300";
     return "rounded-full bg-sky-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-sky-300";
+}
+function sceneCardClass(status) {
+    if (status === "completed")
+        return "border-emerald-500/20 bg-emerald-950/15";
+    if (status === "failed")
+        return "border-red-500/20 bg-red-950/15";
+    if (status === "cancelled")
+        return "border-gray-500/20 bg-gray-950/20";
+    if (status === "cancelling")
+        return "border-amber-500/20 bg-amber-950/15";
+    if (status === "queued")
+        return "border-indigo-500/20 bg-indigo-950/15";
+    return "border-sky-500/20 bg-sky-950/15";
+}
+function sceneLifecycleLabel(job) {
+    if (job.startedAt)
+        return `Started ${formatSceneTimestamp(job.startedAt)}`;
+    if (job.createdAt)
+        return `Queued ${formatSceneTimestamp(job.createdAt)}`;
+    return "Waiting for worker";
 }
 function formatSceneTimestamp(value) {
     const parsed = new Date(value);
@@ -792,20 +841,34 @@ else {
         ...{ class: "italic" },
     });
 }
+if (__VLS_ctx.activeSessions.length > 0) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (__VLS_ctx.handleSessionSwitch) },
+        value: (__VLS_ctx.gateway.currentSessionId ?? ''),
+        ...{ class: "rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    for (const [session] of __VLS_getVForSourceType((__VLS_ctx.activeSessions))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (session.id),
+            value: (session.id),
+        });
+        (session.id.substring(0, 8));
+        (session.turns);
+    }
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "flex gap-2" },
 });
-if (!__VLS_ctx.gateway.currentSessionId) {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (...[$event]) => {
-                if (!(!__VLS_ctx.gateway.currentSessionId))
-                    return;
-                __VLS_ctx.gateway.createSession();
-            } },
-        ...{ class: "btn-grad px-3 py-1 rounded-lg text-xs" },
-    });
-}
-else {
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.gateway.createSession();
+        } },
+    ...{ class: "btn-grad px-3 py-1 rounded-lg text-xs" },
+});
+if (__VLS_ctx.gateway.currentSessionId) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.exportMarkdown) },
         disabled: (__VLS_ctx.gateway.messages.length === 0),
@@ -817,6 +880,10 @@ else {
         disabled: (__VLS_ctx.gateway.messages.length === 0),
         ...{ class: "btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40" },
         title: "Export conversation as PDF",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.archiveCurrentSession) },
+        ...{ class: "btn-ghost px-3 py-1 rounded-lg text-xs" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.resetSession) },
@@ -1012,7 +1079,7 @@ if (__VLS_ctx.gateway.scenes.length > 0) {
             key: (scene.name),
             disabled: (__VLS_ctx.gateway.isLoading || !__VLS_ctx.gateway.connected || __VLS_ctx.isSceneRunning(scene.name)),
             title: (scene.description),
-            ...{ class: "\u0067\u0072\u006f\u0075\u0070\u0020\u0066\u006c\u0065\u0078\u0020\u0069\u0074\u0065\u006d\u0073\u002d\u0063\u0065\u006e\u0074\u0065\u0072\u0020\u0067\u0061\u0070\u002d\u0031\u002e\u0035\u0020\u0070\u0078\u002d\u0033\u0020\u0070\u0079\u002d\u0031\u0020\u0074\u0065\u0078\u0074\u002d\u0078\u0073\u0020\u0066\u006f\u006e\u0074\u002d\u006d\u0065\u0064\u0069\u0075\u006d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u0067\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0039\u0030\u0030\u002f\u0033\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u0067\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0038\u0030\u0030\u002f\u0035\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0037\u0030\u0030\u002f\u0034\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0036\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0065\u0078\u0074\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0033\u0030\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0074\u0065\u0078\u0074\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0032\u0030\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0066\u0075\u006c\u006c\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0061\u006c\u006c\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u006f\u0070\u0061\u0063\u0069\u0074\u0079\u002d\u0034\u0030\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u0063\u0075\u0072\u0073\u006f\u0072\u002d\u006e\u006f\u0074\u002d\u0061\u006c\u006c\u006f\u0077\u0065\u0064" },
+            ...{ class: "\u0067\u0072\u006f\u0075\u0070\u0020\u0066\u006c\u0065\u0078\u0020\u0069\u0074\u0065\u006d\u0073\u002d\u0063\u0065\u006e\u0074\u0065\u0072\u0020\u0067\u0061\u0070\u002d\u0031\u002e\u0035\u0020\u0070\u0078\u002d\u0033\u0020\u0070\u0079\u002d\u0031\u0020\u0074\u0065\u0078\u0074\u002d\u0078\u0073\u0020\u0066\u006f\u006e\u0074\u002d\u006d\u0065\u0064\u0069\u0075\u006d\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u0067\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0039\u0030\u0030\u002f\u0033\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u0067\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0038\u0030\u0030\u002f\u0035\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0037\u0030\u0030\u002f\u0034\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0036\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0065\u0078\u0074\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0033\u0030\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0074\u0065\u0078\u0074\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0032\u0030\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0066\u0075\u006c\u006c\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0061\u006c\u006c\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u006f\u0070\u0061\u0063\u0069\u0074\u0079\u002d\u0034\u0030\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u0063\u0075\u0072\u0073\u006f\u0072\u002d\u006e\u006f\u0074\u002d\u0061\u006c\u006c\u006f\u0077\u0065\u0064" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
             ...{ class: "text-purple-500 group-hover:text-purple-300 transition-colors" },
@@ -1030,11 +1097,7 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
             key: (job.id),
             ...{ class: ([
                     'rounded-2xl border px-3 py-3 text-sm backdrop-blur-md',
-                    job.status === 'completed'
-                        ? 'border-emerald-500/20 bg-emerald-950/15'
-                        : job.status === 'failed'
-                            ? 'border-red-500/20 bg-red-950/15'
-                            : 'border-sky-500/20 bg-sky-950/15'
+                    __VLS_ctx.sceneCardClass(job.status)
                 ]) },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -1056,6 +1119,21 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
             ...{ class: "mt-1 text-[11px] uppercase tracking-wide text-gray-500" },
         });
         (__VLS_ctx.shortJobId(job.id));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "flex items-center gap-2" },
+        });
+        if (__VLS_ctx.isSceneJobCancelable(job.status)) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError))
+                            return;
+                        if (!(__VLS_ctx.isSceneJobCancelable(job.status)))
+                            return;
+                        __VLS_ctx.scenesStore.cancel(job.id);
+                    } },
+                ...{ class: "rounded-full border border-amber-500/25 px-2 py-0.5 text-[11px] text-amber-200 transition hover:border-amber-400/50 hover:text-amber-100" },
+            });
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!(__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError))
@@ -1068,7 +1146,7 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
             ...{ class: "mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        (__VLS_ctx.formatSceneTimestamp(job.startedAt));
+        (__VLS_ctx.sceneLifecycleLabel(job));
         if (job.completedAt) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
             (__VLS_ctx.formatSceneTimestamp(job.completedAt));
@@ -1082,10 +1160,73 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
             (job.toolCallsExecuted);
             (job.toolCallsExecuted === 1 ? '' : 's');
         }
-        if (job.status === 'running') {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-3" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "flex items-center justify-between text-[11px] text-gray-400" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (job.progress.message ?? 'Waiting for worker updates');
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (Math.round(job.progress.percent ?? 0));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-1 h-1.5 overflow-hidden rounded-full bg-black/30" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div)({
+            ...{ class: "h-full rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-emerald-300 transition-[width] duration-300" },
+            ...{ style: ({ width: `${Math.max(0, Math.min(100, job.progress.percent ?? 0))}%` }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl bg-black/20 px-2 py-1.5" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-gray-500" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-1 text-gray-100" },
+        });
+        (job.progress.toolCallsCompleted);
+        (job.progress.toolCallsRequested);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl bg-black/20 px-2 py-1.5" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-gray-500" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-1 text-gray-100" },
+        });
+        (job.progress.approvalsRequested);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl bg-black/20 px-2 py-1.5" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-gray-500" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-1 text-gray-100" },
+        });
+        (job.progress.subAgentsStarted);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl bg-black/20 px-2 py-1.5" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-gray-500" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "mt-1 text-gray-100" },
+        });
+        (job.progress.swarmTasksCompleted);
+        (job.progress.swarmTasksTotal);
+        if (job.status === 'queued' || job.status === 'running' || job.status === 'cancelling') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "mt-2 text-xs text-sky-200/90" },
             });
+            (job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : 'Scene is running in the background.');
         }
         else if (job.error) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
@@ -1151,6 +1292,15 @@ if (__VLS_ctx.sceneJobs.length > 0 || __VLS_ctx.scenesStore.runError) {
         });
         (__VLS_ctx.scenesStore.runError);
     }
+}
+if (__VLS_ctx.sceneJobs.length > 0) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "mb-3 flex justify-end" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.openJobs) },
+        ...{ class: "btn-ghost px-3 py-1 rounded-lg text-xs" },
+    });
 }
 if (__VLS_ctx.pendingImageContexts.length > 0) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -1491,7 +1641,7 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
         } },
     value: (__VLS_ctx.inputText),
     disabled: (__VLS_ctx.gateway.isLoading || !__VLS_ctx.gateway.connected),
-    ...{ class: "\u0066\u006c\u0065\u0078\u002d\u0031\u0020\u0062\u0067\u002d\u0067\u0072\u0061\u0079\u002d\u0038\u0030\u0030\u002f\u0035\u0030\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0032\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0034\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0036\u0030\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u0062\u0067\u002d\u0067\u0072\u0061\u0079\u002d\u0038\u0030\u0030\u002f\u0037\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0032\u0078\u006c\u0020\u0070\u0078\u002d\u0034\u0020\u0070\u0079\u002d\u0033\u0020\u0074\u0065\u0078\u0074\u002d\u0073\u006d\u0020\u0072\u0065\u0073\u0069\u007a\u0065\u002d\u006e\u006f\u006e\u0065\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u006f\u0075\u0074\u006c\u0069\u006e\u0065\u002d\u006e\u006f\u006e\u0065\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u006f\u0070\u0061\u0063\u0069\u0074\u0079\u002d\u0034\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0065\u0078\u0074\u002d\u0067\u0072\u0061\u0079\u002d\u0031\u0030\u0030\u0020\u0070\u006c\u0061\u0063\u0065\u0068\u006f\u006c\u0064\u0065\u0072\u002d\u0067\u0072\u0061\u0079\u002d\u0036\u0030\u0030\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0061\u006c\u006c\u0020\u0064\u0075\u0072\u0061\u0074\u0069\u006f\u006e\u002d\u0032\u0030\u0030" },
+    ...{ class: "\u0066\u006c\u0065\u0078\u002d\u0031\u0020\u0062\u0067\u002d\u0067\u0072\u0061\u0079\u002d\u0038\u0030\u0030\u002f\u0035\u0030\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0032\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0034\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0070\u0075\u0072\u0070\u006c\u0065\u002d\u0035\u0030\u0030\u002f\u0036\u0030\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u0062\u0067\u002d\u0067\u0072\u0061\u0079\u002d\u0038\u0030\u0030\u002f\u0037\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0032\u0078\u006c\u0020\u0070\u0078\u002d\u0034\u0020\u0070\u0079\u002d\u0033\u0020\u0074\u0065\u0078\u0074\u002d\u0073\u006d\u0020\u0072\u0065\u0073\u0069\u007a\u0065\u002d\u006e\u006f\u006e\u0065\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0066\u006f\u0063\u0075\u0073\u003a\u006f\u0075\u0074\u006c\u0069\u006e\u0065\u002d\u006e\u006f\u006e\u0065\u0020\u0064\u0069\u0073\u0061\u0062\u006c\u0065\u0064\u003a\u006f\u0070\u0061\u0063\u0069\u0074\u0079\u002d\u0034\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0065\u0078\u0074\u002d\u0067\u0072\u0061\u0079\u002d\u0031\u0030\u0030\u0020\u0070\u006c\u0061\u0063\u0065\u0068\u006f\u006c\u0064\u0065\u0072\u002d\u0067\u0072\u0061\u0079\u002d\u0036\u0030\u0030\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0061\u006c\u006c\u0020\u0064\u0075\u0072\u0061\u0074\u0069\u006f\u006e\u002d\u0032\u0030\u0030" },
     placeholder: "Message StarlingAI… (Enter to send, Shift+Enter for newline)",
     rows: "1",
     ...{ style: {} },
@@ -1541,7 +1691,7 @@ if (__VLS_ctx.gateway.isLoading) {
                     return;
                 __VLS_ctx.gateway.cancelTurn();
             } },
-        ...{ class: "\u0070\u0078\u002d\u0035\u0020\u0070\u0079\u002d\u0033\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0032\u0078\u006c\u0020\u0074\u0065\u0078\u0074\u002d\u0073\u006d\u0020\u0073\u0068\u0072\u0069\u006e\u006b\u002d\u0030\u0020\u0066\u006f\u006e\u0074\u002d\u0073\u0065\u006d\u0069\u0062\u006f\u006c\u0064\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0063\u006f\u006c\u006f\u0072\u0073\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u0067\u002d\u0072\u0065\u0064\u002d\u0036\u0030\u0030\u002f\u0038\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u0067\u002d\u0072\u0065\u0064\u002d\u0035\u0030\u0030\u002f\u0039\u0030\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0072\u0065\u0064\u002d\u0034\u0030\u0030\u002f\u0034\u0030\u0020\u0074\u0065\u0078\u0074\u002d\u0077\u0068\u0069\u0074\u0065" },
+        ...{ class: "\u0070\u0078\u002d\u0035\u0020\u0070\u0079\u002d\u0033\u0020\u0072\u006f\u0075\u006e\u0064\u0065\u0064\u002d\u0032\u0078\u006c\u0020\u0074\u0065\u0078\u0074\u002d\u0073\u006d\u0020\u0073\u0068\u0072\u0069\u006e\u006b\u002d\u0030\u0020\u0066\u006f\u006e\u0074\u002d\u0073\u0065\u006d\u0069\u0062\u006f\u006c\u0064\u0020\u0074\u0072\u0061\u006e\u0073\u0069\u0074\u0069\u006f\u006e\u002d\u0063\u006f\u006c\u006f\u0072\u0073\u000d\u000a\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0020\u0062\u0067\u002d\u0072\u0065\u0064\u002d\u0036\u0030\u0030\u002f\u0038\u0030\u0020\u0068\u006f\u0076\u0065\u0072\u003a\u0062\u0067\u002d\u0072\u0065\u0064\u002d\u0035\u0030\u0030\u002f\u0039\u0030\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u0020\u0062\u006f\u0072\u0064\u0065\u0072\u002d\u0072\u0065\u0064\u002d\u0034\u0030\u0030\u002f\u0034\u0030\u0020\u0074\u0065\u0078\u0074\u002d\u0077\u0068\u0069\u0074\u0065" },
         title: "Stop the current turn",
     });
 }
@@ -1642,6 +1792,14 @@ var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
 /** @type {__VLS_StyleScopedClasses['ml-1']} */ ;
 /** @type {__VLS_StyleScopedClasses['italic']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-purple-500/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-gray-900/70']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['btn-grad']} */ ;
@@ -1661,6 +1819,11 @@ var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['disabled:opacity-40']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
 /** @type {__VLS_StyleScopedClasses['px-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['py-1']} */ ;
@@ -1819,6 +1982,19 @@ var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
 /** @type {__VLS_StyleScopedClasses['tracking-wide']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-amber-500/25']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-0.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-amber-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:border-amber-400/50']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:text-amber-100']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-white/10']} */ ;
@@ -1835,6 +2011,60 @@ var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-hidden']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/30']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-gradient-to-r']} */ ;
+/** @type {__VLS_StyleScopedClasses['from-sky-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['via-cyan-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['to-emerald-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition-[width]']} */ ;
+/** @type {__VLS_StyleScopedClasses['duration-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid-cols-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['sm:grid-cols-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-black/20']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-gray-100']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sky-200/90']} */ ;
@@ -1889,6 +2119,14 @@ var __VLS_26;
 /** @type {__VLS_StyleScopedClasses['py-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-red-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-end']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-ghost']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex-wrap']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
@@ -2135,6 +2373,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             orbAiState: orbAiState,
             displayMessages: displayMessages,
             sceneJobs: sceneJobs,
+            activeSessions: activeSessions,
             latestAssistantText: latestAssistantText,
             showFileInput: showFileInput,
             showAudioUpload: showAudioUpload,
@@ -2154,11 +2393,17 @@ const __VLS_self = (await import('vue')).defineComponent({
             approveAction: approveAction,
             handleInterventionAction: handleInterventionAction,
             resetSession: resetSession,
+            archiveCurrentSession: archiveCurrentSession,
+            handleSessionSwitch: handleSessionSwitch,
             openInSessions: openInSessions,
+            openJobs: openJobs,
             isSceneRunning: isSceneRunning,
             formatSceneName: formatSceneName,
             shortJobId: shortJobId,
+            isSceneJobCancelable: isSceneJobCancelable,
             sceneStatusClass: sceneStatusClass,
+            sceneCardClass: sceneCardClass,
+            sceneLifecycleLabel: sceneLifecycleLabel,
             formatSceneTimestamp: formatSceneTimestamp,
             formatDuration: formatDuration,
             formatCompactNumber: formatCompactNumber,

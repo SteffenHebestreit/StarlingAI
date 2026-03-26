@@ -34,18 +34,36 @@ export interface SceneJobPerformance {
   blocked: boolean;
 }
 
+export interface SceneJobProgress {
+  stage: string;
+  message?: string;
+  percent?: number;
+  toolCallsRequested: number;
+  toolCallsCompleted: number;
+  approvalsRequested: number;
+  subAgentsStarted: number;
+  swarmTasksTotal: number;
+  swarmTasksCompleted: number;
+  lastEventAt: string;
+  lastEventType?: string;
+  currentTool?: string;
+  currentAgent?: string;
+}
+
 export interface SceneJob {
   id: string;
   sceneName: string;
   sessionId: string;
-  status: "running" | "completed" | "failed";
-  startedAt: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
+  createdAt?: string;
+  startedAt?: string;
   completedAt?: string;
   response?: string;
   toolCallsExecuted?: number;
   blocked?: boolean;
   performance?: SceneJobPerformance;
   error?: string;
+  progress: SceneJobProgress;
 }
 
 interface SceneRunResponse {
@@ -53,7 +71,7 @@ interface SceneRunResponse {
   sceneName: string;
   jobId: string;
   sessionId: string;
-  status: "running";
+  status: "queued" | "running";
 }
 
 export const useScenesStore = defineStore("scenes", () => {
@@ -79,8 +97,8 @@ export const useScenesStore = defineStore("scenes", () => {
     const withoutCurrent = recentJobs.value.filter((entry) => entry.id !== job.id);
     recentJobs.value = [job, ...withoutCurrent]
       .sort((left, right) => {
-        const leftTs = left.completedAt ?? left.startedAt;
-        const rightTs = right.completedAt ?? right.startedAt;
+        const leftTs = left.completedAt ?? left.startedAt ?? left.createdAt ?? "";
+        const rightTs = right.completedAt ?? right.startedAt ?? right.createdAt ?? "";
         return rightTs.localeCompare(leftTs);
       })
       .slice(0, 12);
@@ -107,7 +125,7 @@ export const useScenesStore = defineStore("scenes", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const job = await res.json() as SceneJob;
       upsertJob(job);
-      if (job.status !== "running") stopPolling(job.id);
+      if (!["queued", "running", "cancelling"].includes(job.status)) stopPolling(job.id);
       return job;
     } catch (e) {
       runError.value = String(e);
@@ -116,12 +134,32 @@ export const useScenesStore = defineStore("scenes", () => {
     }
   }
 
+  async function fetchJobs(options: { limit?: number; status?: SceneJob["status"] } = {}): Promise<SceneJob[]> {
+    try {
+      const params = new URLSearchParams();
+      if (options.limit) params.set("limit", String(options.limit));
+      if (options.status) params.set("status", options.status);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const res = await globalThis.fetch(restUrl(`/api/scenes/jobs${query}`), {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json() as { jobs: SceneJob[] };
+      recentJobs.value = body.jobs;
+      resumeRunningJobs();
+      return body.jobs;
+    } catch (e) {
+      runError.value = String(e);
+      return recentJobs.value;
+    }
+  }
+
   function schedulePoll(jobId: string, delayMs = 2000) {
     if (pollTimers.has(jobId)) return;
     const timer = setTimeout(async () => {
       pollTimers.delete(jobId);
       const job = await fetchJob(jobId);
-      if (job?.status === "running") {
+      if (job && ["queued", "running", "cancelling"].includes(job.status)) {
         schedulePoll(jobId, 2000);
       }
     }, delayMs);
@@ -131,7 +169,7 @@ export const useScenesStore = defineStore("scenes", () => {
   function resumeRunningJobs() {
     if (!gateway.token) return;
     recentJobs.value
-      .filter((job) => job.status === "running")
+      .filter((job) => ["queued", "running", "cancelling"].includes(job.status))
       .forEach((job) => schedulePoll(job.id, 0));
   }
 
@@ -206,8 +244,20 @@ export const useScenesStore = defineStore("scenes", () => {
         id: data.jobId,
         sceneName: data.sceneName,
         sessionId: data.sessionId,
-        status: "running",
-        startedAt: new Date().toISOString(),
+        status: data.status,
+        createdAt: new Date().toISOString(),
+        progress: {
+          stage: data.status,
+          message: data.status === "queued" ? "Queued for worker execution" : "Worker claimed job",
+          percent: data.status === "queued" ? 0 : 5,
+          toolCallsRequested: 0,
+          toolCallsCompleted: 0,
+          approvalsRequested: 0,
+          subAgentsStarted: 0,
+          swarmTasksTotal: 0,
+          swarmTasksCompleted: 0,
+          lastEventAt: new Date().toISOString(),
+        },
       };
       upsertJob(job);
       schedulePoll(job.id, 0);
@@ -218,7 +268,32 @@ export const useScenesStore = defineStore("scenes", () => {
     }
   }
 
-  const runningJobs = computed(() => recentJobs.value.filter((job) => job.status === "running"));
+  async function cancel(jobId: string): Promise<SceneJob | null> {
+    runError.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/jobs/${encodeURIComponent(jobId)}/cancel`), {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const job = (await res.json() as { job: SceneJob }).job;
+      upsertJob(job);
+      if (["queued", "running", "cancelling"].includes(job.status)) {
+        schedulePoll(job.id, 0);
+      } else {
+        stopPolling(job.id);
+      }
+      return job;
+    } catch (e) {
+      runError.value = String(e);
+      return null;
+    }
+  }
+
+  const runningJobs = computed(() => recentJobs.value.filter((job) => ["queued", "running", "cancelling"].includes(job.status)));
 
   watch(() => gateway.token, (token) => {
     if (token) resumeRunningJobs();
@@ -232,10 +307,12 @@ export const useScenesStore = defineStore("scenes", () => {
     recentJobs,
     runningJobs,
     fetch,
+    fetchJobs,
     fetchJob,
     save,
     remove,
     run,
+    cancel,
     dismissJob,
   };
 });

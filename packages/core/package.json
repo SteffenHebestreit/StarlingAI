@@ -8,14 +8,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsx watch src/index.ts",
+    "dev:scene-worker": "tsx watch src/scene-worker-main.ts",
     "start": "node dist/index.js",
+    "start:scene-worker": "node dist/scene-worker-main.js",
     "test": "vitest run",
     "test:qwen-speech-smoke": "tsx src/scripts/qwen-speech-smoke.ts",
     "runtime-guidance:evaluate": "tsx src/scripts/runtime-guidance-live-eval.ts",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
     "lint": "eslint src",
-    "agents:evaluate": "tsx src/agent/evaluation-cli.ts"
+    "agents:evaluate": "tsx src/agent/evaluation-cli.ts",
+    "worker:scene": "tsx src/scene-worker-main.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",

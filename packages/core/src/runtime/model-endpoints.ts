@@ -1,4 +1,5 @@
 import { getConfig } from "../config/loader.js";
+import { resolveEmbeddingEndpoint, resolveProviderEndpoint, resolveProviderEndpointForModel } from "../providers/index.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./status.js";
 
 export interface ModelEndpointHealth {
@@ -167,48 +168,56 @@ async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealt
 
 function collectTargets(): EndpointTarget[] {
   const config = getConfig();
-  const lmsCfg = config.providers.lmstudio;
   const defaults = config.agents.defaults.model;
   const targets: EndpointTarget[] = [];
 
-  const orchestratorBaseUrl = defaults.baseUrl ?? lmsCfg?.baseUrl ?? "http://host.docker.internal:1234/v1";
-  const orchestratorApiKey = defaults.apiKey ?? lmsCfg?.apiKey ?? "lm-studio";
+  const orchestratorEndpoint = resolveProviderEndpoint(defaults, config);
 
   targets.push({
     role: "orchestrator",
     model: defaults.primary,
-    baseUrl: orchestratorBaseUrl,
-    apiKey: orchestratorApiKey,
+    baseUrl: orchestratorEndpoint.baseUrl,
+    apiKey: orchestratorEndpoint.apiKey,
     source: "agents.defaults.model",
   });
 
   if (defaults.embeddingModel) {
+    const embeddingEndpoint = resolveEmbeddingEndpoint(defaults, config);
     targets.push({
       role: "embeddings",
       model: defaults.embeddingModel,
-      baseUrl: defaults.embeddingBaseUrl ?? orchestratorBaseUrl,
-      apiKey: defaults.embeddingApiKey ?? orchestratorApiKey,
+      baseUrl: embeddingEndpoint.baseUrl,
+      apiKey: embeddingEndpoint.apiKey,
       source: "agents.defaults.model.embeddingModel",
     });
   }
 
   for (const [name, agent] of Object.entries(config.subAgents ?? {})) {
     const model = { ...defaults, ...(agent.model ?? {}) };
+    const endpoint = resolveProviderEndpoint(model, config);
     targets.push({
       role: `subagent:${name}`,
       model: model.primary,
-      baseUrl: model.baseUrl ?? orchestratorBaseUrl,
-      apiKey: model.apiKey ?? orchestratorApiKey,
+      baseUrl: endpoint.baseUrl,
+      apiKey: endpoint.apiKey,
       source: `subAgents.${name}.model`,
     });
   }
 
   if (config.multimodal.files.visionModel) {
+    const visionEndpoint = resolveProviderEndpointForModel(
+      config.multimodal.files.visionModel,
+      {
+        baseUrl: config.multimodal.files.visionBaseUrl,
+        apiKey: config.multimodal.files.visionApiKey,
+      },
+      config,
+    );
     targets.push({
       role: "vision",
       model: config.multimodal.files.visionModel,
-      baseUrl: config.multimodal.files.visionBaseUrl ?? orchestratorBaseUrl,
-      apiKey: config.multimodal.files.visionApiKey ?? orchestratorApiKey,
+      baseUrl: visionEndpoint.baseUrl,
+      apiKey: visionEndpoint.apiKey,
       source: "multimodal.files.visionModel",
     });
   }

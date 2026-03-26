@@ -45,6 +45,9 @@ describe("gateway HTTP bridge", () => {
     const runtimeStatus = await import("../runtime/status.js");
     runtimeStatus.resetRuntimeStatusForTests();
 
+    const jobs = await import("../agent/jobs.js");
+    await jobs.resetJobsForTests();
+
     const registry = await import("../channels/registry.js");
     registry.resetChannelRegistryForTests();
   });
@@ -216,6 +219,80 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("lists recent scene jobs and supports status filtering", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-jobs-"));
+    const port = 19500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "s".repeat(32),
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth, jobs] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+      import("../agent/jobs.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+
+      const first = await jobs.createJob({
+        sceneName: "deep_research",
+        task: "Research alpha",
+        params: { topic: "alpha" },
+        userId: "admin",
+        turnTimeoutMs: 30_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await jobs.createJob({
+        sceneName: "deep_research",
+        task: "Research beta",
+        params: { topic: "beta" },
+        userId: "admin",
+        turnTimeoutMs: 30_000,
+      });
+      await jobs.cancelJob(second.id);
+
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const listResponse = await fetch(`${baseUrl}/api/scenes/jobs?limit=10`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(listResponse.status).toBe(200);
+      const listed = await listResponse.json() as { jobs: Array<{ id: string; status: string }> };
+      expect(listed.jobs.map((job) => job.id)).toEqual([second.id, first.id]);
+
+      const filteredResponse = await fetch(`${baseUrl}/api/scenes/jobs?status=cancelled`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(filteredResponse.status).toBe(200);
+      const filtered = await filteredResponse.json() as { jobs: Array<{ id: string; status: string }> };
+      expect(filtered.jobs).toHaveLength(1);
+      expect(filtered.jobs[0]).toMatchObject({ id: second.id, status: "cancelled" });
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("serves effective channel config and accepts telegram dashboard settings", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-channels-"));
     const port = 20000 + Math.floor(Math.random() * 1000);
@@ -356,8 +433,7 @@ describe("gateway HTTP bridge", () => {
         supported: true,
       });
       expect(initialBody.find((status) => status.type === "signal")).toMatchObject({
-        supported: false,
-        reason: "Channel runtime is not implemented yet",
+        supported: true,
       });
 
       const enable = await fetch(`${baseUrl}/api/channels/slack`, {

@@ -6,12 +6,11 @@
  *
  * Each sub-agent is isolated:
  *  - Fresh conversation history (no access to parent session)
- *  - Its own LMStudioProvider instance (potentially a different model)
+ *  - Its own chat provider instance (potentially a different model/backend)
  *  - A restricted tool list derived from its config
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
-import { LMStudioProvider } from "../providers/lmstudio.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
 import { getToolsAsLLMDefs, executeTool, type ToolContext } from "../tools/registry.js";
@@ -22,6 +21,7 @@ import { childLogger } from "../logger.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs } from "./outcomes.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
+import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 
 const log = childLogger("agent:sub-agent");
 
@@ -131,9 +131,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     // Merge defaults with per-agent overrides
     const modelConfig = { ...config.agents.defaults.model, ...(agentCfg.model ?? {}) };
 
-    const lmsCfg = config.providers.lmstudio;
-    const lmsBaseUrl = modelConfig.baseUrl ?? lmsCfg?.baseUrl ?? "http://host.docker.internal:1234/v1";
-    const lmsApiKey  = modelConfig.apiKey  ?? lmsCfg?.apiKey  ?? "lm-studio";
+    const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
     // ── Dispatch to container runner if configured ───────────────────────────
     if (agentCfg.container?.enabled) {
@@ -142,7 +140,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       let containerRun;
       try {
         log.info({ agentName: opts.agentName, maxConcurrent }, "Dispatching to containerized sub-agent");
-        containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, lmsBaseUrl, lmsApiKey);
+        containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
       } finally {
         releaseSlot(opts.agentName);
       }
@@ -176,7 +174,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       };
     }
 
-    const provider = new LMStudioProvider(lmsBaseUrl, lmsApiKey, modelConfig);
+    const provider = createChatProvider(modelConfig, providerEndpoint);
 
     // Build system prompt
     const today = new Date().toLocaleDateString("en-US", {
