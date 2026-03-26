@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { AgentSession } from "../agent/session.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests } from "../agent/session.js";
+
+afterEach(() => {
+  resetSessionsForTests();
+});
 
 describe("AgentSession collapsed history", () => {
   it("keeps tool results on the active user turn", () => {
@@ -57,5 +61,39 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).toContain("parallel_delegate");
     expect(prompt).toContain("Maximum 1 create_ephemeral_agent call per turn");
     expect(prompt).toContain("Use application_pipeline only for its specific end-to-end browser workflow");
+  });
+
+  it("supports paged transcript retrieval for stored sessions", () => {
+    const session = createSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "first" });
+    session.addMessage({ role: "assistant", content: "reply one" });
+    session.addMessage({ role: "user", content: "second" });
+    session.addMessage({ role: "assistant", content: "reply two" });
+    session.addMessage({ role: "user", content: "third" });
+
+    const latestPage = getSessionTranscript(session.id, { limit: 2 });
+    expect(latestPage?.totalMessages).toBe(5);
+    expect(latestPage?.transcript).toHaveLength(2);
+    expect(latestPage?.transcript.map((message) => message.content)).toEqual(["reply two", "third"]);
+    expect(latestPage?.nextBeforeMessageId).toBe(latestPage?.transcript[0]?.id);
+
+    const olderPage = getSessionTranscript(session.id, {
+      limit: 2,
+      beforeMessageId: latestPage?.nextBeforeMessageId,
+    });
+    expect(olderPage?.transcript.map((message) => message.content)).toEqual(["reply one", "second"]);
+    expect(olderPage?.nextBeforeMessageId).toBe(olderPage?.transcript[0]?.id);
+
+    const oldestPage = getSessionTranscript(session.id, {
+      limit: 2,
+      beforeMessageId: olderPage?.nextBeforeMessageId,
+    });
+    expect(oldestPage?.transcript.map((message) => message.content)).toEqual(["first"]);
+    expect(oldestPage?.nextBeforeMessageId).toBeUndefined();
   });
 });

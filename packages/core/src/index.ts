@@ -14,6 +14,8 @@ import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeCo
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
+import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
+import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
@@ -42,6 +44,7 @@ const log = childLogger("main");
 
 export async function main() {
   log.info("StarlingAI starting...");
+  const embeddedSceneWorkerEnabled = process.env["SAI_DISABLE_EMBEDDED_SCENE_WORKER"] !== "1";
 
   // Load and validate config
   const config = loadConfig();
@@ -49,6 +52,9 @@ export async function main() {
 
   // Initialize Postgres audit sink (optional)
   await initPostgresAudit();
+
+  // Initialize durable scene-job storage before worker startup.
+  await initSceneJobStore();
 
   // Check LLM provider health
   await initProviders();
@@ -66,6 +72,13 @@ export async function main() {
   // Start gateway (WS + REST)
   const gateway = createGateway();
   await gateway.start();
+
+  // Start the scene-job worker after the API is ready unless an external worker is managing the queue.
+  if (embeddedSceneWorkerEnabled) {
+    await startSceneJobWorker();
+  } else {
+    log.info("Embedded scene worker disabled; expecting an external scene worker process");
+  }
 
   // Start and reconcile dashboard-managed channels
   await syncAllChannels();
@@ -119,11 +132,15 @@ export async function main() {
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
     stopWarden();
+    if (embeddedSceneWorkerEnabled) {
+      await stopSceneJobWorker();
+    }
     stopAutonomousBidding();
     stopBidderWorker();
     await stopSwarmBus();
     await stopManagedChannels();
     await gateway.stop();
+    await shutdownSceneJobStore();
     await shutdownMcpServers();
     process.exit(0);
   };

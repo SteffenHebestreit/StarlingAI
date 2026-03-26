@@ -7,6 +7,13 @@ export const LMStudioProviderSchema = z.object({
   maxRetries: z.number().int().min(0).max(5).default(3),
 });
 
+export const OpenAICompatibleProviderSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().default("local-openai"),
+  timeoutMs: z.number().int().min(5000).max(300000).default(30000),
+  maxRetries: z.number().int().min(0).max(5).default(3),
+});
+
 export const OllamaProviderSchema = z.object({
   baseUrl: z.string().url().default("http://host.docker.internal:11434"),
   api: z.literal("ollama-native").default("ollama-native"),
@@ -20,6 +27,7 @@ export const AnthropicProviderSchema = z.object({
 
 export const ProvidersSchema = z.object({
   lmstudio: LMStudioProviderSchema.optional(),
+  openaiCompatible: z.record(OpenAICompatibleProviderSchema).default({}),
   ollama: OllamaProviderSchema.optional(),
   anthropic: AnthropicProviderSchema.optional(),
 });
@@ -182,11 +190,13 @@ export const MultimodalFileServiceSchema = MultimodalServiceSchema.extend({
 
 export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
   baseUrl: z.string().url().default("http://qwen3-asr-service:5002"),
+  api: z.enum(["auto", "openai-compatible", "transcribe-only"]).default("auto"),
   model: z.string().min(1).default("Qwen/Qwen3-ASR-1.7B"),
 });
 
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   baseUrl: z.string().url().default("http://qwen3-tts-service:5004"),
+  api: z.enum(["qwen-compatible", "openai-compatible"]).default("qwen-compatible"),
   model: z.string().min(1).default("Qwen/Qwen3-TTS-12Hz-0.6B-Instruct"),
   defaultLanguage: z.string().min(2).default("English"),
   defaultSpeaker: z.string().min(1).default("Vivian"),
@@ -239,8 +249,15 @@ export const RetrievalRerankerSchema = z.object({
   topK: z.number().int().min(2).max(12).default(6),
 });
 
+export const RetrievalSearchSchema = z.object({
+  backend: z.enum(["auto", "searxng", "duckduckgo"]).default("auto"),
+  searxngBaseUrl: z.string().url().optional(),
+  timeoutMs: z.number().int().min(1000).max(60000).default(12000),
+});
+
 export const RetrievalSchema = z.object({
   reranker: RetrievalRerankerSchema.default({}),
+  search: RetrievalSearchSchema.default({}),
 });
 
 // ─── MCP Server configuration ────────────────────────────────────────────────
@@ -438,10 +455,86 @@ export const WebhooksSchema = z.record(WebhookToolSchema);
 export type WebhookToolConfig = z.infer<typeof WebhookToolSchema>;
 
 
+// ─── Infrastructure adapters ───────────────────────────────────────────────
+
+export const InfrastructureVmProxmoxProfileSchema = z.object({
+  type: z.literal("proxmox"),
+  apiUrl: z.string().url(),
+  node: z.string().min(1),
+  username: z.string().min(1).optional(),
+  password: z.string().min(1).optional(),
+  tokenId: z.string().min(1).optional(),
+  tokenSecret: z.string().min(1).optional(),
+  timeoutMs: z.number().int().min(1000).max(900000).default(120000),
+});
+
+export const InfrastructureVmWebhookProfileSchema = z.object({
+  type: z.literal("webhook"),
+  url: z.string().url(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(900000).default(120000),
+});
+
+export const InfrastructureVmProfileSchema = z.discriminatedUnion("type", [
+  InfrastructureVmProxmoxProfileSchema,
+  InfrastructureVmWebhookProfileSchema,
+]);
+
+export const InfrastructureAutomationLocalCliProfileSchema = z.object({
+  type: z.literal("local-cli"),
+  terraformBinary: z.string().min(1).default("terraform"),
+  ansibleBinary: z.string().min(1).default("ansible"),
+  ansiblePlaybookBinary: z.string().min(1).default("ansible-playbook"),
+  timeoutMs: z.number().int().min(1000).max(900000).optional(),
+});
+
+export const InfrastructureAutomationWebhookProfileSchema = z.object({
+  type: z.literal("webhook"),
+  url: z.string().url(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(900000).optional(),
+});
+
+export const InfrastructureAutomationProfileSchema = z.discriminatedUnion("type", [
+  InfrastructureAutomationLocalCliProfileSchema,
+  InfrastructureAutomationWebhookProfileSchema,
+]);
+
+export const InfrastructureSchema = z.object({
+  virtualization: z.object({
+    profiles: z.record(InfrastructureVmProfileSchema).default({}),
+  }).default({}),
+  automation: z.object({
+    defaultProfile: z.string().min(1).optional(),
+    profiles: z.record(InfrastructureAutomationProfileSchema).default({}),
+  }).default({}),
+});
+
+
 // ─── Pentest service ──────────────────────────────────────────────────────────
+
+export const PentestKaliServiceProfileSchema = z.object({
+  type: z.literal("kali-service"),
+  serviceUrl: z.string().url().default("http://kali-pentest:5010"),
+  timeoutMs: z.number().int().min(1000).max(900000).default(300000),
+});
+
+export const PentestWebhookProfileSchema = z.object({
+  type: z.literal("webhook"),
+  url: z.string().url(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(900000).default(300000),
+});
+
+export const PentestProfileSchema = z.discriminatedUnion("type", [
+  PentestKaliServiceProfileSchema,
+  PentestWebhookProfileSchema,
+]);
 
 export const PentestSchema = z.object({
   serviceUrl: z.string().url().default("http://kali-pentest:5010"),
+  defaultProfile: z.string().min(1).optional(),
+  profiles: z.record(PentestProfileSchema).default({}),
 });
 
 // ─── Guardrails ───────────────────────────────────────────────────────────────
@@ -521,6 +614,7 @@ export const ConfigSchema = z.object({
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
+  infrastructure: InfrastructureSchema.default({}),
   pentest: PentestSchema.default({}),
   workspacePath: z.string().default("/workspace"),
 });
@@ -528,3 +622,8 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type GatewayConfig = z.infer<typeof GatewaySchema>;
+export type MultimodalFileConfig = z.infer<typeof MultimodalFileServiceSchema>;
+export type MultimodalSpeechToTextConfig = z.infer<typeof MultimodalSpeechToTextSchema>;
+export type MultimodalTextToSpeechConfig = z.infer<typeof MultimodalTextToSpeechSchema>;
+export type RetrievalSearchConfig = z.infer<typeof RetrievalSearchSchema>;
+export type InfrastructureAutomationProfile = z.infer<typeof InfrastructureAutomationProfileSchema>;

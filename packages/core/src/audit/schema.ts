@@ -29,6 +29,7 @@ export type AuditEventType =
   | "turn_performance"
   | "scene_job_completed"
   | "scene_job_failed"
+  | "scene_job_cancelled"
   | "ephemeral_agent_rejected"
   | "approval_requested"
   | "approval_resolved"

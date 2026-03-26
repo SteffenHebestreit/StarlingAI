@@ -4,7 +4,7 @@
   <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
-StarlingAI supports the built-in web dashboard chat plus Telegram, Slack, Discord, WhatsApp, and Email channel runtimes. Signal can be configured in `starlingai.json` but is currently reported as unsupported at runtime.
+StarlingAI supports the built-in web dashboard chat plus Telegram, Slack, Discord, WhatsApp, Email, and Signal channel runtimes.
 
 ---
 
@@ -226,7 +226,30 @@ Notes:
 
 ## 7. Signal
 
-`channels.signal` exists in the config schema and dashboard, but the runtime currently reports it as unsupported.
+Signal uses `signal-cli` on the gateway host. StarlingAI polls `signal-cli receive` for inbound DMs and sends replies through `signal-cli send`.
+
+### Step 1 — Install and link `signal-cli`
+1. Install `signal-cli` on the same host where the gateway runs.
+2. Link or register a dedicated Signal account.
+3. Confirm the account appears in `signal-cli --output=json listAccounts`.
+
+### Step 2 — Configure
+```jsonc
+"signal": {
+  "enabled": true,
+  "account": "+49123456789",
+  "signalCliPath": "signal-cli",
+  "dmPolicy": "pairing",
+  "allowFrom": []
+}
+```
+
+Notes:
+
+- `account` must match the registered Signal number in international format.
+- `signalCliPath` can point to a custom binary location when `signal-cli` is not on `PATH`.
+- Pairing works the same way as Slack, Discord, and WhatsApp: the pairing code is logged at startup and users send `/pair CODE` in Signal.
+- Signal is currently DM-oriented. Group messages are ignored by the adapter.
 
 ## Common config options
 

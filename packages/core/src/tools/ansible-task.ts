@@ -3,9 +3,11 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import {
+  executeAutomationWebhook,
   formatCliExecutionError,
   materializeInventory,
   normalizeExecutionTimeout,
+  resolveAutomationProfile,
   resolveWorkspaceRelativePath,
   safeDelete,
 } from "./infrastructure-shared.js";
@@ -30,6 +32,10 @@ registerTool({
       projectDir: {
         type: "string",
         description: "Optional workspace-relative Ansible project directory used as cwd for ansible.",
+      },
+      profile: {
+        type: "string",
+        description: "Optional infrastructure.automation profile name. Supports local-cli and webhook profiles.",
       },
       pattern: {
         type: "string",
@@ -73,13 +79,27 @@ registerTool({
     required: ["module"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const automationProfile = resolveAutomationProfile(args["profile"]);
+    if (automationProfile.error) {
+      return { success: false, output: "", error: automationProfile.error };
+    }
+    if (automationProfile.profile?.type === "webhook" && automationProfile.profileName) {
+      return executeAutomationWebhook(
+        "ansible_task",
+        automationProfile.profileName,
+        automationProfile.profile,
+        args,
+        DEFAULT_TIMEOUT_MS,
+      );
+    }
+
     const inventoryInput = args["inventory"] ?? args["inventoryUrl"];
     const inventory = inventoryInput ? String(inventoryInput) : undefined;
     const pattern = String(args["pattern"] ?? "all").trim() || "all";
     const moduleName = String(args["module"] ?? "").trim();
     const moduleArgs = typeof args["moduleArgs"] === "string" ? String(args["moduleArgs"]).trim() : "";
     const extraVars = (args["extraVars"] as Record<string, unknown> | undefined) ?? {};
-    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"], DEFAULT_TIMEOUT_MS);
+    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? automationProfile.profile?.timeoutMs, DEFAULT_TIMEOUT_MS);
     const projectDirInput = typeof args["projectDir"] === "string" ? String(args["projectDir"]).trim() : "";
     const projectDir = projectDirInput
       ? resolveWorkspaceRelativePath(projectDirInput, ctx.workspacePath)
@@ -92,6 +112,9 @@ registerTool({
     let inventoryPath: string | undefined;
     let shouldDeleteInventory = false;
     const cliArgs = [pattern, "-m", moduleName];
+    const binary = automationProfile.profile?.type === "local-cli"
+      ? automationProfile.profile.ansibleBinary
+      : "ansible";
 
     try {
       if (inventory) {
@@ -124,7 +147,7 @@ registerTool({
       }
 
       log.debug({ moduleName, pattern, args: cliArgs }, "Running ansible ad-hoc task");
-      const { stdout, stderr } = await execFileAsync("ansible", cliArgs, {
+      const { stdout, stderr } = await execFileAsync(binary, cliArgs, {
         cwd: projectDir,
         timeout: timeoutMs,
       });
@@ -142,7 +165,7 @@ registerTool({
       return {
         success: false,
         output: `${error.stdout || ""}\n${error.stderr || ""}\n${error.message || ""}`.trim(),
-        error: formatCliExecutionError(error, "ansible"),
+        error: formatCliExecutionError(error, binary),
       };
     } finally {
       if (shouldDeleteInventory && inventoryPath) {

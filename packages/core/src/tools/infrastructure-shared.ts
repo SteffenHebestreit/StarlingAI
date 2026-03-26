@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getConfig } from "../config/loader.js";
+import type { InfrastructureAutomationProfile } from "../config/schema.js";
 import { getCredential } from "../credentials/store.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 
@@ -106,6 +108,18 @@ export function resolveSecretRefs<T>(value: T): T {
   return value;
 }
 
+export function resolveWebhookHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => {
+      const resolved = resolveSecretRef(value) ?? value;
+      return [
+        key,
+        resolved.replace(/\$([A-Z0-9_]+)/gi, (_match, envName: string) => process.env[envName] ?? ""),
+      ];
+    }),
+  );
+}
+
 export function resolveWorkspaceRelativePath(
   inputPath: string,
   workspacePath: string,
@@ -116,4 +130,106 @@ export function resolveWorkspaceRelativePath(
     return resolvePathWithinWorkspace(candidate, workspacePath).resolved;
   }
   return resolvePathWithinWorkspace(inputPath, workspacePath).resolved;
+}
+
+export function resolveAutomationProfile(
+  requestedProfile: unknown,
+): { profileName?: string; profile?: InfrastructureAutomationProfile; error?: string } {
+  const config = getConfig();
+  const explicitProfile = typeof requestedProfile === "string" && requestedProfile.trim()
+    ? requestedProfile.trim()
+    : undefined;
+  const profileName = explicitProfile ?? config.infrastructure.automation.defaultProfile?.trim();
+
+  if (!profileName) {
+    return {};
+  }
+
+  const profile = config.infrastructure.automation.profiles[profileName];
+  if (!profile) {
+    return { error: `Unknown automation profile '${profileName}'` };
+  }
+
+  return { profileName, profile };
+}
+
+export async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function executeAutomationWebhook(
+  toolName: string,
+  profileName: string,
+  profile: Extract<InfrastructureAutomationProfile, { type: "webhook" }>,
+  args: Record<string, unknown>,
+  defaultTimeoutMs: number,
+): Promise<{ success: boolean; output: string; error?: string; metadata?: Record<string, unknown> }> {
+  const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? profile.timeoutMs, defaultTimeoutMs);
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    ...resolveWebhookHeaders(profile.headers ?? {}),
+  };
+
+  try {
+    const response = await fetchWithTimeout(profile.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        action: toolName,
+        profile: profileName,
+        params: args,
+      }),
+    }, timeoutMs);
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      return {
+        success: false,
+        output: "",
+        error: `Automation webhook returned HTTP ${response.status}: ${body.slice(0, 400)}`,
+      };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("json")) {
+      const body = await response.json() as Record<string, unknown>;
+      if (typeof body["success"] === "boolean") {
+        return {
+          success: Boolean(body["success"]),
+          output: typeof body["output"] === "string" ? body["output"] : "",
+          error: typeof body["error"] === "string" ? body["error"] : undefined,
+          metadata: {
+            backend: "webhook",
+            profile: profileName,
+            ...(body["metadata"] && typeof body["metadata"] === "object" ? body["metadata"] as Record<string, unknown> : {}),
+          },
+        };
+      }
+
+      return {
+        success: true,
+        output: JSON.stringify(body).slice(0, 4000),
+        metadata: { backend: "webhook", profile: profileName },
+      };
+    }
+
+    return {
+      success: true,
+      output: (await response.text()).slice(0, 4000),
+      metadata: { backend: "webhook", profile: profileName },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      output: "",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

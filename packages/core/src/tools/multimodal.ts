@@ -4,6 +4,7 @@ import JSON5 from "json5";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { getMcpConnections } from "../mcp/registry.js";
+import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 
@@ -93,6 +94,7 @@ registerTool({
       const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
       const config = getConfig().multimodal.stt;
       const response = await sendSttRequest({
+        api: config.api,
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
@@ -194,6 +196,7 @@ registerTool({
       const savedVoiceId = stringArg(args["voiceId"]) ?? stringArg(args["voice"]) ?? config.defaultVoiceId;
       const speaker = stringArg(args["speaker"]) ?? (savedVoiceId ? undefined : config.defaultSpeaker);
       const response = await sendTtsRequest({
+        api: config.api,
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
@@ -634,9 +637,16 @@ async function callMultimodalToolViaMcp(input: {
 
 async function analyzeImageBytes(bytes: Uint8Array, contentType: string, configuredModel: string, prompt: string): Promise<string> {
   const config = getConfig();
-  const providerConfig = config.providers.lmstudio;
-  const baseUrl = (config.multimodal.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-  const apiKey = config.multimodal.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
+  const endpoint = resolveProviderEndpointForModel(
+    configuredModel,
+    {
+      baseUrl: config.multimodal.files.visionBaseUrl,
+      apiKey: config.multimodal.files.visionApiKey,
+    },
+    config,
+  );
+  const baseUrl = endpoint.baseUrl.replace(/\/$/, "");
+  const apiKey = endpoint.apiKey;
   const modelId = configuredModel.replace(/^[^/]+\//, "");
   const dataUrl = `data:${contentType};base64,${Buffer.from(bytes).toString("base64")}`;
 
@@ -781,6 +791,7 @@ async function parseUpstreamJsonResponse(response: Response, fallback: string): 
 }
 
 async function sendSttRequest(input: {
+  api: "auto" | "openai-compatible" | "transcribe-only";
   baseUrl: string;
   apiKey?: string;
   timeoutMs: number;
@@ -790,6 +801,23 @@ async function sendSttRequest(input: {
   language?: string;
   prompt?: string;
 }): Promise<Response> {
+  if (input.api === "transcribe-only") {
+    const fallbackForm = new FormData();
+    fallbackForm.append("audio", input.audioBlob, input.filename);
+    if (input.language) fallbackForm.append("language", input.language);
+    if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+
+    return fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/transcribe"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(input.apiKey),
+        body: fallbackForm,
+      },
+      input.timeoutMs,
+    );
+  }
+
   const openAiForm = new FormData();
   openAiForm.append("file", input.audioBlob, input.filename);
   openAiForm.append("model", input.model);
@@ -810,6 +838,10 @@ async function sendSttRequest(input: {
     return openAiResponse;
   }
 
+  if (input.api === "openai-compatible") {
+    return openAiResponse;
+  }
+
   const fallbackForm = new FormData();
   fallbackForm.append("audio", input.audioBlob, input.filename);
   if (input.language) fallbackForm.append("language", input.language);
@@ -827,10 +859,39 @@ async function sendSttRequest(input: {
 }
 
 async function fetchTtsVoiceCatalog(config: {
+  api: "qwen-compatible" | "openai-compatible";
   baseUrl: string;
   apiKey?: string;
   timeoutMs: number;
 }): Promise<Record<string, unknown>> {
+  if (config.api === "openai-compatible") {
+    const [voicesResponse, modelsResponse] = await Promise.all([
+      fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+      fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+    ]);
+
+    if (!modelsResponse.ok) {
+      throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
+    }
+
+    const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
+    let voices: unknown[] = [];
+
+    if (voicesResponse.ok) {
+      const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
+      voices = Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [];
+    } else if (voicesResponse.status !== 404 && voicesResponse.status !== 405) {
+      throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
+    }
+
+    return {
+      voices,
+      speakers: [],
+      models: modelsBody["models"] ?? {},
+      currentModel: modelsBody["current_model"] ?? undefined,
+    };
+  }
+
   const [voicesResponse, speakersResponse, modelsResponse] = await Promise.all([
     fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
     fetchWithTimeout(upstreamUrl(config.baseUrl, "/speakers"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
@@ -890,7 +951,12 @@ function normalizeQwenLanguage(language: string): string {
   return map[normalized.toLowerCase()] ?? normalized;
 }
 
+function normalizeTtsLanguage(language: string, api: "qwen-compatible" | "openai-compatible"): string {
+  return api === "qwen-compatible" ? normalizeQwenLanguage(language) : language.trim();
+}
+
 async function sendTtsRequest(input: {
+  api: "qwen-compatible" | "openai-compatible";
   baseUrl: string;
   apiKey?: string;
   timeoutMs: number;
@@ -906,8 +972,30 @@ async function sendTtsRequest(input: {
   referenceText?: string;
   saveVoiceAs?: string;
 }): Promise<Response> {
-  const language = normalizeQwenLanguage(input.language);
+  const language = normalizeTtsLanguage(input.language, input.api);
   const model = input.model?.trim();
+
+  if (input.api === "openai-compatible") {
+    if (input.audioExample || input.saveVoiceAs || input.referenceText) {
+      throw new Error("Voice cloning is only supported for qwen-compatible TTS backends.");
+    }
+
+    return fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/v1/audio/speech"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          model: model || "tts-1",
+          input: input.text,
+          voice: input.savedVoiceId ?? input.speaker ?? "alloy",
+          response_format: "wav",
+          ...(input.speed !== undefined ? { speed: input.speed } : {}),
+        }),
+      },
+      input.timeoutMs,
+    );
+  }
 
   if (model) {
     const loadModelResponse = await fetchWithTimeout(

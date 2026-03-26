@@ -14,19 +14,32 @@
           <code class="font-mono text-gray-400 ml-1">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
         </span>
         <span v-else class="italic">No active session</span>
+        <select
+          v-if="activeSessions.length > 0"
+          :value="gateway.currentSessionId ?? ''"
+          class="rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300"
+          @change="handleSessionSwitch"
+        >
+          <option value="">Select active session</option>
+          <option v-for="session in activeSessions" :key="session.id" :value="session.id">
+            {{ session.id.substring(0, 8) }}… · {{ session.turns }} turns
+          </option>
+        </select>
       </div>
       <div class="flex gap-2">
-        <button v-if="!gateway.currentSessionId" @click="gateway.createSession()"
+        <button @click="gateway.createSession()"
           class="btn-grad px-3 py-1 rounded-lg text-xs">New Session</button>
-        <template v-else>
+        <template v-if="gateway.currentSessionId">
           <button @click="exportMarkdown"
-            :disabled="gateway.messages.length === 0"
+            :disabled="gateway.messages.length === 0 || exportingTranscript"
             class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
             title="Download conversation as Markdown">⬇ MD</button>
           <button @click="exportPDF"
-            :disabled="gateway.messages.length === 0"
+            :disabled="gateway.messages.length === 0 || exportingTranscript"
             class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
             title="Export conversation as PDF">⬇ PDF</button>
+          <button @click="archiveCurrentSession"
+            class="btn-ghost px-3 py-1 rounded-lg text-xs">Archive</button>
           <button @click="resetSession"
             class="btn-ghost px-3 py-1 rounded-lg text-xs">Reset</button>
         </template>
@@ -45,6 +58,16 @@
         @select-run="gateway.selectSwarmRun"
         @open-archive="openInSessions"
       />
+
+      <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
+        <button
+          @click="loadOlderMessages"
+          :disabled="gateway.currentSessionTranscriptLoading"
+          class="rounded-full border border-purple-500/25 bg-gray-900/70 px-4 py-1.5 text-xs text-purple-200 transition hover:border-purple-400/45 hover:text-purple-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {{ gateway.currentSessionTranscriptLoading ? 'Loading older messages...' : 'Load older messages' }}
+        </button>
+      </div>
 
       <MessageBubble
         v-for="msg in displayMessages"
@@ -148,11 +171,7 @@
           :key="job.id"
           :class="[
             'rounded-2xl border px-3 py-3 text-sm backdrop-blur-md',
-            job.status === 'completed'
-              ? 'border-emerald-500/20 bg-emerald-950/15'
-              : job.status === 'failed'
-                ? 'border-red-500/20 bg-red-950/15'
-                : 'border-sky-500/20 bg-sky-950/15'
+            sceneCardClass(job.status)
           ]"
         >
           <div class="flex items-start justify-between gap-3">
@@ -163,23 +182,61 @@
               </div>
               <div class="mt-1 text-[11px] uppercase tracking-wide text-gray-500">Job {{ shortJobId(job.id) }}</div>
             </div>
-            <button
-              @click="scenesStore.dismissJob(job.id)"
-              class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
-            >
-              Dismiss
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                v-if="isSceneJobCancelable(job.status)"
+                @click="scenesStore.cancel(job.id)"
+                class="rounded-full border border-amber-500/25 px-2 py-0.5 text-[11px] text-amber-200 transition hover:border-amber-400/50 hover:text-amber-100"
+              >
+                Cancel
+              </button>
+              <button
+                @click="scenesStore.dismissJob(job.id)"
+                class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
 
           <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
-            <span>Started {{ formatSceneTimestamp(job.startedAt) }}</span>
+            <span>{{ sceneLifecycleLabel(job) }}</span>
             <span v-if="job.completedAt">Finished {{ formatSceneTimestamp(job.completedAt) }}</span>
             <span v-if="job.performance">{{ formatDuration(job.performance.turnDurationMs) }}</span>
             <span v-if="typeof job.toolCallsExecuted === 'number'">{{ job.toolCallsExecuted }} tool call{{ job.toolCallsExecuted === 1 ? '' : 's' }}</span>
           </div>
 
-          <p v-if="job.status === 'running'" class="mt-2 text-xs text-sky-200/90">
-            Scene is running in the background. Metrics will appear when the job completes.
+          <div class="mt-3">
+            <div class="flex items-center justify-between text-[11px] text-gray-400">
+              <span>{{ job.progress.message ?? 'Waiting for worker updates' }}</span>
+              <span>{{ Math.round(job.progress.percent ?? 0) }}%</span>
+            </div>
+            <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-black/30">
+              <div class="h-full rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-emerald-300 transition-[width] duration-300" :style="{ width: `${Math.max(0, Math.min(100, job.progress.percent ?? 0))}%` }" />
+            </div>
+          </div>
+
+          <div class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4">
+            <div class="rounded-xl bg-black/20 px-2 py-1.5">
+              <div class="text-gray-500">Tools</div>
+              <div class="mt-1 text-gray-100">{{ job.progress.toolCallsCompleted }} / {{ job.progress.toolCallsRequested }}</div>
+            </div>
+            <div class="rounded-xl bg-black/20 px-2 py-1.5">
+              <div class="text-gray-500">Approvals</div>
+              <div class="mt-1 text-gray-100">{{ job.progress.approvalsRequested }}</div>
+            </div>
+            <div class="rounded-xl bg-black/20 px-2 py-1.5">
+              <div class="text-gray-500">Sub-agents</div>
+              <div class="mt-1 text-gray-100">{{ job.progress.subAgentsStarted }}</div>
+            </div>
+            <div class="rounded-xl bg-black/20 px-2 py-1.5">
+              <div class="text-gray-500">Swarm tasks</div>
+              <div class="mt-1 text-gray-100">{{ job.progress.swarmTasksCompleted }} / {{ job.progress.swarmTasksTotal }}</div>
+            </div>
+          </div>
+
+          <p v-if="job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'" class="mt-2 text-xs text-sky-200/90">
+            {{ job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : 'Scene is running in the background.' }}
           </p>
           <p v-else-if="job.error" class="mt-2 line-clamp-3 text-xs text-red-200/90">
             {{ job.error }}
@@ -211,6 +268,10 @@
         <div v-if="scenesStore.runError" class="rounded-2xl border border-red-500/20 bg-red-950/15 px-3 py-3 text-xs text-red-200">
           {{ scenesStore.runError }}
         </div>
+      </div>
+
+      <div v-if="sceneJobs.length > 0" class="mb-3 flex justify-end">
+        <button @click="openJobs" class="btn-ghost px-3 py-1 rounded-lg text-xs">Open Jobs Dashboard</button>
       </div>
 
       <!-- Pending image attachment chips -->
@@ -477,7 +538,7 @@ import { useStorage } from "@vueuse/core";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
-import type { InterventionAction } from "@/stores/gateway";
+import type { GatewaySessionTranscriptMessage, InterventionAction } from "@/stores/gateway";
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
@@ -505,6 +566,7 @@ const wakeLanguage = useStorage<string>("gc_wake_language", "en-US");
 const wakeSilenceTimeoutMs = useStorage<number>("gc_wake_silence_ms", 4000);
 const speakReplyEnabled = useStorage<boolean>("sai_speak_reply", false);
 const lastSpokenSummary = ref<string | null>(null);
+const exportingTranscript = ref(false);
 /** Per-message Qwen3.5 thinking toggle: undefined = auto, true = on, false = off */
 const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
@@ -623,6 +685,7 @@ const orbAiState = computed(() => {
 
 const displayMessages = computed(() => gateway.messages);
 const sceneJobs = computed(() => scenesStore.recentJobs);
+const activeSessions = computed(() => gateway.activeSessions);
 const latestAssistantText = computed(() => {
   for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
     const message = gateway.messages[index];
@@ -1088,7 +1151,23 @@ async function handleInterventionAction(action: InterventionAction) {
 }
 
 async function resetSession() {
-  await gateway.createSession();
+  if (!gateway.currentSessionId) {
+    await gateway.createSession();
+    return;
+  }
+  await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
+  await gateway.loadSession(gateway.currentSessionId);
+}
+
+async function archiveCurrentSession() {
+  if (!gateway.currentSessionId) return;
+  await gateway.archiveSession(gateway.currentSessionId);
+}
+
+async function handleSessionSwitch(event: Event) {
+  const sessionId = (event.target as HTMLSelectElement).value;
+  if (!sessionId) return;
+  await gateway.switchSession(sessionId);
 }
 
 function openInSessions() {
@@ -1104,6 +1183,10 @@ function openInSessions() {
   });
 }
 
+function openJobs() {
+  router.push({ path: "/jobs" });
+}
+
 function isSceneRunning(name: string): boolean {
   return scenesStore.runningJobs.some((job) => job.sceneName === name);
 }
@@ -1116,10 +1199,32 @@ function shortJobId(jobId: string): string {
   return `${jobId.slice(0, 8)}…`;
 }
 
-function sceneStatusClass(status: "running" | "completed" | "failed"): string {
+function isSceneJobCancelable(status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed"): boolean {
+  return status === "queued" || status === "running" || status === "cancelling";
+}
+
+function sceneStatusClass(status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed"): string {
   if (status === "completed") return "rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-emerald-300";
   if (status === "failed") return "rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-red-300";
+  if (status === "cancelled") return "rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-gray-300";
+  if (status === "cancelling") return "rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-amber-300";
+  if (status === "queued") return "rounded-full bg-indigo-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-indigo-300";
   return "rounded-full bg-sky-500/15 px-2 py-0.5 text-[11px] uppercase tracking-wide text-sky-300";
+}
+
+function sceneCardClass(status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed"): string {
+  if (status === "completed") return "border-emerald-500/20 bg-emerald-950/15";
+  if (status === "failed") return "border-red-500/20 bg-red-950/15";
+  if (status === "cancelled") return "border-gray-500/20 bg-gray-950/20";
+  if (status === "cancelling") return "border-amber-500/20 bg-amber-950/15";
+  if (status === "queued") return "border-indigo-500/20 bg-indigo-950/15";
+  return "border-sky-500/20 bg-sky-950/15";
+}
+
+function sceneLifecycleLabel(job: { createdAt?: string; startedAt?: string }): string {
+  if (job.startedAt) return `Started ${formatSceneTimestamp(job.startedAt)}`;
+  if (job.createdAt) return `Queued ${formatSceneTimestamp(job.createdAt)}`;
+  return "Waiting for worker";
 }
 
 function formatSceneTimestamp(value: string): string {
@@ -1141,7 +1246,30 @@ function formatCompactNumber(value: number): string {
 
 // ── Export helpers ────────────────────────────────────────────────────────────
 
-function buildMarkdownExport(): string {
+function exportRoleLabel(role: GatewaySessionTranscriptMessage["role"]): string {
+  if (role === "user") return "**You**";
+  if (role === "system") return "**System**";
+  return "**StarlingAI**";
+}
+
+async function getExportTranscriptMessages(): Promise<GatewaySessionTranscriptMessage[]> {
+  if (gateway.currentSessionId) {
+    const result = await gateway.getSessionTranscript(gateway.currentSessionId);
+    return result.transcript;
+  }
+
+  return gateway.messages
+    .filter((message) => message.id !== "streaming")
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp.toISOString(),
+      toolCalls: message.toolCalls,
+    }));
+}
+
+function buildMarkdownExport(messages: GatewaySessionTranscriptMessage[]): string {
   const sessionId = gateway.currentSessionId ?? "unknown";
   const date = new Date().toLocaleString();
   const lines: string[] = [
@@ -1153,8 +1281,8 @@ function buildMarkdownExport(): string {
     `---`,
     ``,
   ];
-  for (const msg of gateway.messages) {
-    const role = msg.role === "user" ? "**You**" : "**StarlingAI**";
+  for (const msg of messages) {
+    const role = exportRoleLabel(msg.role);
     const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     lines.push(`### ${role} — ${time}`);
     lines.push(``);
@@ -1166,36 +1294,45 @@ function buildMarkdownExport(): string {
   return lines.join("\n");
 }
 
-function exportMarkdown(): void {
-  const content = buildMarkdownExport();
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `starlingai-${(gateway.currentSessionId ?? "session").slice(0, 8)}.md`;
-  a.click();
-  URL.revokeObjectURL(url);
+async function exportMarkdown(): Promise<void> {
+  exportingTranscript.value = true;
+  try {
+    const transcript = await getExportTranscriptMessages();
+    const content = buildMarkdownExport(transcript);
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `starlingai-${(gateway.currentSessionId ?? "session").slice(0, 8)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } finally {
+    exportingTranscript.value = false;
+  }
 }
 
-function exportPDF(): void {
-  const sessionId = gateway.currentSessionId ?? "unknown";
-  const date = new Date().toLocaleString();
+async function exportPDF(): Promise<void> {
+  exportingTranscript.value = true;
+  try {
+    const transcript = await getExportTranscriptMessages();
+    const sessionId = gateway.currentSessionId ?? "unknown";
+    const date = new Date().toLocaleString();
 
-  const messageHtml = gateway.messages.map(msg => {
-    const role = msg.role === "user" ? "You" : "StarlingAI";
-    const roleClass = msg.role === "user" ? "role-user" : "role-ai";
-    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const bodyHtml = msg.content
-      ? marked.parse(msg.content, { async: false }) as string
-      : "<em>(no content)</em>";
-    return `
-      <div class="message ${roleClass}">
-        <div class="message-header"><span class="role">${role}</span><span class="time">${time}</span></div>
-        <div class="message-body">${bodyHtml}</div>
-      </div>`;
-  }).join("\n");
+    const messageHtml = transcript.map((msg) => {
+      const role = msg.role === "user" ? "You" : msg.role === "system" ? "System" : "StarlingAI";
+      const roleClass = msg.role === "user" ? "role-user" : msg.role === "system" ? "role-system" : "role-ai";
+      const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const bodyHtml = msg.content
+        ? marked.parse(msg.content, { async: false }) as string
+        : "<em>(no content)</em>";
+      return `
+        <div class="message ${roleClass}">
+          <div class="message-header"><span class="role">${role}</span><span class="time">${time}</span></div>
+          <div class="message-body">${bodyHtml}</div>
+        </div>`;
+    }).join("\n");
 
-  const html = `<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1206,10 +1343,12 @@ function exportPDF(): void {
     .meta { font-size: 0.78rem; color: #6b7280; margin-bottom: 1.5rem; }
     .message { margin-bottom: 1.25rem; border-radius: 8px; padding: 0.75rem 1rem; page-break-inside: avoid; }
     .role-user { background: #f5f3ff; border: 1px solid #ddd6fe; }
-    .role-ai   { background: #fafafa;  border: 1px solid #e5e7eb; }
+    .role-ai { background: #fafafa; border: 1px solid #e5e7eb; }
+    .role-system { background: #eff6ff; border: 1px solid #bfdbfe; }
     .message-header { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
     .role { font-weight: 700; font-size: 0.8rem; color: #6d28d9; }
     .role-user .role { color: #7c3aed; }
+    .role-system .role { color: #1d4ed8; }
     .time { font-size: 0.72rem; color: #9ca3af; }
     .message-body p { margin: 0 0 0.4rem; }
     .message-body p:last-child { margin-bottom: 0; }
@@ -1231,12 +1370,19 @@ function exportPDF(): void {
 </body>
 </html>`;
 
-  const win = window.open("", "_blank");
-  if (!win) return;
-  win.document.write(html);
-  win.document.close();
-  win.focus();
-  setTimeout(() => { win.print(); }, 300);
+    const win = window.open("", "_blank");
+    if (!win) return;
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { win.print(); }, 300);
+  } finally {
+    exportingTranscript.value = false;
+  }
+}
+
+async function loadOlderMessages(): Promise<void> {
+  await gateway.loadOlderCurrentSessionTranscript();
 }
 
 function scrollToBottom() {

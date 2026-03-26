@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +26,9 @@ describe("infrastructure tools", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["VM_WEBHOOK_TOKEN"];
     vi.resetModules();
   });
 
@@ -49,7 +53,283 @@ describe("infrastructure tools", () => {
     expect(toolNames).toContain("service_check");
     expect(toolNames).toContain("ansible_task");
     expect(toolNames).toContain("terraform_exec");
+    expect(toolNames).toContain("vm_manage");
     expect(toolNames).toContain("proxmox_vm");
+  });
+
+  it("resolves named Proxmox connection profiles", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-proxmox-profile-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      infrastructure: {
+        virtualization: {
+          profiles: {
+            lab_proxmox: {
+              type: "proxmox",
+              apiUrl: "https://proxmox.example.com:8006",
+              node: "pve-01",
+              tokenId: "root@pam!starlingai",
+              tokenSecret: "secret:tf_api_token",
+              timeoutMs: 90000,
+            },
+          },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/status/current")) {
+        return new Response(JSON.stringify({ data: { status: "running", name: "app-42" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("./registry.js"),
+        import("./proxmox.js"),
+      ]);
+
+      const tool = getTool("proxmox_vm");
+      const result = await tool!.execute({
+        action: "status",
+        profile: "lab_proxmox",
+        vmId: 42,
+      }, {
+        sessionId: "session-proxmox-profile",
+        workspacePath: process.cwd(),
+      });
+
+      expect(result.success).toBe(true);
+      const firstCall = fetchMock.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      const firstUrl = firstCall?.[0];
+      const firstInit = (firstCall as unknown[] | undefined)?.[1] as RequestInit | undefined;
+      expect(String(firstUrl)).toBe("https://proxmox.example.com:8006/api2/json/nodes/pve-01/qemu/42/status/current");
+      expect(firstInit?.headers).toMatchObject({ Authorization: "PVEAPIToken=root@pam!starlingai=secret-variable-value" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes generic VM actions through webhook virtualization profiles", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-vm-webhook-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      infrastructure: {
+        virtualization: {
+          profiles: {
+            lab_webhook: {
+              type: "webhook",
+              url: "https://infra.example.com/vm/manage",
+              headers: {
+                Authorization: "Bearer $VM_WEBHOOK_TOKEN",
+              },
+              timeoutMs: 45000,
+            },
+          },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["VM_WEBHOOK_TOKEN"] = "webhook-token";
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer webhook-token" });
+      const payload = JSON.parse(String(init?.body));
+      expect(payload).toMatchObject({
+        action: "clone",
+        vmId: 300,
+        profile: "lab_webhook",
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        output: "Webhook VM cloned",
+        metadata: { requestId: "req-1" },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("./registry.js"),
+        import("./proxmox.js"),
+      ]);
+
+      const tool = getTool("vm_manage");
+      const result = await tool!.execute({
+        backend: "webhook",
+        profile: "lab_webhook",
+        action: "clone",
+        vmId: 300,
+        sourceVmid: 9000,
+        name: "app-300",
+        node: "target-node",
+      }, {
+        sessionId: "session-vm-webhook",
+        workspacePath: process.cwd(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("Webhook VM cloned");
+      expect(result.metadata).toMatchObject({ backend: "webhook", profile: "lab_webhook", requestId: "req-1" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes terraform actions through automation webhook profiles", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-automation-webhook-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      infrastructure: {
+        automation: {
+          profiles: {
+            ops_webhook: {
+              type: "webhook",
+              url: "https://infra.example.com/automation",
+              headers: {
+                Authorization: "Bearer $VM_WEBHOOK_TOKEN",
+              },
+              timeoutMs: 45000,
+            },
+          },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["VM_WEBHOOK_TOKEN"] = "webhook-token";
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer webhook-token" });
+      const payload = JSON.parse(String(init?.body));
+      expect(payload).toMatchObject({
+        action: "terraform_exec",
+        profile: "ops_webhook",
+        params: {
+          action: "plan",
+          profile: "ops_webhook",
+          workingDir: ".",
+        },
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        output: "Terraform webhook plan",
+        metadata: { requestId: "tf-1" },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("./registry.js"),
+        import("./terraform.js"),
+      ]);
+
+      const tool = getTool("terraform_exec");
+      const result = await tool!.execute({
+        action: "plan",
+        profile: "ops_webhook",
+        workingDir: ".",
+      }, {
+        sessionId: "session-terraform-webhook",
+        workspacePath: process.cwd(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("Terraform webhook plan");
+      expect(result.metadata).toMatchObject({ backend: "webhook", profile: "ops_webhook", requestId: "tf-1" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves local automation profiles for ansible and terraform binaries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-automation-cli-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      infrastructure: {
+        automation: {
+          profiles: {
+            custom_cli: {
+              type: "local-cli",
+              terraformBinary: "tofu",
+              ansibleBinary: "ansible-custom",
+              ansiblePlaybookBinary: "ansible-playbook-custom",
+            },
+          },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    execFileMock.mockImplementation((_file, _args, _options, callback) => {
+      callback(null, { stdout: "ok", stderr: "" });
+    });
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("./registry.js"),
+        import("./ansible.js"),
+      ]);
+      await import("./ansible-task.js");
+      await import("./terraform.js");
+
+      const playbookTool = getTool("ansible_playbook");
+      const taskTool = getTool("ansible_task");
+      const terraformTool = getTool("terraform_exec");
+
+      const playbookResult = await playbookTool!.execute({
+        profile: "custom_cli",
+        playbookYaml: "- hosts: all\n  tasks: []\n",
+      }, {
+        sessionId: "session-ansible-profile",
+        workspacePath: process.cwd(),
+      });
+      expect(playbookResult.success).toBe(true);
+
+      const taskResult = await taskTool!.execute({
+        profile: "custom_cli",
+        module: "shell",
+        inventory: "vm.internal",
+      }, {
+        sessionId: "session-ansible-task-profile",
+        workspacePath: process.cwd(),
+      });
+      expect(taskResult.success).toBe(true);
+
+      const terraformResult = await terraformTool!.execute({
+        profile: "custom_cli",
+        action: "validate",
+        workingDir: ".",
+        autoInit: false,
+      }, {
+        sessionId: "session-terraform-profile",
+        workspacePath: process.cwd(),
+      });
+      expect(terraformResult.success).toBe(true);
+
+      const binaries = execFileMock.mock.calls.map((call) => call[0]);
+      expect(binaries).toContain("ansible-playbook-custom");
+      expect(binaries).toContain("ansible-custom");
+      expect(binaries).toContain("tofu");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("appends a trailing comma only for a single-host ansible inventory", async () => {

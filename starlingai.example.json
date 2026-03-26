@@ -8,6 +8,13 @@
       "timeoutMs": 30000,
       "maxRetries": 3
     }
+    //,
+    // "openaiCompatible": {
+    //   "coder_vllm": {
+    //     "baseUrl": "http://host.docker.internal:8000/v1",
+    //     "apiKey": "local-vllm"
+    //   }
+    // }
     // "anthropic": {
     //   "apiKey": "$ANTHROPIC_API_KEY"
     // }
@@ -29,6 +36,87 @@
       "toolCallsPerTurn": 20,
       "concurrentSessions": 10
     }
+  },
+
+  "retrieval": {
+    "search": {
+      "backend": "auto"
+    }
+    //,
+    // "search": {
+    //   "backend": "searxng",
+    //   "searxngBaseUrl": "http://search.k2o",
+    //   "timeoutMs": 12000
+    // },
+    // "reranker": {
+    //   "enabled": true,
+    //   "baseUrl": "http://host.docker.internal:1234/v1",
+    //   "apiKey": "lm-studio",
+    //   "model": "Qwen/Qwen3-Reranker-4B"
+    // }
+  },
+
+  "infrastructure": {
+    "automation": {
+      "profiles": {
+        "local_cli": {
+          "type": "local-cli",
+          "terraformBinary": "terraform",
+          "ansibleBinary": "ansible",
+          "ansiblePlaybookBinary": "ansible-playbook"
+        }
+        //,
+        // "ops_webhook": {
+        //   "type": "webhook",
+        //   "url": "https://ops.example.com/automation",
+        //   "headers": {
+        //     "Authorization": "Bearer $INFRA_AUTOMATION_TOKEN"
+        //   },
+        //   "timeoutMs": 45000
+        // }
+      }
+      //,
+      // "defaultProfile": "ops_webhook"
+    },
+    "virtualization": {
+      "profiles": {
+        "lab_proxmox": {
+          "type": "proxmox",
+          "apiUrl": "https://proxmox.example.com:8006",
+          "node": "pve-01",
+          "tokenId": "root@pam!starlingai",
+          "tokenSecret": "$PROXMOX_TOKEN_SECRET"
+        }
+        //,
+        // "lab_webhook": {
+        //   "type": "webhook",
+        //   "url": "https://n8n.example.com/webhook/vm-manage",
+        //   "headers": {
+        //     "Authorization": "Bearer $INFRA_WEBHOOK_TOKEN"
+        //   }
+        // }
+      }
+    }
+  },
+
+  "pentest": {
+    "serviceUrl": "http://kali-pentest:5010"
+    //,
+    // "defaultProfile": "ops_webhook",
+    // "profiles": {
+    //   "ops_webhook": {
+    //     "type": "webhook",
+    //     "url": "https://ops.example.com/pentest",
+    //     "headers": {
+    //       "Authorization": "Bearer $PENTEST_WEBHOOK_TOKEN"
+    //     },
+    //     "timeoutMs": 45000
+    //   },
+    //   "local_kali": {
+    //     "type": "kali-service",
+    //     "serviceUrl": "http://kali-pentest:5010"
+    //   }
+    // }
   },
 
   "subAgents": {
@@ -99,8 +187,9 @@
         "maxTokens": 8192
       },
       "maxIterations": 10,
-      "systemPrompt": "You are an infrastructure automation specialist. Prefer proxmox_vm for standard Proxmox VM lifecycle actions, terraform_exec for declarative infrastructure changes and saved-plan workflows, service_check to wait for HTTP, TCP, SSH, or DNS readiness between provisioning steps, ansible_task or ansible_playbook for host configuration depending on scope including Vault-backed playbooks, ssh_upload for transferring local deployment artifacts, ssh_download for collecting remote logs or generated files, and SSH for targeted remote execution and verification. When using terraform_exec with action=output, rely on the structured output values for downstream steps instead of reparsing the JSON manually. Prefer complete end-to-end deployments over partial setup.",
+      "systemPrompt": "You are an infrastructure automation specialist. Prefer vm_manage for generalized VM lifecycle actions across configured backends, proxmox_vm when you explicitly need the Proxmox-specialized path, terraform_exec for declarative infrastructure changes and saved-plan workflows, service_check to wait for HTTP, TCP, SSH, or DNS readiness between provisioning steps, ansible_task or ansible_playbook for host configuration depending on scope including Vault-backed playbooks, ssh_upload for transferring local deployment artifacts, ssh_download for collecting remote logs or generated files, and SSH for targeted remote execution and verification. When using terraform_exec with action=output, rely on the structured output values for downstream steps instead of reparsing the JSON manually. Prefer complete end-to-end deployments over partial setup.",
       "tools": [
+        "vm_manage",
         "proxmox_vm",
         "terraform_exec",
         "service_check",

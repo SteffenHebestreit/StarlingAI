@@ -274,6 +274,51 @@ describe("runtime reload reconciliation", () => {
     }
   });
 
+  it("resolves named OpenAI-compatible providers from the model prefix", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-named-provider-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      providers: {
+        lmstudio: { baseUrl: "http://localhost:1234/v1", apiKey: "global-key" },
+        openaiCompatible: {
+          coder_vllm: { baseUrl: "http://localhost:8000/v1", apiKey: "vllm-key" },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "coder_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+            embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-8b",
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const providers = await import("../providers/index.js");
+
+    try {
+      providers.getChatProvider();
+      expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:8000/v1");
+      expect(providerInstances.at(-1)?.apiKey).toBe("vllm-key");
+      expect(providerInstances.at(-1)?.modelConfig).toMatchObject({
+        primary: "coder_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      });
+
+      providers.getEmbeddingProvider();
+      expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:8000/v1");
+      expect(providerInstances.at(-1)?.apiKey).toBe("vllm-key");
+      expect(providerInstances.at(-1)?.modelConfig).toMatchObject({
+        embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-8b",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("tracks external model endpoint health in runtime status", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-model-endpoints-"));
     const configPath = join(tempDir, "starlingai.json");

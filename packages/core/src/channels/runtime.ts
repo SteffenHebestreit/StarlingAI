@@ -8,6 +8,7 @@ import { startSlackChannel } from "./slack.js";
 import { startTelegramBot } from "./telegram.js";
 import { startWhatsappChannel } from "./whatsapp.js";
 import { startEmailChannel } from "./email.js";
+import { startSignalChannel } from "./signal.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "../runtime/status.js";
 
 const log = childLogger("channels:runtime");
@@ -38,7 +39,7 @@ export function stopManagedChannels(): Promise<void> {
 }
 
 export function isChannelRuntimeSupported(type: ChannelType): boolean {
-  return type === "telegram" || type === "slack" || type === "discord" || type === "whatsapp" || type === "email";
+  return type === "telegram" || type === "slack" || type === "discord" || type === "whatsapp" || type === "email" || type === "signal";
 }
 
 export function getChannelRuntimeSupport(type: ChannelType): { supported: boolean; reason?: string } {
@@ -166,7 +167,25 @@ async function syncChannelNow(type: ChannelType): Promise<void> {
     }
 
     case "signal": {
-      setChannelError(type, UNSUPPORTED_CHANNEL_REASON);
+      if (!resolveToken(effective.account)) {
+        setChannelError(type, "Signal channel enabled but account missing");
+        return;
+      }
+
+      let stopFn: (() => Promise<void>) | null;
+      try {
+        stopFn = await startSignalChannel();
+      } catch (err) {
+        setChannelError(type, `Signal startup failed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+
+      if (!stopFn) {
+        setChannelError(type, "Signal channel failed to start");
+        return;
+      }
+
+      setChannelRunning(type, rememberManagedStop(type, stopFn));
       return;
     }
   }

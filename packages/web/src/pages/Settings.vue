@@ -1423,10 +1423,12 @@ const multimodalForm = reactive({
   visionBaseUrl: "",
   visionApiKey: "",
   sttBaseUrl: "",
+  sttApi: "auto" as "auto" | "openai-compatible" | "transcribe-only",
   sttApiKey: "",
   sttTimeoutMs: 60_000,
   sttModel: "Qwen/Qwen3-ASR-1.7B",
   ttsBaseUrl: "",
+  ttsApi: "qwen-compatible" as "qwen-compatible" | "openai-compatible",
   ttsApiKey: "",
   ttsTimeoutMs: 60_000,
   ttsModel: "",
@@ -1675,10 +1677,12 @@ function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.visionBaseUrl = config.files.visionBaseUrl ?? "";
   multimodalForm.visionApiKey = config.files.visionApiKey ?? "";
   multimodalForm.sttBaseUrl = config.stt.baseUrl;
+  multimodalForm.sttApi = config.stt.api;
   multimodalForm.sttApiKey = config.stt.apiKey ?? "";
   multimodalForm.sttTimeoutMs = config.stt.timeoutMs;
   multimodalForm.sttModel = config.stt.model;
   multimodalForm.ttsBaseUrl = config.tts.baseUrl;
+  multimodalForm.ttsApi = config.tts.api;
   multimodalForm.ttsApiKey = config.tts.apiKey ?? "";
   multimodalForm.ttsTimeoutMs = config.tts.timeoutMs;
   multimodalForm.ttsModel = config.tts.model ?? "";
@@ -1788,12 +1792,14 @@ async function submitMultimodalForm() {
     },
     stt: {
       baseUrl: multimodalForm.sttBaseUrl.trim(),
+      api: multimodalForm.sttApi,
       apiKey: multimodalForm.sttApiKey.trim() || undefined,
       timeoutMs: multimodalForm.sttTimeoutMs,
       model: multimodalForm.sttModel.trim(),
     },
     tts: {
       baseUrl: multimodalForm.ttsBaseUrl.trim(),
+      api: multimodalForm.ttsApi,
       apiKey: multimodalForm.ttsApiKey.trim() || undefined,
       timeoutMs: multimodalForm.ttsTimeoutMs,
       model: multimodalForm.ttsModel.trim() || undefined,

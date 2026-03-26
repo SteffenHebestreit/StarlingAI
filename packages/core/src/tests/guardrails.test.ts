@@ -120,6 +120,8 @@ describe("tool-tiers", () => {
     expect(getToolTier("ansible_playbook").requiresPerCallApproval).toBe(true);
     expect(getToolTier("ansible_task").tier).toBe(ToolTier.THREE_PRIVILEGED);
     expect(getToolTier("ansible_task").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("vm_manage").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("vm_manage").requiresPerCallApproval).toBe(true);
     expect(getToolTier("proxmox_vm").tier).toBe(ToolTier.THREE_PRIVILEGED);
     expect(getToolTier("proxmox_vm").requiresPerCallApproval).toBe(true);
     expect(getToolTier("terraform_exec").tier).toBe(ToolTier.THREE_PRIVILEGED);

@@ -2,8 +2,8 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { getLMStudioProvider, getLMStudioProviderWithOverride } from "../providers/index.js";
-import type { LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
+import { getChatProvider, getChatProviderWithOverride } from "../providers/index.js";
+import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
@@ -229,8 +229,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const _recentOutputsByTool = new Map<string, string[]>();
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   const provider = opts.enableThinking !== undefined
-    ? getLMStudioProviderWithOverride({ enableThinking: opts.enableThinking })
-    : getLMStudioProvider();
+    ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
+    : getChatProvider();
   const maxToolIterations = opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
@@ -642,7 +642,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
  */
 async function forceSynthesis(
   session: AgentSession,
-  provider: import("../providers/lmstudio.js").LMStudioProvider,
+  provider: ChatProvider,
   signal: AbortSignal,
   instruction: string,
 ): Promise<string | null> {

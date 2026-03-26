@@ -256,6 +256,42 @@ describe("multimodal and browser direct tools", () => {
     expect(callCount).toBe(2);
   });
 
+  it("can target transcribe-only STT backends without probing OpenAI routes", async () => {
+    writeFileSync(join(tempDir, "transcribe-only.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        stt: { ...realConfig.multimodal.stt, api: "transcribe-only" },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify({ text: `only:${url}` }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("transcribe_audio");
+
+      const result = await tool!.execute({ path: "transcribe-only.wav" }, {
+        sessionId: "session-stt-transcribe-only",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://stt.local/transcribe");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("returns failure when the STT service responds with a non-200 error", async () => {
     writeFileSync(join(tempDir, "bad.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
 
@@ -452,6 +488,53 @@ describe("multimodal and browser direct tools", () => {
     expect(url).toBe("http://tts.local/tts");
   });
 
+  it("can use OpenAI-compatible TTS backends while keeping Qwen as a special case", async () => {
+    const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        tts: {
+          ...realConfig.multimodal.tts,
+          api: "openai-compatible",
+          model: "openai-compatible/tts-1",
+          defaultSpeaker: "alloy",
+        },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://tts.local/v1/audio/speech");
+      const body = JSON.parse(String(init?.body));
+      expect(body.model).toBe("openai-compatible/tts-1");
+      expect(body.input).toBe("Hello open audio");
+      expect(body.voice).toBe("alloy");
+      return new Response(fakeWav, {
+        status: 200,
+        headers: { "Content-Type": "audio/wav" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("synthesize_speech");
+
+      const result = await tool!.execute({ text: "Hello open audio", outputPath: "openai.wav" }, {
+        sessionId: "session-tts-openai",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("openai.wav");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("returns failure when the TTS service responds with a non-200 error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       error: "Voice not found",
@@ -599,6 +682,62 @@ describe("multimodal and browser direct tools", () => {
       const init = visionCall?.[1] as RequestInit;
       expect(url).toBe("http://vision-dedicated.local/v1/chat/completions");
       expect(init.headers).toMatchObject({ Authorization: "Bearer vision-key" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("resolves named provider endpoints for vision models", async () => {
+    const pngBytes = Buffer.from("89504e470d0a1a0a", "hex");
+    writeFileSync(join(tempDir, "named-provider-vision.png"), pngBytes);
+
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      providers: {
+        ...realConfig.providers,
+        openaiCompatible: {
+          ...(realConfig.providers.openaiCompatible ?? {}),
+          vision_vllm: {
+            baseUrl: "http://vision-vllm.local/v1",
+            apiKey: "vision-vllm-key",
+            timeoutMs: 5_000,
+            maxRetries: 3,
+          },
+        },
+      },
+      multimodal: {
+        ...realConfig.multimodal,
+        files: {
+          ...realConfig.multimodal.files,
+          visionModel: "vision_vllm/Qwen/Qwen2.5-VL-7B-Instruct",
+          visionBaseUrl: undefined,
+          visionApiKey: undefined,
+        },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "Named provider vision." } }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("analyze_image");
+
+      await tool!.execute({ path: "named-provider-vision.png" }, {
+        sessionId: "session-named-provider-vision",
+        workspacePath: tempDir,
+      });
+
+      const visionCall = fetchMock.mock.calls[0] as unknown[] | undefined;
+      expect(String(visionCall?.[0])).toBe("http://vision-vllm.local/v1/chat/completions");
+      expect((visionCall?.[1] as RequestInit).headers).toMatchObject({ Authorization: "Bearer vision-vllm-key" });
     } finally {
       spy.mockRestore();
     }

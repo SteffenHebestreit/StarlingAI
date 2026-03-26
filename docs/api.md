@@ -105,7 +105,9 @@ Example response shape:
 | `POST` | `/api/scenes/:name` | create or update a dashboard scene |
 | `DELETE` | `/api/scenes/:name` | delete a dashboard scene |
 | `POST` | `/api/scenes/:name/run` | trigger an async scene job |
+| `GET` | `/api/scenes/jobs` | list recent scene jobs, optionally filtered by status |
 | `GET` | `/api/scenes/jobs/:jobId` | poll a scene job |
+| `POST` | `/api/scenes/jobs/:jobId/cancel` | cancel a queued or running scene job |
 
 `POST /api/scenes/:name/run` returns immediately:
 
@@ -115,7 +117,7 @@ Example response shape:
   "sceneName": "apply_jobs",
   "jobId": "...",
   "sessionId": "...",
-  "status": "running"
+  "status": "queued"
 }
 ```
 
@@ -126,18 +128,38 @@ Polling `GET /api/scenes/jobs/:jobId` returns the current job record:
   "id": "...",
   "sceneName": "apply_jobs",
   "sessionId": "...",
+  "createdAt": "2026-03-15T11:59:58.000Z",
   "status": "running",
   "startedAt": "2026-03-15T12:00:00.000Z",
   "completedAt": "2026-03-15T12:04:12.000Z",
   "response": "...",
   "toolCallsExecuted": 6,
   "blocked": false,
+  "progress": {
+    "stage": "tool",
+    "message": "Completed tool web_search",
+    "percent": 48,
+    "toolCallsRequested": 4,
+    "toolCallsCompleted": 3,
+    "approvalsRequested": 0,
+    "subAgentsStarted": 1,
+    "swarmTasksTotal": 2,
+    "swarmTasksCompleted": 1,
+    "lastEventAt": "2026-03-15T12:01:40.000Z",
+    "lastEventType": "tool_call_completed"
+  },
   "performance": {},
   "error": "..."
 }
 ```
 
-If a scene exceeds `gateway.turnTimeoutMs`, the job fails and its scene session is ended.
+`GET /api/scenes/jobs` returns recent jobs ordered by most recently updated first. Use `?limit=50` to cap the result set and `?status=running` to filter by a specific lifecycle state.
+
+`POST /api/scenes/jobs/:jobId/cancel` returns the updated job record. Queued jobs become `cancelled` immediately. Running jobs enter `cancelling` until the worker aborts the turn and marks the job `cancelled`.
+
+For split deployments, run a standalone worker with `pnpm --filter @starlingai/core worker:scene` and set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway process.
+
+If a scene exceeds `gateway.turnTimeoutMs`, the job fails and its scene session is archived.
 
 ### Approvals
 
@@ -379,7 +401,10 @@ Supported RPC methods:
 | `gateway.status` | none |
 | `session.create` | `{ channel, userId?, workspacePath? }` |
 | `session.end` | `{ sessionId? }` |
+| `session.get` | `{ sessionId?, limit?, beforeMessageId? }` |
 | `session.list` | none |
+| `session.archive` | `{ sessionId? }` |
+| `session.delete` | `{ sessionId? }` |
 | `session.reset` | `{ sessionId? }` |
 | `scenes.list` | none |
 | `approval.respond` | `{ approvalId, approved }` |
@@ -387,6 +412,38 @@ Supported RPC methods:
 | `audit.subscribe` | none |
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`.
+
+`session.list` returns session summaries for both active and archived sessions. `session.get` supports optional transcript paging with `limit` and `beforeMessageId`. When `limit` is omitted, the full transcript is returned. With `limit`, the response returns the newest page before the optional cursor.
+
+`session.get` returns:
+
+```json
+{
+  "session": {
+    "id": "...",
+    "channel": "webchat",
+    "createdAt": "2026-03-15T11:00:00.000Z",
+    "updatedAt": "2026-03-15T11:10:00.000Z",
+    "archivedAt": null,
+    "turns": 4,
+    "messageCount": 8,
+    "lastMessageAt": "2026-03-15T11:09:58.000Z",
+    "preview": "Latest assistant or user text snippet"
+  },
+  "transcript": [
+    {
+      "id": "session:0",
+      "role": "user",
+      "content": "hello",
+      "timestamp": "2026-03-15T11:00:01.000Z"
+    }
+  ],
+  "totalMessages": 8,
+  "nextBeforeMessageId": "session:0"
+}
+```
+
+`session.end` remains accepted for backward compatibility and now archives the session instead of deleting it. Use `session.delete` to permanently remove stored session state.
 
 ### Streaming Events
 
@@ -412,7 +469,7 @@ Final `status` payloads can include:
 - `performance`
 - `error`
 
-When a turn times out, the gateway now emits an error message that explicitly says the session was ended.
+When a turn times out, the gateway now emits an error message that explicitly says the session was archived.
 
 ## AG-UI Streaming
 

@@ -13,15 +13,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
-import { getAllSessions, createSession, endSession } from "../agent/session.js";
+import { getAllSessions } from "../agent/session.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import { getGuardrails, updateGuardrails, resetGuardrails } from "../guardrails/store.js";
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent } from "../agent/sub-agent.js";
-import { runTurn } from "../agent/runtime.js";
-import { createJob, completeJob, failJob, getJob } from "../agent/jobs.js";
-import { requestApprovalViaChannel } from "../approval/index.js";
+import { createJob, cancelJob, getJob, listJobs } from "../agent/jobs.js";
 import { resolveApproval, getPendingApproval } from "../approval/store.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
@@ -32,6 +30,7 @@ import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js"
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
+import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
 import { getConcurrencySnapshot } from "../swarm/concurrency.js";
@@ -361,6 +360,32 @@ export function createGateway() {
   }
 
   async function checkSttHealth(baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+    return checkSttHealthByApi("auto", baseUrl, apiKey, timeoutMs, model);
+  }
+
+  async function checkSttHealthByApi(api: "auto" | "openai-compatible" | "transcribe-only", baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+    if (api === "transcribe-only") {
+      const healthProbe = await checkEndpointHealth({
+        baseUrl,
+        apiKey,
+        timeoutMs,
+        path: "/health",
+        successStatuses: [200],
+      });
+
+      if (healthProbe.ok) return healthProbe;
+
+      return checkEndpointHealth({
+        baseUrl,
+        apiKey,
+        timeoutMs,
+        path: "/transcribe",
+        method: "POST",
+        body: new FormData(),
+        successStatuses: [200, 400, 401, 422],
+      });
+    }
+
     const openAiProbe = await checkEndpointHealth({
       baseUrl,
       apiKey,
@@ -375,7 +400,7 @@ export function createGateway() {
       successStatuses: [200, 400, 401, 422],
     });
 
-    if (openAiProbe.ok || (openAiProbe.status !== 404 && openAiProbe.status !== 405)) {
+    if (api === "openai-compatible" || openAiProbe.ok || (openAiProbe.status !== 404 && openAiProbe.status !== 405)) {
       return openAiProbe;
     }
 
@@ -391,6 +416,7 @@ export function createGateway() {
   }
 
   async function sendSttRequest(input: {
+    api: "auto" | "openai-compatible" | "transcribe-only";
     baseUrl: string;
     apiKey?: string;
     timeoutMs: number;
@@ -400,6 +426,23 @@ export function createGateway() {
     language?: string;
     prompt?: string;
   }): Promise<Response> {
+    if (input.api === "transcribe-only") {
+      const fallbackForm = new FormData();
+      fallbackForm.append("audio", input.audioBlob, input.filename);
+      if (input.language) fallbackForm.append("language", input.language);
+      if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/transcribe"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(input.apiKey),
+          body: fallbackForm,
+        },
+        input.timeoutMs,
+      );
+    }
+
     const openAiForm = new FormData();
     openAiForm.append("file", input.audioBlob, input.filename);
     openAiForm.append("model", input.model);
@@ -417,6 +460,10 @@ export function createGateway() {
     );
 
     if (openAiResponse.status !== 404 && openAiResponse.status !== 405) {
+      return openAiResponse;
+    }
+
+    if (input.api === "openai-compatible") {
       return openAiResponse;
     }
 
@@ -494,11 +541,42 @@ export function createGateway() {
     return map[normalized.toLowerCase()] ?? normalized;
   }
 
+  function normalizeTtsLanguage(language: string, api: "qwen-compatible" | "openai-compatible"): string {
+    return api === "qwen-compatible" ? normalizeQwenLanguage(language) : language.trim();
+  }
+
   async function fetchTtsVoiceCatalog(config: {
+    api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
     apiKey?: string;
     timeoutMs: number;
   }): Promise<Record<string, unknown>> {
+    if (config.api === "openai-compatible") {
+      const [voicesResponse, modelsResponse] = await Promise.all([
+        fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+        fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+      ]);
+
+      if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
+
+      const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
+      let voices: unknown[] = [];
+
+      if (voicesResponse.ok) {
+        const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
+        voices = Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [];
+      } else if (voicesResponse.status !== 404 && voicesResponse.status !== 405) {
+        throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
+      }
+
+      return {
+        voices,
+        speakers: [],
+        models: modelsBody["models"] ?? {},
+        currentModel: modelsBody["current_model"] ?? undefined,
+      };
+    }
+
     const [voicesResponse, speakersResponse, modelsResponse] = await Promise.all([
       fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
       fetchWithTimeout(upstreamUrl(config.baseUrl, "/speakers"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
@@ -521,6 +599,7 @@ export function createGateway() {
   }
 
   async function sendTtsRequest(input: {
+    api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
     apiKey?: string;
     timeoutMs: number;
@@ -534,9 +613,32 @@ export function createGateway() {
     saveVoiceAs?: string;
     quality?: string;
     gender?: string;
+    speed?: number;
   }): Promise<Response> {
-    const language = normalizeQwenLanguage(input.language);
+    const language = normalizeTtsLanguage(input.language, input.api);
     const model = input.model?.trim();
+
+    if (input.api === "openai-compatible") {
+      if (input.audioExample || input.saveVoiceAs || input.referenceText) {
+        throw new Error("Voice cloning is only supported for qwen-compatible TTS backends.");
+      }
+
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/v1/audio/speech"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            model: model || "tts-1",
+            input: input.text,
+            voice: input.savedVoiceId ?? input.speaker ?? "alloy",
+            response_format: "wav",
+            ...(input.speed !== undefined ? { speed: input.speed } : {}),
+          }),
+        },
+        input.timeoutMs,
+      );
+    }
 
     if (model) {
       const loadModelResponse = await fetchWithTimeout(
@@ -751,8 +853,22 @@ export function createGateway() {
     const visionModel = multimodalConfig.files.visionModel;
     const vision = visionModel
       ? checkEndpointHealth({
-          baseUrl: multimodalConfig.files.visionBaseUrl ?? (getConfig().providers.lmstudio?.baseUrl ?? "http://host.docker.internal:1234/v1"),
-          apiKey: multimodalConfig.files.visionApiKey ?? getConfig().providers.lmstudio?.apiKey,
+          baseUrl: resolveProviderEndpointForModel(
+            visionModel,
+            {
+              baseUrl: multimodalConfig.files.visionBaseUrl,
+              apiKey: multimodalConfig.files.visionApiKey,
+            },
+            getConfig(),
+          ).baseUrl,
+          apiKey: resolveProviderEndpointForModel(
+            visionModel,
+            {
+              baseUrl: multimodalConfig.files.visionBaseUrl,
+              apiKey: multimodalConfig.files.visionApiKey,
+            },
+            getConfig(),
+          ).apiKey,
           timeoutMs: multimodalConfig.files.timeoutMs,
           path: "/models",
         })
@@ -765,13 +881,20 @@ export function createGateway() {
         timeoutMs: multimodalConfig.files.timeoutMs,
         path: "/api/health",
       }),
-      checkSttHealth(multimodalConfig.stt.baseUrl, multimodalConfig.stt.apiKey, multimodalConfig.stt.timeoutMs, multimodalConfig.stt.model),
-      checkEndpointHealth({
-        baseUrl: multimodalConfig.tts.baseUrl,
-        apiKey: multimodalConfig.tts.apiKey,
-        timeoutMs: multimodalConfig.tts.timeoutMs,
-        path: "/health",
-      }),
+      checkSttHealthByApi(multimodalConfig.stt.api, multimodalConfig.stt.baseUrl, multimodalConfig.stt.apiKey, multimodalConfig.stt.timeoutMs, multimodalConfig.stt.model),
+      multimodalConfig.tts.api === "openai-compatible"
+        ? checkEndpointHealth({
+            baseUrl: multimodalConfig.tts.baseUrl,
+            apiKey: multimodalConfig.tts.apiKey,
+            timeoutMs: multimodalConfig.tts.timeoutMs,
+            path: "/models",
+          })
+        : checkEndpointHealth({
+            baseUrl: multimodalConfig.tts.baseUrl,
+            apiKey: multimodalConfig.tts.apiKey,
+            timeoutMs: multimodalConfig.tts.timeoutMs,
+            path: "/health",
+          }),
       imageGenHealthPromise,
       vision,
     ]);
@@ -971,6 +1094,7 @@ export function createGateway() {
 
     try {
       const upstream = await sendSttRequest({
+        api: multimodalConfig.stt.api,
         baseUrl: multimodalConfig.stt.baseUrl,
         apiKey: multimodalConfig.stt.apiKey,
         timeoutMs: multimodalConfig.stt.timeoutMs,
@@ -1035,8 +1159,12 @@ export function createGateway() {
 
     const languageValue = formData.get("language");
     const language = typeof languageValue === "string" && languageValue.trim()
-      ? normalizeQwenLanguage(languageValue.trim())
-      : normalizeQwenLanguage(multimodalConfig.tts.defaultLanguage);
+      ? normalizeTtsLanguage(languageValue.trim(), multimodalConfig.tts.api)
+      : normalizeTtsLanguage(multimodalConfig.tts.defaultLanguage, multimodalConfig.tts.api);
+
+    if (multimodalConfig.tts.api !== "qwen-compatible") {
+      return c.json({ error: "Voice sample saving is only supported for qwen-compatible TTS backends." }, 400);
+    }
 
     try {
       if (multimodalConfig.tts.model?.trim()) {
@@ -1105,6 +1233,7 @@ export function createGateway() {
         ? body["audioExamplePath"].trim()
         : multimodalConfig.tts.voiceSamplePath;
       const upstream = await sendTtsRequest({
+        api: multimodalConfig.tts.api,
         baseUrl: multimodalConfig.tts.baseUrl,
         apiKey: multimodalConfig.tts.apiKey,
         timeoutMs: multimodalConfig.tts.timeoutMs,
@@ -1132,6 +1261,7 @@ export function createGateway() {
           : undefined,
         quality: typeof body["quality"] === "string" ? body["quality"] : multimodalConfig.tts.defaultQuality,
         gender: typeof body["gender"] === "string" ? body["gender"] : undefined,
+        speed: typeof body["speed"] === "number" ? body["speed"] : undefined,
       });
 
       if (!upstream.ok) {
@@ -1181,8 +1311,8 @@ export function createGateway() {
       : (multimodalConfig.tts.speakReplySummaryMaxSentences ?? 3);
 
     try {
-      const { getLMStudioProvider } = await import("../providers/index.js");
-      const provider = getLMStudioProvider();
+      const { getChatProvider } = await import("../providers/index.js");
+      const provider = getChatProvider();
       const llmResponse = await provider.complete(
         [
           {
@@ -1229,13 +1359,20 @@ export function createGateway() {
 
     const cfg = getConfig();
     const multimodalConfig = currentMultimodalConfig();
-    const providerConfig = cfg.providers?.lmstudio;
-    const visionBaseUrl = (multimodalConfig.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-    const visionApiKey = multimodalConfig.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
+    const visionModelRaw = multimodalConfig.files.visionModel ?? cfg.agents.defaults.model.primary;
+    const visionEndpoint = resolveProviderEndpointForModel(
+      visionModelRaw,
+      {
+        baseUrl: multimodalConfig.files.visionBaseUrl,
+        apiKey: multimodalConfig.files.visionApiKey,
+      },
+      cfg,
+    );
+    const visionBaseUrl = visionEndpoint.baseUrl.replace(/\/$/, "");
+    const visionApiKey = visionEndpoint.apiKey;
 
     // Use dedicated vision model if configured, otherwise fall back to default LLM
     // (qwen3.5-35b is vision-enabled so no separate model is needed)
-    const visionModelRaw = multimodalConfig.files.visionModel ?? cfg.agents.defaults.model.primary;
     const modelId = visionModelRaw.replace(/^[^/]+\//, "");
 
     try {
@@ -1697,73 +1834,19 @@ export function createGateway() {
         })
       : scene.task;
 
-    const session = createSession({ channel: "scene", userId: `scene:${sceneName}` });
-    const job = createJob(sceneName, session.id);
-    log.info({ sceneName, sessionId: session.id, jobId: job.id }, "Scene triggered (async)");
-
-    // Build an approvalCallback if this scene has humanInLoopSteps + an approvalChannel
-    const approvalCallback = (scene.humanInLoopSteps?.length && scene.approvalChannel)
-      ? (toolName: string, args: Record<string, unknown>) =>
-          requestApprovalViaChannel(scene.approvalChannel!, toolName, args, sceneName)
-      : undefined;
-
-    // AbortController + configurable timeout so scene jobs cannot hang forever
-    const sceneAbort = new AbortController();
-    let sceneTimedOut = false;
-    const sceneTimeoutHandle = setTimeout(() => {
-      if (sceneTimedOut) return;
-      sceneTimedOut = true;
-      sceneAbort.abort();
-      failJob(job.id, `Scene timed out after ${Math.round(turnTimeoutMs / 60000)} minutes`);
-      endSession(session.id);
-      log.warn({ sceneName, jobId: job.id }, "Scene run timed out — aborted");
-    }, turnTimeoutMs);
-
-    // Run in background — return jobId immediately
-    runTurn({
-      session,
-      userMessage: task,
+    const job = await createJob({
+      sceneName,
+      userId: `scene:${sceneName}`,
+      task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
-      approvalCallback,
-      signal: sceneAbort.signal,
-    }).then(output => {
-      if (sceneTimedOut) return;
-      clearTimeout(sceneTimeoutHandle);
-      completeJob(job.id, output);
-      logAudit("scene_job_completed", {
-        jobId: job.id,
-        sceneName,
-        status: output.blocked ? "failed" : "completed",
-        responseLength: output.response.length,
-        toolCallsExecuted: output.toolCallsExecuted,
-        blocked: output.blocked,
-        ...(output.performance ?? {}),
-      }, {
-        sessionId: session.id,
-        channel: "scene",
-        severity: output.blocked ? "warn" : "info",
-      });
-      endSession(session.id);
-    }).catch(err => {
-      if (sceneTimedOut) return;
-      clearTimeout(sceneTimeoutHandle);
-      const error = String(err);
-      failJob(job.id, error);
-      logAudit("scene_job_failed", {
-        jobId: job.id,
-        sceneName,
-        error,
-      }, {
-        sessionId: session.id,
-        channel: "scene",
-        severity: "error",
-      });
-      endSession(session.id);
-      log.error({ err, sceneName, jobId: job.id }, "Scene run failed");
+      approvalChannel: scene.approvalChannel,
+      params: mergedParams,
+      turnTimeoutMs,
     });
+    log.info({ sceneName, sessionId: job.sessionId, jobId: job.id }, "Scene job queued");
 
-    return c.json({ ok: true, sceneName, jobId: job.id, sessionId: session.id, status: "running" });
+    return c.json({ ok: true, sceneName, jobId: job.id, sessionId: job.sessionId, status: job.status });
   });
 
   // ── Approval callback endpoints ──────────────────────────────────────────
@@ -1818,15 +1901,41 @@ export function createGateway() {
     return c.json({ ok: true, approved });
   });
 
+  // GET /api/scenes/jobs — list recent async scene execution jobs
+  app.get("/api/scenes/jobs", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const limitParam = c.req.query("limit");
+    const statusParam = c.req.query("status");
+    const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+    const allowedStatuses = new Set(["queued", "running", "cancelling", "cancelled", "completed", "failed"]);
+    const status = statusParam && allowedStatuses.has(statusParam) ? statusParam as "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed" : undefined;
+
+    return c.json({
+      jobs: await listJobs({ limit, status }),
+    });
+  });
+
   // GET /api/scenes/jobs/:jobId — poll async scene execution status
   app.get("/api/scenes/jobs/:jobId", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const jobId = c.req.param("jobId");
-    const job = getJob(jobId);
+    const job = await getJob(jobId);
     if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
     return c.json(job);
+  });
+
+  app.post("/api/scenes/jobs/:jobId/cancel", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const jobId = c.req.param("jobId");
+    const job = await cancelJob(jobId);
+    if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
+    return c.json({ ok: true, job });
   });
 
   // ── Channel webhook endpoints (no auth — use their own verification) ────────
@@ -2183,7 +2292,9 @@ export function createGateway() {
         ];
       case "signal":
         return [
-          "Signal runtime support is not implemented yet; saved credentials will not start a live adapter.",
+          "Verify signal-cli is installed on the gateway host and that channels.signal.signalCliPath points to the correct binary.",
+          "Confirm channels.signal.account is already linked or registered in signal-cli and appears in signal-cli listAccounts output.",
+          "If Signal stops receiving messages, rerun signal-cli receive manually to confirm the local account session is still healthy.",
         ];
       default:
         return ["Review the channel config, runtime status, and recent dead-letter entries before retrying delivery."];

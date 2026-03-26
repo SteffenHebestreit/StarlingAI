@@ -9,7 +9,7 @@ import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, t
 import { runSubAgent } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
-import { getEmbeddingProvider, getLMStudioProvider } from "../providers/index.js";
+import { getChatProvider, getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
@@ -476,7 +476,7 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   const config = getConfig();
   let provider;
   try {
-    provider = getLMStudioProvider();
+    provider = getChatProvider();
   } catch {
     return null;
   }

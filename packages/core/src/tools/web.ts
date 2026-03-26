@@ -1,15 +1,23 @@
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
+import { getConfig } from "../config/loader.js";
+import type { Config } from "../config/schema.js";
 import { resolve as dnsResolve } from "node:dns/promises";
 
 const log = childLogger("tool:web");
 
-// StarlingAI relies on a configured SearXNG instance for web search.
-const SEARXNG_BASE = process.env["SEARXNG_BASE_URL"];
+type SearchBackend = "searxng" | "duckduckgo";
+
+interface ResolvedSearchBackendConfig {
+  requestedBackend: "auto" | SearchBackend;
+  backends: SearchBackend[];
+  searxngBaseUrl?: string;
+  timeoutMs: number;
+}
 
 registerTool({
   name: "web_search",
-  description: "Search the web using the configured SearXNG instance. Returns top results with titles, URLs, and snippets.",
+  description: "Search the web using the configured search backend. Prefers SearXNG when configured and can fall back to DuckDuckGo.",
   parameters: {
     type: "object",
     properties: {
@@ -21,52 +29,91 @@ registerTool({
   async execute(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "");
     const maxResults = Math.min(10, Math.max(1, Number(args["maxResults"] ?? 5)));
+    const searchConfig = resolveSearchBackendConfig();
 
     if (!query.trim()) {
       return { success: false, output: "", error: "Search query cannot be empty" };
     }
 
-    if (!SEARXNG_BASE) {
+    if (searchConfig.requestedBackend === "searxng" && !searchConfig.searxngBaseUrl) {
       return {
         success: false,
         output: "",
-        error: "web_search requires SEARXNG_BASE_URL to be configured. StarlingAI relies exclusively on SearXNG for web search.",
+        error: "web_search is configured for SearXNG, but no endpoint is set. Configure retrieval.search.searxngBaseUrl or SEARXNG_BASE_URL.",
       };
     }
 
-    try {
-      const searchOutcome = await searchSearxng(query, maxResults, SEARXNG_BASE);
-      const { results, rewrittenQuery, ranking } = searchOutcome;
-      const backend = "searxng";
-      const queryNote = rewrittenQuery !== query.trim()
-        ? `\nSearched as: "${rewrittenQuery}"`
-        : "";
+    const attemptedBackends: SearchBackend[] = [];
+    const backendErrors: string[] = [];
 
-      if (results.length === 0) {
+    for (const backend of searchConfig.backends) {
+      attemptedBackends.push(backend);
+
+      try {
+        const searchOutcome = backend === "searxng"
+          ? await searchSearxng(query, maxResults, searchConfig.searxngBaseUrl!, searchConfig.timeoutMs)
+          : await searchDuckDuckGo(query, maxResults, searchConfig.timeoutMs);
+
+        const { results, rewrittenQuery, ranking } = searchOutcome;
+        const queryNote = rewrittenQuery !== query.trim()
+          ? `\nSearched as: "${rewrittenQuery}"`
+          : "";
+
+        if (results.length === 0) {
+          return {
+            success: true,
+            output: `No results found for "${query}" from the ${backend} backend.${queryNote}\nTry rephrasing or use different keywords.`,
+            metadata: {
+              query,
+              rewrittenQuery,
+              backend,
+              attemptedBackends,
+              requestedBackend: searchConfig.requestedBackend,
+              ranking,
+            },
+          };
+        }
+
+        const formatted = results
+          .map(r => `**${r.title}**\n${r.url}\n${r.snippet}`)
+          .join("\n\n");
+
         return {
           success: true,
-          output: `No results found for "${query}" from the configured SearXNG backend.${queryNote}\nTry rephrasing or use different keywords.`,
-          metadata: { query, rewrittenQuery, backend, ranking },
+          output: `**Web Search Results for:** "${query}" (via ${backend})${queryNote}\n\n${formatted}`,
+          metadata: {
+            query,
+            rewrittenQuery,
+            resultCount: results.length,
+            backend,
+            attemptedBackends,
+            requestedBackend: searchConfig.requestedBackend,
+            ranking,
+          },
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        backendErrors.push(`${backend}: ${message}`);
+
+        if (searchConfig.requestedBackend === "auto" && attemptedBackends.length < searchConfig.backends.length) {
+          log.warn({ err, query, backend }, "web_search backend failed, trying fallback backend");
+          continue;
+        }
+
+        log.error({ err, query, backend }, "web_search failed");
+        return {
+          success: false,
+          output: "",
+          error: formatSearchError(searchConfig.requestedBackend, backendErrors),
         };
       }
-
-      const formatted = results
-        .map(r => `**${r.title}**\n${r.url}\n${r.snippet}`)
-        .join("\n\n");
-
-      return {
-        success: true,
-        output: `**Web Search Results for:** "${query}" (via ${backend})${queryNote}\n\n${formatted}`,
-        metadata: { query, rewrittenQuery, resultCount: results.length, backend, ranking },
-      };
-    } catch (err) {
-      log.error({ err, query }, "web_search failed");
-      return {
-        success: false,
-        output: "",
-        error: `Search failed: ${String(err)}. Check that SEARXNG_BASE_URL points to a reachable SearXNG instance.`,
-      };
     }
+
+    return {
+      success: false,
+      output: "",
+      error: formatSearchError(searchConfig.requestedBackend, backendErrors),
+    };
   },
 });
 
@@ -210,20 +257,45 @@ function stripHtml(html: string): string {
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
     .replace(/\s{3,}/g, "\n\n")
     .trim();
-  return text;
+  return decodeHtmlEntities(text);
 }
 
 interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+}
+
+export function resolveSearchBackendConfig(config: Config = getConfig()): ResolvedSearchBackendConfig {
+  const searchConfig = config.retrieval.search;
+  const searxngBaseUrl = searchConfig.searxngBaseUrl?.trim() || process.env["SEARXNG_BASE_URL"]?.trim();
+
+  if (searchConfig.backend === "searxng") {
+    return {
+      requestedBackend: "searxng",
+      backends: ["searxng"],
+      searxngBaseUrl,
+      timeoutMs: searchConfig.timeoutMs,
+    };
+  }
+
+  if (searchConfig.backend === "duckduckgo") {
+    return {
+      requestedBackend: "duckduckgo",
+      backends: ["duckduckgo"],
+      searxngBaseUrl,
+      timeoutMs: searchConfig.timeoutMs,
+    };
+  }
+
+  return {
+    requestedBackend: "auto",
+    backends: searxngBaseUrl ? ["searxng", "duckduckgo"] : ["duckduckgo"],
+    searxngBaseUrl,
+    timeoutMs: searchConfig.timeoutMs,
+  };
 }
 
 const SEARCH_STOP_WORDS = new Set([
@@ -404,14 +476,14 @@ export function expandSearchQuery(query: string): string {
 
 // ─── SearXNG (self-hosted, most reliable) ────────────────────────────────────
 
-async function searchSearxng(query: string, maxResults: number, baseUrl: string): Promise<{
+async function searchSearxng(query: string, maxResults: number, baseUrl: string, timeoutMs: number): Promise<{
   results: SearchResult[];
   rewrittenQuery: string;
   ranking: SearchRankingMetadata;
 }> {
   const rewrittenQuery = expandSearchQuery(query);
   const url = `${baseUrl.replace(/\/$/, "")}/search?q=${encodeURIComponent(rewrittenQuery)}&format=json&categories=general&language=auto`;
-  const res = await fetchWithTimeout(url, 12000, {
+  const res = await fetchWithTimeout(url, timeoutMs, {
     headers: {
       "Accept": "application/json",
       "User-Agent": "StarlingAI/0.1",
@@ -446,5 +518,111 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string)
       },
     },
   };
+}
+
+async function searchDuckDuckGo(query: string, maxResults: number, timeoutMs: number): Promise<{
+  results: SearchResult[];
+  rewrittenQuery: string;
+  ranking: SearchRankingMetadata;
+}> {
+  const rewrittenQuery = expandSearchQuery(query);
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(rewrittenQuery)}&kl=wt-wt`;
+  const res = await fetchWithTimeout(url, timeoutMs, {
+    headers: {
+      "Accept": "text/html,application/xhtml+xml",
+      "User-Agent": "StarlingAI/0.1",
+    },
+  });
+
+  if (!res.ok) throw new Error(`DuckDuckGo returned HTTP ${res.status}`);
+  const html = await res.text();
+  const rawResults = parseDuckDuckGoResults(html);
+  const rankedResults = rankSearchResults(rewrittenQuery, rawResults, maxResults);
+  const signals = extractQuerySignals(rewrittenQuery);
+
+  return {
+    results: rankedResults.map(({ score: _score, ...result }) => result),
+    rewrittenQuery,
+    ranking: {
+      topResults: rankedResults.slice(0, 3).map((result) => ({
+        title: result.title,
+        url: result.url,
+        score: Number(result.score.toFixed(3)),
+      })),
+      heuristics: {
+        phrases: signals.phrases,
+        keywordTerms: signals.keywordTerms,
+        acronymTerms: signals.acronymTerms,
+      },
+    },
+  };
+}
+
+function parseDuckDuckGoResults(html: string): SearchResult[] {
+  const anchorPattern = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const matches = [...html.matchAll(anchorPattern)];
+  const results: SearchResult[] = [];
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    if (!match) continue;
+
+    const nextIndex = matches[index + 1]?.index ?? html.length;
+    const segment = html.slice(match.index ?? 0, nextIndex);
+    const title = collapseWhitespace(stripHtml(match[2] ?? ""));
+    const url = collapseWhitespace(decodeDuckDuckGoResultUrl(match[1] ?? ""));
+    const snippetMatch = segment.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div)>/i);
+    const snippet = collapseWhitespace(stripHtml(snippetMatch?.[1] ?? ""));
+
+    if (!title || !url) continue;
+    if (results.some((result) => result.url === url)) continue;
+
+    results.push({ title, url, snippet });
+  }
+
+  return results;
+}
+
+function decodeDuckDuckGoResultUrl(rawUrl: string): string {
+  const normalized = decodeHtmlEntities(rawUrl).trim();
+
+  try {
+    const url = new URL(normalized.startsWith("//") ? `https:${normalized}` : normalized, "https://duckduckgo.com");
+    const target = url.searchParams.get("uddg");
+    return target ? target : url.toString();
+  } catch {
+    return normalized;
+  }
+}
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_match, value: string) => String.fromCodePoint(Number(value)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, value: string) => String.fromCodePoint(parseInt(value, 16)))
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function formatSearchError(requestedBackend: "auto" | SearchBackend, backendErrors: string[]): string {
+  if (backendErrors.length === 0) {
+    return requestedBackend === "searxng"
+      ? "Search failed: SearXNG is configured but unavailable. Check retrieval.search.searxngBaseUrl or SEARXNG_BASE_URL."
+      : "Search failed: no search backend is available.";
+  }
+
+  if (requestedBackend === "auto") {
+    return `Search failed across available backends: ${backendErrors.join("; ")}`;
+  }
+
+  return `Search failed: ${backendErrors.join("; ")}`;
 }
 

@@ -44,8 +44,8 @@ export interface ContainerTaskPayload {
   workspacePath: string;
   agentConfig: SubAgentConfig;
   resolvedModelConfig: ModelConfig;
-  lmsBaseUrl: string;
-  lmsApiKey: string;
+  providerBaseUrl: string;
+  providerApiKey: string;
 }
 
 export interface ContainerTaskResult {
@@ -99,8 +99,8 @@ export async function runSubAgentInContainer(
   opts: SubAgentRunOptions,
   agentCfg: SubAgentConfig,
   resolvedModelConfig: ModelConfig,
-  lmsBaseUrl: string,
-  lmsApiKey: string,
+  providerBaseUrl: string,
+  providerApiKey: string,
 ): Promise<ContainerRunResult> {
   const container = agentCfg.container!;
   const image = container.image ?? "starlingai/agent-worker:dev";
@@ -118,8 +118,8 @@ export async function runSubAgentInContainer(
     workspacePath: opts.workspacePath,
     agentConfig: agentCfg,
     resolvedModelConfig,
-    lmsBaseUrl,
-    lmsApiKey,
+    providerBaseUrl,
+    providerApiKey,
   };
 
   const dockerArgs = [

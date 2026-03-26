@@ -36,7 +36,7 @@ See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
 | `search_agents` | Score agents against a query using hybrid routing |
 | `read_file` | Read a file from the workspace |
 | `list_files` | List files in a workspace directory |
-| `web_search` | Search via the configured SearXNG backend |
+| `web_search` | Search via the configured web-search backend (SearXNG or DuckDuckGo fallback) |
 | `web_fetch` | Fetch a URL and return text content |
 | `workspace_search` | Full-text search across workspace files |
 | `memory_search` | Search the agent memory store |
@@ -77,6 +77,15 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 |------|-------------|---------|
 | `send_telegram` | Send a Telegram message via the bot | Per-call + audit |
 | `cron_create` | Register a new cron schedule | Per-call + audit |
+| `vm_manage` | Manage VMs through configured infrastructure backends | Per-call + audit |
+| `proxmox_vm` | Manage Proxmox VMs via the Proxmox VE API | Per-call + audit |
+| `terraform_exec` | Run Terraform provisioning and stateful changes | Per-call + audit |
+| `ansible_playbook` | Run an Ansible playbook for privileged infrastructure changes | Per-call + audit |
+| `ansible_task` | Run a single Ansible ad-hoc task against remote inventory | Per-call + audit |
+| `service_check` | Check remote infrastructure readiness from the host | Per-call + audit |
+| `ssh_exec` | Run a remote SSH command on a target host | Per-call + audit |
+| `ssh_upload` | Upload files or directories to a remote host | Per-call + audit |
+| `ssh_download` | Download files or directories from a remote host | Per-call + audit |
 | `mcp__<server>__<tool>` (unlisted) | Any MCP tool not explicitly listed in Tier 0 | Per-call + audit |
 
 **MCP tools default rule:** any MCP tool that is not explicitly classified in Tier 0 is automatically assigned Tier 3. This means new MCP servers get privileged-but-allowed behaviour by default — they require per-call approval and generate an audit entry, but they are not blocked outright.

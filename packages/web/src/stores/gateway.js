@@ -2,6 +2,22 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { useAuditStore } from "./audit";
+function extractToolAttachments(name, metadata) {
+    if (name !== "generate_image" || !metadata || typeof metadata !== "object") {
+        return [];
+    }
+    const value = metadata;
+    const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : "";
+    if (!dataUrl.startsWith("data:image/")) {
+        return [];
+    }
+    const filename = typeof value["filename"] === "string"
+        ? value["filename"]
+        : typeof value["outputPath"] === "string"
+            ? String(value["outputPath"]).split(/[\\/]/).pop() || "generated-image.png"
+            : "generated-image.png";
+    return [{ filename, dataUrl }];
+}
 export const useGatewayStore = defineStore("gateway", () => {
     const audit = useAuditStore();
     const token = useStorage("gc_token", "");
@@ -9,7 +25,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const swarmRunsBySession = useStorage("gc_swarm_runs", {});
     const connected = ref(false);
     const connecting = ref(false);
-    const currentSessionId = ref(null);
+    const currentSessionId = useStorage("gc_current_session_id", null);
     const sessions = ref([]);
     const scenes = ref([]);
     const messages = ref([]);
@@ -144,6 +160,46 @@ export const useGatewayStore = defineStore("gateway", () => {
         isError.value = true;
         setTimeout(() => { isError.value = false; }, 5000);
     }
+    function resetLocalSessionState() {
+        messages.value = [];
+        streamingText.value = "";
+        pendingRequestId.value = null;
+        pendingApproval.value = null;
+        pendingIntervention.value = null;
+        liveSwarmState.value = null;
+        isStreaming.value = false;
+        selectedSwarmRunId.value = null;
+    }
+    function hydrateTranscript(transcript) {
+        messages.value = transcript.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            timestamp: new Date(message.timestamp),
+            toolCalls: message.toolCalls,
+        }));
+    }
+    function applyCurrentSessionRunSelection(sessionId) {
+        const existingRuns = sessionId ? (swarmRunsBySession.value[sessionId] ?? []) : [];
+        selectedSwarmRunId.value = existingRuns[existingRuns.length - 1]?.id ?? null;
+    }
+    async function refreshSessions() {
+        const result = await rpc("session.list");
+        sessions.value = result;
+        return result;
+    }
+    async function loadSession(sessionId, allowArchived = false) {
+        const result = await rpc("session.get", { sessionId });
+        if (!allowArchived && result.session.archivedAt) {
+            throw new Error("Archived sessions cannot be resumed");
+        }
+        currentSessionId.value = result.session.archivedAt ? null : sessionId;
+        hydrateTranscript(result.transcript);
+        applyCurrentSessionRunSelection(currentSessionId.value ?? sessionId);
+    }
+    async function switchSession(sessionId) {
+        await loadSession(sessionId);
+    }
     function connect() {
         if (ws?.readyState === WebSocket.OPEN)
             return;
@@ -199,13 +255,22 @@ export const useGatewayStore = defineStore("gateway", () => {
         old?.close();
         connected.value = false;
         connecting.value = false;
-        currentSessionId.value = null;
     }
     function handleServerMessage(msg) {
         const type = msg["type"];
         if (type === "hello-ok") {
             const data = msg["data"];
             sessions.value = data["sessions"] ?? [];
+            if (currentSessionId.value && sessions.value.some((session) => session.id === currentSessionId.value && !session.archivedAt)) {
+                void loadSession(currentSessionId.value).catch(() => {
+                    currentSessionId.value = null;
+                    resetLocalSessionState();
+                });
+            }
+            else if (currentSessionId.value && !sessions.value.some((session) => session.id === currentSessionId.value)) {
+                currentSessionId.value = null;
+                resetLocalSessionState();
+            }
             return;
         }
         if (type === "rpc.response") {
@@ -284,6 +349,12 @@ export const useGatewayStore = defineStore("gateway", () => {
                     if (tc)
                         tc.result = String(data["result"] ?? "");
                 }
+                if (last) {
+                    const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
+                    if (attachments.length) {
+                        last.attachments = [...(last.attachments ?? []), ...attachments];
+                    }
+                }
             }
             return;
         }
@@ -298,13 +369,15 @@ export const useGatewayStore = defineStore("gateway", () => {
                 const isBlocked = status === "blocked";
                 const swarmState = normalizeSwarmState(data["swarmState"]) ?? liveSwarmState.value;
                 const rawPerf = data["performance"];
+                const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
                 const finalMsg = {
                     id: crypto.randomUUID(),
                     role: "assistant",
                     content: String(data["response"] ?? ""),
                     timestamp: new Date(),
                     guardrailEvents: data["guardrailEvents"],
-                    toolCalls: idx >= 0 ? messages.value[idx]?.toolCalls : undefined,
+                    toolCalls: streamingMessage?.toolCalls,
+                    attachments: streamingMessage?.attachments,
                     blocked: isBlocked,
                     swarmState: swarmState ?? undefined,
                     usage: data["usage"],
@@ -355,24 +428,12 @@ export const useGatewayStore = defineStore("gateway", () => {
         });
     }
     async function createSession() {
-        // End the previous session on the server before creating a new one
-        if (currentSessionId.value) {
-            try {
-                await rpc("session.end", { sessionId: currentSessionId.value });
-            }
-            catch { /* already gone */ }
-        }
         const result = await rpc("session.create", { channel: "webchat" });
         const sid = result["sessionId"];
         currentSessionId.value = sid;
-        messages.value = [];
-        streamingText.value = "";
-        pendingRequestId.value = null;
-        pendingApproval.value = null;
-        pendingIntervention.value = null;
-        liveSwarmState.value = null;
-        const existingRuns = swarmRunsBySession.value[sid] ?? [];
-        selectedSwarmRunId.value = existingRuns[existingRuns.length - 1]?.id ?? null;
+        resetLocalSessionState();
+        applyCurrentSessionRunSelection(sid);
+        await refreshSessions();
         return sid;
     }
     async function loadScenes() {
@@ -402,26 +463,31 @@ export const useGatewayStore = defineStore("gateway", () => {
         failPendingTurn("Turn cancelled by user.");
     }
     async function deleteSession(sessionId) {
-        // End on server — silently ignore if already ended or not found
         if (ws?.readyState === WebSocket.OPEN) {
             try {
-                await rpc("session.end", { sessionId });
+                await rpc("session.delete", { sessionId });
             }
-            catch { /* already ended */ }
+            catch { /* already deleted */ }
         }
-        // Clear local swarm history for this session
         const next = { ...swarmRunsBySession.value };
         delete next[sessionId];
         swarmRunsBySession.value = next;
-        // If this was the active chat session, reset it so the user starts fresh
         if (currentSessionId.value === sessionId) {
             currentSessionId.value = null;
-            messages.value = [];
-            streamingText.value = "";
-            pendingRequestId.value = null;
-            pendingApproval.value = null;
-            liveSwarmState.value = null;
-            selectedSwarmRunId.value = null;
+            resetLocalSessionState();
+        }
+        sessions.value = sessions.value.filter((session) => session.id !== sessionId);
+    }
+    async function archiveSession(sessionId) {
+        if (ws?.readyState === WebSocket.OPEN) {
+            await rpc("session.archive", { sessionId });
+        }
+        sessions.value = sessions.value.map((session) => session.id === sessionId
+            ? { ...session, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+            : session);
+        if (currentSessionId.value === sessionId) {
+            currentSessionId.value = null;
+            resetLocalSessionState();
         }
     }
     async function sendMessage(text, enableThinking, displayContent, attachments) {
@@ -557,6 +623,8 @@ export const useGatewayStore = defineStore("gateway", () => {
             return [];
         return swarmRunsBySession.value[currentSessionId.value] ?? [];
     });
+    const activeSessions = computed(() => sessions.value.filter((session) => !session.archivedAt));
+    const archivedSessions = computed(() => sessions.value.filter((session) => Boolean(session.archivedAt)));
     const swarmSessionHistory = computed(() => Object.entries(swarmRunsBySession.value)
         .map(([sessionId, runs]) => {
         const latestRun = runs[runs.length - 1];
@@ -598,6 +666,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         authFailed,
         currentSessionId,
         sessions,
+        activeSessions,
+        archivedSessions,
         scenes,
         messages,
         streamingText,
@@ -613,6 +683,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         connect,
         disconnect,
         rpc,
+        refreshSessions,
+        loadSession,
+        switchSession,
         createSession,
         loadScenes,
         sendMessage,
@@ -627,6 +700,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         respondApproval,
         dismissIntervention,
         cancelTurn,
+        archiveSession,
         deleteSession,
         getSwarmRuns,
         selectSwarmRun,

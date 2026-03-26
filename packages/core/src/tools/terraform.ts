@@ -6,7 +6,9 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import {
+  executeAutomationWebhook,
   normalizeExecutionTimeout,
+  resolveAutomationProfile,
   resolveSecretRefs,
   resolveWorkspaceRelativePath,
 } from "./infrastructure-shared.js";
@@ -28,6 +30,10 @@ registerTool({
       workingDir: {
         type: "string",
         description: "Workspace-relative directory containing Terraform files",
+      },
+      profile: {
+        type: "string",
+        description: "Optional infrastructure.automation profile name. Supports local-cli and webhook profiles.",
       },
       configFiles: {
         type: "object",
@@ -81,12 +87,26 @@ registerTool({
     required: ["action"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const automationProfile = resolveAutomationProfile(args["profile"]);
+    if (automationProfile.error) {
+      return { success: false, output: "", error: automationProfile.error };
+    }
+    if (automationProfile.profile?.type === "webhook" && automationProfile.profileName) {
+      return executeAutomationWebhook(
+        "terraform_exec",
+        automationProfile.profileName,
+        automationProfile.profile,
+        args,
+        DEFAULT_TIMEOUT_MS,
+      );
+    }
+
     const action = String(args["action"] ?? "").trim();
     if (!action) {
       return { success: false, output: "", error: "action is required" };
     }
 
-    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"], DEFAULT_TIMEOUT_MS);
+    const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"] ?? automationProfile.profile?.timeoutMs, DEFAULT_TIMEOUT_MS);
     const configFiles = normalizeConfigFiles(args["configFiles"]);
     const resolvedVariables = resolveObjectArg(args["variables"]);
     const resolvedBackendConfig = resolveObjectArg(args["backendConfig"]);
@@ -94,6 +114,9 @@ registerTool({
     const planFilePath = resolveOptionalPathArg(args["planFilePath"], ctx.workspacePath);
     let tempDir: string | undefined;
     const cleanupPaths: string[] = [];
+    const binary = automationProfile.profile?.type === "local-cli"
+      ? automationProfile.profile.terraformBinary
+      : "terraform";
 
     try {
       if ((action === "apply" || action === "show") && !planFilePath && args["planFilePath"] !== undefined) {
@@ -117,15 +140,15 @@ registerTool({
       }
 
       if (action !== "init" && action !== "fmt" && args["autoInit"] !== false) {
-        await runTerraform(workingDirectory, buildInitArgs(resolvedBackendConfig), timeoutMs);
+        await runTerraform(binary, workingDirectory, buildInitArgs(resolvedBackendConfig), timeoutMs);
       }
 
       if (typeof args["workspaceName"] === "string" && String(args["workspaceName"]).trim()) {
-        await ensureTerraformWorkspace(workingDirectory, String(args["workspaceName"]).trim(), timeoutMs);
+        await ensureTerraformWorkspace(binary, workingDirectory, String(args["workspaceName"]).trim(), timeoutMs);
       }
 
       const cliArgs = buildTerraformArgs(action, args, resolvedBackendConfig, planOutPath, planFilePath);
-      const result = await runTerraform(workingDirectory, cliArgs, timeoutMs);
+      const result = await runTerraform(binary, workingDirectory, cliArgs, timeoutMs);
       const parsedOutput = action === "output" ? parseTerraformOutput(result.trim()) : undefined;
       return {
         success: true,
@@ -147,7 +170,7 @@ registerTool({
       return {
         success: false,
         output: `${error.stdout || ""}\n${error.stderr || ""}\n${error.message || ""}`.trim(),
-        error: formatExecutionError(error),
+        error: formatExecutionError(error, binary),
       };
     } finally {
       for (const cleanupPath of cleanupPaths) {
@@ -270,17 +293,17 @@ function buildTerraformArgs(
   return cliArgs;
 }
 
-async function ensureTerraformWorkspace(workingDirectory: string, workspaceName: string, timeoutMs: number): Promise<void> {
+async function ensureTerraformWorkspace(binary: string, workingDirectory: string, workspaceName: string, timeoutMs: number): Promise<void> {
   try {
-    await runTerraform(workingDirectory, ["workspace", "select", workspaceName, "-no-color"], timeoutMs);
+    await runTerraform(binary, workingDirectory, ["workspace", "select", workspaceName, "-no-color"], timeoutMs);
   } catch {
-    await runTerraform(workingDirectory, ["workspace", "new", workspaceName, "-no-color"], timeoutMs);
+    await runTerraform(binary, workingDirectory, ["workspace", "new", workspaceName, "-no-color"], timeoutMs);
   }
 }
 
-async function runTerraform(workingDirectory: string, args: string[], timeoutMs: number): Promise<string> {
-  log.debug({ workingDirectory, args }, "Running terraform");
-  const { stdout, stderr } = await execFileAsync("terraform", args, {
+async function runTerraform(binary: string, workingDirectory: string, args: string[], timeoutMs: number): Promise<string> {
+  log.debug({ workingDirectory, args, binary }, "Running terraform");
+  const { stdout, stderr } = await execFileAsync(binary, args, {
     cwd: workingDirectory,
     timeout: timeoutMs,
   });
@@ -302,9 +325,9 @@ function resolveOptionalPathArg(value: unknown, workspacePath: string): string |
   return resolveWorkspaceRelativePath(value.trim(), workspacePath);
 }
 
-function formatExecutionError(error: { code?: string; killed?: boolean; signal?: string }): string {
+function formatExecutionError(error: { code?: string; killed?: boolean; signal?: string }, binary: string): string {
   if (error.code === "ENOENT") {
-    return "terraform is not installed or not on PATH";
+    return `${binary} is not installed or not on PATH`;
   }
   if (error.killed || error.signal === "SIGTERM") {
     return "Execution timed out. Check output for partial progress.";

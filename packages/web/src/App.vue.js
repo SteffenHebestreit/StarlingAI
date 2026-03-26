@@ -8,6 +8,7 @@ const $route = useRoute();
 const navLinks = [
     { to: "/", label: "Chat" },
     { to: "/audit", label: "Audit" },
+    { to: "/jobs", label: "Jobs" },
     { to: "/sessions", label: "Sessions" },
     { to: "/settings", label: "Settings" },
 ];
