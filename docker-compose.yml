@@ -6,6 +6,7 @@ services:
     build:
       context: .
       dockerfile: docker/gateway/Dockerfile
+      target: runtime
     image: starlingai/gateway:dev
     restart: unless-stopped
     ports:
@@ -14,7 +15,9 @@ services:
       - NODE_ENV=production
       - SAI_JWT_SECRET=${SAI_JWT_SECRET}
       - SAI_MASTER_KEY=${SAI_MASTER_KEY}
-      - SAI_LMSTUDIO_URL=http://host.docker.internal:1234/v1
+      - SAI_LMSTUDIO_URL=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
+      - SAI_MULTIMODAL_STT_URL=${SAI_MULTIMODAL_STT_URL:-http://host.docker.internal:5002}
+      - SAI_MULTIMODAL_TTS_URL=${SAI_MULTIMODAL_TTS_URL:-http://host.docker.internal:5004}
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
       - REDIS_URL=redis://redis:6379
       - SAI_AUDIT_LOG=/data/audit.jsonl
@@ -29,6 +32,7 @@ services:
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
+      - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
@@ -46,16 +50,40 @@ services:
         condition: service_healthy
       fastapi-mcp-template:
         condition: service_healthy
-      qwen3-asr-service:
-        condition: service_started   # model download can take 15+ min; gateway handles unavailability gracefully
-      qwen3-tts-service:
-        condition: service_started   # same — TTS is supplemental, not a hard gateway dependency
+      computer-remote:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8765/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  computer-remote:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+      target: computer-remote-runtime
+    image: starlingai/computer-remote:dev
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - SAI_COMPUTER_REMOTE_HOST=0.0.0.0
+      - SAI_COMPUTER_REMOTE_PORT=8890
+      - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:-}
+      - SAI_COMPUTER_REMOTE_LABEL=${SAI_COMPUTER_REMOTE_LABEL:-Remote access sidecar}
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8890/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Web dashboard ─────────────────────────────────────────────────────────
   web:
@@ -114,6 +142,8 @@ services:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     image: starlingai/qwen3-asr-service:dev
+    profiles:
+      - speech
     restart: unless-stopped
     environment:
       - QWEN3_ASR_MODEL=${QWEN3_ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
@@ -136,6 +166,8 @@ services:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     image: starlingai/qwen3-tts-service:dev
+    profiles:
+      - speech
     restart: unless-stopped
     environment:
       - QWEN3_ASR_SERVICE_URL=http://qwen3-asr-service:5002
@@ -242,6 +274,33 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── Computer Desktop (VNC) ──────────────────────────────────────────────
+  # Ephemeral XFCE desktop exposed over VNC for computer-use agents.
+  # Profile "computer-desktop" — start with: --computer-desktop flag or
+  #   docker compose --profile computer-desktop up
+  computer-desktop:
+    build:
+      context: .
+      dockerfile: docker/computer-desktop/Dockerfile
+    image: starlingai/computer-desktop:dev
+    profiles:
+      - computer-desktop
+    restart: unless-stopped
+    ports:
+      - "${VNC_HOST_PORT:-5901}:5901"
+    environment:
+      - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
+      - VNC_COLOR_DEPTH=${VNC_COLOR_DEPTH:-24}
+      - VNC_PASSWORD=${VNC_PASSWORD:-starling}
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "ss -tlnp | grep -q 5901"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   # ── Test runner — run all core unit tests ─────────────────────────────────
   # Usage: docker compose --profile test run --rm test-runner

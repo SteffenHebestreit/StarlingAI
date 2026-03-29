@@ -30,7 +30,7 @@ start.bat
 
 The `start.sh` / `start.bat` script handles everything: prerequisite checks, first-time image build, health monitoring, and dashboard token generation.
 
-## start.sh flags
+## start script flags
 
 | Flag | Effect |
 |---|---|
@@ -40,6 +40,7 @@ The `start.sh` / `start.bat` script handles everything: prerequisite checks, fir
 | `--fresh` | Wipe all volumes + rebuild + start (clean slate) |
 | `--pentest` | Also start the Kali Linux pentest service |
 | `--image` | Also start the image-generation service |
+| `--computer-desktop` | Also start the bundled VNC desktop for computer-use workflows |
 | `--down` | Stop all services |
 | `--down --volumes` | Stop all services and wipe all data volumes |
 
@@ -59,6 +60,14 @@ Optional services run under Docker Compose profiles and can be added or removed 
 ```
 
 Windows CMD: `extras.bat pentest on` etc.
+
+The bundled VNC desktop is started with the main launcher rather than `extras`:
+
+```bash
+./start.sh --computer-desktop
+```
+
+Windows CMD: `start.bat --computer-desktop`
 
 ### Pentest service
 
@@ -98,6 +107,104 @@ Copy `starlingai.example.json` to `starlingai.json` and update these sections fi
 - `workspacePath`: set the mounted workspace path the file and shell tools should see.
 - `mcp.servers`: keep only the MCP servers you actually want to auto-start.
 - `sites`, `scenes`, `channels`, `approvalChannels`, `integrations`, and `webhooks`: add only what you need.
+
+## Credential-Safe Logins
+
+Store reusable site credentials either in `sites` inside `starlingai.json` or through the dashboard under Settings → Site Credentials. The runtime keeps those secrets out of the model context: `get_site_credentials` reveals only login metadata, browser logins should use `site_fill_credentials`, and desktop logins should use `computer_type_credential`. If you add scene approval gates, gate the secure fill tool rather than `get_site_credentials`.
+
+## Remote Access
+
+For raw VNC, RDP, or SSH targets, the default stack now includes a dedicated `computer-remote` sidecar. The gateway talks to that service over HTTP, and the sidecar owns native tooling like FreeRDP and OpenSSH.
+
+Gateway-side configuration:
+
+```jsonc
+"computerUse": {
+	"enabled": true,
+	"remoteAccessService": {
+		"baseUrl": "http://computer-remote:8890",
+		"authToken": "$SAI_COMPUTER_REMOTE_TOKEN",
+		"timeoutMs": 20000,
+		"label": "Remote access sidecar"
+	},
+	"nodes": {
+		"win-rdp": {
+			"adapter": "remote_rdp",
+			"host": "10.10.0.2",
+			"port": 3389,
+			"protocol": "rdp",
+			"credentials": "Administrator:password",
+			"displayResolution": "1920x1080",
+			"label": "Windows RDP workstation"
+		}
+	}
+}
+```
+
+You can also point at the bundled ephemeral desktop with a named VNC node:
+
+```jsonc
+"desktop": {
+	"adapter": "remote_vnc",
+	"host": "computer-desktop",
+	"port": 5901,
+	"protocol": "vnc",
+	"credentials": "starling",
+	"label": "Ephemeral VNC desktop"
+}
+```
+
+To launch that bundled desktop container locally:
+
+```bash
+./start.sh --computer-desktop
+```
+
+Windows CMD: `start.bat --computer-desktop`
+
+### Legacy Windows node host
+
+For direct control of an interactive Windows desktop on the target machine itself, the legacy `remote_node` adapter is still available. Keep it only for cases where raw host-desktop capture and input injection are required; prefer `remote_vnc`, `remote_rdp`, or `remote_ssh` for new setups.
+
+Gateway-side configuration:
+
+```jsonc
+"computerUse": {
+	"enabled": true,
+	"adapters": {
+		"remote_node": {
+			"baseUrl": "http://10.10.0.2:8877",
+			"authToken": "$STARLING_COMPUTER_NODE_TOKEN",
+			"timeoutMs": 15000,
+			"label": "Windows workstation"
+		}
+	}
+}
+```
+
+Target Windows machine:
+
+```bat
+set SAI_COMPUTER_NODE_TOKEN=replace-with-shared-secret
+pnpm --filter @starlingai/core dev:computer-node
+```
+
+For a one-click local Windows startup that also launches the node host, use:
+
+```bat
+start.bat --computer-node
+```
+
+That launches the normal Docker services and also starts the desktop node host in the background. `start.bat --down` stops both.
+
+If you only want to manage the desktop node host itself, use:
+
+```bat
+start-computer-node.bat
+stop-computer-node.bat
+```
+
+The node host runs as a real Windows process rather than a container because it needs direct access to the interactive desktop for screenshots, input injection, clipboard access, and window focus.
 
 ## Scenes: Missions for the Swarm
 

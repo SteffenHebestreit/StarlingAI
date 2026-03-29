@@ -257,9 +257,21 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
 
   // ─── Tier 2: Credentials (execute-level — logged, per-call approval) ────
   get_site_credentials: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Check whether stored credentials exist for a website and retrieve non-secret metadata (login URL, selectors)",
+    requiresPerCallApproval: false,   // no longer exposes secrets — safe as read-only
+    requiresSandbox: false,
+  },
+  site_fill_credentials: {
     tier: ToolTier.TWO_EXECUTE,
-    description: "Retrieve stored username + password for a website (for browser login automation)",
-    requiresPerCallApproval: true,   // always ask before exposing a password to the LLM
+    description: "Securely fill browser login form fields with stored credentials (password never visible to LLM)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_type_credential: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Type a stored credential (username or password) into the focused field on the remote desktop (value never visible to LLM)",
+    requiresPerCallApproval: true,
     requiresSandbox: false,
   },
 
@@ -394,6 +406,168 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Check remote infrastructure readiness over HTTP, TCP, SSH, or DNS from the host",
     requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+
+  // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
+  computer_list_nodes: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List configured computer nodes available for connection",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_session_start: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Start a new computer session (adapter, config)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_session_attach: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Attach to an existing computer session",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_session_stop: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Graceful stop of a computer session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Computer Use: Interaction Tools (Stage 9) ──────────────────────────
+  computer_snapshot: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Capture screenshot + accessibility tree, analyze via vision model",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_click: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Click at (x, y) on the computer screen",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_type: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Type text on the computer",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_hotkey: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Send a keyboard shortcut (e.g. ctrl+s)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_scroll: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Scroll at a position on the screen",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_drag: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Drag from one position to another",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_wait_for: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Wait for a visual condition on screen (poll screenshots + vision)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_list_windows: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List open windows with titles, process names, and bounds",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_focus_window: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Focus a window by title pattern",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_capture_region: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Capture a specific screen region and analyze with vision",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_clipboard_read: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Read clipboard contents (potential secret exposure)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_clipboard_write: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Write to clipboard (potential data injection)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_upload_file: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Transfer a file to a remote computer session",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  computer_download_file: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Transfer a file from a remote computer session",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+
+  // ─── VS Code Tools (Stage 9) ───────────────────────────────────────────
+  vscode_open_file: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Open a file in VS Code editor at optional line/column",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  vscode_run_terminal_command: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Run a command in VS Code integrated terminal",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  vscode_get_diagnostics: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read VS Code problems panel diagnostics",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  vscode_focus_panel: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Focus a VS Code panel (terminal, problems, explorer, source-control)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  vscode_search_workspace: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Full workspace text search in VS Code",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  vscode_command: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Execute an arbitrary VS Code command (escape hatch)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  vscode_get_active_editor: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Return current VS Code file, selection, and cursor position",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  vscode_diff: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Open a diff view for two files in VS Code",
+    requiresPerCallApproval: false,
     requiresSandbox: false,
   },
 

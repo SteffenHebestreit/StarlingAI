@@ -73,7 +73,7 @@ Top-level keys accepted by the current schema:
   "defaults": {
     "model": {
       "primary": "coder_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct",
-      "embeddingModel": "coder_vllm/text-embedding-qwen3-embedding-8b"
+      "embeddingModel": "coder_vllm/text-embedding-qwen3-embedding-0.6b"
     }
   }
 }
@@ -85,10 +85,13 @@ Top-level keys accepted by the current schema:
 
 ```jsonc
 "agents": {
+  "mainAssistant": {
+    "toolMode": "delegate_only"
+  },
   "defaults": {
     "model": {
       "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-      "fallback": "lmstudio/qwen/qwen3.5-9b",
+      "fallback": "lmstudio/qwen3.5-4b",
       "cloudFallback": "anthropic/claude-haiku-4-5-20251001",
       "contextWindow": 32768,
       "temperature": 0.3,
@@ -98,7 +101,7 @@ Top-level keys accepted by the current schema:
       "minP": 0.05,
       "repeatPenalty": 1.05,
       "seed": 42,
-      "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-8b",
+      "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
       "embeddingBaseUrl": "http://host.docker.internal:8004/v1",
       "embeddingApiKey": "local-embed"
     }
@@ -110,6 +113,28 @@ Top-level keys accepted by the current schema:
   }
 }
 ```
+
+`agents.mainAssistant.toolMode` controls whether the top-level assistant can use direct tools itself or must route work through sub-agents:
+
+- `hybrid`: direct tools plus orchestration tools
+- `orchestration_only`: orchestration tools only
+- `delegate_only`: only `delegate_to_agent`
+
+`agents.ephemeralGeneration` controls when the runtime generates an on-the-fly specialist instead of delegating to an existing agent:
+
+```jsonc
+"agents": {
+  "ephemeralGeneration": {
+    "enabled": true,
+    "skillMatchThreshold": 0.75,
+    "architectAgentName": "agent_architect"
+  }
+}
+```
+
+- `enabled`: disables threshold-triggered ephemeral generation entirely when set to `false`
+- `skillMatchThreshold`: `0` to `1` cutoff for the best routed or bid specialist; below this score the runtime generates an ephemeral agent instead
+- `architectAgentName`: configured specialist used to write the ephemeral agent description, prompt, tools, and model
 
 The dashboard can hot-patch most model fields for configured sub-agents through `PATCH /api/agents/:name/model`.
 
@@ -152,7 +177,7 @@ Each entry in `subAgents` defines one specialist agent. The current schema suppo
     "capabilities": ["web research", "documentation lookup"],
     "tags": ["research", "docs"],
     "model": {
-      "primary": "lmstudio/qwen/qwen3.5-9b",
+      "primary": "lmstudio/qwen3.5-4b",
       "temperature": 0.2,
       "maxTokens": 4096
     },
@@ -191,6 +216,10 @@ Sub-agents can also override the endpoint at the model level when only some spec
 }
 ```
 
+For source-grounded document work, the recommended specialist stack is `citation_researcher` for authoritative source collection, `paper_author` for drafting only from shared evidence, and `source_verifier` for final citation and claim checks. `prompt_optimizer` is useful when an agent loops or hallucinates, and `incident_responder` is the preferred triage agent for provider/model/config failures.
+
+For dynamic specialization, add an `agent_architect` specialist. The runtime calls it whenever the best available specialist scores below `agents.ephemeralGeneration.skillMatchThreshold`, and the generated ephemeral agent is executed immediately on the original task.
+
 ## Gateway
 
 ```jsonc
@@ -215,7 +244,7 @@ Sub-agents can also override the endpoint at the model level when only some spec
 
 ## Multimodal
 
-The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-playground` services in Docker Compose.
+The default speech stack uses the host-level Qwen3-ASR and Qwen3-TTS services on ports `5002` and `5004`. The bundled Compose speech services remain optional under the `speech` profile and can expose the same ports when needed.
 
 ```jsonc
 "multimodal": {
@@ -223,19 +252,19 @@ The default speech stack now uses Qwen3-ASR and Qwen3-TTS from the `tts-stt-play
   "files": {
     "baseUrl": "http://fastapi-mcp-template:8000",
     "toolName": "file_to_markdown",
-    "visionModel": "lmstudio/qwen/qwen3.5-9b",
+    "visionModel": "lmstudio/your-vision-model",
     "visionBaseUrl": "http://host.docker.internal:8001/v1",
     "visionApiKey": "local-vision",
     "timeoutMs": 60000
   },
   "stt": {
-    "baseUrl": "http://qwen3-asr-service:5002",
+    "baseUrl": "http://host.docker.internal:5002",
     "api": "auto",
     "model": "Qwen/Qwen3-ASR-1.7B",
     "timeoutMs": 60000
   },
   "tts": {
-    "baseUrl": "http://qwen3-tts-service:5004",
+    "baseUrl": "http://host.docker.internal:5004",
     "api": "qwen-compatible",
     "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
     "defaultLanguage": "English",
@@ -503,8 +532,8 @@ Scenes are task templates, not step arrays.
 ```jsonc
 "scenes": {
   "apply_jobs": {
-    "description": "Submit one ranked freelance lead.",
-    "task": "Run the application pipeline for leads rated {{minRating|0.7}} or higher.",
+    "description": "Run a browser-assisted application workflow for one approved freelance lead.",
+    "task": "Use web_task_coordinator to review one approved lead and delegate browser submission only after stored credentials exist and secure credential fill has been approved.",
     "webhookKey": "$SCENE_APPLY_JOBS_KEY",
     "params": {
       "minRating": {
@@ -512,9 +541,20 @@ Scenes are task templates, not step arrays.
         "default": "0.7"
       }
     },
-    "allowedAgents": ["application_pipeline", "proposal_writer"],
-    "humanInLoopSteps": ["get_site_credentials", "mcp__playwright__browser_navigate"],
+    "allowedAgents": ["web_task_coordinator", "browser_agent", "researcher", "summarizer"],
+    "humanInLoopSteps": ["site_fill_credentials", "mcp__playwright__browser_navigate"],
     "approvalChannel": "slack-approvals"
+  },
+  "source_backed_paper": {
+    "description": "Produce a paper or report grounded in official sources and verified citations.",
+    "task": "Use citation_researcher to gather authoritative sources, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+    "allowedAgents": ["citation_researcher", "paper_author", "source_verifier", "researcher", "summarizer"],
+    "params": {
+      "outputStyle": {
+        "description": "Requested style or citation format",
+        "default": "technical report with inline references"
+      }
+    }
   }
 }
 ```
@@ -524,8 +564,11 @@ Notes:
 - `task` is injected into a fresh scene session.
 - `params` supports `{{name|default}}` substitution for chat `/run` and webhook-triggered runs.
 - `allowedAgents` restricts delegation scope for that scene.
+- `humanInLoopSteps` matches tool names, not scene phases. For credentialed browser or desktop flows, gate `site_fill_credentials` or `computer_type_credential`; `get_site_credentials` is safe metadata lookup and does not expose secrets.
 - `humanInLoopSteps` is a list of tool names, not numeric step indexes.
 - Config-file scenes are read-only in the dashboard; dashboard-created scenes live in the credential store.
+
+The bundled compose stack now treats local speech containers as optional. By default the gateway reads STT/TTS from `SAI_MULTIMODAL_STT_URL` and `SAI_MULTIMODAL_TTS_URL`, which default to `http://host.docker.internal:5002` and `http://host.docker.internal:5004`. Start the built-in Qwen speech services only when needed with `docker compose --profile speech up -d`.
 
 ## MCP Servers
 

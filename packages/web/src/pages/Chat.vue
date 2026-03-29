@@ -46,36 +46,84 @@
       </div>
     </div>
 
-    <!-- Messages -->
-    <div ref="messagesEl" class="relative z-10 flex-1 overflow-y-auto p-5 space-y-4">
-      <SwarmStatusPanel
-        v-if="gateway.visibleSwarmState"
-        :state="gateway.visibleSwarmState"
-        :active="gateway.isLoading"
-        :runs="gateway.currentSessionSwarmRuns"
-        :selected-run-id="gateway.selectedSwarmRunId"
-        :show-archive-action="Boolean(gateway.currentSessionId)"
-        @select-run="gateway.selectSwarmRun"
-        @open-archive="openInSessions"
-      />
+    <!-- Workspace -->
+    <div class="relative z-10 flex-1 min-h-0 px-4 pb-4 pt-4 sm:px-5">
+      <div class="chat-workspace h-full">
+        <section class="chat-main-column">
+          <div ref="messagesEl" class="chat-message-scroll">
+            <details v-if="hasSidePanels" class="chat-mobile-panels lg:hidden" :open="gateway.isLoading">
+              <summary class="chat-mobile-panels__summary">
+                <span>Live Context</span>
+                <span class="chat-mobile-panels__meta">
+                  <span v-if="gateway.visibleSwarmState">Swarm</span>
+                  <span v-if="computerStore.sessions.length > 0 || computerStore.loading || gateway.isLoading">Computer</span>
+                </span>
+              </summary>
+              <div class="chat-mobile-panels__body">
+                <SwarmStatusPanel
+                  v-if="gateway.visibleSwarmState"
+                  :state="gateway.visibleSwarmState"
+                  :active="gateway.isLoading"
+                  :runs="gateway.currentSessionSwarmRuns"
+                  :selected-run-id="gateway.selectedSwarmRunId"
+                  :show-archive-action="Boolean(gateway.currentSessionId)"
+                  @select-run="gateway.selectSwarmRun"
+                  @open-archive="openInSessions"
+                />
+                <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
+              </div>
+            </details>
 
-      <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
-        <button
-          @click="loadOlderMessages"
-          :disabled="gateway.currentSessionTranscriptLoading"
-          class="rounded-full border border-purple-500/25 bg-gray-900/70 px-4 py-1.5 text-xs text-purple-200 transition hover:border-purple-400/45 hover:text-purple-100 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {{ gateway.currentSessionTranscriptLoading ? 'Loading older messages...' : 'Load older messages' }}
-        </button>
+            <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
+              <button
+                @click="loadOlderMessages"
+                :disabled="gateway.currentSessionTranscriptLoading"
+                class="rounded-full border border-purple-500/25 bg-gray-900/70 px-4 py-1.5 text-xs text-purple-200 transition hover:border-purple-400/45 hover:text-purple-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {{ gateway.currentSessionTranscriptLoading ? 'Loading older messages...' : 'Load older messages' }}
+              </button>
+            </div>
+
+            <div v-if="collapsedMessageCount > 0" class="chat-history-collapsed">
+              <button
+                @click="expandedMessageHistory = !expandedMessageHistory"
+                class="chat-history-collapsed__button"
+              >
+                {{ expandedMessageHistory ? `Hide ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` : `Show ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` }}
+              </button>
+              <span class="chat-history-collapsed__hint">Composer locked while the current turn is running.</span>
+            </div>
+
+            <MessageBubble
+              v-for="msg in visibleMessages"
+              :key="msg.id"
+              :message="msg"
+              :is-streaming="msg.id === 'streaming'"
+              :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
+            />
+          </div>
+        </section>
+
+        <aside class="chat-side-column hidden lg:flex">
+          <div class="chat-side-stack">
+            <SwarmStatusPanel
+              v-if="gateway.visibleSwarmState"
+              :state="gateway.visibleSwarmState"
+              :active="gateway.isLoading"
+              :runs="gateway.currentSessionSwarmRuns"
+              :selected-run-id="gateway.selectedSwarmRunId"
+              :show-archive-action="Boolean(gateway.currentSessionId)"
+              @select-run="gateway.selectSwarmRun"
+              @open-archive="openInSessions"
+            />
+            <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
+            <div v-if="!hasSidePanels" class="chat-sidebar-placeholder">
+              <div class="chat-sidebar-placeholder__eyebrow">Live Context</div>
+              <p class="chat-sidebar-placeholder__copy">Swarm state, computer sessions, and live previews appear here during active delegation and desktop control.</p>
+            </div>
+          </div>
+        </aside>
       </div>
-
-      <MessageBubble
-        v-for="msg in displayMessages"
-        :key="msg.id"
-        :message="msg"
-        :is-streaming="msg.id === 'streaming'"
-        :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
-      />
     </div>
 
     <!-- Human-in-the-loop approval banner -->
@@ -147,133 +195,6 @@
     <!-- Input area -->
     <div class="relative z-10 bg-gray-900/70 backdrop-blur-lg border-t border-purple-500/15 px-5 py-4">
 
-      <!-- Scene quick-triggers -->
-      <div v-if="gateway.scenes.length > 0" class="flex flex-wrap gap-2 mb-3">
-        <button
-          v-for="scene in gateway.scenes"
-          :key="scene.name"
-          @click="triggerScene(scene.name)"
-          :disabled="gateway.isLoading || !gateway.connected || isSceneRunning(scene.name)"
-          :title="scene.description"
-          class="group flex items-center gap-1.5 px-3 py-1 text-xs font-medium
-                 bg-purple-900/30 hover:bg-purple-800/50
-                 border border-purple-700/40 hover:border-purple-500/60
-                 text-purple-300 hover:text-purple-200
-                 rounded-full transition-all disabled:opacity-40 disabled:cursor-not-allowed">
-          <span class="text-purple-500 group-hover:text-purple-300 transition-colors">{{ isSceneRunning(scene.name) ? '●' : '▶' }}</span>
-          {{ scene.name.replace(/_/g, ' ') }}
-        </button>
-      </div>
-
-      <div v-if="sceneJobs.length > 0 || scenesStore.runError" class="mb-3 grid gap-2 lg:grid-cols-2">
-        <div
-          v-for="job in sceneJobs"
-          :key="job.id"
-          :class="[
-            'rounded-2xl border px-3 py-3 text-sm backdrop-blur-md',
-            sceneCardClass(job.status)
-          ]"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-gray-100">{{ formatSceneName(job.sceneName) }}</span>
-                <span :class="sceneStatusClass(job.status)">{{ job.status }}</span>
-              </div>
-              <div class="mt-1 text-[11px] uppercase tracking-wide text-gray-500">Job {{ shortJobId(job.id) }}</div>
-            </div>
-            <div class="flex items-center gap-2">
-              <button
-                v-if="isSceneJobCancelable(job.status)"
-                @click="scenesStore.cancel(job.id)"
-                class="rounded-full border border-amber-500/25 px-2 py-0.5 text-[11px] text-amber-200 transition hover:border-amber-400/50 hover:text-amber-100"
-              >
-                Cancel
-              </button>
-              <button
-                @click="scenesStore.dismissJob(job.id)"
-                class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
-
-          <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
-            <span>{{ sceneLifecycleLabel(job) }}</span>
-            <span v-if="job.completedAt">Finished {{ formatSceneTimestamp(job.completedAt) }}</span>
-            <span v-if="job.performance">{{ formatDuration(job.performance.turnDurationMs) }}</span>
-            <span v-if="typeof job.toolCallsExecuted === 'number'">{{ job.toolCallsExecuted }} tool call{{ job.toolCallsExecuted === 1 ? '' : 's' }}</span>
-          </div>
-
-          <div class="mt-3">
-            <div class="flex items-center justify-between text-[11px] text-gray-400">
-              <span>{{ job.progress.message ?? 'Waiting for worker updates' }}</span>
-              <span>{{ Math.round(job.progress.percent ?? 0) }}%</span>
-            </div>
-            <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-black/30">
-              <div class="h-full rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-emerald-300 transition-[width] duration-300" :style="{ width: `${Math.max(0, Math.min(100, job.progress.percent ?? 0))}%` }" />
-            </div>
-          </div>
-
-          <div class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4">
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Tools</div>
-              <div class="mt-1 text-gray-100">{{ job.progress.toolCallsCompleted }} / {{ job.progress.toolCallsRequested }}</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Approvals</div>
-              <div class="mt-1 text-gray-100">{{ job.progress.approvalsRequested }}</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Sub-agents</div>
-              <div class="mt-1 text-gray-100">{{ job.progress.subAgentsStarted }}</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Swarm tasks</div>
-              <div class="mt-1 text-gray-100">{{ job.progress.swarmTasksCompleted }} / {{ job.progress.swarmTasksTotal }}</div>
-            </div>
-          </div>
-
-          <p v-if="job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'" class="mt-2 text-xs text-sky-200/90">
-            {{ job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : 'Scene is running in the background.' }}
-          </p>
-          <p v-else-if="job.error" class="mt-2 line-clamp-3 text-xs text-red-200/90">
-            {{ job.error }}
-          </p>
-          <p v-else-if="job.response" class="mt-2 line-clamp-4 text-xs text-gray-300/90">
-            {{ job.response }}
-          </p>
-
-          <div v-if="job.performance" class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4">
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">LLM calls</div>
-              <div class="mt-1 text-gray-100">{{ job.performance.llmCalls }}</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">LLM time</div>
-              <div class="mt-1 text-gray-100">{{ formatDuration(job.performance.llmTimeMs) }}</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Prompt</div>
-              <div class="mt-1 text-gray-100">{{ formatCompactNumber(job.performance.promptChars) }} chars</div>
-            </div>
-            <div class="rounded-xl bg-black/20 px-2 py-1.5">
-              <div class="text-gray-500">Finish</div>
-              <div class="mt-1 text-gray-100">{{ job.performance.finishReason }}</div>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="scenesStore.runError" class="rounded-2xl border border-red-500/20 bg-red-950/15 px-3 py-3 text-xs text-red-200">
-          {{ scenesStore.runError }}
-        </div>
-      </div>
-
-      <div v-if="sceneJobs.length > 0" class="mb-3 flex justify-end">
-        <button @click="openJobs" class="btn-ghost px-3 py-1 rounded-lg text-xs">Open Jobs Dashboard</button>
-      </div>
-
       <!-- Pending image attachment chips -->
       <div v-if="pendingImageContexts.length > 0" class="flex flex-wrap gap-2 mb-2">
         <div
@@ -314,7 +235,16 @@
         </button>
       </div>
 
-      <div class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
+      <div v-if="showMultimodalStatus" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
+        <span class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
+          {{ voiceStatus }}
+        </span>
+        <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
+          Say {{ wakeKeywords.join(" / ") }}
+        </span>
+      </div>
+
+      <div class="hidden">
         <input
           ref="fileInputEl"
           type="file"
@@ -329,108 +259,6 @@
           accept="audio/*"
           @change="onAudioSelected"
         />
-        <button
-          v-if="showFileInput"
-          @click="fileInputEl?.click()"
-          :disabled="multimodalBusy"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-          title="Attach a document or image"
-          aria-label="Attach file"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-            <path d="M14 3v5h5" />
-            <path d="M8.5 15.5l2.5-2.5 2.5 2.5 2-2 1.5 1.5" />
-            <circle cx="9" cy="10" r="1" />
-          </svg>
-        </button>
-        <button
-          v-if="showAudioUpload"
-          @click="audioInputEl?.click()"
-          :disabled="multimodalBusy"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-          title="Upload an audio file for transcription"
-          aria-label="Upload audio"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 16V4" />
-            <path d="M8.5 7.5 12 4l3.5 3.5" />
-            <path d="M4 15v2a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-2" />
-            <path d="M8 12.5a4 4 0 0 0 8 0" />
-          </svg>
-        </button>
-        <button
-          v-if="showRecording"
-          @click="toggleRecording()"
-          :disabled="multimodalBusy && recordingState !== 'recording'"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-          :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
-          :title="recordingState === 'recording' ? 'Stop microphone recording' : 'Record voice from the microphone'"
-          :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
-            <path d="M6.5 10.5a5.5 5.5 0 0 0 11 0" />
-            <path d="M12 16v4" />
-            <path d="M8.5 20h7" />
-          </svg>
-        </button>
-        <button
-          v-if="showWakeMode"
-          @click="toggleWakeListening()"
-          :disabled="recordingState === 'processing'"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-          :class="wakeListening ? 'multimodal-action-active' : ''"
-          :title="wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection'"
-          :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M14.75 4.5c-2.9 0-5.25 2.35-5.25 5.25v4.5c0 2.07 1.68 3.75 3.75 3.75h.25" />
-            <path d="M14.25 7.5a2.75 2.75 0 0 0-2.75 2.75v3.5a1.75 1.75 0 0 0 1.75 1.75" />
-            <path d="M13.5 18.25c0 1.8 1.45 3.25 3.25 3.25S20 20.05 20 18.25 18.55 15 16.75 15c-1.17 0-2.19.62-2.76 1.54" />
-            <path d="M18.1 16.9 15.5 19.5" />
-            <path d="m15.5 16.9 2.6 2.6" />
-          </svg>
-        </button>
-        <button
-          v-if="showSpeechPlayback"
-          @click="speakLatestAssistant()"
-          :disabled="multimodalBusy || !latestAssistantText"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-          title="Speak a summary of the latest assistant reply"
-          aria-label="Speak reply"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M5 9v6" />
-            <path d="M9 7v10" />
-            <path d="M13 4v16" />
-            <path d="M17 8a4 4 0 0 1 0 8" />
-            <path d="M19 5a7.5 7.5 0 0 1 0 14" />
-          </svg>
-        </button>
-        <!-- Auto-speak toggle: enabled only when voice mode is in use -->
-        <button
-          v-if="showSpeechPlayback"
-          @click="toggleSpeakReply()"
-          class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
-          :class="speakReplyEnabled ? 'multimodal-action-active' : ''"
-          :title="speakReplyEnabled ? 'Auto-speak reply summary is ON — click to disable' : 'Auto-speak reply summary is OFF — click to enable'"
-          :aria-label="speakReplyEnabled ? 'Disable auto-speak' : 'Enable auto-speak'"
-          :aria-pressed="speakReplyEnabled"
-        >
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <!-- Speaker with auto indicator (looping arrow overlay) -->
-            <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-          </svg>
-        </button>
-        <span v-if="showMultimodalStatus" class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
-          {{ voiceStatus }}
-        </span>
-        <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
-          Say {{ wakeKeywords.join(" / ") }}
-        </span>
       </div>
 
       <div v-if="audioPreviewUrl" class="mb-3 rounded-2xl border border-white/10 bg-black/20 px-3 py-3">
@@ -440,65 +268,282 @@
         </p>
       </div>
 
-      <div class="flex gap-3 items-end">
-        <textarea
-          v-model="inputText"
-          @keydown.enter.exact.prevent="sendMessage"
-          @keydown.enter.shift.exact="inputText += '\n'"
-          :disabled="gateway.isLoading || !gateway.connected"
-          class="flex-1 bg-gray-800/50 border border-purple-500/20 hover:border-purple-500/40
-                 focus:border-purple-500/60 focus:bg-gray-800/70
-                 rounded-2xl px-4 py-3 text-sm resize-none
-                 focus:outline-none disabled:opacity-40
-                 text-gray-100 placeholder-gray-600
-                 transition-all duration-200"
-          placeholder="Message StarlingAI… (Enter to send, Shift+Enter for newline)"
-          rows="1"
-          style="min-height: 48px; max-height: 200px"
-        />
-        <!-- Thinking mode toggle: cycles auto → on → off -->
-        <button
-          @click="cycleThinkingMode"
-          class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
-          :class="thinkingMode === true
-            ? 'multimodal-action-active'
-            : thinkingMode === false
-              ? 'opacity-40 border-dashed'
-              : 'opacity-60 hover:opacity-100'"
-          :title="thinkingMode === undefined
-            ? 'Thinking: auto — click to enable extended reasoning'
-            : thinkingMode
-              ? 'Thinking: ON — click to disable'
-              : 'Thinking: OFF — click to reset to auto'"
-          :aria-label="thinkingMode === undefined ? 'Thinking auto' : thinkingMode ? 'Thinking on' : 'Thinking off'"
-          :aria-pressed="thinkingMode === true"
-        >
-          <!-- Brain / chain-of-thought icon -->
-          <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
-            <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
-          </svg>
-          <span v-if="thinkingMode !== undefined" class="text-[10px] leading-none mt-0.5">
-            {{ thinkingMode ? 'on' : 'off' }}
-          </span>
-        </button>
-        <button
-          v-if="gateway.isLoading"
-          @click="gateway.cancelTurn()"
-          class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors
-                 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white"
-          title="Stop the current turn"
-        >
-          Stop
-        </button>
-        <button
-          v-else
-          @click="sendMessage"
-          :disabled="(!inputText.trim() && pendingImageContexts.length === 0) || !gateway.connected"
-          class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
-        >
-          Send
-        </button>
+      <div class="chat-composer" :class="compactComposer ? 'chat-composer--compact' : ''">
+        <div class="chat-composer__field">
+          <textarea
+            ref="composerTextareaEl"
+            v-model="inputText"
+            @keydown.enter.exact.prevent="sendMessage"
+            @keydown.enter.shift.exact="inputText += '\n'"
+            :disabled="gateway.isLoading || !gateway.connected"
+            class="chat-composer__textarea"
+            :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
+            :style="composerTextareaStyle"
+            placeholder="Message StarlingAI… (Enter to send, Shift+Enter for newline)"
+            rows="3"
+          />
+        </div>
+
+        <div class="chat-composer__controls">
+          <div class="chat-composer__menus">
+            <details v-if="showOptionsDropdown" class="chat-dropdown">
+              <summary class="chat-dropdown__summary">
+                <span>Options</span>
+                <span class="chat-dropdown__chevron">▾</span>
+              </summary>
+              <div class="chat-dropdown__menu">
+                <div class="chat-dropdown__group">
+                  <div class="chat-dropdown__label">Attachments & Voice</div>
+                  <div class="chat-dropdown__actions">
+                    <button
+                      v-if="showFileInput"
+                      @click="fileInputEl?.click()"
+                      :disabled="multimodalBusy"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
+                      title="Attach a document or image"
+                      aria-label="Attach file"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                        <path d="M14 3v5h5" />
+                        <path d="M8.5 15.5l2.5-2.5 2.5 2.5 2-2 1.5 1.5" />
+                        <circle cx="9" cy="10" r="1" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showAudioUpload"
+                      @click="audioInputEl?.click()"
+                      :disabled="multimodalBusy"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
+                      title="Upload an audio file for transcription"
+                      aria-label="Upload audio"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 16V4" />
+                        <path d="M8.5 7.5 12 4l3.5 3.5" />
+                        <path d="M4 15v2a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-2" />
+                        <path d="M8 12.5a4 4 0 0 0 8 0" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showRecording"
+                      @click="toggleRecording()"
+                      :disabled="multimodalBusy && recordingState !== 'recording'"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
+                      :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
+                      :title="recordingState === 'recording' ? 'Stop microphone recording' : 'Record voice from the microphone'"
+                      :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
+                        <path d="M6.5 10.5a5.5 5.5 0 0 0 11 0" />
+                        <path d="M12 16v4" />
+                        <path d="M8.5 20h7" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showWakeMode"
+                      @click="toggleWakeListening()"
+                      :disabled="recordingState === 'processing'"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
+                      :class="wakeListening ? 'multimodal-action-active' : ''"
+                      :title="wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection'"
+                      :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M14.75 4.5c-2.9 0-5.25 2.35-5.25 5.25v4.5c0 2.07 1.68 3.75 3.75 3.75h.25" />
+                        <path d="M14.25 7.5a2.75 2.75 0 0 0-2.75 2.75v3.5a1.75 1.75 0 0 0 1.75 1.75" />
+                        <path d="M13.5 18.25c0 1.8 1.45 3.25 3.25 3.25S20 20.05 20 18.25 18.55 15 16.75 15c-1.17 0-2.19.62-2.76 1.54" />
+                        <path d="M18.1 16.9 15.5 19.5" />
+                        <path d="m15.5 16.9 2.6 2.6" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showSpeechPlayback"
+                      @click="speakLatestAssistant()"
+                      :disabled="multimodalBusy || !latestAssistantText"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
+                      title="Speak a summary of the latest assistant reply"
+                      aria-label="Speak reply"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M5 9v6" />
+                        <path d="M9 7v10" />
+                        <path d="M13 4v16" />
+                        <path d="M17 8a4 4 0 0 1 0 8" />
+                        <path d="M19 5a7.5 7.5 0 0 1 0 14" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showSpeechPlayback"
+                      @click="toggleSpeakReply()"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
+                      :class="speakReplyEnabled ? 'multimodal-action-active' : ''"
+                      :title="speakReplyEnabled ? 'Auto-speak reply summary is ON — click to disable' : 'Auto-speak reply summary is OFF — click to enable'"
+                      :aria-label="speakReplyEnabled ? 'Disable auto-speak' : 'Enable auto-speak'"
+                      :aria-pressed="speakReplyEnabled"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                        <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                        <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="gateway.scenes.length > 0" class="chat-dropdown__group">
+                  <div class="chat-dropdown__label">Scenes</div>
+                  <div class="chat-dropdown__scene-grid">
+                    <button
+                      v-for="scene in gateway.scenes"
+                      :key="scene.name"
+                      @click="triggerScene(scene.name)"
+                      :disabled="gateway.isLoading || !gateway.connected || isSceneRunning(scene.name)"
+                      :title="scene.description"
+                      class="chat-scene-pill"
+                    >
+                      <span class="text-purple-500 transition-colors">{{ isSceneRunning(scene.name) ? '●' : '▶' }}</span>
+                      {{ scene.name.replace(/_/g, ' ') }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details v-if="showJobsDropdown" class="chat-dropdown">
+              <summary class="chat-dropdown__summary">
+                <span>{{ jobsDropdownLabel }}</span>
+                <span class="chat-dropdown__chevron">▾</span>
+              </summary>
+              <div class="chat-dropdown__menu chat-dropdown__menu--jobs">
+                <div v-if="sceneJobs.length === 0 && scenesStore.runError" class="rounded-2xl border border-red-500/20 bg-red-950/15 px-3 py-3 text-xs text-red-200">
+                  {{ scenesStore.runError }}
+                </div>
+                <div v-for="job in sceneJobs" :key="job.id" :class="['rounded-2xl border px-3 py-3 text-sm backdrop-blur-md', sceneCardClass(job.status)]">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="flex items-center gap-2">
+                        <span class="text-sm font-medium text-gray-100">{{ formatSceneName(job.sceneName) }}</span>
+                        <span :class="sceneStatusClass(job.status)">{{ job.status }}</span>
+                      </div>
+                      <div class="mt-1 text-[11px] uppercase tracking-wide text-gray-500">Job {{ shortJobId(job.id) }}</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <button
+                        v-if="isSceneJobCancelable(job.status)"
+                        @click="scenesStore.cancel(job.id)"
+                        class="rounded-full border border-amber-500/25 px-2 py-0.5 text-[11px] text-amber-200 transition hover:border-amber-400/50 hover:text-amber-100"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        @click="scenesStore.dismissJob(job.id)"
+                        class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
+                    <span>{{ sceneLifecycleLabel(job) }}</span>
+                    <span v-if="job.completedAt">Finished {{ formatSceneTimestamp(job.completedAt) }}</span>
+                    <span v-if="job.performance">{{ formatDuration(job.performance.turnDurationMs) }}</span>
+                    <span v-if="typeof job.toolCallsExecuted === 'number'">{{ job.toolCallsExecuted }} tool call{{ job.toolCallsExecuted === 1 ? '' : 's' }}</span>
+                  </div>
+
+                  <div class="mt-3">
+                    <div class="flex items-center justify-between text-[11px] text-gray-400">
+                      <span>{{ job.progress.message ?? 'Waiting for worker updates' }}</span>
+                      <span>{{ Math.round(job.progress.percent ?? 0) }}%</span>
+                    </div>
+                    <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-black/30">
+                      <div class="h-full rounded-full bg-gradient-to-r from-sky-400 via-cyan-300 to-emerald-300 transition-[width] duration-300" :style="{ width: `${Math.max(0, Math.min(100, job.progress.percent ?? 0))}%` }" />
+                    </div>
+                  </div>
+
+                  <div class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4">
+                    <div class="rounded-xl bg-black/20 px-2 py-1.5">
+                      <div class="text-gray-500">Tools</div>
+                      <div class="mt-1 text-gray-100">{{ job.progress.toolCallsCompleted }} / {{ job.progress.toolCallsRequested }}</div>
+                    </div>
+                    <div class="rounded-xl bg-black/20 px-2 py-1.5">
+                      <div class="text-gray-500">Approvals</div>
+                      <div class="mt-1 text-gray-100">{{ job.progress.approvalsRequested }}</div>
+                    </div>
+                    <div class="rounded-xl bg-black/20 px-2 py-1.5">
+                      <div class="text-gray-500">Sub-agents</div>
+                      <div class="mt-1 text-gray-100">{{ job.progress.subAgentsStarted }}</div>
+                    </div>
+                    <div class="rounded-xl bg-black/20 px-2 py-1.5">
+                      <div class="text-gray-500">Swarm tasks</div>
+                      <div class="mt-1 text-gray-100">{{ job.progress.swarmTasksCompleted }} / {{ job.progress.swarmTasksTotal }}</div>
+                    </div>
+                  </div>
+
+                  <p v-if="job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'" class="mt-2 text-xs text-sky-200/90">
+                    {{ job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : 'Scene is running in the background.' }}
+                  </p>
+                  <p v-else-if="job.error" class="mt-2 line-clamp-3 text-xs text-red-200/90">
+                    {{ job.error }}
+                  </p>
+                  <p v-else-if="job.response" class="mt-2 line-clamp-4 text-xs text-gray-300/90">
+                    {{ job.response }}
+                  </p>
+                </div>
+
+                <div v-if="sceneJobs.length > 0" class="flex justify-end">
+                  <button @click="openJobs" class="btn-ghost px-3 py-1 rounded-lg text-xs">Open Jobs Dashboard</button>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div class="chat-composer__primary-actions">
+            <button
+              @click="cycleThinkingMode"
+              class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
+              :class="thinkingMode === true
+                ? 'multimodal-action-active'
+                : thinkingMode === false
+                  ? 'opacity-40 border-dashed'
+                  : 'opacity-60 hover:opacity-100'"
+              :title="thinkingMode === undefined
+                ? 'Thinking: auto — click to enable extended reasoning'
+                : thinkingMode
+                  ? 'Thinking: ON — click to disable'
+                  : 'Thinking: OFF — click to reset to auto'"
+              :aria-label="thinkingMode === undefined ? 'Thinking auto' : thinkingMode ? 'Thinking on' : 'Thinking off'"
+              :aria-pressed="thinkingMode === true"
+            >
+              <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
+                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
+              </svg>
+              <span v-if="thinkingMode !== undefined" class="text-[10px] leading-none mt-0.5">
+                {{ thinkingMode ? 'on' : 'off' }}
+              </span>
+            </button>
+
+            <button
+              v-if="gateway.isLoading"
+              @click="gateway.cancelTurn()"
+              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white"
+              title="Stop the current turn"
+            >
+              Stop
+            </button>
+            <button
+              v-else
+              @click="sendMessage"
+              :disabled="(!inputText.trim() && pendingImageContexts.length === 0) || !gateway.connected"
+              class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
+            >
+              Send
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="text-xs text-gray-700 mt-2 px-1">
@@ -532,25 +577,29 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onUnmounted, defineAsyncComponent } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onUnmounted, defineAsyncComponent } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
+import { useComputerStore } from "@/stores/computer";
 import type { GatewaySessionTranscriptMessage, InterventionAction } from "@/stores/gateway";
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
+import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
 const gateway = useGatewayStore();
 const scenesStore = useScenesStore();
 const multimodalStore = useMultimodalStore();
+const computerStore = useComputerStore();
 const router = useRouter();
 const inputText = ref("");
+const composerTextareaEl = ref<HTMLTextAreaElement | null>(null);
 const messagesEl = ref<HTMLElement | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
 const audioInputEl = ref<HTMLInputElement | null>(null);
@@ -572,6 +621,7 @@ const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
 const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
 const previewModalUrl = ref<string | null>(null);
+const expandedMessageHistory = ref(true);
 
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
@@ -675,17 +725,85 @@ function flagChipClass(color: "purple" | "sky" | "amber"): string {
 /** True while image analysis is in-flight before the backend call starts. */
 const analysing = ref(false);
 
+const compactComposer = computed(() => gateway.isLoading || analysing.value);
+const composerMinHeight = computed(() => compactComposer.value ? 72 : 104);
+const composerMaxHeight = computed(() => compactComposer.value ? 168 : 280);
+const composerTextareaStyle = computed(() => ({
+  minHeight: `${composerMinHeight.value}px`,
+  maxHeight: `${composerMaxHeight.value}px`,
+}));
+
+function adjustComposerHeight() {
+  const textarea = composerTextareaEl.value;
+  if (!textarea) return;
+  textarea.style.height = "0px";
+  const nextHeight = Math.min(Math.max(textarea.scrollHeight, composerMinHeight.value), composerMaxHeight.value);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > composerMaxHeight.value ? "auto" : "hidden";
+}
+
+const activeStreamingMessage = computed(() =>
+  gateway.messages.find((message) => message.id === "streaming") ?? null,
+);
+
+const hasRunningToolCalls = computed(() =>
+  Boolean(activeStreamingMessage.value?.toolCalls?.some((toolCall) => toolCall.result === undefined)),
+);
+
+const hasRunningSwarmTasks = computed(() => {
+  const state = gateway.visibleSwarmState;
+  if (!state) return false;
+  return Object.values(state.tasks ?? {}).some((task) => task.status === "running" || task.status === "pending");
+});
+
 const orbAiState = computed(() => {
   if (!gateway.connected) return "default";
   if (gateway.isError)     return "error";
+  if (gateway.isLoading || analysing.value) {
+    if (
+      analysing.value ||
+      hasRunningToolCalls.value ||
+      hasRunningSwarmTasks.value ||
+      Boolean(gateway.pendingApproval) ||
+      Boolean(gateway.pendingIntervention)
+    ) {
+      return "activity";
+    }
+    if (gateway.isStreaming) {
+      return "output";
+    }
+    return "activity";
+  }
   if (gateway.isStreaming)  return "output";
-  if (gateway.isLoading || analysing.value) return "activity";
   return "default";
 });
 
 const displayMessages = computed(() => gateway.messages);
 const sceneJobs = computed(() => scenesStore.recentJobs);
 const activeSessions = computed(() => gateway.activeSessions);
+const showJobsDropdown = computed(() => sceneJobs.value.length > 0 || Boolean(scenesStore.runError));
+const jobsDropdownLabel = computed(() => {
+  const running = scenesStore.runningJobs.length;
+  if (running > 0) return `Jobs (${running})`;
+  if (sceneJobs.value.length > 0) return `Jobs (${sceneJobs.value.length})`;
+  return "Jobs";
+});
+const showOptionsDropdown = computed(() => (
+  showFileInput.value
+  || showAudioUpload.value
+  || showRecording.value
+  || showWakeMode.value
+  || showSpeechPlayback.value
+  || gateway.scenes.length > 0
+));
+const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+const visibleMessages = computed(() => {
+  if (!compactComposer.value || expandedMessageHistory.value || displayMessages.value.length <= 6) {
+    return displayMessages.value;
+  }
+  return displayMessages.value.slice(-6);
+});
+const collapsedMessageCount = computed(() => Math.max(0, displayMessages.value.length - visibleMessages.value.length));
 const latestAssistantText = computed(() => {
   for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
     const message = gateway.messages[index];
@@ -1391,6 +1509,13 @@ function scrollToBottom() {
 
 watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
+watch(compactComposer, (compact) => {
+  expandedMessageHistory.value = !compact;
+  nextTick(() => { adjustComposerHeight(); });
+}, { immediate: true });
+watch(inputText, () => {
+  nextTick(() => { adjustComposerHeight(); });
+}, { flush: "post" });
 
 // Auto-speak: fires when a turn finishes (isLoading flips false → true → false)
 // and the speak-reply toggle is on and the user is in voice-input mode.
@@ -1411,6 +1536,10 @@ watch(() => gateway.connected, async (connected) => {
 
 // onMounted intentionally omitted — the watch above handles the initial case,
 // including when connected is already true at mount time.
+
+onMounted(() => {
+  adjustComposerHeight();
+});
 
 onUnmounted(() => {
   stopWakeRecognition();
@@ -1471,5 +1600,312 @@ onUnmounted(() => {
   border-color: rgba(var(--logo-cyan), 0.34);
   color: rgb(165 243 252);
   box-shadow: 0 0 20px rgba(var(--logo-cyan), 0.12);
+}
+
+.chat-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.chat-main-column,
+.chat-side-column {
+  min-height: 0;
+}
+
+.chat-message-scroll {
+  height: 100%;
+  overflow-y: auto;
+  padding: 0.15rem 0.1rem 0.35rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.chat-side-stack {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-right: 0.25rem;
+}
+
+.chat-sidebar-placeholder {
+  border-radius: 1.5rem;
+  border: 1px dashed rgba(125, 211, 252, 0.18);
+  background: linear-gradient(180deg, rgba(5, 15, 32, 0.72), rgba(7, 13, 24, 0.58));
+  padding: 1.25rem;
+  color: rgb(148 163 184);
+}
+
+.chat-sidebar-placeholder__eyebrow {
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgb(125 211 252);
+  margin-bottom: 0.5rem;
+}
+
+.chat-sidebar-placeholder__copy {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.chat-mobile-panels {
+  border-radius: 1.1rem;
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  background: rgba(6, 12, 24, 0.76);
+  overflow: hidden;
+}
+
+.chat-mobile-panels__summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+  cursor: pointer;
+  color: rgb(226 232 240);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chat-mobile-panels__summary::-webkit-details-marker,
+.chat-dropdown__summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-mobile-panels__meta {
+  display: flex;
+  gap: 0.4rem;
+  color: rgb(125 211 252);
+  font-size: 0.68rem;
+}
+
+.chat-mobile-panels__body {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0 0.85rem 0.85rem;
+}
+
+.chat-history-collapsed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(125, 211, 252, 0.12);
+  background: linear-gradient(180deg, rgba(7, 20, 38, 0.72), rgba(6, 14, 28, 0.52));
+}
+
+.chat-history-collapsed__button {
+  border-radius: 9999px;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: rgba(14, 32, 54, 0.72);
+  color: rgb(186 230 253);
+  padding: 0.42rem 0.9rem;
+  font-size: 0.78rem;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.chat-history-collapsed__button:hover {
+  border-color: rgba(125, 211, 252, 0.48);
+  color: white;
+}
+
+.chat-history-collapsed__hint {
+  font-size: 0.72rem;
+  color: rgb(100 116 139);
+}
+
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.chat-composer__field {
+  min-width: 0;
+  width: 100%;
+  flex: 1 1 auto;
+}
+
+.chat-composer__textarea {
+  width: 100%;
+  resize: none;
+  border-radius: 1.5rem;
+  border: 1px solid rgba(168, 85, 247, 0.2);
+  background: rgba(31, 41, 55, 0.58);
+  padding: 1rem 1.15rem;
+  color: rgb(243 244 246);
+  font-size: 0.92rem;
+  line-height: 1.6;
+  transition: border-color 0.2s ease, background 0.2s ease, padding 0.2s ease, min-height 0.2s ease;
+}
+
+.chat-composer__textarea:hover {
+  border-color: rgba(168, 85, 247, 0.38);
+}
+
+.chat-composer__textarea:focus {
+  outline: none;
+  border-color: rgba(168, 85, 247, 0.62);
+  background: rgba(31, 41, 55, 0.76);
+}
+
+.chat-composer__textarea:disabled {
+  opacity: 0.55;
+}
+
+.chat-composer__textarea--compact {
+  padding-top: 0.8rem;
+  padding-bottom: 0.8rem;
+}
+
+.chat-composer__controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  align-items: flex-start;
+}
+
+.chat-composer__menus,
+.chat-composer__primary-actions {
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.chat-dropdown {
+  position: relative;
+}
+
+.chat-dropdown__summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  min-width: 6.5rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(125, 211, 252, 0.2);
+  background: linear-gradient(180deg, rgba(9, 18, 34, 0.85), rgba(8, 15, 28, 0.68));
+  color: rgb(224 242 254);
+  padding: 0.7rem 0.9rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-dropdown[open] .chat-dropdown__summary {
+  border-color: rgba(125, 211, 252, 0.42);
+  color: white;
+}
+
+.chat-dropdown__chevron {
+  font-size: 0.72rem;
+  color: rgb(125 211 252);
+}
+
+.chat-dropdown__menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.65rem);
+  width: min(24rem, calc(100vw - 2.5rem));
+  max-height: min(70vh, 32rem);
+  overflow-y: auto;
+  z-index: 30;
+  border-radius: 1.3rem;
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  background: linear-gradient(180deg, rgba(6, 10, 20, 0.96), rgba(10, 14, 28, 0.92));
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.38);
+  padding: 0.9rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.chat-dropdown__menu--jobs {
+  width: min(30rem, calc(100vw - 2.5rem));
+}
+
+.chat-dropdown__group {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.chat-dropdown__label {
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(125 211 252);
+}
+
+.chat-dropdown__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.chat-dropdown__scene-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.chat-scene-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.74rem;
+  font-weight: 500;
+  border-radius: 9999px;
+  border: 1px solid rgba(168, 85, 247, 0.34);
+  background: rgba(88, 28, 135, 0.22);
+  color: rgb(216 180 254);
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.chat-scene-pill:hover:enabled {
+  border-color: rgba(168, 85, 247, 0.6);
+  color: rgb(243 232 255);
+  background: rgba(126, 34, 206, 0.28);
+}
+
+.chat-scene-pill:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@media (min-width: 1024px) {
+  .chat-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(21rem, 28rem);
+  }
+
+  .chat-composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 0.9rem;
+    align-items: flex-end;
+  }
+
+  .chat-composer__controls {
+    width: max-content;
+    max-width: 100%;
+    min-width: 0;
+    justify-self: start;
+  }
+
+  .chat-composer__menus,
+  .chat-composer__primary-actions {
+    flex-wrap: nowrap;
+  }
 }
 </style>

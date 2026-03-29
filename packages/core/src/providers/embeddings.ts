@@ -36,7 +36,9 @@ const TOOL_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [
   { pattern: /shell_exec|run_script/, keywords: ["shell", "terminal", "devops", "ops", "commands"] },
   { pattern: /read_file|list_files|filesystem/, keywords: ["files", "workspace", "code", "analysis"] },
   { pattern: /write_file/, keywords: ["write", "draft", "report", "output"] },
-  { pattern: /get_site_credentials/, keywords: ["credentials", "auth", "login", "secrets"] },
+  { pattern: /get_site_credentials/, keywords: ["credentials", "auth", "login", "selectors", "stored"] },
+  { pattern: /site_fill_credentials/, keywords: ["credentials", "auth", "login", "forms", "password", "username", "secure fill"] },
+  { pattern: /computer_type_credential/, keywords: ["credentials", "auth", "login", "desktop", "rdp", "remote desktop", "password", "username"] },
   { pattern: /delegate_to_agent/, keywords: ["orchestration", "workflow", "delegation"] },
 ];
 

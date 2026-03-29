@@ -126,4 +126,303 @@ describe("sub-agent turn timeouts", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("rejects coordinator-style completion claims when no tool calls were executed", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-hallucinated-completion-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        pentest_coordinator: {
+          description: "Pentest coordinator",
+          systemPrompt: "Coordinate a pentest and report results.",
+          tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph", "pentest_set_scope"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValue({
+      content: [
+        "Let me check the agent outputs directly. The task graph completed successfully, which means all phases were executed.",
+        "Passive Reconnaissance - osint_agent completed",
+        "Comprehensive Report Generation - report_writer_agent completed",
+      ].join("\n"),
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "pentest_coordinator",
+        task: "Run the pentest.",
+        parentSessionId: "parent-3",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("claimed delegated work completed without executing any tool calls");
+      expect(result.stats.toolCount).toBe(0);
+      expect(completeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects narrated tool-call markup when no tool calls were executed", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-narrated-tool-call-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        pentest_specialist: {
+          description: "Pentest specialist",
+          systemPrompt: "Use tools to test the target.",
+          tools: ["browser_navigate", "browser_snapshot"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValue({
+      content: [
+        "<tool_call>",
+        "<function=mcp_playwright_browser_navigate>",
+        "<parameter=url>",
+        "https://steffen-hebestreit.com/swagger-ui.html",
+        "</parameter>",
+        "</function>",
+        "</tool_call>",
+      ].join("\n"),
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "pentest_specialist",
+        task: "Open the target in the browser.",
+        parentSessionId: "parent-4",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("emitted narrated tool-call text without executing any tool calls");
+      expect(result.stats.toolCount).toBe(0);
+      expect(completeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsupported scan-blocking claims when no tool calls were executed", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-scan-blocking-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        recon_agent: {
+          description: "Recon agent",
+          systemPrompt: "Run recon and report blockers truthfully.",
+          tools: ["nmap_scan", "pentest_exec"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValue({
+      content: "I am unable to proceed with active reconnaissance due to persistent HTTP 403 Forbidden responses when attempting browser navigation and scanning.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "recon_agent",
+        task: "Run reconnaissance.",
+        parentSessionId: "parent-5",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("reported scan blocking or HTTP findings without executing any tool calls");
+      expect(result.stats.toolCount).toBe(0);
+      expect(completeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards computer callbacks into delegated tool execution", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-computer-callbacks-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        computer_use_agent: {
+          description: "Computer automation agent",
+          systemPrompt: "Use the computer tools.",
+          tools: ["workspace_search"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "workspace_search",
+      description: "Emit synthetic computer callbacks for tests.",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, context) {
+        context.onComputerSessionState?.({ computerSessionId: "session-test", state: "active" });
+        context.onComputerAction?.({ computerSessionId: "session-test", actionType: "snapshot" });
+        context.onComputerScreenshot?.({
+          computerSessionId: "session-test",
+          dataUrl: "data:image/png;base64,AA==",
+          width: 1,
+          height: 1,
+        });
+        return { success: true, output: "callback emitted" };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "call-1", name: "workspace_search", arguments: {} }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "done",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    const seenStates: string[] = [];
+    const seenActions: string[] = [];
+    const seenScreenshots: string[] = [];
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "computer_use_agent",
+        task: "Emit a synthetic computer event.",
+        parentSessionId: "parent-callbacks",
+        workspacePath: tempDir,
+        onComputerSessionState(event) {
+          seenStates.push(event.state);
+        },
+        onComputerAction(event) {
+          seenActions.push(event.actionType);
+        },
+        onComputerScreenshot(event) {
+          seenScreenshots.push(event.dataUrl);
+        },
+      });
+
+      expect(result.output).toBe("done");
+      expect(seenStates).toEqual(["active"]);
+      expect(seenActions).toEqual(["snapshot"]);
+      expect(seenScreenshots).toEqual(["data:image/png;base64,AA=="]);
+    } finally {
+      unregisterTool("workspace_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates consecutive identical tool calls and returns cached result", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-dedup-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        dedup_agent: {
+          description: "Dedup test agent",
+          systemPrompt: "Use tools as needed.",
+          tools: ["workspace_search"],
+          maxIterations: 5,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    let executeCount = 0;
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "workspace_search",
+      description: "A searchable tool.",
+      parameters: { type: "object", properties: { query: { type: "string" } } },
+      async execute() {
+        executeCount++;
+        return { success: true, output: "search result: found 3 items" };
+      },
+    });
+
+    completeMock
+      // Iteration 1: model calls workspace_search twice with identical args
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          { id: "call-1", name: "workspace_search", arguments: { query: "hello" } },
+          { id: "call-2", name: "workspace_search", arguments: { query: "hello" } },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      // Iteration 2: model calls it AGAIN with same args
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          { id: "call-3", name: "workspace_search", arguments: { query: "hello" } },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      // Iteration 3: model returns final answer
+      .mockResolvedValueOnce({
+        content: "Found 3 items.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "dedup_agent",
+        task: "Search for things.",
+        parentSessionId: "parent-dedup",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toBe("Found 3 items.");
+      // The tool should only have been ACTUALLY executed once (first call).
+      // The second call in iteration 1 and the call in iteration 2 should be deduped.
+      expect(executeCount).toBe(1);
+      // But all 3 tool calls should be counted
+      expect(result.stats.toolCount).toBe(3);
+    } finally {
+      unregisterTool("workspace_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -4,6 +4,7 @@ ARG FASTAPI_MCP_TEMPLATE_REPO=https://github.com/SteffenHebestreit/fastapi_mcp_t
 ARG FASTAPI_MCP_TEMPLATE_REF=main
 ARG ENABLED_TOOLS=file_converter
 ARG ENABLE_TESTS=false
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -40,6 +41,8 @@ WORKDIR /app
 RUN git clone --depth 1 --branch "${FASTAPI_MCP_TEMPLATE_REF}" "${FASTAPI_MCP_TEMPLATE_REPO}" /app
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch torchvision
 
 RUN pip install --no-cache-dir -r fastapi_mcp_template/requirements.txt \
     && for tool in $(echo "$ENABLED_TOOLS" | tr ',' ' '); do \

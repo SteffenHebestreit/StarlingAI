@@ -38,6 +38,7 @@ import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
+import { computerSessionManager } from "../agent/computer-session.js";
 
 const log = childLogger("gateway");
 
@@ -2090,6 +2091,56 @@ export function createGateway() {
     deleteChannelConfig(type as Parameters<typeof deleteChannelConfig>[0]);
     await reloadChannel(type as Parameters<typeof deleteChannelConfig>[0]);
     return c.json({ ok: true });
+  });
+
+  // ── Computer-use session routes ────────────────────────────────────────────
+
+  app.get("/api/computer-sessions", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(computerSessionManager.listSessions());
+  });
+
+  app.get("/api/computer-sessions/active", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(computerSessionManager.listActiveSessions());
+  });
+
+  app.get("/api/computer-sessions/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const id = c.req.param("id");
+    const sessions = computerSessionManager.listSessions();
+    const session = sessions.find(s => s.id === id);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    return c.json(session);
+  });
+
+  app.post("/api/computer-sessions/:id/emergency-stop", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const id = c.req.param("id");
+    const body = await c.req.json<{ reason?: string }>().catch((): { reason?: string } => ({}));
+    const reason = body.reason ?? "api:manual_stop";
+    computerSessionManager.emergencyStop(id, reason);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/computer-sessions/:id/heartbeat", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const id = c.req.param("id");
+    computerSessionManager.heartbeat(id);
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/computer-sessions/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const cfg = getConfig();
+    const computerUse = (cfg as Record<string, unknown>)["computerUse"] ?? {};
+    return c.json(computerUse);
   });
 
   // ── REST chat endpoint (for simple integrations) ─────────────────────────

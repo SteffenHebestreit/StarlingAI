@@ -387,7 +387,7 @@ registerTool({
 
 registerBrowserTool({
   name: "browser_navigate",
-  description: "Navigate the shared browser session to a public URL.",
+  description: "Navigate the shared browser session to a public URL. After navigating, use browser_snapshot or browser_wait_for to inspect rendered page content.",
   parameters: {
     type: "object",
     properties: {
@@ -400,7 +400,7 @@ registerBrowserTool({
 
 registerBrowserTool({
   name: "browser_snapshot",
-  description: "Capture an accessibility snapshot of the current browser page.",
+  description: "Capture an accessibility snapshot of the current browser page. Use this after browser_navigate to read rendered text and page structure, including JavaScript-loaded content.",
   parameters: {
     type: "object",
     properties: {},
@@ -411,7 +411,7 @@ registerBrowserTool({
 
 registerBrowserTool({
   name: "browser_wait_for",
-  description: "Wait for text to appear or disappear on the current browser page.",
+  description: "Wait for text to appear or disappear on the current browser page before taking a browser_snapshot or interacting with the page.",
   parameters: {
     type: "object",
     properties: {
@@ -635,7 +635,7 @@ async function callMultimodalToolViaMcp(input: {
   return parseMcpToolTextResponse(text, `MCP tool ${input.serverName}/${input.toolName} returned an unparsable response`);
 }
 
-async function analyzeImageBytes(bytes: Uint8Array, contentType: string, configuredModel: string, prompt: string): Promise<string> {
+export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, configuredModel: string, prompt: string): Promise<string> {
   const config = getConfig();
   const endpoint = resolveProviderEndpointForModel(
     configuredModel,

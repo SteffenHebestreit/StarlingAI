@@ -3,18 +3,25 @@
 #  StarlingAI — one-command start script
 #
 #  Usage:
-#    ./start.sh                   # build (if needed) + start core services
-#    ./start.sh --build           # force rebuild, then start
-#    ./start.sh --no-cache        # force rebuild with no Docker cache
-#    ./start.sh --fresh           # wipe volumes + rebuild + start (clean slate)
-#    ./start.sh --pentest         # also start the kali-pentest service
-#    ./start.sh --image           # also start the image-generation service
-#    ./start.sh --down            # stop all services
-#    ./start.sh --down --volumes  # stop all services AND wipe all data volumes
+#    ./start.sh                       # build (if needed) + start core services
+#    ./start.sh --build               # force rebuild, then start
+#    ./start.sh --no-cache            # force rebuild with no Docker cache
+#    ./start.sh --fresh               # wipe volumes + rebuild + start (clean slate)
+#    ./start.sh --pentest             # also start the kali-pentest service
+#    ./start.sh --image               # also start the image-generation service
+#    ./start.sh --computer-desktop    # also start ephemeral VNC desktop container
+#    ./start.sh --down                # stop all services
+#    ./start.sh --down --volumes      # stop all services AND wipe all data volumes
+#
+#  Computer-use connection methods (configure in starlingai.json):
+#    remote_vnc   — Connect to any VNC server (recommended, no agent on target)
+#    remote_rdp   — Connect to Windows machines via RDP
+#    remote_ssh   — Command-line control via SSH
+#    remote_node  — Legacy HTTP node (requires custom node-host)
 #
 #  Flags can be combined:
 #    ./start.sh --no-cache --pentest
-#    ./start.sh --fresh --pentest --image
+#    ./start.sh --fresh --pentest --image --computer-desktop
 #
 # ── Hardware note (Strix Halo / Ryzen AI Max) ──────────────────────────────────
 #  LM Studio on Windows (Vulkan) uses the iGPU via AMD Variable Graphics Memory
@@ -54,6 +61,7 @@ NO_CACHE=false
 FRESH=false
 PENTEST=false
 IMAGE_GEN=false
+COMPUTER_DESKTOP=false
 DOWN=false
 WIPE_VOLUMES=false
 
@@ -64,6 +72,7 @@ for arg in "$@"; do
     --fresh)     BUILD=true; NO_CACHE=true; WIPE_VOLUMES=true ;;
     --pentest)   PENTEST=true ;;
     --image)     IMAGE_GEN=true ;;
+    --computer-desktop) COMPUTER_DESKTOP=true ;;
     --down)      DOWN=true ;;
     --volumes)   WIPE_VOLUMES=true ;;
     --help|-h)
@@ -81,11 +90,12 @@ COMPOSE_FILES=(-f docker-compose.yml)
 
 # Build profile args
 PROFILE_ARGS=()
-$PENTEST   && PROFILE_ARGS+=(--profile pentest)
-$IMAGE_GEN && PROFILE_ARGS+=(--profile image)
+$PENTEST           && PROFILE_ARGS+=(--profile pentest)
+$IMAGE_GEN         && PROFILE_ARGS+=(--profile image)
+$COMPUTER_DESKTOP  && PROFILE_ARGS+=(--profile computer-desktop)
 
 dc() { docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" "$@"; }
-dc_all() { docker compose "${COMPOSE_FILES[@]}" --profile pentest --profile image "$@"; }
+dc_all() { docker compose "${COMPOSE_FILES[@]}" --profile pentest --profile image --profile computer-desktop "$@"; }
 
 # ── Down mode ─────────────────────────────────────────────────────────────────
 if $DOWN; then
@@ -166,6 +176,13 @@ hdr "Starting services..."
 dc up -d
 ok "Containers started"
 
+if $COMPUTER_DESKTOP; then
+  echo ""
+  info "VNC desktop container starting on port 5901..."
+  info "Configure in starlingai.json:"
+  echo '  "computerUse": { "adapters": { "remote_vnc": { "host": "host.docker.internal", "port": 5901, "protocol": "vnc", "credentials": "starling" } } }'
+fi
+
 # ── Health checks ─────────────────────────────────────────────────────────────
 hdr "Waiting for services to become healthy..."
 
@@ -217,6 +234,11 @@ fi
 hdr "Dashboard login token"
 TOKEN=""
 if command -v node >/dev/null 2>&1 && [[ -f scripts/gen-token.mjs ]]; then
+  # Source SAI_JWT_SECRET from .env so the token is signed with the same secret the gateway uses.
+  if [[ -z "${SAI_JWT_SECRET:-}" && -f .env ]]; then
+    SAI_JWT_SECRET=$(grep -E '^SAI_JWT_SECRET=' .env | head -1 | cut -d= -f2-)
+    export SAI_JWT_SECRET
+  fi
   TOKEN=$(node scripts/gen-token.mjs 2>/dev/null || true)
 fi
 
@@ -246,13 +268,17 @@ if $IMAGE_GEN; then
   echo -e "  ${BOLD}Image Gen${RESET}     →  running on port 5005"
   echo -e "                    Loading model (may take several minutes)"
 fi
+if $COMPUTER_DESKTOP; then
+  echo -e "  ${BOLD}VNC Desktop${RESET}   →  ${CYAN}vnc://localhost:5901${RESET} (password: starling)"
+fi
 
 echo ""
 echo -e "  ${BOLD}Useful commands:${RESET}"
-echo -e "    ./start.sh --down             Stop all services"
-echo -e "    ./start.sh --down --volumes   Stop + wipe all data"
-echo -e "    ./start.sh --build            Force rebuild"
-echo -e "    ./start.sh --pentest          Start with Kali pentest service"
-echo -e "    docker compose logs -f        Follow logs"
-echo -e "    docker compose ps             Service status"
+echo -e "    ./start.sh --down                 Stop all services"
+echo -e "    ./start.sh --down --volumes       Stop + wipe all data"
+echo -e "    ./start.sh --build                Force rebuild"
+echo -e "    ./start.sh --pentest              Start with Kali pentest service"
+echo -e "    ./start.sh --computer-desktop     Start with VNC desktop"
+echo -e "    docker compose logs -f            Follow logs"
+echo -e "    docker compose ps                 Service status"
 echo ""

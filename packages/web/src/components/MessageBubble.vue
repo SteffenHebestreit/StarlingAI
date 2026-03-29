@@ -1,7 +1,22 @@
 <template>
-  <div :class="['message-row', message.role === 'user' ? 'message-row--user' : 'message-row--ai']">
+  <div :class="[
+    'message-row',
+    message.role === 'user'
+      ? 'message-row--user'
+      : message.role === 'system'
+        ? 'message-row--system'
+        : 'message-row--ai'
+  ]">
 
-    <div :class="['message-bubble', message.role === 'user' ? 'message-bubble--user' : 'message-bubble--ai', message.blocked && 'message-bubble--error']">
+    <div :class="[
+      'message-bubble',
+      message.role === 'user'
+        ? 'message-bubble--user'
+        : message.role === 'system'
+          ? 'message-bubble--system'
+          : 'message-bubble--ai',
+      message.blocked && 'message-bubble--error'
+    ]">
 
       <!-- Guardrail / blocked badge -->
       <div v-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
@@ -13,24 +28,27 @@
         </div>
       </div>
 
-      <!-- Tool calls (collapsed inline status + expandable history) -->
-      <div v-if="message.toolCalls?.length" class="tool-status-wrap">
+      <!-- Execution steps (prefer delegated sub-agent actions over wrapper tool calls) -->
+      <div v-if="executionItems.length" class="tool-status-wrap">
         <div class="tool-status" @click="toolHistoryOpen = !toolHistoryOpen">
           <span class="tool-status__icon">⚙</span>
-          <span class="tool-status__label">{{ activeToolLabel }}</span>
+          <span class="tool-status__label">{{ activeExecutionLabel }}</span>
           <span class="tool-status__chevron">{{ toolHistoryOpen ? '▲' : '▼' }}</span>
         </div>
         <div v-if="toolHistoryOpen" class="tool-history">
-          <div class="tool-history__header">Tool Execution Steps</div>
+          <div class="tool-history__header">{{ executionHistoryHeader }}</div>
           <div
-            v-for="(tc, i) in message.toolCalls"
-            :key="i"
+            v-for="(item, i) in executionItems"
+            :key="`${item.kind}-${item.key}`"
             class="tool-history__item"
           >
             <span class="tool-history__step">{{ i + 1 }}</span>
-            <span class="tool-history__name">{{ tc.name }}</span>
-            <span :class="['tool-history__status', tc.result !== undefined ? 'tool-history__status--done' : 'tool-history__status--running']">
-              {{ tc.result !== undefined ? '✓' : '…' }}
+            <div class="tool-history__details">
+              <span class="tool-history__name">{{ item.name }}</span>
+              <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
+            </div>
+            <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
+              {{ item.statusSymbol }}
             </span>
           </div>
         </div>
@@ -123,6 +141,29 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { ChatMessage } from "@/stores/gateway";
 
+type ExecutionStatus = "running" | "done" | "failed";
+
+interface ExecutionItem {
+  key: string;
+  kind: "subagent" | "subagent-tool" | "tool";
+  name: string;
+  meta?: string;
+  status: ExecutionStatus;
+  statusSymbol: string;
+  startedAt?: string;
+}
+
+function mapExecutionStatus(status: "running" | "completed" | "failed"): ExecutionStatus {
+  if (status === "completed") return "done";
+  return status;
+}
+
+function executionStatusSymbol(status: ExecutionStatus): string {
+  if (status === "done") return "✓";
+  if (status === "failed") return "!";
+  return "…";
+}
+
 const props = defineProps<{
   message: ChatMessage;
   isStreaming?: boolean;
@@ -172,12 +213,85 @@ const blockLabel = computed((): string => {
   return "⚠ Request blocked";
 });
 
-// ── Tool call label ───────────────────────────────────────────────────────────
-const activeToolLabel = computed(() => {
-  const tcs = props.message.toolCalls ?? [];
-  const running = tcs.find(tc => tc.result === undefined);
-  if (running) return `Calling ${running.name}…`;
-  return `${tcs.length} tool call${tcs.length !== 1 ? "s" : ""} completed`;
+// ── Execution history label ──────────────────────────────────────────────────
+const swarmExecutionItems = computed<ExecutionItem[]>(() => Object.values(props.message.swarmState?.tasks ?? {})
+  .flatMap((task) => task.attempts.flatMap((attempt, index) => {
+    const status = mapExecutionStatus(attempt.status);
+    const items: ExecutionItem[] = [{
+      key: `${task.id}-${attempt.agentName}-${attempt.startedAt}-${index}`,
+      kind: "subagent" as const,
+      name: attempt.agentName,
+      meta: [
+        task.title,
+        attempt.toolCount ? `${attempt.toolCount} tool${attempt.toolCount === 1 ? "" : "s"}` : "",
+        attempt.iterations ? `${attempt.iterations} iter${attempt.iterations === 1 ? "" : "s"}` : "",
+      ].filter(Boolean).join(" · "),
+      status,
+      statusSymbol: executionStatusSymbol(status),
+      startedAt: attempt.startedAt,
+    }];
+
+    for (const [toolIndex, toolName] of (attempt.toolNames ?? []).entries()) {
+      items.push({
+        key: `${task.id}-${attempt.agentName}-${attempt.startedAt}-${index}-tool-${toolIndex}`,
+        kind: "subagent-tool" as const,
+        name: toolName,
+        meta: `${attempt.agentName} · ${toolIndex + 1}/${attempt.toolNames?.length ?? 0}`,
+        status,
+        statusSymbol: executionStatusSymbol(status),
+        startedAt: attempt.startedAt,
+      });
+    }
+
+    return items;
+  }))
+  .sort((left, right) => {
+    if (left.startedAt && right.startedAt) return left.startedAt.localeCompare(right.startedAt);
+    if (left.startedAt) return -1;
+    if (right.startedAt) return 1;
+    return left.key.localeCompare(right.key);
+  }));
+
+const toolExecutionItems = computed<ExecutionItem[]>(() => (props.message.toolCalls ?? []).map((toolCall, index) => ({
+  key: `${toolCall.name}-${index}`,
+  kind: "tool" as const,
+  name: toolCall.name,
+  status: toolCall.result !== undefined ? "done" : "running",
+  statusSymbol: toolCall.result !== undefined ? executionStatusSymbol("done") : executionStatusSymbol("running"),
+})));
+
+const executionItems = computed<ExecutionItem[]>(() => {
+  if (swarmExecutionItems.value.length > 0) return swarmExecutionItems.value;
+  return toolExecutionItems.value;
+});
+
+const executionHistoryHeader = computed(() => swarmExecutionItems.value.length > 0 ? "Sub-Agent Actions" : "Tool Execution Steps");
+
+const swarmToolCallCount = computed(() => Object.values(props.message.swarmState?.tasks ?? {})
+  .flatMap((task) => task.attempts)
+  .reduce((total, attempt) => total + (attempt.toolCount ?? 0), 0));
+
+const activeExecutionLabel = computed(() => {
+  const items = executionItems.value;
+  if (!items.length) return "";
+
+  const running = items.find((item) => item.status === "running");
+  if (running) {
+    return running.kind === "subagent"
+      ? `${running.name} working…`
+      : `Calling ${running.name}…`;
+  }
+
+  const failedCount = items.filter((item) => item.status === "failed").length;
+  if (failedCount > 0) {
+    return swarmExecutionItems.value.length > 0
+      ? `${failedCount} sub-agent action${failedCount !== 1 ? "s" : ""} failed`
+      : `${failedCount} tool call${failedCount !== 1 ? "s" : ""} failed`;
+  }
+
+  return swarmExecutionItems.value.length > 0
+    ? `${items.filter((item) => item.kind === "subagent").length} sub-agent action${items.filter((item) => item.kind === "subagent").length !== 1 ? "s" : ""} completed${swarmToolCallCount.value > 0 ? ` · ${swarmToolCallCount.value} tool call${swarmToolCallCount.value === 1 ? "" : "s"}` : ""}`
+    : `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
 
 // ── Rendered markdown ─────────────────────────────────────────────────────────
@@ -200,7 +314,7 @@ const renderedStreamingContent = computed(() => {
 
 // ── Per-message export ────────────────────────────────────────────────────────
 function exportMessageMarkdown(): void {
-  const role = props.message.role === "user" ? "You" : "StarlingAI";
+  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : "StarlingAI";
   const time = formatTime(props.message.timestamp);
   const content = mainContent.value;
   const md = `# ${role} — ${time}\n\n${content}\n`;
@@ -214,7 +328,7 @@ function exportMessageMarkdown(): void {
 }
 
 function exportMessagePDF(): void {
-  const role = props.message.role === "user" ? "You" : "StarlingAI";
+  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : "StarlingAI";
   const time = formatTime(props.message.timestamp);
   const bodyHtml = renderedContent.value;
   const html = `<!DOCTYPE html>
@@ -295,6 +409,7 @@ function formatDuration(ms: number): string {
 }
 .message-row--user { justify-content: flex-end; }
 .message-row--ai   { justify-content: flex-start; }
+.message-row--system { justify-content: center; }
 
 /* ── Bubble ──────────────────────────────────────────────────────────────────── */
 .message-bubble {
@@ -320,6 +435,15 @@ function formatDuration(ms: number): string {
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
   border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
   color: #e8e3f5;
+}
+
+.message-bubble--system {
+  max-width: min(82%, 42rem);
+  background: rgba(120, 113, 108, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  border-radius: 1rem;
+  color: #f8e7b9;
 }
 
 .message-bubble--error {
@@ -396,10 +520,26 @@ function formatDuration(ms: number): string {
 }
 .tool-history__item:last-child { border-bottom: none; }
 .tool-history__step  { color: #a78bfa; font-weight: 700; min-width: 1rem; }
-.tool-history__name  { flex: 1; font-family: monospace; color: #e2d9f3; }
+.tool-history__details {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.tool-history__name  { font-family: monospace; color: #e2d9f3; }
+.tool-history__meta {
+  color: #b8a7d9;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tool-history__status { font-size: 0.75rem; }
 .tool-history__status--done    { color: #4ade80; }
 .tool-history__status--running { color: #e879f9; animation: pulse 1s infinite; }
+.tool-history__status--failed  { color: #f87171; }
 
 /* ── Thinking section ────────────────────────────────────────────────────────── */
 .thinking-section {

@@ -73,14 +73,16 @@ Scenes can narrow which agents may be used for a run:
 ```jsonc
 "scenes": {
   "apply_jobs": {
-    "description": "Submit one ranked lead.",
-    "task": "Run the application pipeline.",
-    "allowedAgents": ["application_pipeline", "proposal_writer"]
+    "description": "Run a browser-assisted application workflow for one approved lead.",
+    "task": "Use web_task_coordinator to review one approved lead and delegate browser submission only after stored credentials exist and secure credential fill has been approved.",
+    "allowedAgents": ["web_task_coordinator", "browser_agent", "researcher", "summarizer"]
   }
 }
 ```
 
 When a scene is launched, that `allowedAgents` list is passed into the runtime and sub-agent tools respect it for delegation and search.
+
+For credentialed browser scenes, let the browser specialist use `get_site_credentials` for metadata, then place the approval gate on `site_fill_credentials`. For desktop login flows, gate `computer_type_credential` instead.
 
 ## Ephemeral Agents
 
@@ -90,7 +92,7 @@ The usual entry path is the `agent_factory` flow, which decides whether a one-of
 
 ### Emergent Architect Fallback
 
-When all routing candidates score below the confidence floor, `runArchitectFallback` is called. The orchestrator LLM is prompted to design a purpose-built ephemeral agent (system prompt, tool selection from `GRANTABLE_TOOLS`, maxIterations), which is then validated and executed immediately.
+When the best routed or autonomously bid specialist scores below `agents.ephemeralGeneration.skillMatchThreshold` (default `0.75`), `runArchitectFallback` is called. A dedicated `agent_architect` specialist writes the ephemeral agent spec: description, system prompt, tool selection from `GRANTABLE_TOOLS`, model override, and maxIterations. That spec is then validated and executed immediately on the original task.
 
 ### Auto-Promotion
 
@@ -122,6 +124,16 @@ All alerts appear in the JSONL audit log and the real-time WebSocket dashboard s
 The orchestrator can run multiple specialists in parallel for decomposable work — a direct expression of the swarm principle that independent sub-tasks should run concurrently and be synthesized. The resulting swarm state is surfaced live over `agent.swarm` WebSocket events and persisted in the web dashboard's swarm run history.
 
 This enables the emergent execution pattern from the starling swarm analogy: a researcher, an analyst, and a writer can each work independently, then their outputs are combined into something no single agent could produce alone.
+
+## Recommended Future Stack
+
+For source-backed papers, technical reports, and any workflow where fabricated citations are unacceptable, use this chain:
+
+- `citation_researcher` to gather authoritative sources with URL and date metadata
+- `paper_author` to draft only from collected evidence
+- `source_verifier` to reject unsupported claims and invented references before final output
+- `prompt_optimizer` when a specialist keeps looping, overusing tools, or inventing unsupported details
+- `incident_responder` when provider, gateway, or model-id failures need fast diagnosis
 
 ## Collective Memory
 

@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { useAuditStore } from "./audit";
+import { useComputerStore } from "./computer";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -52,6 +53,9 @@ export interface SwarmTaskAttempt {
   startedAt: string;
   finishedAt?: string;
   summary?: string;
+  toolCount?: number;
+  iterations?: number;
+  toolNames?: string[];
 }
 
 export interface SwarmTaskState {
@@ -116,6 +120,10 @@ export interface GatewaySessionTranscript {
 }
 
 const SESSION_TRANSCRIPT_PAGE_SIZE = 100;
+const CONNECT_TIMEOUT_MS = 10_000;
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
+const RECONNECT_DELAY_MS = 3_000;
 
 export interface FileToMarkdownResult {
   success: boolean;
@@ -149,6 +157,8 @@ interface ChatAttachment {
   dataUrl: string;
 }
 
+const THINKING_BLOCK_RE = /<(thinking|think)>[\s\S]*?<\/(thinking|think)>/gi;
+
 function extractToolAttachments(name: string, metadata: unknown): ChatAttachment[] {
   if (name !== "generate_image" || !metadata || typeof metadata !== "object") {
     return [];
@@ -167,6 +177,51 @@ function extractToolAttachments(name: string, metadata: unknown): ChatAttachment
       : "generated-image.png";
 
   return [{ filename, dataUrl }];
+}
+
+function extractCompletedThinkingBlocks(text: string): string {
+  return (text.match(THINKING_BLOCK_RE) ?? []).join("\n\n").trim();
+}
+
+function mergeFinalAssistantContent(response: unknown, streamedText: string): string {
+  const finalResponse = String(response ?? "").trim();
+  if (/<(thinking|think)>/i.test(finalResponse)) {
+    return finalResponse;
+  }
+
+  const completedThinking = extractCompletedThinkingBlocks(streamedText);
+  if (!completedThinking) {
+    return finalResponse;
+  }
+
+  return [completedThinking, finalResponse].filter(Boolean).join("\n\n");
+}
+
+function buildAcceptedStatusMessage(data: Record<string, unknown>): string | null {
+  const segments: string[] = [];
+  const info = typeof data["info"] === "string" ? data["info"].trim() : "";
+  if (info) {
+    segments.push(info);
+  }
+
+  const activeFlags = data["activeFlags"];
+  if (activeFlags && typeof activeFlags === "object") {
+    const flags = activeFlags as Record<string, unknown>;
+    const labels: string[] = [];
+    if (flags["autoApprove"] === true) labels.push("auto-approve");
+    if (typeof flags["maxIterations"] === "number") labels.push(`iter ${flags["maxIterations"]}`);
+    if (typeof flags["agent"] === "string" && flags["agent"].trim()) labels.push(`agent ${flags["agent"].trim()}`);
+    if (typeof flags["timeout"] === "number") labels.push(`timeout ${flags["timeout"]}s`);
+    if (labels.length > 0) {
+      segments.push(`Active overrides: ${labels.join(", ")}`);
+    }
+  }
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  return segments.join("\n");
 }
 
 export const useGatewayStore = defineStore("gateway", () => {
@@ -193,6 +248,12 @@ export const useGatewayStore = defineStore("gateway", () => {
   const authFailed = ref(false);    // true when connection was rejected due to bad token
   const pendingIntervention = ref<InterventionNotice | null>(null);
 
+  interface PendingRpc {
+    resolve: (payload: unknown) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }
+
   interface PendingApproval {
     approvalId: string;
     requestId: string;
@@ -202,7 +263,97 @@ export const useGatewayStore = defineStore("gateway", () => {
   const pendingApproval = ref<PendingApproval | null>(null);
 
   let ws: WebSocket | null = null;
-  const messageHandlers = new Map<string, (payload: unknown) => void>();
+  const pendingRpcs = new Map<string, PendingRpc>();
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let heartbeatInFlight = false;
+  let lifecycleHooksInstalled = false;
+
+  function clearReconnectTimer(): void {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function clearConnectTimeout(): void {
+    if (connectTimeoutTimer) {
+      clearTimeout(connectTimeoutTimer);
+      connectTimeoutTimer = null;
+    }
+  }
+
+  function stopHeartbeat(): void {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    heartbeatInFlight = false;
+  }
+
+  function closeActiveSocket(reason?: string): void {
+    const activeSocket = ws;
+    if (!activeSocket) return;
+    ws = null;
+    try {
+      activeSocket.close(4000, reason);
+    } catch {
+      activeSocket.close();
+    }
+  }
+
+  function scheduleReconnect(delayMs = RECONNECT_DELAY_MS): void {
+    if (reconnectTimer || !token.value || authFailed.value) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!token.value || authFailed.value || connected.value || connecting.value) return;
+      connect();
+    }, delayMs);
+  }
+
+  function installLifecycleHooks(): void {
+    if (lifecycleHooksInstalled || typeof window === "undefined") return;
+    lifecycleHooksInstalled = true;
+
+    const resumeConnection = () => {
+      if (!token.value || authFailed.value) return;
+      if (connected.value || connecting.value) return;
+      connect();
+    };
+
+    window.addEventListener("online", resumeConnection);
+    window.addEventListener("focus", resumeConnection);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        resumeConnection();
+      }
+    });
+  }
+
+  function startHeartbeat(): void {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(async () => {
+      if (!connected.value || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (pendingRequestId.value || heartbeatInFlight) return;
+      heartbeatInFlight = true;
+      try {
+        await rpc("gateway.status", undefined, HEARTBEAT_RPC_TIMEOUT_MS);
+      } catch {
+        closeActiveSocket("Heartbeat timeout");
+      } finally {
+        heartbeatInFlight = false;
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function rejectPendingRpcs(message: string): void {
+    for (const [id, pendingRpc] of pendingRpcs) {
+      clearTimeout(pendingRpc.timeout);
+      pendingRpc.reject(new Error(message));
+      pendingRpcs.delete(id);
+    }
+  }
 
   async function parseErrorResponse(response: Response): Promise<string> {
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -354,6 +505,30 @@ export const useGatewayStore = defineStore("gateway", () => {
     messages.value = mapTranscriptMessages(transcript);
   }
 
+  function getStreamingMessage(): ChatMessage | undefined {
+    return messages.value.find((entry) => entry.id === "streaming");
+  }
+
+  function insertSystemFeedbackMessage(content: string): void {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const systemMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "system",
+      content: trimmed,
+      timestamp: new Date(),
+    };
+
+    const streamingIndex = messages.value.findIndex((entry) => entry.id === "streaming");
+    if (streamingIndex >= 0) {
+      messages.value.splice(streamingIndex, 0, systemMessage);
+      return;
+    }
+
+    messages.value.push(systemMessage);
+  }
+
   function applyCurrentSessionRunSelection(sessionId: string | null) {
     const existingRuns = sessionId ? (swarmRunsBySession.value[sessionId] ?? []) : [];
     selectedSwarmRunId.value = existingRuns[existingRuns.length - 1]?.id ?? null;
@@ -426,18 +601,24 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function connect() {
-    if (ws?.readyState === WebSocket.OPEN) return;
+    installLifecycleHooks();
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    clearReconnectTimer();
+    clearConnectTimeout();
     connecting.value = true;
     authFailed.value = false;
 
     const url = `${wsUrl.value}?token=${encodeURIComponent(token.value)}`;
     const socket = new WebSocket(url);
     ws = socket;
+    connectTimeoutTimer = setTimeout(() => {
+      if (ws !== socket || connected.value) return;
+      closeActiveSocket("Connect timeout");
+    }, CONNECT_TIMEOUT_MS);
 
     socket.onopen = () => {
       if (ws !== socket) return;          // stale socket
-      connected.value = true;
-      connecting.value = false;
+      connecting.value = true;
     };
 
     socket.onclose = (ev: CloseEvent) => {
@@ -445,9 +626,13 @@ export const useGatewayStore = defineStore("gateway", () => {
       ws = null;
       connected.value = false;
       connecting.value = false;
+      clearConnectTimeout();
+      stopHeartbeat();
+      rejectPendingRpcs("Connection closed");
 
       // Auth failure (4401) or rate-limited (4429) — stop reconnecting
       if (ev.code === 4401 || ev.code === 4429) {
+        clearReconnectTimer();
         authFailed.value = true;
         token.value = "";
         return;
@@ -457,8 +642,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (pendingRequestId.value) {
         failPendingTurn("Connection lost while waiting for a response. Please try again.");
       }
-      // Auto-reconnect after 3s only for non-auth failures
-      setTimeout(() => { if (token.value) connect(); }, 3000);
+      scheduleReconnect();
     };
 
     socket.onerror = () => {
@@ -476,6 +660,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function disconnect() {
+    clearReconnectTimer();
+    clearConnectTimeout();
+    stopHeartbeat();
+    rejectPendingRpcs("Disconnected");
     const old = ws;
     ws = null;                            // detach first so old handlers bail out
     old?.close();
@@ -487,6 +675,10 @@ export const useGatewayStore = defineStore("gateway", () => {
     const type = msg["type"] as string;
 
     if (type === "hello-ok") {
+      clearConnectTimeout();
+      connected.value = true;
+      connecting.value = false;
+      startHeartbeat();
       const data = msg["data"] as Record<string, unknown>;
       sessions.value = (data["sessions"] as GatewaySession[]) ?? [];
       if (currentSessionId.value && sessions.value.some((session) => session.id === currentSessionId.value && !session.archivedAt)) {
@@ -503,10 +695,12 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "rpc.response") {
       const id = msg["id"] as string;
-      const handler = messageHandlers.get(id);
-      if (handler) {
-        handler(msg);
-        messageHandlers.delete(id);
+      const pendingRpc = pendingRpcs.get(id);
+      if (pendingRpc) {
+        clearTimeout(pendingRpc.timeout);
+        pendingRpcs.delete(id);
+        if (msg["ok"]) pendingRpc.resolve(msg["payload"]);
+        else pendingRpc.reject(new Error(String(msg["error"] ?? "RPC error")));
       }
       return;
     }
@@ -531,9 +725,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.tool_start") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
-        const last = messages.value[messages.value.length - 1];
-        if (last && last.role === "assistant" && last.id === "streaming") {
-          last.toolCalls = [...(last.toolCalls ?? []), {
+        const streamingMessage = getStreamingMessage();
+        if (streamingMessage) {
+          streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
             name: String(data["name"]),
             args: data["args"] as Record<string, unknown>,
           }];
@@ -575,18 +769,25 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    // ── Computer-use events ──────────────────────────────────────────────
+    if (type.startsWith("computer.")) {
+      const computerStore = useComputerStore();
+      computerStore.handleServerMessage({ type, data: msg["data"] });
+      return;
+    }
+
     if (type === "agent.tool_done") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
-        const last = messages.value[messages.value.length - 1];
-        if (last?.toolCalls) {
-          const tc = last.toolCalls.find(t => t.name === String(data["name"]));
+        const streamingMessage = getStreamingMessage();
+        if (streamingMessage?.toolCalls) {
+          const tc = streamingMessage.toolCalls.find(t => t.name === String(data["name"]));
           if (tc) tc.result = String(data["result"] ?? "");
         }
-        if (last) {
+        if (streamingMessage) {
           const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
           if (attachments.length) {
-            last.attachments = [...(last.attachments ?? []), ...attachments];
+            streamingMessage.attachments = [...(streamingMessage.attachments ?? []), ...attachments];
           }
         }
       }
@@ -599,6 +800,14 @@ export const useGatewayStore = defineStore("gateway", () => {
 
       const status = data["status"] as string;
 
+      if (status === "accepted") {
+        const feedback = buildAcceptedStatusMessage(data);
+        if (feedback) {
+          insertSystemFeedbackMessage(feedback);
+        }
+        return;
+      }
+
       if (status === "ok" || status === "blocked") {
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");
@@ -609,7 +818,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         const finalMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: String(data["response"] ?? ""),
+          content: mergeFinalAssistantContent(data["response"], streamingText.value),
           timestamp: new Date(),
           guardrailEvents: data["guardrailEvents"] as ChatMessage["guardrailEvents"],
           toolCalls: streamingMessage?.toolCalls,
@@ -645,16 +854,18 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
-  async function rpc(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  async function rpc(method: string, params?: Record<string, unknown>, timeoutMs = 30000): Promise<unknown> {
     if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("Not connected");
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("RPC timeout")), 30000);
-      messageHandlers.set(id, (payload) => {
-        clearTimeout(timeout);
-        const p = payload as Record<string, unknown>;
-        if (p["ok"]) resolve(p["payload"]);
-        else reject(new Error(String(p["error"] ?? "RPC error")));
+      const timeout = setTimeout(() => {
+        pendingRpcs.delete(id);
+        reject(new Error("RPC timeout"));
+      }, timeoutMs);
+      pendingRpcs.set(id, {
+        resolve,
+        reject,
+        timeout,
       });
       ws!.send(JSON.stringify({ id, method, params }));
     });

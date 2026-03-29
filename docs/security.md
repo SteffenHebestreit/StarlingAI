@@ -69,6 +69,17 @@ The encrypted credential store holds secrets that should survive restarts but mu
 
 The store is read on startup and written on every change. The master key (`SAI_MASTER_KEY`) is the single point of trust — protect it as you would a root credential.
 
+## Secret-Safe Login Automation
+
+Stored credentials are designed to stay out of the LLM context even when the swarm automates logins.
+
+- `get_site_credentials` returns only non-secret metadata such as the hostname, login URL, selectors, and notes.
+- `site_fill_credentials` resolves the stored username and password internally and fills browser form fields without exposing either value to the model.
+- `computer_type_credential` performs the same protected injection for remote desktop or computer-use sessions.
+- Approval gates should target the secret-bearing action (`site_fill_credentials` or `computer_type_credential`), not the metadata lookup step.
+
+Credential access and secure fill events are still audited, but secret values remain redacted in tool results and audit sinks.
+
 ---
 
 ## Guardrails Stack

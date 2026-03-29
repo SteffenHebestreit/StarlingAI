@@ -1,0 +1,21 @@
+{
+  "identicalLoop": {
+    "agentName": "pentest_coordinator",
+    "task": "Validate pentest authorization",
+    "delegatedOutput": "[pentest_coordinator]: ## Authorization Confirmed\n\nPlease confirm the authorization reference again before I proceed."
+  },
+  "delegateLimit": {
+    "agentName": "pentest_coordinator",
+    "tasks": [
+      "Authorization check 1",
+      "Authorization check 2",
+      "Authorization check 3",
+      "Authorization check 4"
+    ],
+    "delegatedOutputs": [
+      "[pentest_coordinator]: Please confirm the authorization reference from the request.",
+      "[pentest_coordinator]: Please confirm the approved target scope before I proceed.",
+      "[pentest_coordinator]: Please confirm the authorization reference again before I continue."
+    ]
+  }
+}

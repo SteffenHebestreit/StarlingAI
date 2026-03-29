@@ -289,7 +289,7 @@ describe("runtime reload reconciliation", () => {
         defaults: {
           model: {
             primary: "coder_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct",
-            embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-8b",
+            embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-0.6b",
           },
         },
       },
@@ -312,7 +312,7 @@ describe("runtime reload reconciliation", () => {
       expect(providerInstances.at(-1)?.baseUrl).toBe("http://localhost:8000/v1");
       expect(providerInstances.at(-1)?.apiKey).toBe("vllm-key");
       expect(providerInstances.at(-1)?.modelConfig).toMatchObject({
-        embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-8b",
+        embeddingModel: "coder_vllm/text-embedding-qwen3-embedding-0.6b",
       });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

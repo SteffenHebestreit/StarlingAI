@@ -5,7 +5,7 @@
     </td>
     <td valign="middle" width="75%">
       <strong style="font-size:1.4em;">StarlingAI</strong><br/>
-      <sub>GUARDED AGENT SWARM &nbsp;·&nbsp; <em>under development</em></sub>
+      <sub>GUARDED AGENT SWARM &nbsp;·&nbsp; <em>v0.2.0</em></sub>
     </td>
   </tr>
 </table>
@@ -76,6 +76,8 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Parallel Delegation** — Independent sub-tasks run concurrently. Task graphs handle complex dependencies with per-node fallbacks.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
 - **Multimodal Tools** — Speech-to-text, speech synthesis, image analysis, file-to-markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
+- **Credential-Safe Automation** — Stored site credentials never need to enter the LLM context. Agents inspect login metadata with `get_site_credentials` and inject secrets only through `site_fill_credentials` or `computer_type_credential` under approval.
+- **Remote Access Sidecar** — Raw VNC, RDP, and SSH sessions can run through a dedicated `computer-remote` service so native desktop tooling stays isolated from the main gateway.
 - **Human-in-the-Loop** — Approval gates via Slack, outbound webhook, or sync webhook with one-click HTTP callbacks before sensitive actions proceed.
 - **Multi-Channel Messaging** — Webchat, Telegram, Slack, Discord, WhatsApp, and email with consistent delivery SLOs, dead-letter queues, and retry with backoff.
 - **Warden Monitoring** — A background warden detects tool storms, escape attempts, failure spikes, and SLO breaches in real time.
@@ -107,11 +109,12 @@ The bundled multimodal stack defaults to Qwen3 across the board: Qwen3.5 for age
 ```bash
 ./extras.sh pentest on   # start Kali Linux pentest service
 ./extras.sh image on     # start image-generation service
+./start.sh --computer-desktop  # start the bundled VNC desktop for computer-use flows
 ./extras.sh all on       # start both
 ./extras.sh status       # show what's running
 ```
 
-Windows CMD: `extras.bat pentest on` etc.
+Windows CMD: `extras.bat pentest on` etc. For the bundled desktop, use `start.bat --computer-desktop`.
 
 > See [QUICKSTART.md](QUICKSTART.md) for detailed setup steps and configuration options.
 

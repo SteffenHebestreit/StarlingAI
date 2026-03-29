@@ -16,6 +16,9 @@ export interface SwarmTaskAttempt {
   startedAt: string;
   finishedAt?: string;
   summary?: string;
+  toolCount?: number;
+  iterations?: number;
+  toolNames?: string[];
 }
 
 export interface SwarmTaskState {
@@ -41,6 +44,9 @@ export interface ToolContext {
   sessionId: string;
   workspacePath: string;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
+  onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
+  onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
   /** When set by a scene, only these sub-agent names may be delegated to */
   allowedAgents?: string[];
   /**
@@ -107,6 +113,60 @@ export function getToolsAsLLMDefs(allowedTools?: string[]): LLMToolDef[] {
     description: t.description,
     parameters: t.parameters,
   }));
+}
+
+/**
+ * Repair a tool call whose name was mangled by the model.
+ * Some models emit `tool_name(arg=val, …)` as the function name instead of
+ * using the structured name + arguments fields.  Detect the pattern of a `(`
+ * inside the name and split it back apart so downstream validation sees the
+ * correct tool name.
+ */
+export function normalizeToolCall(tc: { name: string; arguments: Record<string, unknown> }): void {
+  const parenIdx = tc.name.indexOf("(");
+  if (parenIdx < 0) return;
+
+  const realName = tc.name.slice(0, parenIdx).trim();
+  if (!realName) return;
+
+  const argsGood = tc.arguments && !("_parse_error" in tc.arguments) && Object.keys(tc.arguments).length > 0;
+
+  if (!argsGood) {
+    const tail = tc.name.slice(parenIdx + 1);
+    const closeParen = tail.lastIndexOf(")");
+    const raw = (closeParen >= 0 ? tail.slice(0, closeParen) : tail).trim();
+
+    if (raw) {
+      // Attempt 1: wrap in braces and parse as JSON
+      try {
+        const parsed = JSON.parse(`{${raw}}`);
+        if (typeof parsed === "object" && parsed !== null) {
+          tc.arguments = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Attempt 2: Python-style kwargs  key="val", key=True, key=123
+        const obj: Record<string, unknown> = {};
+        const re = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|(true|false|null|\d+(?:\.\d+)?))/gi;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(raw)) !== null) {
+          const key = m[1]!;
+          const strVal = m[2] ?? m[3];
+          const lit = m[4];
+          if (strVal !== undefined) { obj[key] = strVal; }
+          else if (lit !== undefined) {
+            const lo = lit.toLowerCase();
+            if (lo === "true") obj[key] = true;
+            else if (lo === "false") obj[key] = false;
+            else if (lo === "null") obj[key] = null;
+            else obj[key] = Number(lit);
+          }
+        }
+        if (Object.keys(obj).length > 0) tc.arguments = obj;
+      }
+    }
+  }
+
+  tc.name = realName;
 }
 
 export async function executeTool(

@@ -764,7 +764,7 @@ describe("infrastructure tools", () => {
       "2222",
       `deploy@vm.internal:/opt/app/infrastructure.test.ts`,
     ]));
-    expect(args.some((value) => value.endsWith("src/tools/infrastructure.test.ts"))).toBe(true);
+    expect(args.some((value) => value.replace(/\\/g, "/").endsWith("src/tools/infrastructure.test.ts"))).toBe(true);
   });
 
   it("downloads remote files over scp into the workspace", async () => {

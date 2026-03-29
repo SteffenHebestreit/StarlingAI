@@ -1,5 +1,6 @@
-FROM node:22-alpine AS base
-RUN apk add --no-cache curl && npm install -g pnpm@10.6.0
+FROM node:22-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+    && npm install -g pnpm@10.6.0
 WORKDIR /app
 
 # Dependencies — copy manifests first for layer caching
@@ -7,7 +8,7 @@ FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # Test — runs vitest inside the container, exits non-zero on failure
 FROM deps AS test
@@ -24,9 +25,11 @@ FROM deps AS build
 COPY packages/core ./packages/core
 RUN pnpm --filter @starlingai/core build
 
-# Runtime
-FROM node:22-alpine AS runtime
-RUN apk add --no-cache curl docker-cli
+# Shared runtime filesystem
+FROM node:22-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl docker.io \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY --from=build /app/node_modules ./node_modules
@@ -41,8 +44,24 @@ COPY starlingai.json /config/starlingai.json
 ENV NODE_ENV=production
 ENV LOG_LEVEL=info
 
+# Gateway runtime
+FROM runtime-base AS runtime
+
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -sf http://localhost:8765/healthz || exit 1
 
 EXPOSE 8765
 CMD ["node", "packages/core/dist/index.js"]
+
+# Remote access sidecar runtime
+FROM runtime-base AS computer-remote-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb freerdp2-x11 xdotool imagemagick \
+        openssh-client sshpass \
+        && rm -rf /var/lib/apt/lists/*
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:8890/health || exit 1
+
+EXPOSE 8890
+CMD ["node", "packages/core/dist/computer-remote-main.js"]

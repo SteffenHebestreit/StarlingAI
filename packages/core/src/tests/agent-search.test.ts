@@ -38,13 +38,27 @@ describe("agent search helpers", () => {
       description: "Automates browser logins and form submissions.",
       capabilities: [],
       tags: [],
-      tools: ["get_site_credentials", "mcp__playwright__browser_click", "mcp__playwright__browser_type"],
+      tools: ["get_site_credentials", "site_fill_credentials", "mcp__playwright__browser_click", "mcp__playwright__browser_type"],
       maxIterations: 6,
     });
 
     expect(keywords).toContain("login");
     expect(keywords).toContain("browser");
     expect(keywords).toContain("forms");
+  });
+
+  it("adds secure credential typing keywords for desktop login specialists", () => {
+    const keywords = inferAgentSearchKeywords("computer_use_agent", {
+      description: "Controls desktop login flows.",
+      capabilities: [],
+      tags: [],
+      tools: ["computer_type_credential"],
+      maxIterations: 6,
+    });
+
+    expect(keywords).toContain("credentials");
+    expect(keywords).toContain("desktop");
+    expect(keywords).toContain("login");
   });
 
   it("ranks capability matches ahead of generic description matches", () => {

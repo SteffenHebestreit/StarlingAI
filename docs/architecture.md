@@ -39,11 +39,11 @@ At the code level this means:
 
 ### 2. Emergenz (The Whole Is More Than the Sum of Its Parts)
 
-Complex capabilities emerge from the interaction of simple agents. A user asks "research competitors, write a proposal, and email it" — the orchestrator does not have a hard-coded handler for this. Instead it discovers and chains `researcher` → `proposal_writer` → `email_drafter` dynamically, using the hybrid routing layer to find the best agent for each step. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
+Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not have a hard-coded handler for this. Instead it can chain `citation_researcher` → `paper_author` → `source_verifier` dynamically, using the hybrid routing layer to find the best agent for each step. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
 
 This emergence is reproducible and auditable: every delegation is recorded in the audit log with inputs, outputs, and token counts. Outcome-weighted routing means the swarm continuously improves its specialist selection without manual tuning.
 
-When no registered agent matches a task, the **emergent architect fallback** activates: an LLM designs a purpose-built ephemeral agent on the fly. If that agent succeeds, it is auto-promoted to `.starlingai/promoted_agents.json` and becomes a permanent catalog member. This creates a self-growing specialist registry.
+When no registered agent matches a task strongly enough, the **emergent architect fallback** activates: if the best routed or bid specialist scores below the configured skill-match threshold (default `0.75`), the dedicated `agent_architect` specialist designs a purpose-built ephemeral agent on the fly and that generated agent runs immediately on the original task. If the ephemeral agent succeeds repeatedly, it is auto-promoted to `.starlingai/promoted_agents.json` and becomes a permanent catalog member. This creates a self-growing specialist registry.
 
 The collective memory layer (`swarm/memory.ts`) gives agents a shared knowledge pool backed by Redis Hash/List structures with embedding-backed semantic lookup (`write_shared_fact`, `read_shared_facts`, `share_finding`), so discoveries made by one agent in a session are available to all peers.
 
@@ -91,7 +91,7 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
-| **Emergent architect fallback** | 2 | Implemented | LLM designs ephemeral agents on-the-fly when no catalog match exists |
+| **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
 | **Warden agent** | 3 | Implemented | Subscribes to live audit stream; detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach |

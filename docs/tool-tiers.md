@@ -41,6 +41,7 @@ See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
 | `workspace_search` | Full-text search across workspace files |
 | `memory_search` | Search the agent memory store |
 | `session_status` | Read current session metadata |
+| `get_site_credentials` | Check whether stored site credentials exist and return non-secret login metadata |
 
 ### Tier 1 — Write (Workspace-Scoped)
 
@@ -67,9 +68,12 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `parallel_delegate` | Run up to 5 agents concurrently | Per-call | No |
 | `shell_exec` | Execute a shell command | Per-call | Yes — Docker container |
 | `run_script` | Run a script file | Per-call | Yes — Docker container |
-| `get_site_credentials` | Retrieve stored site credentials | Per-call | No |
+| `site_fill_credentials` | Securely fill stored credentials into browser login fields | Per-call | No |
+| `computer_type_credential` | Securely type stored credentials into a desktop login form | Per-call | No |
 
 `shell_exec` and `run_script` **always** run inside the Docker sandbox container. There is no code path that can execute these on the host.
+
+`get_site_credentials` is Tier 0 because it returns metadata only. The secret-bearing actions stay approval-gated through `site_fill_credentials` and `computer_type_credential`.
 
 ### Tier 3 — Privileged (Admin Approval + Audit)
 

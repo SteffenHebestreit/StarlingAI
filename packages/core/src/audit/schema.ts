@@ -19,6 +19,7 @@ export type AuditEventType =
   | "channel_delivery_failed"
   | "agent_routing_evaluated"
   | "credential_accessed"
+  | "credential_fill"
   | "session_reset"
   | "sub_agent_started"
   | "sub_agent_completed"
@@ -40,7 +41,19 @@ export type AuditEventType =
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
   | "turn_guidance_applied"
-  | "turn_slo_breach";
+  | "turn_slo_breach"
+  | "computer_action"
+  | "computer_screenshot_analyzed"
+  | "computer_credential_prompt_detected"
+  | "computer_session_started"
+  | "computer_session_stopped"
+  | "computer_session_emergency_stopped"
+  | "computer_session_start"
+  | "computer_session_attach"
+  | "computer_session_stop"
+  | "computer_session_emergency_stop"
+  | "computer_heartbeat_lost"
+  | "tool_loop_detected";
 
 export interface AuditEvent {
   id: string;

@@ -266,6 +266,16 @@
             </tbody>
           </table>
         </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            Browser and desktop specialists can use stored credentials without exposing them to the model.
+            <code>browser_agent</code> uses <code>get_site_credentials</code> for metadata and
+            <code>site_fill_credentials</code> for secure browser logins, while
+            <code>computer_use_agent</code> can use <code>computer_type_credential</code> for desktop login forms.
+          </div>
+        </div>
       </div>
 
       <!-- Changing a model -->
@@ -289,12 +299,12 @@
     "researcher": {
       "model": {
         "primary": "qwen/qwen3.5-35b-a3b",
-        "fallback": "qwen/qwen3.5-9b"
+        "fallback": "qwen/qwen3.5-4b"
       }
     },
     "summarizer": {
       "model": {
-        "primary": "qwen/qwen3.5-9b"
+        "primary": "qwen/qwen3.5-4b"
       }
     }
   }
@@ -320,7 +330,7 @@
 
         <h3>Recommended embedding model</h3>
         <p>
-          Search for <code>text-embedding-qwen3-embedding-8b</code> in LM Studio's Discover tab, download it,
+          Search for <code>text-embedding-qwen3-embedding-0.6b</code> in LM Studio's Discover tab, download it,
           and load it alongside your main model. Then update your config:
         </p>
 
@@ -330,8 +340,8 @@
   "agents": {
     "defaults": {
       "model": {
-        "embeddingModel": "text-embedding-qwen3-embedding-8b",
-        "embeddingUrl": "http://host.docker.internal:1234/v1"
+        "embeddingModel": "text-embedding-qwen3-embedding-0.6b",
+        "embeddingBaseUrl": "http://host.docker.internal:1234/v1"
       }
     }
   }

@@ -76,6 +76,8 @@
 
           <div class="swarm-card__badges">
             <span v-if="taskDuration(task)" class="swarm-mini-badge swarm-mini-badge--duration">{{ taskDuration(task) }}</span>
+            <span v-if="taskToolCount(task) > 0" class="swarm-mini-badge swarm-mini-badge--duration">{{ taskToolCount(task) }} tool{{ taskToolCount(task) === 1 ? '' : 's' }}</span>
+            <span v-if="taskIterationCount(task) > 0" class="swarm-mini-badge swarm-mini-badge--duration">{{ taskIterationCount(task) }} iter{{ taskIterationCount(task) === 1 ? '' : 's' }}</span>
             <span v-if="fallbackCount(task) > 0" class="swarm-mini-badge swarm-mini-badge--fallback">{{ fallbackCount(task) }} fallback{{ fallbackCount(task) === 1 ? '' : 's' }}</span>
             <span v-if="task.selectedAgent" class="swarm-mini-badge swarm-mini-badge--agent">{{ task.selectedAgent }}</span>
           </div>
@@ -102,7 +104,10 @@
               <div v-for="(attempt, index) in task.attempts" :key="`${task.id}-${index}`" class="swarm-attempt">
                 <span class="swarm-attempt__agent">{{ attempt.agentName }}</span>
                 <span :class="['swarm-attempt__status', `swarm-attempt__status--${attempt.status}`]">{{ attempt.status }}</span>
+                <span v-if="attempt.toolCount" class="swarm-attempt__summary">{{ attempt.toolCount }} tool{{ attempt.toolCount === 1 ? '' : 's' }}</span>
+                <span v-if="attempt.iterations" class="swarm-attempt__summary">{{ attempt.iterations }} iter{{ attempt.iterations === 1 ? '' : 's' }}</span>
                 <span v-if="attempt.summary" class="swarm-attempt__summary">{{ attempt.summary }}</span>
+                <span v-if="attempt.toolNames?.length" class="swarm-attempt__summary">{{ summarize(attempt.toolNames.join(', '), 220) }}</span>
               </div>
             </div>
           </div>
@@ -206,6 +211,14 @@ function taskDuration(task: SwarmTaskState): string | null {
 
 function fallbackCount(task: SwarmTaskState): number {
   return Math.max(0, task.attempts.length - 1);
+}
+
+function taskToolCount(task: SwarmTaskState): number {
+  return task.attempts.reduce((total, attempt) => total + (attempt.toolCount ?? 0), 0);
+}
+
+function taskIterationCount(task: SwarmTaskState): number {
+  return task.attempts.reduce((total, attempt) => total + (attempt.iterations ?? 0), 0);
 }
 
 const timeline = computed(() => Object.values(props.state.tasks)

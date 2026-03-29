@@ -9,7 +9,7 @@
  */
 
 import type { LLMMessage } from "../providers/lmstudio.js";
-import { getToolsAsLLMDefs, executeTool, type ToolContext } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { ContainerTaskPayload, ContainerTaskResult } from "./container-runner.js";
 import { createChatProvider } from "../providers/index.js";
@@ -107,6 +107,9 @@ async function main(): Promise<void> {
         writeResult({ success: true, result });
         return;
       }
+
+      // Repair any mangled tool names before processing
+      for (const tc of response.tool_calls) normalizeToolCall(tc);
 
       history.push({
         role: "assistant",

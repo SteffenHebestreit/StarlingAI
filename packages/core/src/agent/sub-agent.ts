@@ -13,7 +13,7 @@
 
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
-import { getToolsAsLLMDefs, executeTool, type ToolContext } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
@@ -22,14 +22,119 @@ import { runSubAgentInContainer } from "./container-runner.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs } from "./outcomes.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
+import { computerSessionManager } from "./computer-session.js";
 
 const log = childLogger("agent:sub-agent");
 
 const DEFAULT_MAX_ITERATIONS = 5;
 
+function looksLikeNarratedToolCall(content: string): boolean {
+  const preview = content.slice(0, 2000);
+  if (!preview.trim()) return false;
+  return /<tool_call>|<function=|<parameter=|\[Tool:/i.test(preview);
+}
+
+function looksLikeUnsupportedScanClaim(content: string): boolean {
+  const preview = content.slice(0, 2000);
+  if (!preview.trim()) return false;
+
+  const blockingClaim = /\b(http\s*403|403 forbidden|forbidden|waf|rate limit(?:ing)?|bot detection|access restriction|access restrictions)\b/i.test(preview);
+  const attemptedAction = /\b(attempt(?:ing|ed)?|scan(?:ning|ned)?|recon(?:naissance)?|navigat(?:e|ing|ed)|access(?:ing|ed)?|request(?:ing|ed)?)\b/i.test(preview);
+  return blockingClaim && attemptedAction;
+}
+
+function looksLikeHallucinatedDelegationSummary(content: string): boolean {
+  const preview = content.slice(0, 2000);
+  if (!preview.trim()) return false;
+
+  if (/let me check the agent outputs directly/i.test(preview)) {
+    return true;
+  }
+
+  const mentionsAgentCompletion =
+    /\b[a-z][a-z0-9_]*_agent\b[\s\S]{0,40}\b(completed|executed|finished)\b/i.test(preview) ||
+    /\b(completed|executed|finished)\b[\s\S]{0,40}\b[a-z][a-z0-9_]*_agent\b/i.test(preview);
+  if (mentionsAgentCompletion) {
+    return true;
+  }
+
+  const completionClaim = /\b(task graph completed|all phases were executed|completed phases|engagement has been completed successfully|penetration test complete|pentest complete|test initiated|starting engagement)\b/i.test(preview);
+  const referencedAgents = preview.match(/\b[a-z][a-z0-9_]*_agent\b/gi) ?? [];
+  return completionClaim && referencedAgents.length >= 2;
+}
+
+function rejectSuspiciousNoToolOutput(
+  opts: SubAgentRunOptions,
+  stats: SubAgentExecutionStats,
+  output: string,
+  turnTimeoutMs: number | undefined,
+  runStartedAt: number,
+): SubAgentRunResult | null {
+  if (stats.toolCount > 0) return null;
+
+  const failureStats: SubAgentExecutionStats = {
+    ...stats,
+    terminalState: "error",
+  };
+
+  let reason: string | null = null;
+  if (looksLikeHallucinatedDelegationSummary(output)) {
+    reason = "claimed delegated work completed without executing any tool calls";
+  } else if (looksLikeNarratedToolCall(output)) {
+    reason = "emitted narrated tool-call text without executing any tool calls";
+  } else if (looksLikeUnsupportedScanClaim(output)) {
+    reason = "reported scan blocking or HTTP findings without executing any tool calls";
+  }
+
+  if (!reason) return null;
+
+  const error = `Sub-agent error: '${opts.agentName}' ${reason}.`;
+
+  logAudit(
+    "sub_agent_completed",
+    {
+      agentName: opts.agentName,
+      iterations: stats.iterations,
+      resultLength: output.length,
+      promptChars: stats.promptChars,
+      userContentChars: stats.userContentChars,
+      toolCount: stats.toolCount,
+      usage: stats.usage,
+      model: stats.model,
+      durationMs: Date.now() - runStartedAt,
+      suspiciousNoToolOutput: true,
+      suspiciousNoToolReason: reason,
+    },
+    { sessionId: stats.sessionId, severity: "warn" }
+  );
+
+  appendOutcome(opts.workspacePath, {
+    ts: new Date().toISOString(),
+    agent: opts.agentName,
+    task: opts.task.slice(0, 200),
+    outcome: "failure",
+    iterations: stats.iterations,
+    totalTokens: stats.usage.totalTokens,
+    durationMs: Date.now() - runStartedAt,
+    timeoutMs: turnTimeoutMs,
+    error: reason,
+  });
+
+  return { output: error, stats: failureStats };
+}
+
 function normalizeSubAgentOutput(content: string | null | undefined): string {
   const normalized = typeof content === "string" ? content.trim() : "";
   return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
+}
+
+/** Strip hallucinated tool-call XML that some models emit in text output. */
+function stripHallucinatedToolTags(text: string): string {
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+    .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
+    .replace(/<\/tool_call>/g, "")
+    .trim();
 }
 
 export interface SubAgentRunOptions {
@@ -41,6 +146,9 @@ export interface SubAgentRunOptions {
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   humanInLoopSteps?: string[];
+  onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
+  onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
+  onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
   /** Override the agent's configured maxIterations for this invocation. */
   maxIterationsOverride?: number;
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
@@ -53,6 +161,7 @@ export interface SubAgentExecutionStats {
   promptChars: number;
   userContentChars: number;
   toolCount: number;
+  toolNames: string[];
   iterations: number;
   usage: {
     promptTokens: number;
@@ -62,6 +171,7 @@ export interface SubAgentExecutionStats {
   maxIterations: number;
   model: string;
   capabilities: string[];
+  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config";
   containerColdStartMs?: number;
   containerBootstrapMs?: number;
   containerRuntimeMs?: number;
@@ -86,11 +196,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         promptChars: 0,
         userContentChars: opts.task.length + (opts.context?.length ?? 0),
         toolCount: 0,
+        toolNames: [],
         iterations: 0,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: DEFAULT_MAX_ITERATIONS,
         model: "",
         capabilities: [],
+        terminalState: "missing_config",
       },
     };
   }
@@ -162,11 +274,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           promptChars: 0,
           userContentChars: opts.task.length + (opts.context?.length ?? 0),
           toolCount: 0,
+          toolNames: [],
           iterations: 0,
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
           maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
           model: modelConfig.primary ?? "",
           capabilities: agentCfg.capabilities ?? [],
+          terminalState: "completed",
           containerColdStartMs: containerRun.metrics.containerColdStartMs,
           containerBootstrapMs: containerRun.metrics.containerBootstrapMs,
           containerRuntimeMs: containerRun.metrics.containerRuntimeMs,
@@ -192,32 +306,53 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       workspacePath: opts.workspacePath,
       approvalCallback: opts.approvalCallback,
       humanInLoopSteps: opts.humanInLoopSteps,
+      onComputerAction: opts.onComputerAction,
+      onComputerScreenshot: opts.onComputerScreenshot,
+      onComputerSessionState: opts.onComputerSessionState,
       signal,
     };
 
+    // Sanitize task: strip keyboard shortcut instructions that cause wrong-window side effects.
+    // The orchestrator LLM sometimes composes tasks with explicit shortcut instructions
+    // (e.g. "use Ctrl+Shift+P to open Command Palette") which the sub-agent follows
+    // even when its system prompt says not to. Removing them here is the hard guarantee.
+    let sanitizedTask = opts.task;
+    if (agentCfg.tools?.some((t: string) => t.startsWith("computer_"))) {
+      sanitizedTask = sanitizedTask
+        .replace(/(?:using|use|press|hit|with|via)\s+(?:keyboard\s+shortcut\s+)?(?:Ctrl|Alt|Shift|Cmd|Meta|Win)\+[A-Za-z+]+/gi, "using mouse clicks on visible UI elements")
+        .replace(/(?:Ctrl|Alt|Cmd|Meta)\+(?:Shift|Alt)\+[A-Za-z]/gi, "(blocked shortcut — use mouse click)")
+        .replace(/(?:command\s+palette|Ctrl\+Shift\+P)/gi, "visible UI elements")
+        .replace(/(?:keyboard\s+shortcut|shortcut|key\s*(?:combo|combination))\s+(?:to\s+)?(?:open|toggle|show|launch)/gi, "mouse click to open");
+    }
+
     // Build initial message
     const userContent = opts.context
-      ? `Context:\n${opts.context}\n\nTask: ${opts.task}`
-      : opts.task;
+      ? `Context:\n${opts.context}\n\nTask: ${sanitizedTask}`
+      : sanitizedTask;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
     const maxIterations = opts.maxIterationsOverride ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     let iterations = 0;
     let toolCount = 0;
+    const toolNames: string[] = [];
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    // Track last tool call signature per tool name for consecutive-duplicate detection
+    const lastToolCallSig = new Map<string, { args: string; result: string }>();
 
-    const buildStats = (): SubAgentExecutionStats => ({
+    const buildStats = (terminalState: SubAgentExecutionStats["terminalState"] = "completed"): SubAgentExecutionStats => ({
       agentName: opts.agentName,
       sessionId: subSessionId,
       promptChars: systemPrompt.length,
       userContentChars: userContent.length,
       toolCount,
+      toolNames: [...toolNames],
       iterations,
       usage: { ...usage },
       maxIterations,
       model: modelConfig.primary,
       capabilities: agentCfg.capabilities ?? [],
+      terminalState,
     });
 
     while (iterations < maxIterations) {
@@ -234,9 +369,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
-          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats() };
+          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats("timeout") };
         }
-        return { output: "Sub-agent task was cancelled", stats: buildStats() };
+        return { output: "Sub-agent task was cancelled", stats: buildStats("cancelled") };
       }
 
       const messages: LLMMessage[] = [
@@ -260,10 +395,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
-          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats() };
+          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats("timeout") };
         }
         if (opts.signal?.aborted) {
-          return { output: "Sub-agent task was cancelled", stats: buildStats() };
+          return { output: "Sub-agent task was cancelled", stats: buildStats("cancelled") };
         }
         log.error({ err, agentName: opts.agentName }, "Sub-agent LLM call failed");
         appendOutcome(opts.workspacePath, {
@@ -277,7 +412,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: String(err).slice(0, 200),
         });
-        return { output: `Sub-agent error: ${String(err)}`, stats: buildStats() };
+        return { output: `Sub-agent error: ${String(err)}`, stats: buildStats("error") };
       }
 
       usage.promptTokens += response.usage.promptTokens;
@@ -297,6 +432,18 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             { sessionId: subSessionId, severity: "warn" }
           );
           result = outputScan.redacted;
+        }
+
+        const stats = buildStats("completed");
+        const suspicious = rejectSuspiciousNoToolOutput(
+          opts,
+          stats,
+          result,
+          turnTimeoutMs,
+          runStartedAt,
+        );
+        if (suspicious) {
+          return suspicious;
         }
 
         history.push({ role: "assistant", content: result });
@@ -336,10 +483,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         });
 
         log.info({ agentName: opts.agentName, iterations }, "Sub-agent completed");
-        return { output: result, stats: buildStats() };
+        return { output: stripHallucinatedToolTags(result), stats };
       }
 
-      // Process tool calls
+      // Process tool calls — repair any mangled tool names first
+      for (const tc of response.tool_calls) normalizeToolCall(tc);
+
       history.push({
         role: "assistant",
         content: response.content,
@@ -387,11 +536,33 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           { sessionId: subSessionId }
         );
 
+        toolNames.push(tc.name);
+
+        // Consecutive-duplicate detection: if same tool + same args as the
+        // immediately prior call, return the cached result with a warning
+        // instead of wasting an iteration on a redundant network round-trip.
+        const argsSig = JSON.stringify(tc.arguments);
+        const prev = lastToolCallSig.get(tc.name);
+        if (prev && prev.args === argsSig) {
+          log.warn(
+            { agentName: opts.agentName, tool: tc.name },
+            "Sub-agent repeated identical tool call — returning cached result",
+          );
+          toolResults.push({
+            role: "tool",
+            content: prev.result + "\n\n[Note: This is a cached result — you already called this tool with identical arguments. Move on to the next step.]",
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
+
         const result = await executeTool(tc.name, tc.arguments, toolContext);
+        const resultContent = result.success ? result.output : `Error: ${result.error ?? "unknown"}`;
+        lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent });
 
         toolResults.push({
           role: "tool",
-          content: result.success ? result.output : `Error: ${result.error ?? "unknown"}`,
+          content: resultContent,
           tool_call_id: tc.id,
         });
       }
@@ -437,6 +608,17 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             );
             result = outputScan.redacted;
           }
+          const stats = buildStats("max_iterations");
+          const suspicious = rejectSuspiciousNoToolOutput(
+            opts,
+            stats,
+            result,
+            turnTimeoutMs,
+            runStartedAt,
+          );
+          if (suspicious) {
+            return suspicious;
+          }
           appendOutcome(opts.workspacePath, {
             ts: new Date().toISOString(),
             agent: opts.agentName,
@@ -448,7 +630,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
           });
           log.info({ agentName: opts.agentName, iterations }, "Sub-agent synthesized after max iterations");
-          return { output: result, stats: buildStats() };
+          return { output: stripHallucinatedToolTags(result), stats };
         }
       } catch (synthErr) {
         log.warn({ synthErr, agentName: opts.agentName }, "Synthesis pass after max iterations failed");
@@ -469,10 +651,27 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
     return {
       output: `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
-      stats: buildStats(),
+      stats: buildStats("max_iterations"),
     };
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    // Transfer any computer sessions the sub-agent created back to the parent
+    // so the orchestrator can reuse them if it falls back to direct tool calls.
+    try {
+      const subPrefix = `sub:${opts.parentSessionId}`;
+      for (const session of computerSessionManager.listActiveSessions()) {
+        if (session.leaseOwner.startsWith(subPrefix)) {
+          computerSessionManager.attachSession(session.id, opts.parentSessionId, true);
+          log.info(
+            { sessionId: session.id, from: session.leaseOwner, to: opts.parentSessionId },
+            "Transferred computer session lease from sub-agent back to parent",
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, "Failed to transfer computer session leases back to parent");
+    }
   }
 }
 

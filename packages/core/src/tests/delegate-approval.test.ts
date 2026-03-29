@@ -4,6 +4,22 @@ const runSubAgentMock = vi.fn(async () => "delegated");
 
 vi.mock("../agent/sub-agent.js", () => ({
   runSubAgent: runSubAgentMock,
+  runSubAgentWithStats: vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+    output: await runSubAgentMock(args),
+    stats: {
+      agentName: args.agentName,
+      sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+      promptChars: 0,
+      userContentChars: String(args.task ?? "").length,
+      toolCount: 0,
+      toolNames: [],
+      iterations: 0,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      maxIterations: 5,
+      model: "mock",
+      capabilities: [],
+    },
+  })),
 }));
 
 describe("delegate_to_agent approval propagation", () => {
@@ -34,7 +50,7 @@ describe("delegate_to_agent approval propagation", () => {
         sessionId: "session-1",
         workspacePath: "/workspace",
         approvalCallback,
-        humanInLoopSteps: ["get_site_credentials", "mcp__playwright__browser_navigate"],
+        humanInLoopSteps: ["site_fill_credentials", "mcp__playwright__browser_navigate"],
       },
     );
 
@@ -46,7 +62,7 @@ describe("delegate_to_agent approval propagation", () => {
       workspacePath: "/workspace",
       signal: undefined,
       approvalCallback,
-      humanInLoopSteps: ["get_site_credentials", "mcp__playwright__browser_navigate"],
+      humanInLoopSteps: ["site_fill_credentials", "mcp__playwright__browser_navigate"],
     }));
   });
 });

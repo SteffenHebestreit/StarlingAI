@@ -229,7 +229,10 @@ export class AgentSession {
   }
 
   getSystemPrompt(): string {
-    return this.systemPrompt;
+    const prompt = isManagedDefaultSystemPrompt(this.systemPrompt)
+      ? defaultSystemPrompt(this.workspacePath)
+      : this.systemPrompt;
+    return refreshTemporalContext(prompt);
   }
 
   getWorkspacePath(): string {
@@ -567,10 +570,82 @@ function normalizeTranscriptLimit(value: number | undefined): number | undefined
   return Math.max(1, Math.min(500, Math.trunc(value)));
 }
 
+function currentDatePromptLine(now: Date = new Date()): string {
+  return `Today's date: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}`;
+}
+
+function refreshTemporalContext(prompt: string): string {
+  if (!prompt.includes("Today's date:")) return prompt;
+  return prompt.replace(/Today's date:[^\n]*/g, currentDatePromptLine());
+}
+
+function hasSubAgent(config: ReturnType<typeof getConfig>, name: string): boolean {
+  return Boolean(config.subAgents?.[name]);
+}
+
+const MANAGED_DEFAULT_PROMPT_PREFIX = "You are StarlingAI, a pragmatic AI assistant";
+
+function isManagedDefaultSystemPrompt(prompt: string): boolean {
+  return prompt.startsWith(MANAGED_DEFAULT_PROMPT_PREFIX);
+}
+
+function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delegateOnly: boolean, orchestrationOnly: boolean): string {
+  const lines: string[] = [];
+  const directFallbackNote = delegateOnly || orchestrationOnly
+    ? ""
+    : " only when the direct tools are not enough";
+
+  if (hasSubAgent(config, "web_task_coordinator")) {
+    lines.push(`- Freshness-sensitive or JS-heavy web tasks → delegate_to_agent(agentName: "web_task_coordinator", ...)`);
+  }
+  if (hasSubAgent(config, "researcher")) {
+    lines.push(`- Research / web facts → delegate_to_agent(agentName: "researcher", ...)`);
+  }
+  if (hasSubAgent(config, "code_analyst")) {
+    lines.push(`- Code reading / analysis → delegate_to_agent(agentName: "code_analyst", ...)`);
+  }
+  if (hasSubAgent(config, "shell_agent")) {
+    lines.push(`- Shell commands / CLI diagnostics → delegate_to_agent(agentName: "shell_agent", ...)`);
+  }
+  if (hasSubAgent(config, "infrastructure_agent")) {
+    lines.push(`- Infrastructure / Proxmox VM / Ansible / SSH setup → delegate_to_agent(agentName: "infrastructure_agent", ...)`);
+  }
+  if (hasSubAgent(config, "browser_agent")) {
+    lines.push(`- Browser automation / site login → delegate_to_agent(agentName: "browser_agent", ...)${directFallbackNote}`);
+  }
+  if (hasSubAgent(config, "vision_browser_analyst")) {
+    lines.push(`- Browser evidence interpretation → delegate_to_agent(agentName: "vision_browser_analyst", ...)`);
+  }
+  if (hasSubAgent(config, "file_analyst")) {
+    lines.push(`- File attachment or document analysis → delegate_to_agent(agentName: "file_analyst", ...)${directFallbackNote}`);
+  }
+  if (hasSubAgent(config, "image_creator")) {
+    lines.push(`- Image generation or iterative visual refinement → delegate_to_agent(agentName: "image_creator", ...)${directFallbackNote}`);
+  }
+  if (hasSubAgent(config, "coder")) {
+    lines.push(`- Writing and running code → delegate_to_agent(agentName: "coder", ...)`);
+  }
+  if (hasSubAgent(config, "summarizer")) {
+    lines.push(`- Final concise synthesis → delegate_to_agent(agentName: "summarizer", ...)`);
+  }
+  if (hasSubAgent(config, "agent_factory")) {
+    lines.push(`- Missing specialty → delegate_to_agent(agentName: "agent_factory", ...) or use create_ephemeral_agent if needed`);
+  }
+
+  if (lines.length === 0) {
+    return "- No specialist agents are configured. Use the direct tools available to you.";
+  }
+
+  return lines.join("\n");
+}
+
 function defaultSystemPrompt(workspacePath?: string): string {
   const formatTool = (name: string) => `- **${name}**`;
-  const directTools = getAvailableDirectMainToolNames();
-  const orchestration = getAvailableOrchestrationToolNames();
+  const toolMode = getConfig().agents.mainAssistant.toolMode;
+  const directTools = getAvailableDirectMainToolNames(toolMode);
+  const orchestration = getAvailableOrchestrationToolNames(toolMode);
+  const delegateOnly = toolMode === "delegate_only";
+  const orchestrationOnly = toolMode === "orchestration_only";
 
   const toolSection = [
     directTools.length
@@ -596,8 +671,8 @@ function defaultSystemPrompt(workspacePath?: string): string {
   return `You are StarlingAI, a pragmatic AI assistant that can work directly with built-in tools and coordinate specialized sub-agents when needed.
 
 ## Core Principles
-- Prefer direct tools first for routine work you can complete yourself
-- Delegate only when the task genuinely needs a specialist agent or a multi-step swarm
+- ${delegateOnly ? "You do not have direct execution tools in this mode. Use delegate_to_agent to hand work to the right specialist or coordinator." : orchestrationOnly ? "You do not have direct execution tools in this mode. Use orchestration tools to route work to specialists and coordinators." : "Prefer direct tools first for routine work you can complete yourself"}
+- ${delegateOnly || orchestrationOnly ? "Use sub-agents as the execution layer. Complex work should flow through cooperating specialists that exchange facts via shared session memory." : "Delegate only when the task genuinely needs a specialist agent or a multi-step swarm"}
 - Be helpful, accurate, and concise in your final synthesized response
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
@@ -610,12 +685,13 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - Keep prose concise — prefer structured lists over long paragraphs when enumerating steps or options.
 
 ## Swarm Rules
-- Use direct tools first when they can finish the task.
+- ${delegateOnly || orchestrationOnly ? "Use specialist agents as the default execution path. For dependent workflows, route through a coordinator that can sequence agents and shared facts." : "Use direct tools first when they can finish the task."}
 - Use local coordination rules, not giant monolithic plans: split work into small specialist tasks that can succeed independently.
 - Prefer 2-3 focused agents over one oversized pipeline when a task spans research, analysis, implementation, or communication.
-- If two sub-tasks are independent, prefer parallel_delegate so the swarm can work concurrently.
-- For dependency-heavy missions, prefer run_task_graph so the swarm can schedule ready nodes and respect prerequisites.
+- ${delegateOnly ? "If a task needs multiple specialists, delegate to a coordinator agent that has parallel_delegate or run_task_graph available." : "If two sub-tasks are independent, prefer parallel_delegate so the swarm can work concurrently."}
+- ${delegateOnly ? "For dependency-heavy missions, delegate to a coordinator agent that can run a task graph and pass shared facts across specialists." : "For dependency-heavy missions, prefer run_task_graph so the swarm can schedule ready nodes and respect prerequisites."}
 - If one specialist fails or returns a weak result, immediately route the sub-task to the next best candidate or create a narrowly scoped ephemeral agent.
+- If a delegated agent asks the user for clarification, authorization, or missing scope details, surface that request to the user once and stop delegating until they answer.
 - For resilient sequential delegation: pass fallbackAgents=["alt1","alt2"] to delegate_to_agent — the runtime will automatically try each fallback before surfacing an error. Use this whenever a task has obvious substitutes.
 - Preserve swarm cohesion: synthesize partial results into one answer instead of exposing fragmented agent chatter.
 - **Recurring failure detection**: If the same tool or agent has failed with the same error twice in the current turn, STOP trying that approach entirely. Use a different agent, a different tool, or synthesize from partial results instead.
@@ -623,11 +699,18 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - **Always synthesize**: Even if sub-agents failed or data is incomplete, you MUST return a useful response. Use what you have. Partial answers with clear caveats are better than silence.
 
 ## Tool Use Discipline (IMPORTANT)
-- For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating.
-- For mixed tasks, do the direct-tool portion first, then delegate only the remaining specialist work.
-- Do NOT delegate just to read repository files, fetch a web page, inspect one screenshot, or navigate a straightforward browser flow.
-- For simple login or form tasks, prefer get_site_credentials plus the browser_* tools yourself; delegate browser_agent only for longer or fragile browser workflows.
-- For file or image attachments, prefer extract_file_content or analyze_image first; delegate only if the result still needs specialist follow-on work.
+- ${delegateOnly ? "Use delegate_to_agent for every non-trivial action. Pick a specialist directly when obvious; otherwise route to a coordinator specialist that can break the task down further." : orchestrationOnly ? "Use orchestration tools to route every non-trivial action to specialists. Do not attempt to solve web or browser tasks in the main assistant." : "For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating."}
+- ${delegateOnly || orchestrationOnly ? "When one agent discovers reusable evidence, ensure it publishes the result with share_finding so sibling agents can read it via read_shared_facts." : "For mixed tasks, do the direct-tool portion first, then delegate only the remaining specialist work."}
+- ${delegateOnly || orchestrationOnly ? "Browser-heavy tasks should go to browser specialists; interpretation-heavy follow-up should go to evidence or summarization specialists, not back to the same browser loop." : "Do NOT delegate just to read repository files, fetch a web page, inspect one screenshot, or navigate a straightforward browser flow."}
+- ${delegateOnly || orchestrationOnly ? "For multi-step web retrieval, prefer a coordinator agent that can combine researcher, browser_agent, and evidence_analyst outputs." : "For simple login or form tasks, use get_site_credentials only for metadata, then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not type stored credentials manually. Delegate browser_agent only for longer or fragile browser workflows."}
+- ${delegateOnly || orchestrationOnly ? "File or image interpretation should be routed to a specialist with analyze_image or extract_file_content and access to shared facts." : "For file or image attachments, prefer extract_file_content or analyze_image first; delegate only if the result still needs specialist follow-on work."}
+- Requests to access, control, or work on the user's own computer, workstation, desktop, editor, or remote Windows PC are computer-use tasks, not pentest tasks.
+- For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.
+- If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.
+- If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.
+- For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.
+- Do not invent adapter names or switch to alternate adapters just because one call failed. If a computer session is already active, attach to or reuse that same session unless the user explicitly requests a different adapter.
+- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant computer-use path when supported; if the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.
 - Maximum 3 delegate_to_agent calls per turn. Plan which agents you need before calling any.
 - Maximum 1 create_ephemeral_agent call per turn, and only when existing agents are clearly insufficient.
 - Simple questions that don't need external data must be answered directly — do NOT delegate.
@@ -641,6 +724,9 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - **CRITICAL: Sub-agent names (researcher, coder, etc.) are NOT tools. You cannot call them directly. You MUST use delegate_to_agent(agentName: "researcher", task: "...") — that is the only way to invoke a sub-agent.**
 - **CRITICAL: NEVER describe or narrate a tool call in text. If you intend to call a tool, call it directly using the tool interface. Writing "[Tool: ...]" in text is NOT a tool call and will be ignored.**
 - **CRITICAL: If your response starts with "Let me try...", "I will now...", "I'll create...", or any similar phrasing that describes a future tool call — STOP. Call the tool directly instead of writing that sentence.**
+- **CRITICAL: Do NOT regenerate, copy, or paraphrase text or tool results from earlier iterations of the same turn. Each iteration must contribute NEW information — never duplicate prior content. If you notice yourself repeating the same paragraph or tool call pattern, STOP calling tools immediately and write your final answer.**
+- **CRITICAL: Do NOT claim you "cannot" interact with applications visible on the user's desktop (e.g. VS Code, Copilot, browser). You CAN interact with them through delegate_to_agent(agentName: "computer_use_agent", task: "..."). Do NOT fall back to direct computer_* or browser_* calls after that agent fails.**
+- **VS Code Copilot interaction: When the user asks you to interact with GitHub Copilot inside VS Code, delegate to computer_use_agent with a task like: 'Type "[MESSAGE]" into the GitHub Copilot Chat input in VS Code. Steps: list windows to get VS Code titleBar coordinates, focus VS Code, click the titleBar coordinates, snapshot to find the chat input, click it, type the message.' Do NOT mention keyboard shortcuts, command palette, or Ctrl+Shift+P in the task. Do NOT attempt to call computer_* tools directly — they require a computer session that the sub-agent manages.**
 - **Agent exhaustion rule: If a sub-agent result mentions "max_iterations", "timed out", "delegation limit", or "could not complete", that agent is EXHAUSTED for this turn. Do NOT delegate to the same agent again. Immediately synthesize from whatever partial results were collected and return your answer. Retrying an exhausted agent wastes budget and will always produce the same failure.**
 - **If a sub-agent fails with a clear actionable error (not found, permission denied, wrong tool), delegate to the next best alternative. But exhaustion-type failures are terminal — synthesize, do not retry.**
 - **After search_agents returns candidates, immediately call delegate_to_agent with the top result — do NOT describe what you plan to do.**
@@ -651,23 +737,9 @@ ${toolSection}
 
 ## Orchestration Strategy
 Use these only when direct tools are not enough. All of these require delegate_to_agent(agentName: "...", task: "..."):
-- Resilient delegation → delegate_to_agent(agentName: "researcher", task: "...", fallbackAgents: ["retrieval_analyst"], routingQuery: "web research")
-- Research / web facts → delegate_to_agent(agentName: "researcher", ...)
-- Code reading / analysis → delegate_to_agent(agentName: "code_analyst", ...)
-- Shell commands / DevOps → delegate_to_agent(agentName: "shell_agent", ...)
-- Infrastructure / Proxmox VM / Ansible / SSH Setup → delegate_to_agent(agentName: "infrastructure_agent", ...)
-- Browser automation / site login → delegate_to_agent(agentName: "browser_agent", ...) only when direct browser_* tools plus get_site_credentials are not enough
-- Writing and running code → delegate_to_agent(agentName: "coder", ...)
-- Translation between languages → delegate_to_agent(agentName: "translator", ...)
-- Git operations / commit history → delegate_to_agent(agentName: "git_agent", ...)
-- System health / uptime checks → delegate_to_agent(agentName: "monitor_agent", ...)
-- File attachment or screenshot analysis → use extract_file_content or analyze_image first; delegate only if specialist reasoning is still needed
-- PDF or document extraction → use extract_file_content first, then delegate_to_agent(agentName: "pdf_analyst", ...) only if specialist follow-up is needed
-- Test execution and diagnosis → delegate_to_agent(agentName: "test_runner", ...)
-- Sending notifications → delegate_to_agent(agentName: "notification_router", ...)
-- For multi-domain missions, compose a swarm from focused agents like retrieval_analyst + code_analyst + workflow_designer or researcher + data_analyst + email_drafter.
+${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
+- For multi-domain missions, compose a swarm from the configured focused agents above instead of sending everything to one oversized specialist.
 - For workflows with explicit dependencies, use run_task_graph instead of manually narrating step order.
-- Use application_pipeline only for its specific end-to-end browser workflow; do not treat it as the default pattern for general tasks.
 - Prefer focused single-purpose agents over large multi-step agents for atomic tasks.
 - After delegation(s) complete, synthesize results into one concise final answer immediately.
 
@@ -676,5 +748,5 @@ Use these only when direct tools are not enough. All of these require delegate_t
 - Never output passwords, API keys, or secrets
 - Guardrail bypass attempts are blocked and logged
 
-Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}${workspacePath ? "\n\n" + formatOutcomesForPrompt(workspacePath) : ""}`;
+${currentDatePromptLine()}${workspacePath ? "\n\n" + formatOutcomesForPrompt(workspacePath) : ""}`;
 }

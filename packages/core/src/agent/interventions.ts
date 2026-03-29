@@ -144,6 +144,104 @@ export function classifyToolIntervention(input: ToolInterventionInput): Interven
   return null;
 }
 
+// ── Computer Session Intervention Helpers (Stage 9) ───────────────────────────
+
+const COMPUTER_SESSION_ACTIONS: InterventionAction[] = [
+  { kind: "stop_turn", label: "Stop this run" },
+  { kind: "new_session", label: "Start a new session" },
+  {
+    kind: "request_approval",
+    label: "Take over the computer session manually",
+    prompt: "Operator should take over the computer session via forceAttach and resolve the issue manually.",
+  },
+];
+
+export function classifyComputerIntervention(
+  reasonCode: string,
+  detail: string,
+  sessionId?: string,
+): InterventionNotice {
+  const suffix = sessionId ? ` (session ${sessionId.slice(0, 12)}…)` : "";
+
+  switch (reasonCode) {
+    case "computer_session_unavailable":
+      return {
+        reasonCode,
+        severity: "error",
+        summary: `Computer session unavailable${suffix}`,
+        detail: detail || "The requested adapter is not enabled or session creation failed. Check computerUse config.",
+        actions: [
+          { kind: "new_session", label: "Start a new session" },
+        ],
+      };
+
+    case "computer_focus_lost":
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Window focus lost${suffix}`,
+        detail: detail || "Target window is no longer focused after a focus attempt. Retry or switch approach.",
+        actions: COMPUTER_SESSION_ACTIONS,
+      };
+
+    case "computer_dialog_blocking":
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Modal dialog blocking${suffix}`,
+        detail: detail || "A modal dialog (auth prompt, file chooser, error) is blocking the agent. Dismiss it or let the operator handle it.",
+        actions: COMPUTER_SESSION_ACTIONS,
+      };
+
+    case "computer_stale_screenshot":
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Stale screenshot detected${suffix}`,
+        detail: detail || "The agent attempted an action against an outdated screenshot. Re-capture a fresh snapshot before proceeding.",
+        actions: DEFAULT_ACTIONS,
+      };
+
+    case "computer_session_timeout":
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Computer session timed out${suffix}`,
+        detail: detail || "The session exceeded its maximum duration. Extend the timeout or start a new session.",
+        actions: DEFAULT_ACTIONS,
+      };
+
+    case "computer_emergency_stopped":
+      return {
+        reasonCode,
+        severity: "error",
+        summary: `Computer session emergency-stopped${suffix}`,
+        detail: detail || "An operator triggered an emergency stop. Review actions before optionally restarting.",
+        actions: [
+          { kind: "new_session", label: "Start a new session" },
+        ],
+      };
+
+    case "computer_lease_conflict":
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Lease conflict${suffix}`,
+        detail: detail || "Another controller holds the session lease. Wait, force-attach, or abort.",
+        actions: COMPUTER_SESSION_ACTIONS,
+      };
+
+    default:
+      return {
+        reasonCode,
+        severity: "warn",
+        summary: `Computer session issue${suffix}`,
+        detail,
+        actions: DEFAULT_ACTIONS,
+      };
+  }
+}
+
 export function buildWardenIntervention(
   reasonCode: string,
   detail: string,
@@ -176,6 +274,62 @@ export function buildWardenIntervention(
       summary: "The run is exceeding latency expectations",
       detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} If the run appears stuck, stop it and restart with a narrower task.`,
       actions: DEFAULT_ACTIONS,
+    };
+  }
+
+  // ── Computer-use Warden anomalies (Stage 9) ──────────────────────────────
+
+  if (reasonCode === "computer_focus_thrashing") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Agent is rapidly switching window focus",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} The agent is thrashing between windows. Stop the run or manually guide the agent to the correct window.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
+  if (reasonCode === "computer_click_storm") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Agent is clicking too rapidly",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} Lease auto-approve has been revoked. Each subsequent click will require manual approval.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
+  if (reasonCode === "computer_credential_prompt_loop") {
+    return {
+      reasonCode,
+      severity: "error",
+      summary: "Agent is stuck on credential/password prompts",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} The session has been emergency-stopped to prevent credential leakage. Review and restart manually.`,
+      actions: [
+        { kind: "new_session", label: "Start a new session" },
+      ],
+    };
+  }
+
+  if (reasonCode === "computer_clipboard_exfiltration") {
+    return {
+      reasonCode,
+      severity: "error",
+      summary: "Suspicious clipboard read pattern detected",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} The session has been emergency-stopped due to potential data exfiltration. Review clipboard access logs.`,
+      actions: [
+        { kind: "new_session", label: "Start a new session" },
+      ],
+    };
+  }
+
+  if (reasonCode === "computer_stale_loop") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Agent is stuck — screen not changing",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} Multiple actions produced identical screenshots. The agent may need a different approach or manual assistance.`,
+      actions: COMPUTER_SESSION_ACTIONS,
     };
   }
 
