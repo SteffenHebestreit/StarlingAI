@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests } from "../agent/session.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   resetSessionsForTests();
 });
 
@@ -50,17 +51,53 @@ describe("AgentSession collapsed history", () => {
     });
 
     const prompt = session.getSystemPrompt();
+    const usesDirectMode = prompt.includes("Use direct tools first");
+    const usesDelegateMode = prompt.includes("Use specialist agents as the default execution path");
 
     expect(prompt).toContain("## Swarm Rules");
-    expect(prompt).toContain("Use direct tools first");
+    expect(usesDirectMode || usesDelegateMode).toBe(true);
     expect(prompt).toContain("ask one concise clarifying question instead of guessing");
-    expect(prompt).toContain("For mixed tasks, do the direct-tool portion first");
-    expect(prompt).toContain("For simple login or form tasks, prefer get_site_credentials plus the browser_* tools yourself");
-    expect(prompt).toContain("For file or image attachments, prefer extract_file_content or analyze_image first");
-    expect(prompt).toContain("Use these only when direct tools are not enough");
     expect(prompt).toContain("parallel_delegate");
     expect(prompt).toContain("Maximum 1 create_ephemeral_agent call per turn");
-    expect(prompt).toContain("Use application_pipeline only for its specific end-to-end browser workflow");
+    expect(prompt).toContain("## Orchestration Strategy");
+    expect(prompt).toContain("For workflows with explicit dependencies, use run_task_graph");
+    expect(prompt).toContain("After delegation(s) complete, synthesize results into one concise final answer immediately.");
+
+    if (usesDelegateMode) {
+      expect(prompt).toContain("Use delegate_to_agent for every non-trivial action");
+      expect(prompt).toContain("Complex work should flow through cooperating specialists that exchange facts via shared session memory");
+    }
+
+    expect(prompt.includes("## Available Sub-Agents") || prompt.includes("No specialist agents are configured.")).toBe(true);
+  });
+
+  it("refreshes stale embedded date lines in persisted system prompts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-26T12:00:00.000Z"));
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "Custom system prompt.\n\nToday's date: Friday, March 21, 2025",
+    });
+
+    const prompt = session.getSystemPrompt();
+
+    expect(prompt).toContain("Today's date: Thursday, March 26, 2026");
+    expect(prompt).not.toContain("2025");
+  });
+
+  it("refreshes managed default prompts for persisted sessions", () => {
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are StarlingAI, a pragmatic AI assistant that can work directly with built-in tools and coordinate specialized sub-agents when needed.\n\nToday's date: Friday, March 21, 2025",
+    });
+
+    const prompt = session.getSystemPrompt();
+
+    expect(prompt).toContain("computer-use tasks, not pentest tasks");
+    expect(prompt).toContain("prefer delegate_to_agent(agentName: \"computer_use_agent\", task: \"...\") first");
   });
 
   it("supports paged transcript retrieval for stored sessions", () => {

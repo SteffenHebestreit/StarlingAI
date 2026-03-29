@@ -6,10 +6,10 @@
  */
 
 import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
-import { runSubAgent } from "../agent/sub-agent.js";
+import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
-import { getChatProvider, getEmbeddingProvider } from "../providers/index.js";
+import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
@@ -258,7 +258,8 @@ function formatRoutingCandidate(candidate: AgentRoutingCandidate): string {
     ? `\n  Capabilities: ${candidate.capabilities.join(", ")}`
     : "";
   const costNote = candidate.costProfile ? formatCostProfile(candidate.costProfile) : "";
-  return `**${candidate.name}** (${candidate.model})\n  ${candidate.description}\n  Confidence: ${candidate.confidence}${capabilities}${matchLine}${costNote}`;
+  const scorePct = `${Math.round(candidate.score * 100)}%`;
+  return `**${candidate.name}** (${candidate.model})\n  ${candidate.description}\n  Confidence: ${candidate.confidence} (${scorePct} skill match)${capabilities}${matchLine}${costNote}`;
 }
 
 // ─── create_ephemeral_agent ───────────────────────────────────────────────────
@@ -276,6 +277,11 @@ const GRANTABLE_TOOLS = new Set([
   "mcp__playwright__browser_screenshot",
   "mcp__code_sandbox__run_js", "mcp__code_sandbox__run_ts",
   "mcp__filesystem__read_file", "mcp__filesystem__list_directory",
+  "computer_session_start", "computer_session_attach", "computer_session_stop",
+  "computer_list_nodes", "computer_snapshot", "computer_click", "computer_type", "computer_hotkey",
+  "computer_scroll", "computer_list_windows", "computer_focus_window",
+  "computer_capture_region",
+  "get_site_credentials", "site_fill_credentials", "computer_type_credential",
 ]);
 
 const EXECUTION_TOOL_FAMILIES = {
@@ -288,6 +294,10 @@ const EXECUTION_TOOL_FAMILIES = {
     "mcp__playwright__browser_screenshot",
   ]),
   code: new Set(["mcp__code_sandbox__run_js", "mcp__code_sandbox__run_ts"]),
+  computer: new Set([
+    "computer_session_start", "computer_click", "computer_type", "computer_type_credential",
+    "computer_hotkey", "computer_scroll", "computer_focus_window",
+  ]),
 };
 
 function validateEphemeralToolSelection(tools: string[]): string[] {
@@ -297,13 +307,16 @@ function validateEphemeralToolSelection(tools: string[]): string[] {
     issues.push("Ephemeral agents must have at least one valid tool.");
   }
 
-  if (tools.length > 6) {
-    issues.push("Ephemeral agents may grant at most 6 tools. Keep them narrowly specialized.");
+  const usesComputerTools = tools.some(t => EXECUTION_TOOL_FAMILIES.computer.has(t));
+  const toolCap = usesComputerTools ? 10 : 6;
+
+  if (tools.length > toolCap) {
+    issues.push(`Ephemeral agents may grant at most ${toolCap} tools. Keep them narrowly specialized.`);
   }
 
   const privilegedTools = tools.filter((toolName) => getToolTier(toolName).tier >= ToolTier.TWO_EXECUTE);
-  if (privilegedTools.length > 3) {
-    issues.push(`Ephemeral agents may grant at most 3 execution-capable tools, got ${privilegedTools.length}.`);
+  if (privilegedTools.length > 5) {
+    issues.push(`Ephemeral agents may grant at most 5 execution-capable tools, got ${privilegedTools.length}.`);
   }
 
   const selectedFamilies = Object.entries(EXECUTION_TOOL_FAMILIES)
@@ -327,6 +340,7 @@ interface DelegationRequest {
   context?: string;
   fallbackAgents?: string[];
   routingQuery?: string;
+  skillMatchThreshold?: number;
   taskId?: string;
   taskTitle?: string;
   dependsOn?: string[];
@@ -341,6 +355,117 @@ interface TaskGraphNodeInput {
   dependsOn?: string[];
   fallbackAgents?: string[];
   routingQuery?: string;
+  skillMatchThreshold?: number;
+}
+
+interface ArchitectEphemeralSpec {
+  agentName?: unknown;
+  description?: unknown;
+  systemPrompt?: unknown;
+  tools?: unknown;
+  maxIterations?: unknown;
+  model?: unknown;
+}
+
+function getEphemeralGenerationSettings() {
+  const config = getConfig();
+  return config.agents.ephemeralGeneration;
+}
+
+function resolveSkillMatchThreshold(override?: number): number {
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return Math.max(0, Math.min(1, override));
+  }
+  return getEphemeralGenerationSettings().skillMatchThreshold;
+}
+
+function shouldGenerateEphemeralAgent(bestScore: number | undefined, threshold: number): boolean {
+  return bestScore === undefined || bestScore < threshold;
+}
+
+function parseArchitectSpec(content: string): ArchitectEphemeralSpec {
+  const trimmed = content.trim();
+  const jsonStr = trimmed.startsWith("{")
+    ? trimmed
+    : trimmed.slice(trimmed.indexOf("{"));
+  return JSON.parse(jsonStr) as ArchitectEphemeralSpec;
+}
+
+function buildArchitectPrompt(task: string): string {
+  const toolList = [...GRANTABLE_TOOLS].join(", ");
+  const defaultModel = getConfig().agents.defaults.model.primary;
+  return [
+    "You are an agent architect. Design a minimal, focused ephemeral agent to complete the given task.",
+    "Return valid JSON only. Do not include markdown fences or commentary.",
+    "",
+    `Available tools: ${toolList}`,
+    `Default model: ${defaultModel}`,
+    "",
+    "Rules:",
+    "- Choose at most 4 tools (up to 6 for computer-use tasks).",
+    "- Do NOT mix execution families: shell (shell_exec, run_script), browser (mcp__playwright__*), and code (mcp__code_sandbox__*) are separate families — pick at most one.",
+    "- Keep systemPrompt concise (under 200 words). State the role, key rules, and a tool budget.",
+    "- maxIterations must be between 3 and 8 for non-computer tasks. For computer-use tasks (tools starting with computer_), use 10-15 iterations because each screen interaction needs snapshot+action+verify cycles.",
+    "- For computer-use agents: include 'Do NOT call the same tool with identical arguments twice in a row' in the systemPrompt. The session is already started — begin with computer_list_windows, not computer_session_start.",
+    "- Choose a model appropriate for the task. Use a single string model id in model.primary when you want to override the default.",
+    "",
+    "Schema:",
+    "{",
+    '  "agentName": "<snake_case_name>",',
+    '  "description": "<one line>",',
+    '  "systemPrompt": "<instructions>",',
+    '  "tools": ["<tool1>", "<tool2>"],',
+    '  "maxIterations": 5,',
+    '  "model": { "primary": "<optional model id>", "temperature": 0.1, "maxTokens": 4000 }',
+    "}",
+    "",
+    `Task: ${task.slice(0, 1200)}`,
+  ].join("\n");
+}
+
+async function requestArchitectSpec(task: string, ctx: ToolContext): Promise<ArchitectEphemeralSpec | null> {
+  const settings = getEphemeralGenerationSettings();
+  const architectAgentName = settings.architectAgentName;
+  const architectPrompt = buildArchitectPrompt(task);
+
+  try {
+    const response = await runSubAgent({
+      agentName: architectAgentName,
+      task: architectPrompt,
+      parentSessionId: ctx.sessionId,
+      workspacePath: ctx.workspacePath,
+      signal: ctx.signal,
+      approvalCallback: ctx.approvalCallback,
+      humanInLoopSteps: ctx.humanInLoopSteps,
+      maxIterationsOverride: ctx.maxIterationsOverride,
+    });
+    return parseArchitectSpec(response);
+  } catch (error) {
+    logAudit(
+      "architect_fallback_failed",
+      { reason: "architect_agent_error", architectAgentName, err: String(error) },
+      { sessionId: ctx.sessionId, severity: "warn" },
+    );
+    return null;
+  }
+}
+
+function normalizeArchitectModel(model: unknown): import("../config/schema.js").SubAgentConfig["model"] {
+  if (!model) return undefined;
+  if (typeof model === "string" && model.trim()) {
+    return { primary: model.trim() };
+  }
+  if (typeof model !== "object") return undefined;
+  const raw = model as Record<string, unknown>;
+  const primary = typeof raw.primary === "string" && raw.primary.trim() ? raw.primary.trim() : undefined;
+  const temperature = typeof raw.temperature === "number" ? raw.temperature : undefined;
+  const maxTokens = typeof raw.maxTokens === "number" ? raw.maxTokens : undefined;
+  if (!primary && temperature === undefined && maxTokens === undefined) return undefined;
+  return {
+    ...(primary ? { primary } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+  };
 }
 
 function publishSwarmState(ctx: ToolContext): void {
@@ -398,9 +523,43 @@ function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskSt
   return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
 }
 
-function looksLikeFailureResult(result: string): boolean {
+function looksLikePlanningOnlyResult(result: string): boolean {
+  const preview = result.slice(0, 600).trim();
+  if (!preview) return false;
+
+  const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
+  if (!startsLikePlanning) return false;
+
+  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create)\b/i.test(preview);
+  if (!planningAction) return false;
+
+  const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
+  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|failed|error|could not|did not)\b/i.test(preview);
+  return !terminalMarker && (unresolvedMarker || preview.length <= 220);
+}
+
+export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
-  return /\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(result.slice(0, 600));
+  const preview = result.slice(0, 600);
+  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
+    return true;
+  }
+
+  if (/\b(need to start a session|no computer_session_start|not available in my tool list|available tools are only|missing tool|cannot complete because .*tool)\b/i.test(preview)) {
+    return true;
+  }
+
+  return looksLikePlanningOnlyResult(preview);
+}
+
+/**
+ * Detect infrastructure-level failures where retrying via a different agent
+ * or ephemeral agent cannot succeed (host unreachable, service down, etc.).
+ */
+export function looksLikeInfrastructureFailure(result: string): boolean {
+  if (!result.trim()) return false;
+  const preview = result.slice(0, 800);
+  return /\b(timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -474,63 +633,13 @@ function maybePromoteEphemeral(
  */
 async function runArchitectFallback(task: string, ctx: ToolContext): Promise<ToolResult | null> {
   const config = getConfig();
-  let provider;
-  try {
-    provider = getChatProvider();
-  } catch {
+  const settings = getEphemeralGenerationSettings();
+  if (!settings.enabled) {
     return null;
   }
 
-  const toolList = [...GRANTABLE_TOOLS].join(", ");
-  const architectSystemPrompt = [
-    "You are an agent architect. Design a minimal, focused ephemeral agent to complete the given task.",
-    "",
-    `Available tools: ${toolList}`,
-    "",
-    "Rules:",
-    "- Choose at most 4 tools.",
-    "- Do NOT mix execution families: shell (shell_exec, run_script), browser (mcp__playwright__*), and code (mcp__code_sandbox__*) are separate families — pick at most one.",
-    "- Keep systemPrompt concise (under 200 words). State the role, key rules, and a tool budget.",
-    "- maxIterations must be between 3 and 8.",
-    "",
-    "Respond with valid JSON only — no markdown, no explanation:",
-    "{",
-    '  "agentName": "<snake_case_name>",',
-    '  "description": "<one line>",',
-    '  "systemPrompt": "<instructions>",',
-    '  "tools": ["<tool1>", ...],',
-    '  "maxIterations": <number>',
-    "}",
-  ].join("\n");
-
-  let spec: {
-    agentName?: unknown;
-    description?: unknown;
-    systemPrompt?: unknown;
-    tools?: unknown;
-    maxIterations?: unknown;
-  };
-
-  try {
-    const response = await provider.complete(
-      [
-        { role: "system", content: architectSystemPrompt },
-        { role: "user", content: `Task: ${task.slice(0, 600)}` },
-      ],
-      [],
-    );
-    const content = (response.content ?? "").trim();
-    // Strip markdown fences if the model wrapped the JSON anyway
-    const jsonStr = content.startsWith("{")
-      ? content
-      : content.slice(content.indexOf("{"));
-    spec = JSON.parse(jsonStr) as typeof spec;
-  } catch (err) {
-    logAudit(
-      "architect_fallback_failed",
-      { reason: "llm_or_parse_error", err: String(err) },
-      { sessionId: ctx.sessionId, severity: "warn" },
-    );
+  const spec = await requestArchitectSpec(task, ctx);
+  if (!spec) {
     return null;
   }
 
@@ -542,7 +651,11 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   const description = String(spec.description ?? agentName);
   const rawTools = Array.isArray(spec.tools) ? spec.tools.map(String) : [];
   const tools = rawTools.filter(t => GRANTABLE_TOOLS.has(t));
-  const maxIterations = Math.min(8, Math.max(1, Number(spec.maxIterations ?? 5) || 5));
+  const usesComputerTools = tools.some(t => EXECUTION_TOOL_FAMILIES.computer.has(t));
+  const iterCap = usesComputerTools ? 20 : 8;
+  const iterFloor = usesComputerTools ? 8 : 1;
+  const maxIterations = Math.min(iterCap, Math.max(iterFloor, Number(spec.maxIterations ?? (usesComputerTools ? 12 : 5)) || 5));
+  const model = normalizeArchitectModel(spec.model);
 
   const policyIssues = validateEphemeralToolSelection(tools);
   if (policyIssues.length > 0 || !systemPrompt) {
@@ -561,19 +674,21 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
     systemPrompt,
     tools,
     maxIterations,
+    model,
   };
 
   const ephemeralName = `ephemeral:${agentName}`;
 
   logAudit(
     "architect_fallback_started",
-    { agentName: ephemeralName, tools, maxIterations },
+    { agentName: ephemeralName, tools, maxIterations, model: model?.primary ?? null, architectAgentName: settings.architectAgentName },
     { sessionId: ctx.sessionId },
   );
 
   let result: string;
+  let terminalState: string | undefined;
   try {
-    result = await runSubAgent({
+    const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
       parentSessionId: ctx.sessionId,
@@ -583,6 +698,8 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
       humanInLoopSteps: ctx.humanInLoopSteps,
       inlineConfig,
     });
+    result = runResult.output;
+    terminalState = runResult.stats.terminalState;
   } catch (err) {
     logAudit(
       "architect_fallback_failed",
@@ -592,11 +709,13 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
     return null;
   }
 
-  const success = !looksLikeFailureResult(result);
+  const success = terminalState === undefined || terminalState === "completed"
+    ? !looksLikeFailureResult(result)
+    : false;
 
   logAudit(
     "architect_fallback_completed",
-    { agentName: ephemeralName, success, resultLength: result.length },
+    { agentName: ephemeralName, success, resultLength: result.length, terminalState: terminalState ?? null },
     { sessionId: ctx.sessionId },
   );
 
@@ -620,6 +739,8 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
 async function executeDelegationWithFallback(request: DelegationRequest, ctx: ToolContext): Promise<ToolResult> {
   const title = request.taskTitle ?? summarizeText(request.task, 80);
   const signature = buildTaskSignature(title, request.task, request.dependsOn ?? []);
+  const skillMatchThreshold = resolveSkillMatchThreshold(request.skillMatchThreshold);
+  const explicitAgentRequested = typeof request.agentName === "string" && request.agentName.trim().length > 0;
   const reusableTask = request.taskId ? undefined : findReusableSwarmTask(ctx, signature);
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
@@ -645,6 +766,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
         reused: true,
         inFlight: true,
+      },
+    };
+  }
+
+  if (!request.taskId && reusableTask?.status === "failed") {
+    const attemptedAgents = reusableTask.attempts.map((attempt) => attempt.agentName);
+    return {
+      success: false,
+      output: "",
+      error: `Delegation for task '${title}' already failed earlier in this turn${attemptedAgents.length > 0 ? ` after trying ${attemptedAgents.join(", ")}` : ""}. Do not retry the same task verbatim. ${reusableTask.error ?? "Use a different agent or provide a more specific task."}`,
+      metadata: {
+        agentName: reusableTask.selectedAgent,
+        taskId: reusableTask.id,
+        attemptedAgents,
+        reused: true,
+        priorFailure: true,
       },
     };
   }
@@ -681,6 +818,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     ...(request.fallbackAgents ?? []),
   ]);
   let biddingTried = false;
+  let bestAutoMatchScore: number | undefined;
+  let lastFailureWasInfrastructure = false;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
 
@@ -721,6 +860,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
         const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
+        if (shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+          candidateQueue = [];
+        } else {
         for (const bid of bids) {
           routingCandidateMap.set(bid.agentName, {
             confidence: bid.confidence,
@@ -729,18 +872,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           });
         }
         candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
+        }
       }
 
       if (candidateQueue.length === 0) {
         const routingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
-          routingCandidateMap.set(topCandidate.name, {
-            confidence: topCandidate.confidence,
-            matchedTerms: topCandidate.matchedTerms,
-            score: topCandidate.score,
-          });
-          candidateQueue.push(topCandidate.name);
+          bestAutoMatchScore = topCandidate.score;
+          if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+            routingCandidateMap.set(topCandidate.name, {
+              confidence: topCandidate.confidence,
+              matchedTerms: topCandidate.matchedTerms,
+              score: topCandidate.score,
+            });
+            candidateQueue.push(topCandidate.name);
+          }
         }
       }
 
@@ -792,7 +939,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ? `${sharedCtx}\n\n---\n\n${request.context ?? ""}`.trim()
         : request.context;
 
-      const output = await runSubAgent({
+      const subAgentArgs = {
         agentName: candidate,
         task: request.task,
         context: enrichedContext,
@@ -801,10 +948,39 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,
         humanInLoopSteps: ctx.humanInLoopSteps,
+        onComputerAction: ctx.onComputerAction,
+        onComputerScreenshot: ctx.onComputerScreenshot,
+        onComputerSessionState: ctx.onComputerSessionState,
         maxIterationsOverride: ctx.maxIterationsOverride,
-      });
+      };
 
-      const weak = looksLikeFailureResult(output);
+      let output: string;
+      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string } | undefined;
+
+      if (typeof runSubAgentWithStats === "function") {
+        const maybeResult = await runSubAgentWithStats(subAgentArgs);
+        if (
+          maybeResult
+          && typeof maybeResult.output === "string"
+          && maybeResult.stats
+          && Array.isArray(maybeResult.stats.toolNames)
+        ) {
+          output = maybeResult.output;
+          stats = maybeResult.stats;
+        } else {
+          output = await runSubAgent(subAgentArgs);
+        }
+      } else {
+        output = await runSubAgent(subAgentArgs);
+      }
+
+      if (stats) {
+        attempt.toolCount = stats.toolCount;
+        attempt.iterations = stats.iterations;
+        attempt.toolNames = [...stats.toolNames];
+      }
+
+      const weak = (stats?.terminalState !== undefined && stats.terminalState !== "completed") || looksLikeFailureResult(output);
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
 
@@ -812,9 +988,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.status = "failed";
         taskState.error = summarizeText(output);
         taskState.status = "failed";
+        lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
         publishSwarmState(ctx);
         emitSwarmEvent("task_failed", { sessionId: ctx.sessionId, taskId, agentName: candidate, data: { reason: "weak_result" } });
         if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+        // Infrastructure failures cannot be solved by a different agent — stop immediately
+        if (lastFailureWasInfrastructure) break;
         continue;
       }
 
@@ -865,7 +1044,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // ── Architect fallback ────────────────────────────────────────────────────
   // When routing found zero candidates (no agent was even tried), ask the LLM
   // architect to design a purpose-built ephemeral agent for this task.
-  if (attemptedAgents.length === 0) {
+  // Skip architect if the failure was infrastructure-level (host unreachable, etc.) —
+  // an ephemeral agent would face the exact same connectivity problem.
+  if (!explicitAgentRequested && !lastFailureWasInfrastructure && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))) {
     const architectResult = await runArchitectFallback(request.task, ctx);
     if (architectResult) {
       clearTaskBids(taskId);
@@ -876,7 +1057,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       publishSwarmState(ctx);
       return {
         ...architectResult,
-        metadata: { ...architectResult.metadata, taskId, attemptedAgents },
+        metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore },
       };
     }
   }
@@ -971,6 +1152,7 @@ registerTool({
             dependsOn: { type: "array", items: { type: "string" } },
             fallbackAgents: { type: "array", items: { type: "string" } },
             routingQuery: { type: "string" },
+            skillMatchThreshold: { type: "number" },
           },
           required: ["id", "task"],
         },
@@ -1077,6 +1259,7 @@ registerTool({
           context: node.context,
           fallbackAgents: node.fallbackAgents,
           routingQuery: node.routingQuery,
+          skillMatchThreshold: node.skillMatchThreshold,
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
@@ -1414,6 +1597,10 @@ registerTool({
         type: "string",
         description: "Optional routing query used to auto-select fallback agents when the primary path fails.",
       },
+      skillMatchThreshold: {
+        type: "number",
+        description: "Optional 0-1 threshold. If the best auto-selected specialist scores below this value, generate an ephemeral agent instead.",
+      },
     },
     required: ["agentName", "task"],
   },
@@ -1423,6 +1610,7 @@ registerTool({
     const context = args["context"] ? String(args["context"]) : undefined;
     const fallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
+    const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
 
     if (!agentName) {
       return { success: false, output: "", error: "agentName is required" };
@@ -1446,6 +1634,7 @@ registerTool({
       context,
       fallbackAgents,
       routingQuery,
+      skillMatchThreshold,
       taskTitle: summarizeText(task, 80),
     }, ctx);
   },
@@ -1469,6 +1658,7 @@ registerTool({
             context: { type: "string", description: "Optional context to pass to this agent" },
             fallbackAgents: { type: "array", items: { type: "string" }, description: "Optional fallback agents for this task" },
             routingQuery: { type: "string", description: "Optional routing query for self-healing fallback selection" },
+            skillMatchThreshold: { type: "number", description: "Optional 0-1 threshold for generating an ephemeral agent when no specialist matches strongly enough" },
           },
           required: ["task"],
         },
@@ -1479,7 +1669,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const tasks = Array.isArray(args["tasks"])
-      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string }>)
+      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string; skillMatchThreshold?: number }>)
       : [];
 
     if (tasks.length === 0) return { success: false, output: "", error: "tasks array must not be empty" };

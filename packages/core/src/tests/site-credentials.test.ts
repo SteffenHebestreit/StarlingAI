@@ -51,4 +51,55 @@ describe("site credential resolution", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("keeps stored usernames and passwords out of get_site_credentials output", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-tool-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      sites: {
+        "n8n.k2o": {
+          username: "info@steffen-hebestreit.com",
+          password: "$N8N_PASSWORD",
+          loginUrl: "http://n8n.k2o/login",
+          usernameSelector: "#email",
+          passwordSelector: "#password",
+          submitSelector: "button[type=submit]",
+          notes: "Use the workspace account",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["N8N_PASSWORD"] = "super-secret";
+    vi.resetModules();
+
+    try {
+      const [{ executeTool }, _credentialTools] = await Promise.all([
+        import("../tools/registry.js"),
+        import("../tools/credentials.js"),
+      ]);
+
+      const result = await executeTool(
+        "get_site_credentials",
+        { hostname: "n8n" },
+        { sessionId: "session-credentials", workspacePath: tempDir },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("**Site:** n8n.k2o");
+      expect(result.output).toContain("site_fill_credentials");
+      expect(result.output).toContain("**Username selector:** `#email`");
+      expect(result.output).not.toContain("info@steffen-hebestreit.com");
+      expect(result.output).not.toContain("super-secret");
+      expect(result.metadata).toMatchObject({
+        hostname: "n8n.k2o",
+        hasLoginUrl: true,
+        hasSelectors: true,
+        source: "config",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -10,10 +10,19 @@
  *   rate_limit_flood        — a channel sender is rate-limited ≥5 times within 1 minute
  *   repeated_identical_output — a tool returns the same output ≥3 times in a row (loop)
  *
+ * Computer-use anomalies (Stage 9):
+ *   computer_focus_thrashing      — ≥10 focus switches in 1 minute
+ *   computer_click_storm          — ≥30 clicks in 1 minute → revokes lease auto-approve
+ *   computer_credential_prompt_loop — ≥3 credential dialogs in 5 min → emergency stop
+ *   computer_clipboard_exfiltration — ≥5 clipboard reads in 1 min → emergency stop
+ *   computer_stale_loop           — 3 identical screenshot hashes in a row
+ *
  * On detection:
  *   - A `warden_alert` audit event is emitted (visible in dashboard and JSONL).
  *   - For `repeated_failures` and `tool_escape_attempt`, synthetic failure
  *     outcomes are appended to the outcome log so the circuit breaker can trip.
+ *   - For computer anomalies, sessions may be emergency-stopped or have their
+ *     lease auto-approve revoked depending on severity.
  *
  * The Warden runs a lightweight 30-second sweep interval and an in-memory event
  * listener.  It does not hit any external service.
@@ -24,6 +33,7 @@ import { appendOutcome } from "./outcomes.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { buildWardenIntervention, type InterventionNotice } from "./interventions.js";
+import { computerSessionManager } from "./computer-session.js";
 
 const log = childLogger("agent:warden");
 
@@ -41,6 +51,21 @@ const ESCAPE_THRESHOLD = 3;                    // blocked tool attempts per sub-
 
 const RATE_FLOOD_WINDOW_MS = 60 * 1_000;       // 1 min
 const RATE_FLOOD_THRESHOLD = 5;                // rate-limit hits per sender
+
+// Computer-use anomaly windows
+const COMPUTER_FOCUS_WINDOW_MS = 60 * 1_000;    // 1 min
+const COMPUTER_FOCUS_THRESHOLD = 10;             // focus switches per session
+
+const COMPUTER_CLICK_WINDOW_MS = 60 * 1_000;    // 1 min
+const COMPUTER_CLICK_THRESHOLD = 30;             // clicks per session
+
+const COMPUTER_CREDENTIAL_WINDOW_MS = 5 * 60 * 1_000; // 5 min
+const COMPUTER_CREDENTIAL_THRESHOLD = 3;         // credential prompt detections
+
+const COMPUTER_CLIPBOARD_WINDOW_MS = 60 * 1_000; // 1 min
+const COMPUTER_CLIPBOARD_THRESHOLD = 5;           // clipboard reads per session
+
+const COMPUTER_STALE_LOOP_THRESHOLD = 3;          // identical screenshots in a row
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -65,6 +90,21 @@ const _rateLimitHits = new Map<string, number[]>();
  */
 const _sloBreaches = new Map<string, { turnDurationMs: number; firstTokenMs?: number; sloBudgetMs: number }>();
 
+/** computerSessionId → focus-switch timestamps */
+const _computerFocusSwitches = new Map<string, number[]>();
+
+/** computerSessionId → click timestamps */
+const _computerClicks = new Map<string, number[]>();
+
+/** computerSessionId → credential prompt detection timestamps */
+const _computerCredentialPrompts = new Map<string, number[]>();
+
+/** computerSessionId → clipboard read timestamps */
+const _computerClipboardReads = new Map<string, number[]>();
+
+/** computerSessionId → last N screenshot hashes (ring buffer for stale detection) */
+const _computerScreenshotHashes = new Map<string, string[]>();
+
 let _alertsEmitted = 0;
 let _wardenInterval: ReturnType<typeof setInterval> | null = null;
 let _unsubscribeAudit: (() => void) | null = null;
@@ -72,11 +112,11 @@ let _unsubscribeAudit: (() => void) | null = null;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop";
   severity: "warn" | "error";
   subject: string;
   detail: string;
-  action: "logged" | "circuit_tripped";
+  action: "logged" | "circuit_tripped" | "session_emergency_stopped" | "lease_auto_revoked";
   intervention?: InterventionNotice;
 }
 
@@ -144,6 +184,53 @@ export function startWarden(): void {
         hits.push(now);
         _rateLimitHits.set(key, hits);
       }
+    }
+
+    // ── Computer-use action accumulation ────────────────────────────────────
+    if (event.type === "computer_action" && event.data["computerSessionId"]) {
+      const csId = String(event.data["computerSessionId"]);
+      const actionType = String(event.data["actionType"] ?? "");
+
+      // Focus switch tracking
+      if (actionType === "focus_window") {
+        const hits = _computerFocusSwitches.get(csId) ?? [];
+        hits.push(now);
+        _computerFocusSwitches.set(csId, hits);
+      }
+
+      // Click tracking
+      if (actionType === "click") {
+        const hits = _computerClicks.get(csId) ?? [];
+        hits.push(now);
+        _computerClicks.set(csId, hits);
+      }
+
+      // Clipboard read tracking
+      if (actionType === "clipboard_read") {
+        const hits = _computerClipboardReads.get(csId) ?? [];
+        hits.push(now);
+        _computerClipboardReads.set(csId, hits);
+      }
+
+      // Screenshot hash tracking for stale loop detection
+      if (event.data["screenshotHash"]) {
+        const hash = String(event.data["screenshotHash"]);
+        const hashes = _computerScreenshotHashes.get(csId) ?? [];
+        hashes.push(hash);
+        // Keep only the last COMPUTER_STALE_LOOP_THRESHOLD + 1 entries
+        if (hashes.length > COMPUTER_STALE_LOOP_THRESHOLD + 1) {
+          hashes.splice(0, hashes.length - (COMPUTER_STALE_LOOP_THRESHOLD + 1));
+        }
+        _computerScreenshotHashes.set(csId, hashes);
+      }
+    }
+
+    // Credential prompt detection (emitted by vision pipeline)
+    if (event.type === "computer_credential_prompt_detected" && event.data["computerSessionId"]) {
+      const csId = String(event.data["computerSessionId"]);
+      const hits = _computerCredentialPrompts.get(csId) ?? [];
+      hits.push(now);
+      _computerCredentialPrompts.set(csId, hits);
     }
 
     // ── Identical output loop detection ──────────────────────────────────────
@@ -234,6 +321,11 @@ export function resetWardenForTests(): void {
   _rateLimitHits.clear();
   _sloBreaches.clear();
   _toolIssuesBySession.clear();
+  _computerFocusSwitches.clear();
+  _computerClicks.clear();
+  _computerCredentialPrompts.clear();
+  _computerClipboardReads.clear();
+  _computerScreenshotHashes.clear();
   _alertsEmitted = 0;
 }
 
@@ -376,6 +468,121 @@ function sweepAnomalies(): WardenAlert[] {
       emitAlert(alert);
       alerts.push(alert);
       _rateLimitHits.set(key, []);
+    }
+  }
+
+  // 6. Computer focus thrashing ──────────────────────────────────────────────
+  for (const [csId, timestamps] of _computerFocusSwitches) {
+    const recent = timestamps.filter(t => now - t < COMPUTER_FOCUS_WINDOW_MS);
+    if (recent.length === 0) {
+      _computerFocusSwitches.delete(csId);
+      continue;
+    }
+    _computerFocusSwitches.set(csId, recent);
+
+    if (recent.length >= COMPUTER_FOCUS_THRESHOLD) {
+      const alert = makeAlert(
+        "computer_focus_thrashing",
+        "warn",
+        csId,
+        `Computer session ${csId.slice(0, 20)} switched focus ${recent.length} times in 1 minute`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      _computerFocusSwitches.set(csId, []);
+    }
+  }
+
+  // 7. Computer click storm ──────────────────────────────────────────────────
+  for (const [csId, timestamps] of _computerClicks) {
+    const recent = timestamps.filter(t => now - t < COMPUTER_CLICK_WINDOW_MS);
+    if (recent.length === 0) {
+      _computerClicks.delete(csId);
+      continue;
+    }
+    _computerClicks.set(csId, recent);
+
+    if (recent.length >= COMPUTER_CLICK_THRESHOLD) {
+      computerSessionManager.revokeLeaseAutoApprove(csId);
+      const alert = makeAlert(
+        "computer_click_storm",
+        "warn",
+        csId,
+        `Computer session ${csId.slice(0, 20)} produced ${recent.length} clicks in 1 minute — lease auto-approve revoked`,
+        "lease_auto_revoked",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      _computerClicks.set(csId, []);
+    }
+  }
+
+  // 8. Computer credential prompt loop ───────────────────────────────────────
+  for (const [csId, timestamps] of _computerCredentialPrompts) {
+    const recent = timestamps.filter(t => now - t < COMPUTER_CREDENTIAL_WINDOW_MS);
+    if (recent.length === 0) {
+      _computerCredentialPrompts.delete(csId);
+      continue;
+    }
+    _computerCredentialPrompts.set(csId, recent);
+
+    if (recent.length >= COMPUTER_CREDENTIAL_THRESHOLD) {
+      computerSessionManager.emergencyStop(csId, "warden:credential_prompt_loop");
+      const alert = makeAlert(
+        "computer_credential_prompt_loop",
+        "error",
+        csId,
+        `Computer session ${csId.slice(0, 20)} encountered ${recent.length} credential prompts in 5 minutes — session emergency-stopped`,
+        "session_emergency_stopped",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      _computerCredentialPrompts.delete(csId);
+    }
+  }
+
+  // 9. Computer clipboard exfiltration ───────────────────────────────────────
+  for (const [csId, timestamps] of _computerClipboardReads) {
+    const recent = timestamps.filter(t => now - t < COMPUTER_CLIPBOARD_WINDOW_MS);
+    if (recent.length === 0) {
+      _computerClipboardReads.delete(csId);
+      continue;
+    }
+    _computerClipboardReads.set(csId, recent);
+
+    if (recent.length >= COMPUTER_CLIPBOARD_THRESHOLD) {
+      computerSessionManager.emergencyStop(csId, "warden:clipboard_exfiltration");
+      const alert = makeAlert(
+        "computer_clipboard_exfiltration",
+        "error",
+        csId,
+        `Computer session ${csId.slice(0, 20)} read clipboard ${recent.length} times in 1 minute — session emergency-stopped`,
+        "session_emergency_stopped",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      _computerClipboardReads.delete(csId);
+    }
+  }
+
+  // 10. Computer stale loop ──────────────────────────────────────────────────
+  for (const [csId, hashes] of _computerScreenshotHashes) {
+    if (hashes.length >= COMPUTER_STALE_LOOP_THRESHOLD) {
+      const tail = hashes.slice(-COMPUTER_STALE_LOOP_THRESHOLD);
+      const allSame = tail.every(h => h === tail[0]);
+      if (allSame) {
+        const alert = makeAlert(
+          "computer_stale_loop",
+          "warn",
+          csId,
+          `Computer session ${csId.slice(0, 20)} produced ${COMPUTER_STALE_LOOP_THRESHOLD} identical screenshots — agent may be stuck`,
+          "logged",
+        );
+        emitAlert(alert);
+        alerts.push(alert);
+        _computerScreenshotHashes.set(csId, []);
+      }
     }
   }
 

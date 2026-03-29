@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, watch } from "vue";
-import { useGatewayStore } from "./gateway.js";
+import { useGatewayStore } from "./gateway";
 
 export interface AuditEvent {
   id: string;

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import JSON5 from "json5";
 
 describe("config loader mutable overlay", () => {
   afterEach(async () => {
@@ -110,5 +111,21 @@ describe("config loader mutable overlay", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("ships a pentest coordinator prompt that forbids false start claims", () => {
+    const rootConfigPath = resolve(process.cwd(), "../../starlingai.example.json");
+    const raw = JSON5.parse(readFileSync(rootConfigPath, "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string }>;
+    };
+
+    const prompt = raw.subAgents?.["pentest_coordinator"]?.systemPrompt ?? "";
+
+    expect(prompt).toContain("your next response MUST be a tool call, not a status update");
+    expect(prompt).toContain("Never say the pentest has started");
+    expect(prompt).toContain("successful pentest_set_scope call");
+    expect(prompt).toContain("successful delegation/orchestration call in the same turn");
+    expect(prompt).toContain("treat that as sufficient and do not ask the user to confirm it again");
+    expect(prompt).toContain("Do not invent ad-hoc specialists");
   });
 });

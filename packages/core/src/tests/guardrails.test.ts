@@ -96,11 +96,15 @@ describe("tool-tiers", () => {
     expect(getToolTier("shell_exec").tier).toBe(ToolTier.TWO_EXECUTE);
   });
 
-  it("keeps browser mutation tools approval-gated", () => {
+  it("keeps browser mutation tools and credential injection approval-gated", () => {
     expect(getToolTier("browser_click").tier).toBe(ToolTier.TWO_EXECUTE);
     expect(getToolTier("browser_click").requiresPerCallApproval).toBe(true);
     expect(getToolTier("browser_type").requiresPerCallApproval).toBe(true);
-    expect(getToolTier("get_site_credentials").requiresPerCallApproval).toBe(true);
+    // get_site_credentials is now read-only (no secrets exposed)
+    expect(getToolTier("get_site_credentials").requiresPerCallApproval).toBe(false);
+    // The new credential injection tools require approval
+    expect(getToolTier("site_fill_credentials").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("computer_type_credential").requiresPerCallApproval).toBe(true);
   });
 
   it("classifies bridged MCP tools as privileged", () => {

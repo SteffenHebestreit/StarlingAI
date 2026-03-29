@@ -98,7 +98,7 @@ When the gateway runs in Docker Compose, use internal service names instead of `
       "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
       "baseUrl": "http://host.docker.internal:1234/v1",
       "apiKey": "lm-studio",
-      "embeddingModel": "lmstudio/Qwen/Qwen3-Embedding-8B",
+      "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
       "embeddingBaseUrl": "http://qwen3-embedding-openai:8000/v1",
       "embeddingApiKey": "local-embed"
     }

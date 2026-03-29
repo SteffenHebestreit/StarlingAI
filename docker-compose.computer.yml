@@ -1,0 +1,44 @@
+# docker-compose.computer.yml
+# Overlay for computer-use desktop environment.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.computer.yml up -d
+#
+# This adds an ephemeral XFCE desktop accessible via VNC on port 5901.
+# The gateway service gains access to the desktop for computer-use agents.
+
+name: starlingai
+
+services:
+  # ── Ephemeral desktop for computer-use ────────────────────────────────────
+  computer-desktop:
+    build:
+      context: .
+      dockerfile: docker/computer-desktop/Dockerfile
+    image: starlingai/computer-desktop:dev
+    restart: unless-stopped
+    ports:
+      - "${COMPUTER_VNC_PORT:-5901}:5901"
+    environment:
+      - VNC_RESOLUTION=${COMPUTER_VNC_RESOLUTION:-1920x1080}
+      - VNC_COLOR_DEPTH=24
+    volumes:
+      - computer-workspace:/home/agent/workspace
+    networks:
+      - default
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  # ── Extend gateway with computer-desktop network access ───────────────────
+  gateway:
+    environment:
+      - SAI_COMPUTER_VNC_HOST=computer-desktop
+      - SAI_COMPUTER_VNC_PORT=5901
+    depends_on:
+      - computer-desktop
+
+volumes:
+  computer-workspace:

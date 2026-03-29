@@ -7,6 +7,22 @@ const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; t
 
 vi.mock("../agent/sub-agent.js", () => ({
   runSubAgent: runSubAgentMock,
+  runSubAgentWithStats: vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+    output: await runSubAgentMock(args),
+    stats: {
+      agentName: args.agentName,
+      sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+      promptChars: 0,
+      userContentChars: String(args.task ?? "").length,
+      toolCount: 0,
+      toolNames: [],
+      iterations: 0,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      maxIterations: 5,
+      model: "mock",
+      capabilities: [],
+    },
+  })),
 }));
 
 describe("swarm autonomous bidding", () => {

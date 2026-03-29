@@ -67,6 +67,16 @@ export const RateLimitSchema = z.object({
   windowMs: z.number().int().min(10_000).max(600_000).default(60_000),
 });
 
+export const MainAssistantConfigSchema = z.object({
+  toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("hybrid"),
+});
+
+export const EphemeralGenerationSchema = z.object({
+  enabled: z.boolean().default(true),
+  skillMatchThreshold: z.number().min(0).max(1).default(0.75),
+  architectAgentName: z.string().min(1).default("agent_architect"),
+});
+
 export const ChannelWebChatSchema = z.object({
   enabled: z.boolean().default(true),
   port: z.number().int().min(1024).max(65535).default(3001),
@@ -361,7 +371,7 @@ export const SubAgentConfigSchema = z.object({
   model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all
-  maxIterations: z.number().int().min(1).max(20).default(5), // hard cap on tool-call loops
+  maxIterations: z.number().int().min(1).max(30).default(5), // hard cap on tool-call loops
   turnTimeoutMs: z.number().int().min(1_000).max(900_000).optional(), // optional per-agent wall-clock turn timeout
   maxConcurrent: z.number().int().min(1).max(20).optional(), // max simultaneous containers (default: 3)
   container: SubAgentContainerSchema.optional(),    // run in ephemeral Docker container
@@ -586,6 +596,8 @@ export const ConfigSchema = z.object({
     defaults: z.object({
       model: ModelConfigSchema.default({}),
     }).default({}),
+    mainAssistant: MainAssistantConfigSchema.default({}),
+    ephemeralGeneration: EphemeralGenerationSchema.default({}),
     rateLimit: RateLimitSchema.default({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),
@@ -616,6 +628,8 @@ export const ConfigSchema = z.object({
   approvalChannels: ApprovalChannelsSchema.default({}),
   infrastructure: InfrastructureSchema.default({}),
   pentest: PentestSchema.default({}),
+  /** Computer use configuration — validated separately by Joi, passed through by Zod. */
+  computerUse: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
 });
 

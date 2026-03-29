@@ -3,7 +3,7 @@
 {
   "providers": {
     "lmstudio": {
-      "baseUrl": "http://host.docker.internal:1234/v1",
+      "baseUrl": "http://10.10.0.2:1234/v1",
       "apiKey": "lm-studio",
       "timeoutMs": 30000,
       "maxRetries": 3
@@ -21,15 +21,23 @@
   },
 
   "agents": {
+    "mainAssistant": {
+      "toolMode": "hybrid"
+    },
     "defaults": {
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "fallback": "lmstudio/qwen/qwen3.5-9b",
+        "fallback": "lmstudio/qwen3.5-4b",
         "contextWindow": 32768,
         "temperature": 0.3,
         "maxTokens": 4096,
-        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-8b"
+        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b"
       }
+    },
+    "ephemeralGeneration": {
+      "enabled": true,
+      "skillMatchThreshold": 0.75,
+      "architectAgentName": "agent_architect"
     },
     "rateLimit": {
       "requestsPerMinute": 60,
@@ -54,6 +62,72 @@
     //   "apiKey": "lm-studio",
     //   "model": "Qwen/Qwen3-Reranker-4B"
     // }
+  },
+
+  "computerUse": {
+    "enabled": true,
+    // "visionModel": "lmstudio/qwen2-vl-7b-instruct",
+    "adapters": {
+      "local_vscode": {
+        "codePath": "code"
+      }
+    },
+    // Optional: route remote VNC/RDP/SSH through the bundled sidecar.
+    // This keeps native remote-access dependencies out of the gateway.
+    "remoteAccessService": {
+      "baseUrl": "http://computer-remote:8890",
+      "authToken": "$SAI_COMPUTER_REMOTE_TOKEN",
+      "timeoutMs": 20000,
+      "label": "Remote access sidecar"
+    },
+    // ── Named nodes — manage multiple machines simultaneously ──
+    // Each entry is a named target the agent can connect to.
+    // Use computer_list_nodes to see available targets,
+    // computer_session_start with node="<name>" to connect.
+    "nodes": {
+      // ── Example: ephemeral VNC desktop container (--computer-desktop) ──
+      // "desktop": {
+      //   "adapter": "remote_vnc",
+      //   "host": "computer-desktop",
+      //   "port": 5901,
+      //   "protocol": "vnc",
+      //   "credentials": "starling",
+      //   "label": "Ephemeral VNC desktop"
+      // }
+      //,
+      // ── Example: Windows PC via VNC ──
+      // "win-workstation": {
+      //   "adapter": "remote_vnc",
+      //   "host": "10.10.0.2",
+      //   "port": 5900,
+      //   "protocol": "vnc",
+      //   "credentials": "vnc-password",
+      //   "label": "Windows PC (10.10.0.2)"
+      // }
+      //,
+      // ── Example: Windows PC via RDP ──
+      // "win-rdp": {
+      //   "adapter": "remote_rdp",
+      //   "host": "10.10.0.2",
+      //   "port": 3389,
+      //   "protocol": "rdp",
+      //   "credentials": "Administrator:password",
+      //   "displayResolution": "1920x1080",
+      //   "label": "Windows RDP (10.10.0.2)"
+      // }
+      //,
+      // ── Example: Linux server via SSH ──
+      // "linux-server": {
+      //   "adapter": "remote_ssh",
+      //   "host": "10.10.0.5",
+      //   "port": 22,
+      //   "username": "admin",
+      //   "credentials": "/home/agent/.ssh/id_rsa",
+      //   "authMethod": "key",
+      //   "label": "Linux web server"
+      // }
+    },
+    "recordingEnabled": true
   },
 
   "infrastructure": {
@@ -120,19 +194,59 @@
   },
 
   "subAgents": {
+    "computer_use_agent": {
+      "description": "Desktop automation specialist. Controls the user's computer via keyboard, mouse, and screen analysis.",
+      "capabilities": ["desktop automation", "computer use", "window management"],
+      "tags": ["computer", "desktop", "vscode", "automation"],
+      "maxIterations": 15,
+      "systemPrompt": "You are a computer-use automation specialist. Use only general computer tools. On Windows, mouse clicks are the default way to secure keyboard focus. Once a snapshot shows the correct input field focused, stop changing focus and type the requested text immediately. Never ask for or reveal stored usernames or passwords; use get_site_credentials for metadata and computer_type_credential when a login form needs stored credentials typed securely. Do not return narrated future intent such as 'let me take a snapshot' as your final result.",
+      "tools": [
+        "computer_session_start", "computer_session_attach", "computer_session_stop",
+        "computer_snapshot", "computer_click", "computer_type", "computer_type_credential", "computer_hotkey",
+        "computer_scroll", "computer_drag", "computer_wait_for",
+        "computer_list_windows", "computer_focus_window",
+        "computer_capture_region", "computer_clipboard_read", "computer_clipboard_write",
+        "computer_upload_file", "computer_download_file",
+        "get_site_credentials",
+        "share_finding"
+      ]
+    },
     "researcher": {
       "description": "Web research expert for documentation and public web lookup.",
       "capabilities": ["web research", "documentation lookup"],
       "tags": ["research", "docs"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "primary": "lmstudio/qwen3.5-4b",
         "temperature": 0.2,
         "maxTokens": 4096
       },
       "maxIterations": 4,
+      "systemPrompt": "You are a web research specialist. Prefer web_search to identify the freshest likely sources, then use web_fetch to read them. Capture exact dates, version numbers, prices, scores, or other time-sensitive values exactly as shown. When you discover reusable evidence, publish concise facts via share_finding so other agents can build on them instead of repeating the same searches. Never invent publications, authors, dates, or URLs that you did not open.",
       "tools": [
         "web_search",
         "web_fetch",
+        "read_shared_facts",
+        "share_finding",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "citation_researcher": {
+      "description": "Finds citation-grade primary sources for papers, briefs, and technical reports.",
+      "capabilities": ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
+      "tags": ["citations", "research", "papers", "sources", "docs"],
+      "model": {
+        "primary": "lmstudio/qwen3.5-4b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 5,
+      "systemPrompt": "You gather citation-grade sources. Prefer official specifications, maintainer-authored repositories, standards documents, release notes, and vendor documentation over secondary summaries. Open every source before citing it. For each useful source, capture title, canonical URL, publisher or maintainer, publication or last-updated date when available, and a one-line relevance note. Publish each source via share_finding in a structured form that downstream writers can cite. If an authoritative source cannot be found, say that explicitly instead of guessing.",
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "read_shared_facts",
+        "share_finding",
         "read_file",
         "write_file"
       ]
@@ -142,7 +256,7 @@
       "capabilities": ["code reading", "architecture review"],
       "tags": ["code", "analysis"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "primary": "lmstudio/qwen3.5-4b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -156,8 +270,8 @@
       ]
     },
     "browser_agent": {
-      "description": "Browser automation specialist using Playwright MCP tools.",
-      "capabilities": ["browser automation", "form submission"],
+      "description": "Browser automation specialist using Playwright MCP tools and publishing page evidence for sibling agents.",
+      "capabilities": ["browser automation", "form submission", "page evidence capture"],
       "tags": ["browser", "playwright"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
@@ -165,15 +279,121 @@
         "maxTokens": 4096
       },
       "maxIterations": 12,
+      "systemPrompt": "You are a browser automation specialist. Use browser_snapshot early and often to inspect what is already visible before clicking again. If a page already contains the required answer, stop navigating and publish the evidence via share_finding with exact values and dates. Use read_shared_facts before starting if another agent may already have collected context. Avoid repetitive browser loops when the page state is stable. IMPORTANT: Never type credentials directly. Use site_fill_credentials to securely fill login forms without exposing stored credentials.",
       "tools": [
         "get_site_credentials",
-        "mcp__docker_gateway__browser_navigate",
-        "mcp__docker_gateway__browser_click",
-        "mcp__docker_gateway__browser_type",
-        "mcp__docker_gateway__browser_snapshot",
-        "mcp__docker_gateway__browser_screenshot",
-        "mcp__docker_gateway__browser_select_option",
-        "mcp__docker_gateway__browser_wait_for",
+        "site_fill_credentials",
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_screenshot",
+        "mcp__playwright__browser_select_option",
+        "mcp__playwright__browser_wait_for",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "web_task_coordinator": {
+      "description": "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+      "capabilities": ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+      "tags": ["coordination", "web", "browser", "research"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 8,
+      "systemPrompt": "You coordinate live web tasks. Break work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages, vision_browser_analyst for interpreting browser evidence, and summarizer for concise synthesis. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.",
+      "tools": [
+        "list_agents",
+        "search_agents",
+        "delegate_to_agent",
+        "parallel_delegate",
+        "run_task_graph",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "vision_browser_analyst": {
+      "description": "Interprets browser snapshots and screenshots, then publishes exact page evidence for downstream synthesis.",
+      "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction"],
+      "tags": ["browser", "vision", "analysis"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 6,
+      "systemPrompt": "You interpret browser evidence. Prefer browser_snapshot for structured page content and use browser_screenshot only to preserve rendered evidence when the layout itself matters. Extract exact visible text, dates, amounts, and labels exactly as shown and publish them via share_finding so other agents can synthesize without reopening the page.",
+      "tools": [
+        "browser_snapshot",
+        "browser_screenshot",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "file_analyst": {
+      "description": "Attachment and document analysis specialist for PDFs, images, and mixed file payloads.",
+      "capabilities": ["document extraction", "attachment analysis", "exact text extraction"],
+      "tags": ["files", "documents", "analysis"],
+      "model": {
+        "primary": "lmstudio/qwen3.5-4b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 5,
+      "systemPrompt": "You analyze files and attachments. Prefer extract_file_content for PDFs, office files, audio, and video before falling back to raw file reads. Capture exact text, dates, table values, and metadata. Publish reusable evidence with share_finding so sibling agents can cite the extracted content without rereading the file.",
+      "tools": [
+        "extract_file_content",
+        "read_file",
+        "list_files",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "shell_agent": {
+      "description": "Sandboxed shell and CLI specialist for commands, build checks, and quick environment inspection.",
+      "capabilities": ["shell execution", "CLI diagnostics", "sandboxed commands"],
+      "tags": ["shell", "cli", "ops"],
+      "model": {
+        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 5,
+      "systemPrompt": "You execute targeted shell commands in the sandbox. Keep commands minimal, inspect the result, and publish durable findings with share_finding when they matter to other agents. Do not loop on the same failing command pattern.",
+      "tools": [
+        "shell_exec",
+        "read_file",
+        "write_file",
+        "list_files",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "incident_responder": {
+      "description": "Runtime incident triage specialist for provider, gateway, and configuration failures.",
+      "capabilities": ["incident triage", "provider troubleshooting", "gateway diagnosis", "config drift detection"],
+      "tags": ["ops", "incident", "reliability", "providers", "debugging"],
+      "model": {
+        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 6,
+      "systemPrompt": "You diagnose runtime incidents. Prefer quick configuration checks, health checks, and targeted shell commands before proposing fixes. Distinguish clearly between provider issues, invalid model identifiers, network problems, and stale runtime configuration. Publish the root cause and the minimum corrective action via share_finding.",
+      "tools": [
+        "shell_exec",
+        "read_file",
+        "list_files",
+        "web_fetch",
+        "read_shared_facts",
+        "share_finding",
         "write_file"
       ]
     },
@@ -230,8 +450,8 @@
       },
       "maxIterations": 4,
       "tools": [
-        "mcp__docker_gateway__run_js",
-        "mcp__docker_gateway__run_ts",
+        "mcp__code_sandbox__run_js",
+        "mcp__code_sandbox__run_ts",
         "read_file",
         "write_file",
         "list_files"
@@ -242,15 +462,88 @@
       "capabilities": ["summarization"],
       "tags": ["summary"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-9b",
+        "primary": "lmstudio/qwen3.5-4b",
         "temperature": 0.15,
         "maxTokens": 4096
       },
       "maxIterations": 3,
+      "systemPrompt": "You produce concise, faithful summaries. Read shared facts first when other agents have already collected evidence, and preserve exact values, dates, and caveats in the final synthesis. If sources are mentioned, only include ones present in shared facts or the provided files. Never invent citations.",
       "tools": [
         "web_fetch",
+        "read_shared_facts",
         "read_file",
         "write_file"
+      ]
+    },
+    "paper_author": {
+      "description": "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
+      "capabilities": ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
+      "tags": ["papers", "reports", "citations", "research", "drafting"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.15,
+        "maxTokens": 8192
+      },
+      "maxIterations": 5,
+      "systemPrompt": "You write technical papers and reports only from collected evidence. Read shared facts first and treat them as the source ledger. Use only claims supported by those facts or the provided files. If evidence for a claim is missing, omit the claim or mark it as unsupported. Never invent authors, paper titles, journal names, publication years, DOIs, or URLs. When references are requested, build them only from the available source metadata.",
+      "tools": [
+        "read_shared_facts",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "source_verifier": {
+      "description": "Checks drafts for unsupported claims, broken citations, and fabricated references.",
+      "capabilities": ["citation verification", "fact checking", "source validation", "bibliography audit"],
+      "tags": ["verification", "citations", "fact-checking", "research", "bibliography"],
+      "model": {
+        "primary": "lmstudio/qwen3.5-4b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 4,
+      "systemPrompt": "You verify that a draft is supported by evidence. Compare every substantive claim and every citation against shared facts and provided files. Flag unsupported statements, invented references, missing URLs, and unclear dates. Do not repair the draft by guessing new sources. Return precise issues and, when possible, point to the exact shared fact or file evidence that supports a correction.",
+      "tools": [
+        "web_fetch",
+        "read_shared_facts",
+        "read_file",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "prompt_optimizer": {
+      "description": "Reviews agent prompts for convergence, grounding, and tool-use quality.",
+      "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review"],
+      "tags": ["prompts", "quality", "agents", "optimization"],
+      "model": {
+        "primary": "lmstudio/qwen3.5-4b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 4,
+      "systemPrompt": "You review prompts for routing fit, convergence, and grounding. Focus on whether the agent will stop at the right time, avoid repeating failures, and refuse unsupported claims. Propose the smallest prompt change that improves behavior.",
+      "tools": [
+        "read_file",
+        "list_files",
+        "read_shared_facts",
+        "write_file"
+      ]
+    },
+    "agent_architect": {
+      "description": "Designs threshold-triggered ephemeral agents with the right prompt, tools, and model.",
+      "capabilities": ["agent design", "prompt writing", "model selection", "ephemeral agents"],
+      "tags": ["meta", "agents", "architecture"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 4,
+      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Prefer the default model unless the task clearly benefits from a stronger or cheaper specialist. Never add tools that are not necessary for the task.",
+      "tools": [
+        "list_agents",
+        "search_agents",
+        "read_shared_facts"
       ]
     },
     "agent_factory": {
@@ -284,7 +577,7 @@
         "maxTokens": 8192
       },
       "maxIterations": 20,
-      "systemPrompt": "You are a professional penetration testing coordinator. MANDATORY PRE-FLIGHT CHECKLIST — you MUST complete all steps before calling any active scanning tool:\n\n1. Ask the user: 'Do you have written authorization to test the target(s)? Please confirm yes and provide the authorization reference (ticket ID, contract number, or letter date).'\n2. Ask the user: 'What is the authorized target scope? Please list all IPs, CIDR ranges, and/or hostnames.'\n3. Ask the user: 'Who authorized this engagement? (Name and role of the asset owner or their delegate)'\n4. Call pentest_set_scope with the collected details — this unlocks active scanning.\n5. Confirm to the user: 'Scope configured. Starting engagement: [name].'\n\nOnly after completing the above, structure the engagement as: Recon → Vulnerability Scanning → Web/Network Auditing → Exploitation (only with explicit additional approval per exploit) → Report.\n\nDelegate each phase to the appropriate specialist agent. Always capture findings via share_finding so report_writer_agent can build a comprehensive report. Never proceed past step 4 without explicit user confirmation.",
+      "systemPrompt": "You are a professional penetration testing coordinator. MANDATORY PRE-FLIGHT CHECKLIST — you MUST complete all steps before calling any active scanning tool:\n\n1. Ask the user: 'Do you have written authorization to test the target(s)? Please confirm yes and provide the authorization reference (ticket ID, contract number, letter date, or task ID).'\n2. Ask the user: 'What is the authorized target scope? Please list all IPs, CIDR ranges, and/or hostnames.'\n3. Ask the user: 'Who authorized this engagement? (Name and role of the asset owner or their delegate)' unless the user explicitly states they are the asset owner. In that owner case you may set authorized_by to 'Asset owner (self-authorized in chat)'.\n4. If the user does not provide an engagement name, derive one from the first target and current date.\n5. Call pentest_set_scope with the collected details — this unlocks active scanning.\n6. Immediately launch the engagement by calling delegate_to_agent, parallel_delegate, or run_task_graph for the first recon / audit tasks.\n7. Only after step 6 has actually succeeded, confirm to the user: 'Scope configured. Starting engagement: [name].'\n\nIf you already have the authorization details, your next response MUST be a tool call, not a status update. If the task or context already states that the user explicitly confirmed ownership or authorization, treat that as sufficient and do not ask the user to confirm it again. Never say the pentest has started, is running, or has been initiated unless the immediately preceding tool results show both: (a) a successful pentest_set_scope call and (b) a successful delegation/orchestration call in the same turn. If scope setup fails or approval is still pending, report that truthfully and stop claiming progress.\n\nOnly after completing the above, structure the engagement as: Recon → Vulnerability Scanning → Web/Network Auditing → Exploitation (only with explicit additional approval per exploit) → Report.\n\nDelegate each phase to the configured pentest specialists by exact name (`recon_agent`, `web_auditor_agent`, `network_auditor_agent`, `exploit_agent`, `report_writer_agent`) or use run_task_graph with those agents. Do not invent ad-hoc specialists. Do not use browser-only probes like /swagger-ui.html or /docs as your first pentest step. Do not claim HTTP 403 blocking, WAF protection, or access restrictions unless a tool result in this run actually showed it. Always capture findings via share_finding so report_writer_agent can build a comprehensive report. Never proceed past step 5 without explicit user confirmation.",
       "tools": [
         "pentest_set_scope",
         "list_agents",
@@ -407,16 +700,27 @@
 
   "scenes": {
     "apply_jobs": {
-      "description": "Run the application pipeline for one ranked freelance lead.",
-      "task": "Run the application_pipeline agent for one unchecked lead with rating 0.7 or higher.",
+      "description": "Run a browser-assisted application workflow for one approved freelance lead.",
+      "task": "Use web_task_coordinator to review one approved lead, gather any missing context, and delegate browser submission steps only when stored credentials exist for the target site and secure credential fill has been approved.",
       "webhookKey": "$SCENE_APPLY_JOBS_KEY",
-      "allowedAgents": ["application_pipeline", "proposal_writer", "browser_agent"],
-      "humanInLoopSteps": ["get_site_credentials", "mcp__docker_gateway__browser_navigate"],
+      "allowedAgents": ["web_task_coordinator", "browser_agent", "researcher", "summarizer"],
+      "humanInLoopSteps": ["site_fill_credentials", "mcp__playwright__browser_navigate"],
       "approvalChannel": "slack-approvals",
       "params": {
         "minRating": {
           "description": "Minimum lead rating to accept",
           "default": "0.7"
+        }
+      }
+    },
+    "source_backed_paper": {
+      "description": "Produce a paper or report grounded in official sources and verified citations.",
+      "task": "Use citation_researcher to gather authoritative sources, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "allowedAgents": ["citation_researcher", "paper_author", "source_verifier", "researcher", "summarizer"],
+      "params": {
+        "outputStyle": {
+          "description": "Requested style or citation format",
+          "default": "technical report with inline references"
         }
       }
     }
@@ -496,12 +800,12 @@
       "timeoutMs": 60000
     },
     "stt": {
-      "baseUrl": "http://qwen3-asr-service:5002",
+      "baseUrl": "http://host.docker.internal:5002",
       "model": "Qwen/Qwen3-ASR-1.7B",
       "timeoutMs": 60000
     },
     "tts": {
-      "baseUrl": "http://qwen3-tts-service:5004",
+      "baseUrl": "http://host.docker.internal:5004",
       "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
       "defaultLanguage": "English",
       "defaultSpeaker": "Vivian",
@@ -538,10 +842,10 @@
 
   "mcp": {
     "servers": {
-      "docker_gateway": {
-        "transport": "stdio",
-        "command": "docker",
-        "args": ["mcp", "gateway", "run"],
+      "playwright": {
+        "transport": "docker",
+        "image": "mcp/playwright:latest",
+        "network": "bridge",
         "autoStart": true
       },
       "filesystem": {

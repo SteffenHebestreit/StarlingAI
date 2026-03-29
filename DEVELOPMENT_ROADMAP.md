@@ -16,6 +16,7 @@ The system has functional centralized orchestration with several swarm and evalu
 - Four-layer guardrail stack (input scanner, tool-tier check, output scanner, final redactor)
 - Docker sandboxing with unconditional security flags (`--cap-drop ALL`, `--read-only`, `--network none`)
 - Container heartbeat protocol (stdio-based, 15s interval, 45s watchdog), graceful SIGTERM→SIGKILL shutdown, OOM detection, and partial result recovery
+- Playwright-backed browser automation plus vision-model screenshot/image analysis for web and visual evidence tasks
 - Six active messaging channels (webchat, Telegram, Slack, Discord, WhatsApp, Email)
 - WhatsApp: signature verification, health checks, pairing persistence, rate limiting, and replay-window deduplication (5-min window)
 - Outcome tracking in NDJSON log with routing feedback loop
@@ -31,6 +32,7 @@ The system has functional centralized orchestration with several swarm and evalu
 | **Routing centralization** | All delegation paths funnel through single `resolveAgentRouting()` | No autonomous agent-to-agent discovery |
 | ~~Autonomous bidding (first-pass only)~~ | ✅ Resolved — `startBidderWorker()` runs a fully independent long-running bidder process alongside first-pass `startAutonomousBidding()` | — |
 | **No dynamic replica scaling** | Per-agent concurrency caps and backpressure signals exist, but container replica count is static | Bottlenecked specialists still require manual operator tuning (requires K8s/Swarm) |
+| **No native computer-use substrate** | Browser automation exists, but there is no first-class local desktop / remote workstation session model | Agents cannot safely operate VS Code, desktop apps, OS dialogs, or remote GUI sessions like a human operator |
 | ~~No vector-backed shared-memory retrieval~~ | ✅ Resolved — `read_shared_facts(query=...)` uses embedding-backed lookup with keyword fallback | — |
 | ~~No cold-start timing hooks~~ | ✅ Resolved — container worker emits `READY:<ms>`; runner records `containerColdStartMs`, `containerBootstrapMs`, `containerRuntimeMs` | — |
 | ~~No adaptive timeout policy~~ | ✅ Resolved — rate-adaptive timeout derives bounded recommendation from recent outcome history | — |
@@ -44,6 +46,8 @@ Before adding Keycloak/SSO or other new platform scope, the remaining roadmap ba
 - ✅ Finish adaptive routing improvements by re-evaluating outcome boost during fallback chains, not only at initial delegation.
 - Decide the production approach for dynamic replica scaling and resource reservation, or explicitly move it to an orchestration-specific roadmap.
 - ✅ Expand the evaluation suite depth so new agents ship with stronger regression coverage by default.
+
+The native computer-use / remote-access expansion below is now defined in this roadmap as a concrete future stage, but implementation should remain feature-flagged and policy-gated until the backlog above is closed or explicitly deferred.
 
 ---
 
@@ -448,6 +452,328 @@ The full response is often structured (bullet lists, code, tables) and cannot be
 
 ---
 
+## Stage 9: Native Computer Access and Remote Workstation Control (IN PROGRESS)
+
+### 9.1 Product Goal and Operating Modes
+
+**Goal:** Make computer-use a first-class StarlingAI execution family so agents can work inside VS Code, desktop applications, and managed remote workstations the way a human operator would — while remaining observable, interruptible, policy-gated, and replayable.
+
+**Operating Modes (Adapters)**
+
+| Adapter | Host / Remote | Requires | Use Case |
+|---|---|---|---|
+| `local_vscode` | Host | VS Code CLI (`code`) | Coding, diagnostics, workspace operations |
+| `local_desktop` | Host | `@nut-tree/nut-js` (default) | General desktop automation |
+| `remote_vnc` | Remote | VNC server on target | Remote Linux/macOS workstation |
+| `remote_rdp` | Remote | `freerdp` CLI | Remote Windows workstation |
+| `ephemeral_vm` | Docker | Docker daemon | Disposable sandboxed desktop session |
+
+All adapters implement a shared `ComputerAdapter` interface and are gated by the same tier / approval / recording stack.
+
+### 9.2 Session & Lease Model
+
+Every computer interaction runs inside a **ComputerSession**, identified by a random UUID.
+
+```
+ComputerSessionState: initializing → active → paused → stopping → stopped | error
+                                  ↗ (attach)         ↗ (heartbeat lost)
+```
+
+- **Single-controller lease** — only one owner (`leaseOwner`) may issue actions, preventing conflicts from concurrent agents.
+- **Human takeover** — `forceAttach` lets an operator seize the lease; a `computer.lease_changed` WebSocket event notifies all observers.
+- **Heartbeat watchdog** — reuses the container-runner pattern (15 s emit / 45 s timeout / 20 s warmup grace). Stale sessions are paused automatically.
+- **Emergency stop** — revokes the lease, kills all pending actions, marks session `stopped`, emits `computer.emergency_stop` audit event. Triggered via REST API, WebSocket RPC, or Red Button in the web dashboard.
+- **Session timeout** — sessions auto-stop after `sessionTimeoutMs` (default 30 min, configurable).
+
+### 9.3 Configuration (Joi-validated)
+
+A new `computerUse` section is added to the root config. Because the existing config schema uses Zod, the computer-use sub-schema is validated separately with **Joi** and merged at load time. This keeps the computer-use schema self-contained while remaining compatible with the Zod root.
+
+```jsonc
+// starlingai.json excerpt
+"computerUse": {
+  "enabled": false,                     // global kill-switch (opt-in only)
+  "adapters": {
+    "local_vscode":   { "codePath": "code" },
+    "local_desktop":  { "backend": "nutjs" },
+    "remote_vnc":     { "host": "10.0.0.5", "port": 5900, "credentials": "vault:vnc_pass" },
+    "ephemeral_vm":   { "image": "starlingai/computer-desktop:dev", "memoryMb": 2048, "cpus": 2 }
+  },
+  "visionModel": "",                    // falls back to multimodal.files.visionModel
+  "maxConcurrentSessions": 3,
+  "sessionTimeoutMs": 1800000,          // 30 min
+  "heartbeatIntervalMs": 15000,
+  "heartbeatTimeoutMs": 45000,
+  "recordingEnabled": false,
+  "screenshotMaxWidth": 1920,
+  "screenshotQuality": 0.8,
+  "actionPacingMs": 500,                // min delay between actions (prevents click storms)
+  "emergencyStopEnabled": true
+}
+```
+
+**Joi schema** lives in `packages/core/src/config/computer-use-schema.ts`. The root config loader calls `computerUseSchema.validate()` on the `computerUse` block and merges the validated result before feeding the full config to Zod.
+
+### 9.4 Tool Inventory and Tier Assignments
+
+#### Session Management Tools
+
+| Tool | Tier | Approval | Description |
+|---|---|---|---|
+| `computer_session_start` | 2 | Per-call | Create a new computer session (adapter, config) |
+| `computer_session_attach` | 2 | Per-call | Attach to an existing session |
+| `computer_session_stop` | 1 | — | Graceful session teardown |
+
+#### Interaction Tools
+
+| Tool | Tier | Approval | Description |
+|---|---|---|---|
+| `computer_snapshot` | 0 | — | Capture screenshot + accessibility tree, analyze via vision model |
+| `computer_click` | 2 | Lease-auto | Click at (x, y) — button, double-click options |
+| `computer_type` | 2 | Lease-auto | Type text — optional Enter after |
+| `computer_hotkey` | 2 | Lease-auto | Send key combo (e.g. `ctrl+s`, `alt+tab`) |
+| `computer_scroll` | 2 | Lease-auto | Scroll at (x, y) — direction, amount |
+| `computer_drag` | 2 | Lease-auto | Drag from (x1, y1) to (x2, y2) |
+| `computer_wait_for` | 0 | — | Poll screenshots until visual condition met |
+| `computer_list_windows` | 0 | — | List open windows with titles, bounds |
+| `computer_focus_window` | 2 | Per-call | Focus window by title pattern |
+| `computer_capture_region` | 0 | — | Capture sub-region, analyze via vision model |
+| `computer_clipboard_read` | 2 | **Always** | Read clipboard (secret exposure risk) |
+| `computer_clipboard_write` | 2 | **Always** | Write to clipboard (data injection risk) |
+| `computer_upload_file` | 2 | **Always** | Transfer file to remote session |
+| `computer_download_file` | 2 | **Always** | Transfer file from remote session |
+
+**Lease-scoped auto-approve:** After operator approves `computer_session_start`, subsequent "Lease-auto" tools within the same session are auto-approved for a rolling 15-min window (refreshed per action). Exceptions: clipboard and file-transfer tools always require per-call approval. Warden can revoke auto-approve on anomaly.
+
+#### VS Code-Specific Tools
+
+| Tool | Tier | Approval | Description |
+|---|---|---|---|
+| `vscode_open_file` | 1 | — | Open file in editor at optional line/column |
+| `vscode_run_terminal_command` | 2 | Per-call | Run command in integrated terminal |
+| `vscode_get_diagnostics` | 0 | — | Read problems panel |
+| `vscode_focus_panel` | 1 | — | Focus terminal / problems / explorer / source-control |
+| `vscode_search_workspace` | 0 | — | Full workspace text search |
+| `vscode_command` | 2 | Per-call | Execute arbitrary VS Code command (escape hatch) |
+| `vscode_get_active_editor` | 0 | — | Return current file, selection, cursor |
+| `vscode_diff` | 0 | — | Open diff view for two files |
+
+### 9.5 Warden Anomaly Detection
+
+| Anomaly | Trigger | Action |
+|---|---|---|
+| `computer_focus_thrashing` | >10 `focus_window` calls in 1 min | Warn + surface intervention |
+| `computer_click_storm` | >30 clicks in 1 min | Revoke lease auto-approve |
+| `computer_credential_prompt_loop` | >3 password dialogs in 5 min | Emergency-stop session |
+| `computer_clipboard_exfiltration` | >5 clipboard reads in 1 min | Emergency-stop session |
+| `computer_stale_loop` | ≥3 identical screenshot hashes with actions between | Halt + surface recovery options |
+
+### 9.6 Intervention Types
+
+| Kind | Trigger | Suggested Actions |
+|---|---|---|
+| `computer_session_unavailable` | Adapter disabled or session creation failed | Enable adapter / check config |
+| `computer_focus_lost` | Window no longer focused after focus attempt | Re-try focus, switch adapter |
+| `computer_dialog_blocking` | Modal dialog detected | Dismiss / interact / human override |
+| `computer_stale_screenshot` | Action against outdated frameId | Re-capture snapshot first |
+| `computer_session_timeout` | Session exceeded max duration | Extend timeout or stop session |
+| `computer_emergency_stopped` | Operator triggered emergency stop | Review actions, optionally restart |
+| `computer_lease_conflict` | Another controller holds the lease | Wait, force-attach, or abort |
+
+### 9.7 Vision-Guided Reasoning and Recovery
+
+**Vision pipeline** (`packages/core/src/agent/computer-vision.ts`):
+- `analyzeScreenshot(buffer, prompt?)` — sends screenshot to vision model (reuses `analyzeImageBytes` from `multimodal.ts`), returns `{ description, clickableElements, activeWindow, dialogs, textContent }`.
+- `compareSnapshots(prev, current)` — hash comparison for loop detection + semantic diff for state-change verification.
+- `detectDialog(analysis)` — classifies modal dialogs, file choosers, credential prompts, system notifications.
+- `detectProgressIndicator(analysis)` — loading bars, spinners, "Installing…" text.
+- `buildComputerPrompt(snapshot, analysis, taskContext)` — structured format: accessibility tree + OCR + visual description + clickable elements with DPI-normalized coordinates.
+
+**Screenshot hash loop detection** (extends `runtime.ts`):
+- After each `computer_*` action, capture screenshot hash.
+- 3 consecutive identical hashes → stuck state detected.
+- Classification: dialog appeared → route to dialog handler; nothing changed → emit `computer_stale_loop` Warden anomaly; window focus changed → re-orient agent.
+
+**Recovery strategies** (`packages/core/src/agent/computer-recovery.ts`):
+- `RecoveryStrategy`: `dismiss_dialog | click_retry | wait_and_retry | change_approach | request_human | abort`
+- Dialog handling: OS auth → masked credential injection (never in model context), file chooser → type path, error dialog → read and adapt, confirmation → decide from task context.
+- Progress bar: detect percentage, extend wait (5 s → 10 s → 30 s → 60 s), timeout after configurable max (default 5 min).
+- Overlay/notification: dismiss if unrelated, wait if related, click-through if possible.
+
+**Compact model-visible summaries** (extends `session.ts` `getCollapsedHistory()`):
+- Screenshots → `[Desktop: <window title> – <brief description>]`
+- Click/type → `[Clicked <element> at (x,y)]` / `[Typed "<text>" into <field>]`
+- Window list → `[Open windows: <title1>, <title2>, …]`
+
+### 9.8 Action Hierarchy (VS Code Mode)
+
+When operating in VS Code context, the agent follows a strict **semantic-first** hierarchy:
+
+1. **VS Code CLI** — `code --goto`, `code --diff`, `code -r`, etc.
+2. **Filesystem tools** — `read_file`, `write_file`, `edit_file` (existing tools)
+3. **Desktop GUI pixel control** — `computer_click`, `computer_type` (last resort)
+
+Before executing any `computer_click`/`computer_type` in a VS Code window, the runtime checks if an equivalent VS Code CLI or filesystem operation exists. If yes → use the semantic action and log `semantic_preferred` audit event. Track `semanticActionsUsed` vs `guiActionsUsed` ratio per session.
+
+### 9.9 Remote Workstation Support
+
+**Adapters:**
+- `packages/core/src/agent/computer-adapters/vnc.ts` — VNC RFB protocol client (screenshot via framebuffer, input via mouse/key events, clipboard via VNC extension, exponential-backoff reconnect).
+- `packages/core/src/agent/computer-adapters/rdp.ts` — `freerdp` CLI wrapper with similar interface.
+- `packages/core/src/agent/computer-adapters/ephemeral-vm.ts` — Spawns Docker container with XFCE desktop + VNC server, auto-cleanup on stop, file transfer via volume mount.
+
+**Docker image** (`docker/computer-desktop/Dockerfile`):
+- Lightweight XFCE desktop, pre-installed VS Code + Chrome, TigerVNC server, noVNC web client for operator observation.
+- Non-root user, `--cap-drop ALL`, network-isolated by default.
+- Health check endpoint.
+
+**Session pool** (`packages/core/src/agent/computer-session-pool.ts`):
+- Pre-warmed ephemeral VMs for fast start, configurable pool size, auto-cleanup of idle sessions, lease tracking.
+
+**Reconnection:**
+1. On disconnect → pause agent
+2. Retry with exponential backoff (up to `reconnectAttempts`)
+3. On success → fresh screenshot, verify state, resume
+4. On failure → `computer_session_disconnected` event, mark error, surface intervention
+
+**Latency-aware pacing:**
+- Measure round-trip time per action (input → screenshot shows change).
+- Adjust dynamically: `max(configuredPacing, measuredRTT × 1.5)`
+- Log `inputRttMs` per action.
+
+### 9.10 Evaluation, Recording, and Rollout
+
+**Session recording** (`packages/core/src/agent/computer-recording.ts`):
+- Records `{ timestamp, action, screenshot_before_hash, screenshot_after_hash, result }` per action.
+- Storage: `.starlingai/recordings/{sessionId}.ndjson`, auto-prune after 7 days.
+- Replay: deterministic playback against mock adapter for regression tests.
+
+**Evaluation fixtures** (`packages/core/src/tests/computer-eval/`):
+- VS Code coding: open project → find bug → fix → run tests
+- Installer: download → install → verify
+- Login: navigate → enter credentials (from credential store) → verify
+- File upload: open dialog → navigate → select → confirm
+- Dialog handling: OS auth, error, file chooser
+- Remote reconnect: establish → disconnect → reconnect → resume
+- Multi-monitor: actions targeting correct monitor
+
+**Rollout configuration:**
+- `computerUse.enabled` — global kill switch (default `false`)
+- Per-adapter enable flags
+- `computerUse.allowedScenes` — whitelist scenes that can use computer tools
+- `scenes.<name>.allowComputerUse` / `allowRemoteAdmin`
+- Per-agent `computerAccess: "none" | "vscode" | "desktop" | "remote" | "all"`
+
+**New specialist agents** (added to `starlingai.json`):
+- `computer_agent` — operates VS Code, desktop apps, remote workstations via vision-guided control. Vision-capable model, low temperature (0.15).
+- `computer_task_coordinator` — plans and decomposes computer-use tasks into safe atomic steps.
+
+### 9.11 Edge Cases — Complete Coverage Matrix
+
+| # | Edge Case | Phase | Solution |
+|---|---|---|---|
+| 1 | Multi-monitor / DPI scaling | 9C | `DisplayTopology` with per-monitor DPI-aware coordinate transforms |
+| 2 | Window focus drift | 9B | `computer_focus_window` verifies focus; intervention on failure |
+| 3 | Modal dialogs / OS prompts | 9C | `detectDialog()` classifier routes to dialog-specific handler |
+| 4 | Stale screenshots | 9C | `frameId` on each snapshot; tools reject actions against outdated IDs |
+| 5 | Canvas / inaccessible UIs | 9C | OCR + screenshot analysis + `computer_capture_region` fallback |
+| 6 | Remote disconnect | 9E | Heartbeat + exponential reconnect + fail-closed with resumable state |
+| 7 | File chooser dialogs | 9C/9D | Type path into dialog, verify with vision |
+| 8 | Secrets and MFA | 9B/9E | Encrypted store → masked approval → secure injection, never in model context |
+| 9 | Human takeover | 9A | Single-controller lease, `forceAttach`, `lease_changed` event |
+| 10 | Long-running installs | 9C | `detectProgressIndicator()` + increasing wait intervals (5 s → 60 s) |
+| 11 | Locale / keyboard layout | 9B | Adapter reports layout, `computer_type` maps characters |
+| 12 | Clipboard leakage | 9B | `computer_clipboard_read` always requires per-call approval + output scanner |
+| 13 | VS Code dirty workspace | 9D | Check unsaved files, warn agent, optionally auto-save |
+| 14 | RDP/VNC latency | 9E | Latency-aware pacing: `max(configured, RTT × 1.5)` |
+| 15 | System notifications / overlays | 9C | `detectOverlay()` in vision pipeline — dismiss / wait / route |
+| 16 | Privilege escalation attempt | 9B | sudo/UAC blocked at tier level; `ctrl+alt+delete` → Tier 4 blocked |
+| 17 | Screenshot contains PII | 9B | Vision output → output scanner; screenshots stored only if recording enabled |
+| 18 | Concurrent agents on same desktop | 9A | Session lease prevents concurrent control |
+| 19 | Infinite retry loop | 9C | Screenshot hash dedup (3 identical → halt) + Warden anomaly |
+| 20 | Resolution change mid-session | 9A | Adapter detects topology change, invalidates cached coordinates |
+| 21 | Network partition (remote) | 9E | Heartbeat timeout → pause → reconnect → resume or fail closed |
+| 22 | Container OOM (ephemeral VM) | 9E | Exit 137 detection, workspace data preserved in volume |
+| 23 | Model hallucinates coordinates | 9C | Validate within display bounds; post-action screenshot verifies change |
+| 24 | Tool budget exhaustion | 9C | Compact summaries reduce tokens; higher iteration limit for computer tasks |
+| 25 | Session ID guessing | 9A | UUID lease ownership check on every tool call |
+| 26 | Desktop resolution unknown at start | 9A | Adapter reports topology on init; reject actions until topology known |
+
+### 9.12 Phased Delivery
+
+| Sub-Phase | Name | Description | Gate |
+|---|---|---|---|
+| **9A** | Session & Adapter Foundation | Types, session manager, adapter interface, Joi config schema, gateway endpoints, WebSocket events, audit events | `computer-session.test.ts` green — session lifecycle, lease, heartbeat |
+| **9B** | Minimal Safe Desktop Toolchain | 22 tools (14 `computer_*` + 8 `vscode_*`), tiers, lease-scoped auto-approve, intervention types, Warden anomalies | `computer-use-tools.test.ts` green — all tools against mock adapter |
+| **9C** | Vision-Guided Reasoning & Recovery | Vision pipeline, screenshot loop detection, recovery strategies, compact summaries, multi-monitor/DPI | `computer-vision.test.ts` green — loops, dialogs, recovery |
+| **9D** | VS Code-Native Work Mode | VS Code adapter, action hierarchy, specialist agents, dynamic turn guidance | `vscode-adapter.test.ts` green — CLI, hierarchy, fallback |
+| **9E** | Remote Workstation Support | VNC/RDP/ephemeral-VM adapters, Docker image, session pool, reconnect, latency pacing, compose overlay | Integration test against ephemeral container |
+| **9F** | Evaluation, Replay, Rollout | Recording, replay regression, eval fixtures, frontend observer, rollout config | Full eval suite + manual operator walkthrough |
+
+### 9.13 Implementation Targets
+
+#### Files to Modify
+
+- `packages/core/src/config/schema.ts` — add `computerUse` to root config
+- `packages/core/src/guardrails/tool-tiers.ts` — 22 tool tier entries
+- `packages/core/src/tools/registry.ts` — lease-scoped auto-approve
+- `packages/core/src/agent/runtime.ts` — screenshot hash loop detection, `isComputerUseTask()` guidance, compact summaries
+- `packages/core/src/agent/session.ts` — collapse computer tool results in `getCollapsedHistory()`
+- `packages/core/src/agent/interventions.ts` — 7 computer intervention types
+- `packages/core/src/agent/warden.ts` — 5 computer anomaly classes
+- `packages/core/src/tools/multimodal.ts` — reuse `analyzeImageBytes`
+- `packages/core/src/gateway/index.ts` — computer session REST endpoints
+- `packages/core/src/gateway/rpc.ts` — computer WebSocket events
+- `packages/core/src/agent/default-tools.ts` — register computer tools
+- `starlingai.json` — `computer_agent`, `computer_task_coordinator`, `computerUse` config
+- `starlingai.example.json` — example configuration
+
+#### New Files
+
+- `packages/core/src/agent/computer-session.ts` — session types + manager
+- `packages/core/src/config/computer-use-schema.ts` — Joi config schema
+- `packages/core/src/agent/computer-adapters/base.ts` — adapter interface
+- `packages/core/src/agent/computer-adapters/vscode.ts` — VS Code adapter
+- `packages/core/src/agent/computer-adapters/desktop.ts` — local desktop adapter
+- `packages/core/src/agent/computer-adapters/vnc.ts` — VNC adapter
+- `packages/core/src/agent/computer-adapters/rdp.ts` — RDP adapter
+- `packages/core/src/agent/computer-adapters/ephemeral-vm.ts` — ephemeral VM adapter
+- `packages/core/src/agent/computer-vision.ts` — vision analysis pipeline
+- `packages/core/src/agent/computer-recovery.ts` — recovery strategies
+- `packages/core/src/agent/computer-recording.ts` — session recording & replay
+- `packages/core/src/agent/computer-session-pool.ts` — remote session pool
+- `packages/core/src/tools/computer-use.ts` — all computer-use tools
+- `packages/core/src/tests/computer-session.test.ts`
+- `packages/core/src/tests/computer-use-tools.test.ts`
+- `packages/core/src/tests/computer-vision.test.ts`
+- `packages/core/src/tests/vscode-adapter.test.ts`
+- `packages/web/src/pages/ComputerSession.vue` — session observer view
+- `packages/web/src/stores/computer.ts` — frontend state
+- `docker/computer-desktop/Dockerfile` — ephemeral VM desktop image
+- `docker-compose.computer.yml` — computer service compose overlay
+
+#### New Dependencies
+
+- `joi` — Joi validation for computer-use config schema
+- `@nut-tree/nut-js` — cross-platform desktop automation (mouse, keyboard, screen capture)
+- `sharp` — screenshot image processing / resizing / compression
+- `node-vnc` (or equivalent) — VNC client for remote sessions
+- `tesseract.js` (optional) — client-side OCR for inaccessible UIs (vision model preferred)
+
+#### Key Decisions
+
+- **Opt-in only** — `computerUse.enabled` defaults to `false`. Operators must explicitly enable adapters.
+- **Joi for computer-use config** — keeps the computer-use schema self-contained; merged into Zod root at load-time.
+- **Action hierarchy** — semantic/API actions always attempted before GUI pixel control (lower error rate, deterministic).
+- **Single-controller lease** — one owner per session, human takeover via `forceAttach`, no simultaneous input without shared-control flag.
+- **Vision model** — reuses `multimodal.files.visionModel` with override. Qwen2.5-VL-7B recommended.
+- **Credential handling** — passwords never in model context. Encrypted store → masked approval → secure injection.
+- **Recording** — opt-in, required for Tier 3+ actions. NDJSON with screenshot hashes (not full screenshots) by default.
+- **Pacing** — configurable minimum delay (default 500 ms) prevents click storms and respects remote latency.
+- **Not in scope (v1)** — autonomous background control without lease, privilege escalation/UAC bypass, mobile mirroring, replacing existing filesystem/shell/browser tools.
+
+---
+
 ## Deferred: Keycloak / SSO Support
 
 Keycloak-based single sign-on and delegated token support remain valid future work, but they are explicitly deferred until the existing roadmap backlog is complete.
@@ -473,6 +799,7 @@ That future phase should only be reopened after the current unfinished swarm, ro
 | **Phase 6** | Performance SLOs + latency budgets + regression gates | ✅ Complete (6.1 + 6.2 + 6.3) |
 | **Phase 7** | Multimodal tools + human-in-the-loop approvals + intervention diagnostics | ✅ Complete (7.1 + 7.2 + 7.3) |
 | **Phase 8** | Voice interaction UX — smart spoken summaries + speak-reply toggle | ✅ Complete (8.1) |
+| **Phase 9** | Native computer access + VS Code-native work mode + managed remote workstation control | 🔄 In Progress (sub-phases 9A–9F) |
 | **Future** | Single sign-on + federated Keycloak token access for agents and MCP endpoints | Deferred until current backlog is complete |
 
 ## Success Criteria
@@ -484,5 +811,6 @@ That future phase should only be reopened after the current unfinished swarm, ro
 - Channel adapters expose consistent health, auth, and delivery states across all providers.
 - Each major agent has a documented model profile and measurable quality target.
 - Performance regressions are visible and block releases before users notice them.
+- Native computer-use workflows operate through explicit session leases, approvals, recordings, and recovery paths instead of uncontrolled host automation.
 - The system handles any task domain — not just the ones with pre-built pipelines.
 

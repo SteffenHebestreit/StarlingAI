@@ -38,6 +38,7 @@ import "./tools/workspace-search.js";
 import "./tools/web.js";
 import "./tools/multimodal.js";
 import "./tools/pentest.js";
+import "./tools/computer-use.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 const log = childLogger("main");

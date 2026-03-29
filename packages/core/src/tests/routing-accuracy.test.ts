@@ -25,6 +25,13 @@ const ROUTING_FIXTURE = {
       tools: ["web_search", "web_fetch"],
       maxIterations: 8,
     },
+    citation_researcher: {
+      description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
+      capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
+      tags: ["citations", "research", "sources", "papers"],
+      tools: ["web_search", "web_fetch", "share_finding"],
+      maxIterations: 8,
+    },
     coder: {
       description: "Writes, edits, and saves source code files across any programming language.",
       capabilities: ["code writing", "code generation", "programming", "file editing"],
@@ -67,6 +74,20 @@ const ROUTING_FIXTURE = {
       tags: ["summarization", "writing"],
       tools: ["read_file"],
       maxIterations: 3,
+    },
+    paper_author: {
+      description: "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
+      capabilities: ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
+      tags: ["papers", "reports", "citations", "drafting"],
+      tools: ["read_file", "write_file", "read_shared_facts"],
+      maxIterations: 5,
+    },
+    source_verifier: {
+      description: "Checks drafts for unsupported claims, fabricated references, and citation issues.",
+      capabilities: ["citation verification", "fact checking", "source validation", "bibliography audit"],
+      tags: ["verification", "citations", "bibliography", "research"],
+      tools: ["read_file", "read_shared_facts", "web_fetch"],
+      maxIterations: 4,
     },
     data_analyst: {
       description: "Analyzes datasets, computes statistics, and interprets tabular data.",
@@ -159,6 +180,7 @@ const ROUTING_FIXTURE = {
 const ROUTING_CASES: Array<{ query: string; expected: string; description: string }> = [
   { query: "search the web for the latest Node.js LTS release notes", expected: "researcher", description: "web research" },
   { query: "find official documentation for the Anthropic API tool_use parameter", expected: "researcher", description: "documentation lookup" },
+  { query: "find official sources and citations for a paper on MCP and A2A", expected: "citation_researcher", description: "citation-grade source lookup" },
   { query: "write a TypeScript function that parses ISO dates", expected: "coder", description: "code writing" },
   { query: "create a Python script that reads a CSV and computes averages", expected: "data_analyst", description: "code + data (data_analyst wins on CSV keywords)" },
   { query: "explain what this source file does and describe its structure", expected: "code_analyst", description: "code explanation" },
@@ -169,6 +191,8 @@ const ROUTING_CASES: Array<{ query: string; expected: string; description: strin
   { query: "write a professional reply to a job offer in English", expected: "email_drafter", description: "business email" },
   { query: "translate this German paragraph to English", expected: "translator", description: "translation" },
   { query: "summarize this 500-word article into three bullet points", expected: "summarizer", description: "summarization" },
+  { query: "write a source-backed technical paper from the collected notes and citations", expected: "paper_author", description: "source-grounded writing" },
+  { query: "check this draft for fabricated citations and unsupported claims", expected: "source_verifier", description: "citation verification" },
   { query: "analyze this CSV dataset and compute monthly revenue averages", expected: "data_analyst", description: "data analysis" },
   { query: "execute the shell command 'df -h' and report disk usage", expected: "shell_agent", description: "shell command" },
   { query: "show me the git log for the last 10 commits", expected: "git_agent", description: "git operations" },

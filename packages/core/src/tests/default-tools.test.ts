@@ -41,7 +41,7 @@ describe("default main assistant tools", () => {
     // delegate_to_agent is orchestration — must not appear in direct list
     registerStubTool("delegate_to_agent");
 
-    const availableDirectTools = getAvailableDirectMainToolNames();
+    const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
     const directToolSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
 
     expect(availableDirectTools).toEqual(["read_file", "memory_search", "web_search"]);
@@ -54,7 +54,7 @@ describe("default main assistant tools", () => {
     registerStubTool("delegate_to_agent");
     registerStubTool("run_task_graph");
 
-    const mainAssistantTools = getMainAssistantToolNames();
+    const mainAssistantTools = getMainAssistantToolNames("hybrid");
 
     expect(mainAssistantTools).toEqual([
       "get_site_credentials",
@@ -67,11 +67,32 @@ describe("default main assistant tools", () => {
     expect(ORCHESTRATION_TOOL_NAMES).toContain("run_task_graph");
   });
 
+  it("can restrict the main assistant to orchestration tools only", () => {
+    registerStubTool("browser_snapshot");
+    registerStubTool("delegate_to_agent");
+    registerStubTool("search_agents");
+
+    const tools = getMainAssistantToolNames("orchestration_only");
+
+    expect(tools).toEqual(["delegate_to_agent", "search_agents"]);
+  });
+
+  it("can restrict the main assistant to delegate_to_agent only", () => {
+    registerStubTool("browser_snapshot");
+    registerStubTool("delegate_to_agent");
+    registerStubTool("search_agents");
+    registerStubTool("run_task_graph");
+
+    const tools = getMainAssistantToolNames("delegate_only");
+
+    expect(tools).toEqual(["delegate_to_agent"]);
+  });
+
   it("returns an empty array when no direct tools are registered", () => {
     // Only register an orchestration tool — direct list should be empty
     registerStubTool("list_agents");
 
-    const availableDirectTools = getAvailableDirectMainToolNames();
+    const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
     expect(availableDirectTools).toEqual([]);
   });
 
@@ -79,13 +100,13 @@ describe("default main assistant tools", () => {
     // Only register a direct tool — orchestration list should be empty
     registerStubTool("web_search");
 
-    const availableOrchTools = getAvailableOrchestrationToolNames();
+    const availableOrchTools = getAvailableOrchestrationToolNames("hybrid");
     expect(availableOrchTools).toEqual([]);
   });
 
   it("returns empty list from getMainAssistantToolNames when nothing is registered", () => {
     // Registeredfortesting set is empty; no stubs registered here
-    const tools = getMainAssistantToolNames();
+    const tools = getMainAssistantToolNames("hybrid");
     // may include tools registered by other imported modules — just verify
     // that it only contains known names from both lists
     const knownNames = new Set<string>([...DIRECT_MAIN_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES]);
@@ -100,7 +121,7 @@ describe("default main assistant tools", () => {
     registerStubTool("web_search");
     registerStubTool("memory_search");
 
-    const availableDirectTools = getAvailableDirectMainToolNames();
+    const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
 
     const expectedOrder = DIRECT_MAIN_TOOL_NAMES.filter(n =>
       ["web_fetch", "web_search", "memory_search"].includes(n),
@@ -113,7 +134,7 @@ describe("default main assistant tools", () => {
     registerStubTool("list_agents");
     registerStubTool("delegate_to_agent");
 
-    const available = getAvailableOrchestrationToolNames();
+    const available = getAvailableOrchestrationToolNames("hybrid");
 
     const expectedOrder = ORCHESTRATION_TOOL_NAMES.filter(n =>
       ["run_task_graph", "list_agents", "delegate_to_agent"].includes(n),
@@ -127,7 +148,7 @@ describe("default main assistant tools", () => {
     registerStubTool("read_file");
     registerStubTool("list_agents");
 
-    const combined = getMainAssistantToolNames();
+    const combined = getMainAssistantToolNames("hybrid");
     const directSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
     const orchSet = new Set<string>(ORCHESTRATION_TOOL_NAMES);
 

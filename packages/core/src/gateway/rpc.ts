@@ -19,6 +19,7 @@ import { subscribeToAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
+import { computerSessionManager } from "../agent/computer-session.js";
 
 const log = childLogger("gateway:rpc");
 
@@ -36,7 +37,10 @@ export type RpcMethod =
   | "audit.unsubscribe"
   | "gateway.status"
   | "scenes.list"
-  | "approval.respond";
+  | "approval.respond"
+  | "computer.list_sessions"
+  | "computer.emergency_stop"
+  | "computer.heartbeat";
 
 interface RpcRequest {
   id: string;
@@ -404,6 +408,15 @@ export class RpcConnection {
           onSwarmState: (swarmState) => {
             this.sendEvent({ type: "agent.swarm", data: { requestId, swarmState } });
           },
+          onComputerAction: (action: { computerSessionId: string; actionType: string; [k: string]: unknown }) => {
+            this.sendEvent({ type: "computer.action", data: { requestId, ...action } });
+          },
+          onComputerScreenshot: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => {
+            this.sendEvent({ type: "computer.screenshot", data: { requestId, ...screenshot } });
+          },
+          onComputerSessionState: (sessionState: { computerSessionId: string; state: string }) => {
+            this.sendEvent({ type: "computer.session_state", data: { requestId, ...sessionState } });
+          },
           approvalCallback: async (toolName, args) => {
             const approvalId = randomUUID();
             this.sendEvent({ type: "agent.approval_needed", data: { requestId, toolName, args, approvalId } });
@@ -467,6 +480,23 @@ export class RpcConnection {
         this.auditUnsubscribe?.();
         this.auditUnsubscribe = null;
         return { unsubscribed: true };
+
+      // ── Computer-use session RPC ───────────────────────────────────────
+      case "computer.list_sessions":
+        return { sessions: computerSessionManager.listSessions() };
+
+      case "computer.emergency_stop": {
+        const csId = String(params["computerSessionId"] ?? "");
+        const reason = String(params["reason"] ?? "rpc:manual_stop");
+        computerSessionManager.emergencyStop(csId, reason);
+        return { ok: true };
+      }
+
+      case "computer.heartbeat": {
+        const csId = String(params["computerSessionId"] ?? "");
+        computerSessionManager.heartbeat(csId);
+        return { ok: true };
+      }
 
       default:
         throw new Error(`Unknown method: ${method}`);

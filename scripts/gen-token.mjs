@@ -25,6 +25,21 @@ const role   = get("--role") ?? "admin";
 const ttl    = get("--ttl")  ?? "24h";
 
 // ── Resolve JWT secret (mirrors auth.ts logic) ───────────────────────────────
+function loadDotEnvSecret() {
+  // If SAI_JWT_SECRET isn't in the environment, try reading it from .env
+  // so manual `node scripts/gen-token.mjs` calls produce valid tokens.
+  if (process.env["SAI_JWT_SECRET"]) return;
+  const envPath = resolve(process.cwd(), ".env");
+  try {
+    const lines = readFileSync(envPath, "utf8").split(/\r?\n/);
+    for (const line of lines) {
+      const m = line.match(/^SAI_JWT_SECRET=(.+)$/);
+      if (m) { process.env["SAI_JWT_SECRET"] = m[1].trim(); return; }
+    }
+  } catch { /* .env not found — continue with other sources */ }
+}
+loadDotEnvSecret();
+
 function getSecret() {
   const env = process.env["SAI_JWT_SECRET"];
   if (env && env.length >= 32) return env;

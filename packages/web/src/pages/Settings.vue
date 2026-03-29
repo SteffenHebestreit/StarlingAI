@@ -219,7 +219,7 @@
                   <div class="multimodal-grid">
                     <div class="md:col-span-2">
                       <label class="field-label">Vision Model <span class="text-gray-600 font-normal">optional</span></label>
-                      <input v-model="multimodalForm.visionModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-9b or Qwen/Qwen2.5-VL-7B-Instruct" />
+                      <input v-model="multimodalForm.visionModel" type="text" class="input-box font-mono" placeholder="lmstudio/Qwen/Qwen2.5-VL-7B-Instruct or Qwen/Qwen2.5-VL-7B-Instruct" />
                     </div>
                     <div class="md:col-span-2">
                       <label class="field-label">Vision Endpoint <span class="text-gray-600 font-normal">optional override</span></label>
@@ -488,7 +488,7 @@
         <div class="glass-card p-5">
           <h3 class="section-title">About StarlingAI</h3>
           <div class="text-sm text-gray-500 space-y-1">
-            <p>Version: <span class="text-gray-300">0.1.0</span></p>
+            <p>Version: <span class="text-gray-300">0.2.0</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
             <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
           </div>

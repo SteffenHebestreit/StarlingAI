@@ -1,4 +1,7 @@
 import { getAllTools } from "../tools/registry.js";
+import { getConfig } from "../config/loader.js";
+
+export type MainAssistantToolMode = "hybrid" | "orchestration_only" | "delegate_only";
 
 export const DIRECT_MAIN_TOOL_NAMES = [
   "read_file",
@@ -15,6 +18,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "analyze_image",
   "generate_image",
   "get_site_credentials",
+  "site_fill_credentials",
   "browser_navigate",
   "browser_snapshot",
   "browser_wait_for",
@@ -22,6 +26,8 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "browser_type",
   "browser_select_option",
   "browser_screenshot",
+  // computer_* and vscode_* tools are delegated to the computer_use_agent
+  // sub-agent to prevent hallucinated tool-call patterns in the orchestrator.
   // Pentest tools — available to main assistant; active tools require PENTEST_SCOPE
   "searchsploit_query",
   "pentest_report",
@@ -49,16 +55,24 @@ function getAvailableToolNames(): Set<string> {
   return new Set(getAllTools().map(tool => tool.name));
 }
 
-export function getAvailableDirectMainToolNames(): string[] {
+function resolveToolMode(mode?: MainAssistantToolMode): MainAssistantToolMode {
+  return mode ?? getConfig().agents.mainAssistant.toolMode;
+}
+
+export function getAvailableDirectMainToolNames(mode?: MainAssistantToolMode): string[] {
+  if (resolveToolMode(mode) !== "hybrid") return [];
   const available = getAvailableToolNames();
   return DIRECT_MAIN_TOOL_NAMES.filter(name => available.has(name));
 }
 
-export function getAvailableOrchestrationToolNames(): string[] {
+export function getAvailableOrchestrationToolNames(mode?: MainAssistantToolMode): string[] {
   const available = getAvailableToolNames();
+  if (resolveToolMode(mode) === "delegate_only") {
+    return ORCHESTRATION_TOOL_NAMES.filter(name => name === "delegate_to_agent" && available.has(name));
+  }
   return ORCHESTRATION_TOOL_NAMES.filter(name => available.has(name));
 }
 
-export function getMainAssistantToolNames(): string[] {
-  return [...getAvailableDirectMainToolNames(), ...getAvailableOrchestrationToolNames()];
+export function getMainAssistantToolNames(mode?: MainAssistantToolMode): string[] {
+  return [...getAvailableDirectMainToolNames(mode), ...getAvailableOrchestrationToolNames(mode)];
 }

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema, type Config } from "./schema.js";
+import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { logger } from "../logger.js";
 
 const BASE_CONFIG_PATH = resolveConfigPath();
@@ -17,6 +18,16 @@ export function loadConfig(): Config {
 
   // Merge env overrides
   const merged = mergeEnvOverrides(raw);
+
+  // Validate computerUse block separately with Joi before Zod pass-through
+  if (merged.computerUse !== undefined) {
+    try {
+      merged.computerUse = validateComputerUseConfig(merged.computerUse);
+    } catch (err) {
+      logger.error({ err }, "Computer use config validation failed");
+      throw err;
+    }
+  }
 
   const result = ConfigSchema.safeParse(merged);
   if (!result.success) {
@@ -175,6 +186,28 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       files: env["SAI_MULTIMODAL_FILES_URL"] ? { ...files, baseUrl: env["SAI_MULTIMODAL_FILES_URL"] } : files,
       stt: env["SAI_MULTIMODAL_STT_URL"] ? { ...stt, baseUrl: env["SAI_MULTIMODAL_STT_URL"] } : stt,
       tts: env["SAI_MULTIMODAL_TTS_URL"] ? { ...tts, baseUrl: env["SAI_MULTIMODAL_TTS_URL"] } : tts,
+    };
+  }
+  if (env["SAI_COMPUTER_USE_ENABLED"] || env["SAI_COMPUTER_REMOTE_NODE_URL"] || env["SAI_COMPUTER_REMOTE_NODE_TOKEN"] || env["SAI_COMPUTER_REMOTE_NODE_LABEL"]) {
+    const computerUse = (raw["computerUse"] as Record<string, unknown> | undefined) ?? {};
+    const adapters = (computerUse["adapters"] as Record<string, unknown> | undefined) ?? {};
+    const remoteNode = (adapters["remote_node"] as Record<string, unknown> | undefined) ?? {};
+    raw["computerUse"] = {
+      ...computerUse,
+      ...(env["SAI_COMPUTER_USE_ENABLED"]
+        ? {
+            enabled: !["0", "false", "False", "FALSE"].includes(env["SAI_COMPUTER_USE_ENABLED"]),
+          }
+        : {}),
+      adapters: {
+        ...adapters,
+        remote_node: {
+          ...remoteNode,
+          ...(env["SAI_COMPUTER_REMOTE_NODE_URL"] ? { baseUrl: env["SAI_COMPUTER_REMOTE_NODE_URL"] } : {}),
+          ...(env["SAI_COMPUTER_REMOTE_NODE_TOKEN"] ? { authToken: env["SAI_COMPUTER_REMOTE_NODE_TOKEN"] } : {}),
+          ...(env["SAI_COMPUTER_REMOTE_NODE_LABEL"] ? { label: env["SAI_COMPUTER_REMOTE_NODE_LABEL"] } : {}),
+        },
+      },
     };
   }
 

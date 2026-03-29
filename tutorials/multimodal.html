@@ -114,7 +114,7 @@
             <tr>
               <td><code>analyse_image</code></td>
               <td>Answers questions about an image using a vision-capable LLM</td>
-              <td><code>multimodal.vision.visionModel</code></td>
+              <td><code>multimodal.files.visionModel</code></td>
             </tr>
             <tr>
               <td><code>extract_file_content</code></td>
@@ -139,23 +139,21 @@
   "multimodal": {
     // Speech-to-text (Qwen3-ASR service)
     "stt": {
-      "baseUrl": "http://localhost:5002",
+      "baseUrl": "http://host.docker.internal:5002",
       "model": "Qwen/Qwen3-ASR-1.7B"
     },
     // Text-to-speech (Qwen3-TTS service)
     "tts": {
-      "baseUrl": "http://localhost:5004",
+      "baseUrl": "http://host.docker.internal:5004",
       "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
       "defaultLanguage": "English",
       "defaultSpeaker": "Vivian"
     },
-    // Vision model for image analysis
-    "vision": {
-      "visionModel": "lmstudio/qwen/qwen3.5-35b-a3b"
-    },
     // File-to-Markdown conversion
     "files": {
-      "baseUrl": "http://localhost:7700",
+      "baseUrl": "http://fastapi-mcp-template:8000",
+      "visionModel": "lmstudio/Qwen/Qwen2.5-VL-7B-Instruct",
+      "visionBaseUrl": "http://host.docker.internal:1234/v1",
       // OR use an MCP server instead of the REST service:
       "mcpServer": "file_converter"
     }
@@ -277,7 +275,7 @@ curl http://localhost:5004/voices</code></pre>
         <div class="section-title">Image analysis</div>
         <p>
           The <code>analyse_image</code> tool passes an image (file path or URL) and a question to a
-          vision-capable LLM model. The model is configured through <code>multimodal.vision.visionModel</code>;
+          vision-capable LLM model. The model is configured through <code>multimodal.files.visionModel</code>;
           it must be loaded in LM Studio or another provider that accepts OpenAI-compatible vision requests.
         </p>
 
