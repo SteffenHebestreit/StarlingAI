@@ -6,12 +6,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
+import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
 
 const SANDBOX_IMAGE = process.env["SAI_SANDBOX_IMAGE"] ?? "starlingai/sandbox:latest";
-const SANDBOX_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 const EXEC_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 64 * 1024; // 64KB
 
@@ -66,7 +66,7 @@ registerTool({
       }
     }
 
-    const workspaceMountSource = resolveWorkspaceMountSource(ctx.workspacePath);
+    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
     const wrappedCommand = buildSandboxCommand(command, workdir);
 
     const dockerArgs = [
@@ -124,14 +124,6 @@ function normalizeWorkdir(workdir: string): string | null {
   return normalized;
 }
 
-function resolveWorkspaceMountSource(workspacePath: string): string {
-  const normalized = workspacePath.replace(/\\/g, "/");
-  if (normalized === "/workspace" || normalized.startsWith("/workspace/")) {
-    return SANDBOX_WORKSPACE_VOLUME;
-  }
-  return workspacePath;
-}
-
 function buildSandboxCommand(command: string, workdir: string): string {
   return `mkdir -p ${shellQuote(workdir)} && cd ${shellQuote(workdir)} && ${command}`;
 }
@@ -139,3 +131,118 @@ function buildSandboxCommand(command: string, workdir: string): string {
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
+
+// ── run_script ────────────────────────────────────────────────────────────────
+
+registerTool({
+  name: "run_script",
+  description:
+    "Execute a script file from the workspace in the Docker sandbox. " +
+    "Supports .sh, .py, .js, and .ts files. The script must already exist in the workspace.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Workspace-relative path to the script file (e.g. scripts/deploy.sh)",
+      },
+      args: {
+        type: "array",
+        items: { type: "string" },
+        description: "Arguments to pass to the script",
+        default: [],
+      },
+      env: {
+        type: "object",
+        description: "Additional environment variables (key-value pairs)",
+        additionalProperties: { type: "string" },
+      },
+    },
+    required: ["path"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const scriptPath = String(args["path"] ?? "").replace(/\\/g, "/");
+    const scriptArgs = (args["args"] as string[] | undefined) ?? [];
+    const userEnv = (args["env"] as Record<string, string> | undefined) ?? {};
+
+    if (!scriptPath || scriptPath.includes("..")) {
+      return { success: false, output: "", error: "Invalid script path" };
+    }
+
+    // Determine interpreter from extension
+    const ext = scriptPath.split(".").pop()?.toLowerCase();
+    const interpreterMap: Record<string, string> = {
+      sh: "bash",
+      bash: "bash",
+      py: "python3",
+      js: "node",
+      ts: "npx tsx",
+    };
+    const interpreter = interpreterMap[ext ?? ""];
+    if (!interpreter) {
+      return {
+        success: false,
+        output: "",
+        error: `Unsupported script extension .${ext}. Supported: ${Object.keys(interpreterMap).join(", ")}`,
+      };
+    }
+
+    const sandboxScript = `/workspace/${scriptPath}`;
+    const quotedArgs = scriptArgs.map(shellQuote).join(" ");
+    const command = `${interpreter} ${shellQuote(sandboxScript)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
+
+    const envArgs: string[] = [];
+    for (const [k, v] of Object.entries(userEnv)) {
+      if (/^[A-Z_][A-Z0-9_]*$/i.test(k)) {
+        envArgs.push("-e", `${k}=${v}`);
+      }
+    }
+
+    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+
+    const dockerArgs = [
+      "run", "--rm",
+      "--network=none",
+      "--memory=512m",
+      "--cpus=0.5",
+      "--pids-limit=64",
+      "--read-only",
+      "--tmpfs=/tmp:size=64m",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "-v", `${workspaceMountSource}:/workspace`,
+      "-w", "/workspace",
+      ...envArgs,
+      SANDBOX_IMAGE,
+      "sh", "-lc", command,
+    ];
+
+    log.info({ script: scriptPath, sessionId: ctx.sessionId }, "run_script starting");
+
+    try {
+      const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
+        timeout: EXEC_TIMEOUT_MS,
+        maxBuffer: MAX_OUTPUT_BYTES,
+      });
+
+      const output = [stdout, stderr].filter(Boolean).join("\n");
+      return {
+        success: true,
+        output: output || "(no output)",
+        metadata: { script: scriptPath, exitCode: 0, sandboxed: true },
+      };
+    } catch (err: unknown) {
+      const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
+      if (e.killed) {
+        return { success: false, output: e.stdout ?? "", error: `Script timed out after ${EXEC_TIMEOUT_MS}ms` };
+      }
+      const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
+      return {
+        success: false,
+        output,
+        error: `Exit code ${e.code ?? "?"}: ${e.message ?? "Unknown error"}`,
+        metadata: { script: scriptPath, sandboxed: true },
+      };
+    }
+  },
+});

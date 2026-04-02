@@ -14,6 +14,7 @@ import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
 import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, runChannelTurn } from "./base.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelRunning, setChannelStopped, setChannelHealthCheck } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
@@ -49,6 +50,26 @@ async function slackSend(botToken: string, channel: string, text: string): Promi
     text,
     { channel: "slack" }
   );
+}
+
+/**
+ * Send a Slack message using the configured bot token.
+ * Callable from tools — reads token from channel config.
+ */
+export async function sendSlackMessage(
+  channel: string,
+  text: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const config = getConfig();
+  const slackConfig = getEffectiveChannelConfig("slack", config.channels.slack);
+  const botToken = resolveToken(slackConfig.botToken);
+  if (!botToken) return { ok: false, error: "Slack bot token not configured" };
+  try {
+    await slackSend(botToken, channel, text);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /**
@@ -131,6 +152,14 @@ export async function handleSlackEvent(c: Context): Promise<Response> {
     const { deleteChannelSession } = await import("./base.js");
     deleteChannelSession(`slack:${senderId}`);
     await slackSend(botToken, channelId, "Session reset. Fresh start!");
+    return c.json({ ok: true });
+  }
+
+  const triggeredJob = await dispatchChannelTriggeredJob({ channel: "slack", senderId, text });
+  if (triggeredJob.matched) {
+    if (triggeredJob.responseText) {
+      await slackSend(botToken, channelId, triggeredJob.responseText);
+    }
     return c.json({ ok: true });
   }
 

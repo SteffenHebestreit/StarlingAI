@@ -169,7 +169,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { marked } from "marked";
 import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
-import { useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
+import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
 
 interface SessionCard {
   id: string;
@@ -201,6 +201,14 @@ const transcriptExporting = ref(false);
 let transcriptRequestId = 0;
 
 const visibleTranscriptMessages = computed(() => selectedTranscript.value?.transcript ?? []);
+
+function sanitizeTranscriptMessage(message: GatewaySessionTranscriptMessage): GatewaySessionTranscriptMessage {
+  if (message.role !== "assistant") return message;
+  return {
+    ...message,
+    content: sanitizeAssistantMessageContent(message.content, message.toolCalls),
+  };
+}
 
 const hiddenTranscriptCount = computed(() => {
   const totalMessages = selectedTranscript.value?.totalMessages ?? 0;
@@ -325,12 +333,16 @@ async function loadTranscript(sessionId: string | null, options: { beforeMessage
       beforeMessageId: options.beforeMessageId,
     });
     if (requestId !== transcriptRequestId) return;
+    const sanitizedTranscript: GatewaySessionTranscript = {
+      ...transcript,
+      transcript: transcript.transcript.map(sanitizeTranscriptMessage),
+    };
     selectedTranscript.value = options.appendOlder && selectedTranscript.value?.session.id === transcript.session.id
       ? {
-          ...transcript,
-          transcript: [...transcript.transcript, ...selectedTranscript.value.transcript],
+          ...sanitizedTranscript,
+          transcript: [...sanitizedTranscript.transcript, ...selectedTranscript.value.transcript],
         }
-      : transcript;
+      : sanitizedTranscript;
   } catch (error) {
     if (requestId !== transcriptRequestId) return;
     selectedTranscript.value = null;

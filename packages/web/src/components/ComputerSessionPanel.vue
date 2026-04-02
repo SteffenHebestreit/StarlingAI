@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onUnmounted } from "vue";
 import { useComputerStore, type ComputerMonitorInfo } from "../stores/computer";
 
 const computer = useComputerStore();
+
+// Tick counter to force re-evaluation of age-based computed properties
+const _markerTick = ref(0);
+const _markerTimer = setInterval(() => { _markerTick.value++; }, 500);
+onUnmounted(() => clearInterval(_markerTimer));
 
 const sessions = computed(() => computer.sessions);
 const activeSessions = computed(() => computer.activeSessions);
@@ -13,6 +18,37 @@ const recentActions = computed(() => computer.recentActions
   .filter((action) => !previewSessionId.value || action.computerSessionId === previewSessionId.value)
   .slice(-10)
   .reverse());
+
+/** Agent action markers — show where the agent clicked/scrolled on screen */
+interface AgentActionMarker {
+  percentX: number;
+  percentY: number;
+  actionType: string;
+  age: number; // ms since the action
+}
+
+const agentActionMarkers = computed<AgentActionMarker[]>(() => {
+  void _markerTick.value; // trigger reactivity on timer tick
+  if (!screenshot.value) return [];
+  const now = Date.now();
+  const maxAge = 12_000; // show markers for up to 12 seconds
+  return computer.recentActions
+    .filter((a) => {
+      if (previewSessionId.value && a.computerSessionId !== previewSessionId.value) return false;
+      const age = now - a.timestamp;
+      if (age > maxAge) return false;
+      const x = Number(a.detail?.x);
+      const y = Number(a.detail?.y);
+      return (a.actionType === "click" || a.actionType === "scroll" || a.actionType === "drag")
+        && Number.isFinite(x) && Number.isFinite(y);
+    })
+    .map((a) => ({
+      percentX: (Number(a.detail!.x) / screenshot.value!.width) * 100,
+      percentY: (Number(a.detail!.y) / screenshot.value!.height) * 100,
+      actionType: a.actionType,
+      age: now - a.timestamp,
+    }));
+});
 const screenshotImage = ref<HTMLImageElement | null>(null);
 const copyStatus = ref("");
 const mappedClick = ref<{
@@ -177,6 +213,20 @@ async function copyClickCommand() {
           class="click-marker"
           :style="{ left: `${mappedClick.percentX}%`, top: `${mappedClick.percentY}%` }"
         />
+        <!-- Agent action markers (clicks, scrolls, drags) -->
+        <div
+          v-for="(marker, i) in agentActionMarkers"
+          :key="`am-${i}`"
+          class="agent-action-marker"
+          :class="marker.actionType"
+          :style="{
+            left: `${marker.percentX}%`,
+            top: `${marker.percentY}%`,
+            opacity: Math.max(0.15, 1 - marker.age / 12000),
+          }"
+        >
+          <span class="agent-action-label">{{ marker.actionType }}</span>
+        </div>
       </div>
       <div class="screenshot-meta">
         <span>Frame: {{ screenshot.frameId ? screenshot.frameId.slice(0, 8) : "n/a" }}</span>
@@ -233,6 +283,7 @@ async function copyClickCommand() {
       <ul>
         <li v-for="(action, i) in recentActions" :key="i" class="action-item">
           <span class="action-type">{{ action.actionType }}</span>
+          <span v-if="action.detail?.x != null" class="action-coords">({{ action.detail.x }}, {{ action.detail.y }})</span>
           <span class="action-time">{{ new Date(action.timestamp).toLocaleTimeString() }}</span>
         </li>
       </ul>
@@ -397,6 +448,64 @@ async function copyClickCommand() {
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
 }
 
+.agent-action-marker {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  border: 2px solid #00e5ff;
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.6), 0 0 0 2px rgba(0, 0, 0, 0.5);
+  animation: agent-marker-pulse 1.2s ease-out;
+}
+
+.agent-action-marker.click {
+  border-color: #00e5ff;
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.6), 0 0 0 2px rgba(0, 0, 0, 0.5);
+}
+
+.agent-action-marker.scroll {
+  border-color: #76ff03;
+  box-shadow: 0 0 8px rgba(118, 255, 3, 0.5), 0 0 0 2px rgba(0, 0, 0, 0.5);
+  width: 16px;
+  height: 16px;
+}
+
+.agent-action-marker.drag {
+  border-color: #ffab40;
+  box-shadow: 0 0 8px rgba(255, 171, 64, 0.5), 0 0 0 2px rgba(0, 0, 0, 0.5);
+}
+
+.agent-action-label {
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.6rem;
+  font-family: monospace;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+@keyframes agent-marker-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(2);
+    opacity: 0.3;
+  }
+  30% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
 .screenshot-meta {
   display: flex;
   flex-wrap: wrap;
@@ -500,6 +609,12 @@ async function copyClickCommand() {
 
 .action-type {
   font-family: monospace;
+}
+
+.action-coords {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #00e5ff;
 }
 
 .action-time {

@@ -1,0 +1,8 @@
+{
+  "guardrails": {
+    "promptInjectionBlock": true,
+    "outputSecretScan": true,
+    "maxInputLength": 32000,
+    "sandboxShellExec": true
+  }
+}

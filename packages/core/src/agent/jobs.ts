@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { TurnPerformanceMetrics } from "./runtime.js";
 import { childLogger } from "../logger.js";
+import { publishNotification } from "../runtime/notifications.js";
 
 const log = childLogger("agent:jobs");
 const { Pool } = pg;
@@ -13,6 +14,9 @@ export interface SceneJobProgress {
   stage: string;
   message?: string;
   percent?: number;
+  totalSteps?: number;
+  completedSteps?: number;
+  currentStep?: string;
   toolCallsRequested: number;
   toolCallsCompleted: number;
   approvalsRequested: number;
@@ -28,6 +32,7 @@ export interface SceneJobProgress {
 export interface SceneJob {
   id: string;
   sceneName: string;
+  definitionType?: "scene" | "job";
   sessionId: string;
   userId?: string;
   status: JobStatus;
@@ -42,8 +47,20 @@ export interface SceneJob {
   progress: SceneJobProgress;
 }
 
-export interface SceneJobPayload {
+export interface JobExecutionStep {
+  sceneName: string;
+  label: string;
   task: string;
+  params?: Record<string, string>;
+  allowedAgents?: string[];
+  humanInLoopSteps?: string[];
+  approvalChannel?: string;
+}
+
+export interface SceneJobPayload {
+  definitionType?: "scene" | "job";
+  task?: string;
+  steps?: JobExecutionStep[];
   allowedAgents?: string[];
   humanInLoopSteps?: string[];
   approvalChannel?: string;
@@ -53,8 +70,10 @@ export interface SceneJobPayload {
 
 export interface CreateSceneJobInput {
   sceneName: string;
+  definitionType?: "scene" | "job";
   userId?: string;
-  task: string;
+  task?: string;
+  steps?: JobExecutionStep[];
   allowedAgents?: string[];
   humanInLoopSteps?: string[];
   approvalChannel?: string;
@@ -100,6 +119,7 @@ interface StoredSceneJob extends SceneJob {
 interface SceneJobRow {
   id: string;
   scene_name: string;
+  definition_type: string | null;
   session_id: string;
   user_id: string | null;
   status: JobStatus;
@@ -157,22 +177,80 @@ export async function heartbeatJob(id: string, workerId: string): Promise<void> 
 }
 
 export async function cancelJob(id: string): Promise<SceneJob | undefined> {
-  return (await getStore()).cancelJob(id);
+  const store = await getStore();
+  const job = await store.cancelJob(id);
+  if (job && (job.status === "cancelled" || job.status === "cancelling")) {
+    publishNotification({
+      title: job.status === "cancelled" ? "Job cancelled" : "Job cancellation requested",
+      message: `${job.sceneName} ${job.status === "cancelled" ? "was cancelled" : "is being cancelled"}.`,
+      level: "info",
+      category: "job",
+      sessionId: job.sessionId,
+      jobId: job.id,
+      targetPath: "/jobs",
+      sticky: job.status === "cancelling",
+    });
+  }
+  return job;
 }
 
 export async function markJobCancelled(id: string, reason: string): Promise<void> {
-  await (await getStore()).markCancelled(id, reason);
+  const store = await getStore();
+  await store.markCancelled(id, reason);
+  const job = await store.getJob(id);
+  if (job) {
+    publishNotification({
+      title: "Job cancelled",
+      message: `${job.sceneName} was cancelled. ${reason}`,
+      level: "warn",
+      category: "job",
+      sessionId: job.sessionId,
+      jobId: job.id,
+      targetPath: "/jobs",
+      sticky: true,
+    });
+  }
 }
 
 export async function completeJob(
   id: string,
   result: { response: string; toolCallsExecuted: number; blocked: boolean; performance?: TurnPerformanceMetrics }
 ): Promise<void> {
-  await (await getStore()).completeJob(id, result);
+  const store = await getStore();
+  await store.completeJob(id, result);
+  const job = await store.getJob(id);
+  if (job) {
+    publishNotification({
+      title: result.blocked ? "Job blocked" : "Job completed",
+      message: result.blocked
+        ? `${job.sceneName} was blocked by guardrails.`
+        : `${job.sceneName} finished successfully.`,
+      level: result.blocked ? "warn" : "success",
+      category: "job",
+      sessionId: job.sessionId,
+      jobId: job.id,
+      targetPath: "/jobs",
+      sticky: result.blocked,
+    });
+  }
 }
 
 export async function failJob(id: string, error: string): Promise<void> {
-  await (await getStore()).failJob(id, error);
+  const store = await getStore();
+  await store.failJob(id, error);
+  const job = await store.getJob(id);
+  if (job) {
+    publishNotification({
+      title: "Job failed",
+      message: `${job.sceneName} failed. ${error}`,
+      level: "error",
+      category: "job",
+      sessionId: job.sessionId,
+      jobId: job.id,
+      targetPath: "/jobs",
+      sticky: true,
+    });
+  }
 }
 
 export async function recoverStaleSceneJobs(staleMs = STALE_JOB_MS): Promise<number> {
@@ -211,16 +289,20 @@ class InMemorySceneJobStore implements SceneJobStore {
     this.pruneTerminalJobs();
     const createdAt = nowIso();
     const sessionId = randomUUID();
+    const definitionType = input.definitionType ?? (input.steps?.length ? "job" : "scene");
     const job: StoredSceneJob = {
       id: randomUUID(),
       sceneName: input.sceneName,
+      definitionType,
       sessionId,
       userId: input.userId,
       status: "queued",
       createdAt,
       progress: defaultProgress("queued", "Queued for worker execution"),
       payload: {
+        definitionType,
         task: input.task,
+        steps: input.steps,
         allowedAgents: input.allowedAgents,
         humanInLoopSteps: input.humanInLoopSteps,
         approvalChannel: input.approvalChannel,
@@ -408,6 +490,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       CREATE TABLE IF NOT EXISTS scene_jobs (
         id                  UUID PRIMARY KEY,
         scene_name          TEXT NOT NULL,
+        definition_type     TEXT,
         session_id          TEXT NOT NULL,
         user_id             TEXT,
         status              TEXT NOT NULL,
@@ -430,6 +513,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       CREATE INDEX IF NOT EXISTS idx_scene_jobs_session ON scene_jobs (session_id);
       CREATE INDEX IF NOT EXISTS idx_scene_jobs_heartbeat ON scene_jobs (heartbeat_at);
     `);
+    await this.pool.query(`ALTER TABLE scene_jobs ADD COLUMN IF NOT EXISTS definition_type TEXT`);
     await this.recoverStaleJobs(STALE_JOB_MS);
     log.info("Scene job table ready");
   }
@@ -439,8 +523,11 @@ class PostgresSceneJobStore implements SceneJobStore {
     const sessionId = randomUUID();
     const createdAt = nowIso();
     const progress = defaultProgress("queued", "Queued for worker execution");
+    const definitionType = input.definitionType ?? (input.steps?.length ? "job" : "scene");
     const payload: SceneJobPayload = {
+      definitionType,
       task: input.task,
+      steps: input.steps,
       allowedAgents: input.allowedAgents,
       humanInLoopSteps: input.humanInLoopSteps,
       approvalChannel: input.approvalChannel,
@@ -450,14 +537,15 @@ class PostgresSceneJobStore implements SceneJobStore {
 
     await this.pool.query(
       `INSERT INTO scene_jobs (
-         id, scene_name, session_id, user_id, status, created_at, progress, payload
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
-      [id, input.sceneName, sessionId, input.userId ?? null, "queued", createdAt, JSON.stringify(progress), JSON.stringify(payload)]
+         id, scene_name, definition_type, session_id, user_id, status, created_at, progress, payload
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
+      [id, input.sceneName, definitionType, sessionId, input.userId ?? null, "queued", createdAt, JSON.stringify(progress), JSON.stringify(payload)]
     );
 
     return {
       id,
       sceneName: input.sceneName,
+      definitionType,
       sessionId,
       userId: input.userId,
       status: "queued",
@@ -730,6 +818,7 @@ class PostgresSceneJobStore implements SceneJobStore {
     return {
       id: row.id,
       sceneName: row.scene_name,
+      definitionType: row.definition_type === "job" ? "job" : "scene",
       sessionId: row.session_id,
       userId: row.user_id ?? undefined,
       status,
@@ -753,11 +842,30 @@ class PostgresSceneJobStore implements SceneJobStore {
 
 function normalizePayload(value: unknown): SceneJobPayload {
   if (!value || typeof value !== "object") {
-    return { task: "", turnTimeoutMs: 900_000 };
+    return { definitionType: "scene", task: "", turnTimeoutMs: 900_000 };
   }
   const payload = value as Record<string, unknown>;
   return {
+    definitionType: payload.definitionType === "job" ? "job" : "scene",
     task: typeof payload.task === "string" ? payload.task : "",
+    steps: Array.isArray(payload.steps)
+      ? payload.steps.flatMap((step): JobExecutionStep[] => {
+          if (!step || typeof step !== "object") return [];
+          const value = step as Record<string, unknown>;
+          if (typeof value.sceneName !== "string" || typeof value.label !== "string" || typeof value.task !== "string") return [];
+          return [{
+            sceneName: value.sceneName,
+            label: value.label,
+            task: value.task,
+            params: typeof value.params === "object" && value.params !== null
+              ? Object.fromEntries(Object.entries(value.params as Record<string, unknown>).map(([key, entry]) => [key, String(entry)]))
+              : undefined,
+            allowedAgents: Array.isArray(value.allowedAgents) ? value.allowedAgents.filter((entry): entry is string => typeof entry === "string") : undefined,
+            humanInLoopSteps: Array.isArray(value.humanInLoopSteps) ? value.humanInLoopSteps.filter((entry): entry is string => typeof entry === "string") : undefined,
+            approvalChannel: typeof value.approvalChannel === "string" ? value.approvalChannel : undefined,
+          }];
+        })
+      : undefined,
     allowedAgents: Array.isArray(payload.allowedAgents) ? payload.allowedAgents.filter((entry): entry is string => typeof entry === "string") : undefined,
     humanInLoopSteps: Array.isArray(payload.humanInLoopSteps) ? payload.humanInLoopSteps.filter((entry): entry is string => typeof entry === "string") : undefined,
     approvalChannel: typeof payload.approvalChannel === "string" ? payload.approvalChannel : undefined,
@@ -774,6 +882,8 @@ function defaultProgress(status: JobStatus, message?: string): SceneJobProgress 
     stage: status,
     message,
     percent: status === "completed" || status === "cancelled" || status === "failed" ? 100 : 0,
+    totalSteps: 0,
+    completedSteps: 0,
     toolCallsRequested: 0,
     toolCallsCompleted: 0,
     approvalsRequested: 0,
@@ -792,6 +902,9 @@ function normalizeProgress(value: unknown, status: JobStatus): SceneJobProgress 
     stage: typeof progress.stage === "string" ? progress.stage : base.stage,
     message: typeof progress.message === "string" ? progress.message : base.message,
     percent: clampPercent(progress.percent, base.percent),
+    totalSteps: toCount(progress.totalSteps),
+    completedSteps: toCount(progress.completedSteps),
+    currentStep: typeof progress.currentStep === "string" ? progress.currentStep : undefined,
     toolCallsRequested: toCount(progress.toolCallsRequested),
     toolCallsCompleted: toCount(progress.toolCallsCompleted),
     approvalsRequested: toCount(progress.approvalsRequested),
@@ -809,6 +922,9 @@ function mergeProgress(current: SceneJobProgress, patch: Partial<SceneJobProgres
   const merged: SceneJobProgress = {
     ...current,
     ...patch,
+    totalSteps: patch.totalSteps ?? current.totalSteps,
+    completedSteps: patch.completedSteps ?? current.completedSteps,
+    currentStep: patch.currentStep ?? current.currentStep,
     toolCallsRequested: patch.toolCallsRequested ?? current.toolCallsRequested,
     toolCallsCompleted: patch.toolCallsCompleted ?? current.toolCallsCompleted,
     approvalsRequested: patch.approvalsRequested ?? current.approvalsRequested,
@@ -829,6 +945,10 @@ function mergeProgress(current: SceneJobProgress, patch: Partial<SceneJobProgres
 
 function derivePercent(progress: SceneJobProgress, status: JobStatus): number {
   if (status === "queued") return 0;
+  if ((progress.totalSteps ?? 0) > 0) {
+    const completedRatio = (progress.completedSteps ?? 0) / Math.max(1, progress.totalSteps ?? 0);
+    return Math.max(5, Math.min(95, Math.round(5 + completedRatio * 75)));
+  }
   if (progress.swarmTasksTotal > 0) {
     return Math.max(5, Math.min(95, Math.round((progress.swarmTasksCompleted / progress.swarmTasksTotal) * 100)));
   }
@@ -868,6 +988,7 @@ function toPublicJob(job: StoredSceneJob): SceneJob {
   return {
     id: job.id,
     sceneName: job.sceneName,
+    definitionType: job.definitionType,
     sessionId: job.sessionId,
     userId: job.userId,
     status: job.status,

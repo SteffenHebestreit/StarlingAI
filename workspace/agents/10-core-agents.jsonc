@@ -1,0 +1,27 @@
+{
+  "agents": {
+    "mainAssistant": {
+      "toolMode": "hybrid"
+    },
+    "defaults": {
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "fallback": "lmstudio/qwen3.5-4b",
+        "contextWindow": 32768,
+        "temperature": 0.3,
+        "maxTokens": 4096,
+        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b"
+      }
+    },
+    "ephemeralGeneration": {
+      "enabled": true,
+      "skillMatchThreshold": 0.75,
+      "architectAgentName": "agent_architect"
+    },
+    "rateLimit": {
+      "requestsPerMinute": 60,
+      "toolCallsPerTurn": 20,
+      "concurrentSessions": 10
+    }
+  }
+}

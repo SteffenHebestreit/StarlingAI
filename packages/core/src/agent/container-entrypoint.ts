@@ -62,8 +62,10 @@ async function main(): Promise<void> {
 
   const provider = createChatProvider(resolvedModelConfig, {
     providerId: resolvedModelConfig.primary.split("/")[0] || "lmstudio",
+    model: resolvedModelConfig.primary,
     baseUrl: providerBaseUrl,
     apiKey: providerApiKey,
+    priority: "primary",
   });
 
   const today = new Date().toLocaleDateString("en-US", {

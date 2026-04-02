@@ -1,0 +1,44 @@
+{
+  "accounts": [
+    {
+      "id": "work",
+      "address": "me@company.example",
+      "displayName": "Work",
+      "imap": {
+        "host": "imap.company.example",
+        "port": 993,
+        "secure": true,
+        "user": "$MAIL_WORK_USER",
+        "pass": "$MAIL_WORK_PASS"
+      },
+      "smtp": {
+        "host": "smtp.company.example",
+        "port": 587,
+        "secure": false,
+        "user": "$MAIL_WORK_USER",
+        "pass": "$MAIL_WORK_PASS",
+        "from": "Me (Work) <me@company.example>"
+      }
+    },
+    {
+      "id": "personal",
+      "address": "me@example.com",
+      "displayName": "Personal",
+      "imap": {
+        "host": "imap.example.com",
+        "port": 993,
+        "secure": true,
+        "user": "$MAIL_PERSONAL_USER",
+        "pass": "$MAIL_PERSONAL_PASS"
+      },
+      "smtp": {
+        "host": "smtp.example.com",
+        "port": 587,
+        "secure": false,
+        "user": "$MAIL_PERSONAL_USER",
+        "pass": "$MAIL_PERSONAL_PASS",
+        "from": "Me <me@example.com>"
+      }
+    }
+  ]
+}

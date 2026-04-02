@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SwarmState } from "../tools/registry.js";
+import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
-const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}`);
-const runSubAgentWithStatsMock = vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}`);
+const runSubAgentWithStatsMock = vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
   output: await runSubAgentMock(args),
   stats: {
     agentName: args.agentName,
@@ -26,10 +30,19 @@ vi.mock("../agent/sub-agent.js", () => ({
 }));
 
 describe("swarm orchestration tools", () => {
+  const tempDirs: string[] = [];
+
   afterEach(async () => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    delete process.env["SAI_CONFIG_PATH"];
+    vi.resetModules();
+    const { resetConfigForTests } = await import("../config/loader.js");
+    resetConfigForTests();
     runSubAgentMock.mockClear();
     runSubAgentWithStatsMock.mockClear();
-    runSubAgentWithStatsMock.mockImplementation(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
       output: await runSubAgentMock(args),
       stats: {
         agentName: args.agentName,
@@ -55,7 +68,7 @@ describe("swarm orchestration tools", () => {
   });
 
   it("falls back to an alternative agent and updates swarm state", async () => {
-    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => {
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
       if (agentName === "researcher") return `Error: failed to complete ${task}`;
       return `${agentName}:${task}:ok`;
     });
@@ -97,7 +110,7 @@ describe("swarm orchestration tools", () => {
   }, 30_000);
 
   it("treats empty delegated output as failure and uses the fallback agent", async () => {
-    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => {
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
       if (agentName === "researcher") return "";
       return `${agentName}:${task}:ok`;
     });
@@ -139,8 +152,98 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  it("auto-routes to a coordinator fallback when a broad current-source research task stalls", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-routing-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research specialist",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["web research"],
+          tags: ["research"],
+        },
+        web_task_coordinator: {
+          description: "Coordinator for broad web research tasks",
+          tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          capabilities: ["web retrieval", "evidence synthesis"],
+          tags: ["coordination", "web", "research"],
+        },
+        citation_researcher: {
+          description: "Official source lookup specialist",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["citation research"],
+          tags: ["citations", "sources"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const { getConfig, resetConfigForTests } = await import("../config/loader.js");
+    expect(getConfig().subAgents.web_task_coordinator).toBeDefined();
+    resetConfigForTests();
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
+      if (agentName === "researcher") {
+        return `Sub-agent '${agentName}' reached the maximum number of tool-call iterations (6). Partial result may be incomplete for ${task}`;
+      }
+      if (agentName === "web_task_coordinator") {
+        return `${agentName}:${task}:ok`;
+      }
+      return `${agentName}:${task}:unexpected`;
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Accessibility research guide",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      task: "Provide a comprehensive guide on web accessibility testing for 2026 with official sources and a step-by-step WCAG audit workflow.",
+    }, {
+      sessionId: "session-auto-coordinator-fallback",
+      workspacePath,
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("web_task_coordinator");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("researcher");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("web_task_coordinator");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
   it("treats sessionId planning chatter as failure and uses the fallback agent", async () => {
-    runSubAgentWithStatsMock.mockImplementation(async ({ agentName, task, parentSessionId }: { agentName: string; task: string; parentSessionId: string }) => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const { agentName, task, parentSessionId } = args;
       if (agentName === "researcher") {
         return {
           output: "Let me try with an empty string or null for the sessionId:",
@@ -217,7 +320,8 @@ describe("swarm orchestration tools", () => {
   }, 30_000);
 
   it("treats max-iteration delegated runs as failure even when the summary sounds plausible", async () => {
-    runSubAgentWithStatsMock.mockImplementation(async ({ agentName, task, parentSessionId }: { agentName: string; task: string; parentSessionId: string }) => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const { agentName, task, parentSessionId } = args;
       if (agentName === "researcher") {
         return {
           output: "Now I can see the screen clearly. There is a chat panel visible, and I will try the command palette again.",
@@ -291,7 +395,7 @@ describe("swarm orchestration tools", () => {
   }, 30_000);
 
   it("executes dependency-aware task graphs and exposes the shared swarm state", async () => {
-    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}:done`);
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -342,7 +446,7 @@ describe("swarm orchestration tools", () => {
   }, 15000);
 
   it("reuses an identical completed swarm task instead of creating a duplicate card", async () => {
-    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}:done`);
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -384,7 +488,9 @@ describe("swarm orchestration tools", () => {
   }, 15000);
 
   it("refuses to replay an identical failed delegated task in the same turn", async () => {
-    runSubAgentWithStatsMock.mockImplementation(async ({ agentName, task, parentSessionId }: { agentName: string; task: string; parentSessionId: string }) => ({
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const { agentName, task, parentSessionId } = args;
+      return {
       output: "Let me try with an empty string or null for the sessionId:",
       stats: {
         agentName,
@@ -398,9 +504,10 @@ describe("swarm orchestration tools", () => {
         maxIterations: 5,
         model: "mock",
         capabilities: [],
-        terminalState: "completed" as const,
+        terminalState: "completed",
       },
-    }));
+    };
+    });
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -443,7 +550,9 @@ describe("swarm orchestration tools", () => {
   }, 15_000);
 
   it("does not invoke architect fallback after an explicitly requested agent fails", async () => {
-    runSubAgentWithStatsMock.mockImplementation(async ({ agentName, task, parentSessionId }: { agentName: string; task: string; parentSessionId: string }) => ({
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const { agentName, task, parentSessionId } = args;
+      return {
       output: "Let me try with an empty string or null for the sessionId:",
       stats: {
         agentName,
@@ -457,9 +566,10 @@ describe("swarm orchestration tools", () => {
         maxIterations: 5,
         model: "mock",
         capabilities: [],
-        terminalState: "completed" as const,
+        terminalState: "completed",
       },
-    }));
+    };
+    });
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -498,7 +608,7 @@ describe("swarm orchestration tools", () => {
   }, 15_000);
 
   it("preserves browser findings across a coordinator task graph for downstream specialists", async () => {
-    runSubAgentMock.mockImplementation(async ({ agentName }: { agentName: string; task: string }) => {
+    runSubAgentMock.mockImplementation(async ({ agentName }: SubAgentRunOptions) => {
       if (agentName === "browser_agent") {
         return [
           "FACT: draw_date = 2026-03-24",

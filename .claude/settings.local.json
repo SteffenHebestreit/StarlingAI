@@ -18,7 +18,28 @@
       "Bash(cat /c/Users/steffen/.docker/mcp/*.json)",
       "Bash(docker context:*)",
       "Bash(docker mcp:*)",
-      "Bash(docker extension:*)"
+      "Bash(docker extension:*)",
+      "Bash(ls -la f:/StarlingAI/packages/web/src/main.*)",
+      "Bash(ls f:/StarlingAI/docker/*/)",
+      "Bash(find f:/StarlingAI -name *.html -not -path */node_modules/*)",
+      "Bash(ls f:/StarlingAI/*.deb f:/StarlingAI/*.png f:/StarlingAI/*.log f:/StarlingAI/test_tools.ts)",
+      "Bash(ls f:/StarlingAI/*.jsonc)",
+      "Bash(mkdir -p config/providers config/gateway config/channels config/infrastructure config/multimodal config/integrations config/tooling)",
+      "Bash(mkdir -p workspace/agents workspace/scenes workspace/runtime)",
+      "Bash(ls f:/StarlingAI/starling_config/*/)",
+      "Bash(node scripts/config-layout.mjs build)",
+      "Bash(pnpm install:*)",
+      "Bash(node -e \"import { resolve, dirname } from ''path''; const r = resolve\\(dirname\\(new URL\\(''file:///F:/StarlingAI/scripts/config-layout.mjs''\\).pathname\\), ''..''\\); console.log\\(r\\); console.log\\(new URL\\(''file:///F:/StarlingAI/scripts/config-layout.mjs''\\).pathname\\);\")",
+      "Bash(node -e \"const j = require\\(''./starlingai.json''\\); console.log\\(Object.keys\\(j\\).sort\\(\\).join\\('', ''\\)\\)\")",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm --filter @starlingai/core test -- --reporter=verbose src/tests/config-assistant-proposals.test.ts)",
+      "Bash(npx vitest:*)",
+      "Bash(node -e \":*)",
+      "Bash(node scripts/sai.mjs health)",
+      "Bash(gh pr:*)",
+      "Bash(where gh:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pnpm --filter @starlingai/core exec tsc --noEmit)"
     ]
   }
 }

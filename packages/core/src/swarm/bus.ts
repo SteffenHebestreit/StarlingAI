@@ -25,6 +25,9 @@ export type SwarmEventType =
   | "task_failed"     // agent returned a failure or weak result
   | "task_requeued"   // task re-queued after heartbeat loss / container timeout
   | "agent_promoted"  // ephemeral agent auto-promoted to the permanent catalog
+  | "agent_message"   // direct message from one agent to another within a session
+  | "agent_broadcast" // broadcast message within a session
+  | "agent_capability_announce" // agent heartbeat with capabilities and load
   | "graph_started"   // task graph execution started
   | "graph_node_ready"   // a graph node's dependencies are satisfied, execution starting
   | "graph_node_blocked" // a graph node is blocked due to failed dependency

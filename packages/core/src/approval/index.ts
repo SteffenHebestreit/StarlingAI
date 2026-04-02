@@ -52,9 +52,15 @@ export async function requestApprovalViaChannel(
 
     case "outbound_webhook": {
       // Use the channel-configured secret (resolved from env if needed)
-      const secret = channelConfig.secret.startsWith("$")
-        ? (process.env[channelConfig.secret.slice(1)] ?? channelConfig.secret)
-        : channelConfig.secret;
+      let secret = channelConfig.secret;
+      if (secret.startsWith("$")) {
+        const envVal = process.env[secret.slice(1)];
+        if (!envVal) {
+          log.error({ envVar: secret.slice(1) }, "Approval webhook secret references unset env var — denying");
+          return false;
+        }
+        secret = envVal;
+      }
       const { id, promise } = createPendingApproval({
         toolName, args, sceneName, secret,
         timeoutMs: channelConfig.timeoutMs,

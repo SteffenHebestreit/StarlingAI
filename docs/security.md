@@ -8,6 +8,10 @@ StarlingAI is designed for self-hosted deployment with no assumption of a truste
 
 Every component applies defence-in-depth: authentication at the edge, tool access control in the runtime, secret scanning on outputs, and a complete audit trail. This security model is domain-agnostic — the same guardrails protect the swarm whether it is doing research, writing code, automating browsers, or managing communications.
 
+The swarm is allowed to improve itself only within bounded non-crucial surfaces: prompts, user and workflow memory, sub-agent definitions, and approved tool assignments for those sub-agents. That self-improvement must remain faithful to the base README philosophy and may never weaken the security contract described here.
+
+In particular, secrets are outside autonomous control. Stored credentials, tokens, and secret material must never be read into model context or surfaced as plain text to an agent. They may only be consumed through dedicated secret-safe tools under the existing approval, audit, and redaction rules.
+
 See also: [Tool Tiers & Guardrails](tool-tiers.md) · [Configuration Reference](configuration.md) · [REST API & WebSocket](api.md)
 
 ---

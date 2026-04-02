@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig } from "./config/loader.js";
 import { initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
+import { flushAuditLog } from "./audit/logger.js";
 import { createGateway } from "./gateway/index.js";
 import { createToken } from "./gateway/auth.js";
 import { childLogger } from "./logger.js";
@@ -16,6 +17,7 @@ import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
+import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
@@ -34,12 +36,26 @@ import "./tools/terraform.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/memory.js";
+import "./personality/service.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
 import "./tools/multimodal.js";
+import "./tools/document-output.js";
 import "./tools/pentest.js";
 import "./tools/computer-use.js";
+import "./tools/telegram.js";
+import "./tools/cron.js";
+import "./tools/reminders.js";
+import "./tools/timers.js";
+import "./tools/http-request.js";
+import "./tools/git.js";
+import "./tools/messaging.js";
+import "./tools/mail.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
+
+import { stopAllCronJobs } from "./runtime/scheduler.js";
+import { stopAllReminders } from "./runtime/reminders.js";
+import { stopAllTimers } from "./runtime/timers.js";
 
 const log = childLogger("main");
 
@@ -73,6 +89,8 @@ export async function main() {
   // Start gateway (WS + REST)
   const gateway = createGateway();
   await gateway.start();
+
+  syncConfiguredJobTriggers(config.gateway.turnTimeoutMs);
 
   // Start the scene-job worker after the API is ready unless an external worker is managing the queue.
   if (embeddedSceneWorkerEnabled) {
@@ -111,6 +129,9 @@ export async function main() {
         if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {
           await syncModelEndpointRuntimeStatus();
         }
+        if (changedSections.includes("jobs") || changedSections.includes("scenes") || changedSections.includes("_initial")) {
+          syncConfiguredJobTriggers(newConfig.gateway.turnTimeoutMs);
+        }
         syncApprovalRuntimeStatus();
         if (changedSections.includes("webhooks") || changedSections.includes("_initial")) {
           syncWebhookTools();
@@ -143,6 +164,10 @@ export async function main() {
     await gateway.stop();
     await shutdownSceneJobStore();
     await shutdownMcpServers();
+    stopAllCronJobs();
+    stopAllReminders();
+    stopAllTimers();
+    await flushAuditLog();
     process.exit(0);
   };
 

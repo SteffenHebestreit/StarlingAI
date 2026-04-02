@@ -150,7 +150,7 @@ describe("runtime delegated-loop regressions", () => {
     const result = await runTurn({
       session,
       userMessage: "Start the authorized pentest.",
-      onToolResult: (_name, toolResult) => observedToolResults.push(toolResult),
+      onToolResult: (_toolCallId, _name, toolResult) => observedToolResults.push(toolResult),
     });
 
     expect(result.blocked).toBe(false);
@@ -182,7 +182,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const delegateExecuteMock = vi.fn(async () => ({
       success: true,
-      output: delegatedOutputs[delegatedOutputIndex++] ?? delegatedOutputs[delegatedOutputs.length - 1],
+      output: delegatedOutputs[delegatedOutputIndex++] ?? delegatedOutputs[delegatedOutputs.length - 1] ?? "",
       metadata: {
         agentName,
         attemptedAgents: [agentName],
@@ -215,7 +215,62 @@ describe("runtime delegated-loop regressions", () => {
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(3);
-    expect(toolMessages[2]?.content).toContain("Result summary: Please confirm the authorization reference again before I continue.");
+    expect(toolMessages[2]?.content).toContain("Please confirm the authorization reference again before I continue.");
+  });
+
+  it("resynthesizes narrated tool-trace final responses into a direct answer", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("call_trace", {
+          agentName: "researcher",
+          task: "Research current penetration testing frameworks.",
+        });
+      }
+
+      return createTextStream([
+        "I'll search for more specific information on penetration testing frameworks and methodologies.",
+        "",
+        "[Tool: web_search(maxResults: 10, query: \"OWASP testing guide\") → Web Search Results for: ...]",
+        "",
+        "Now let me create a comprehensive document with all this information.",
+      ].join("\n\n"));
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "OWASP WSTG, PTES, and NIST SP 800-115 are the relevant frameworks.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Research current penetration testing frameworks.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(session.getHistory().at(-1)?.content).toBe("synthesized");
   });
 
   it("blocks hallucinated direct computer tools on owned-computer-access turns", async () => {
@@ -257,5 +312,55 @@ describe("runtime delegated-loop regressions", () => {
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0]?.content).toContain("Tool 'computer_snapshot' is not available in this turn");
+  });
+
+  it("returns a cached result instead of re-executing an identical tool call across iterations", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("read_1", "read_file", { path: "workspace/agents/30-subagents-pentest.jsonc" });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("read_2", "read_file", { path: "workspace/agents/30-subagents-pentest.jsonc" });
+      }
+      return createTextStream("I reviewed the file once and will not repeat the same read again.");
+    });
+
+    const readFileMock = vi.fn(async () => ({
+      success: true,
+      output: "pentest workflow content",
+      metadata: { path: "workspace/agents/30-subagents-pentest.jsonc" },
+    }));
+
+    registerTool({
+      name: "read_file",
+      description: "Read a workspace file.",
+      parameters: { type: "object", properties: {} },
+      execute: readFileMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const observedToolResults: string[] = [];
+    const result = await runTurn({
+      session,
+      userMessage: "Review the pentest workflow file.",
+      onToolResult: (_toolCallId, _name, toolResult) => observedToolResults.push(toolResult),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("will not repeat the same read again");
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(observedToolResults).toHaveLength(2);
+    expect(observedToolResults[1]).toContain("This is a cached result");
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[1]?.content).toContain("already called 'read_file' with identical arguments");
   });
 });

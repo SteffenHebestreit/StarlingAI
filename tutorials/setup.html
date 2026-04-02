@@ -368,22 +368,20 @@ LOG_LEVEL=info</code></pre>
                 <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI for managing agents, scenes, and channels</td></tr>
                 <tr><td><code>postgres</code></td><td>internal</td><td>Persistent storage for audit logs and configuration</td></tr>
                 <tr><td><code>redis</code></td><td>internal</td><td>Session cache, rate limiting, and inter-service pub/sub</td></tr>
-                <tr><td><code>qwen3-asr-service</code></td><td>internal</td><td>Speech-to-text — Qwen3-ASR (downloads model on first start)</td></tr>
-                <tr><td><code>qwen3-tts-service</code></td><td>internal</td><td>Text-to-speech with voice cloning — Qwen3-TTS</td></tr>
                 <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP tool)</td></tr>
                 <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
               </tbody>
             </table>
 
             <h3>Optional services</h3>
-            <p>These run under separate profiles and can be added to a running stack at any time:</p>
+            <p>The core stack ships with the dashboard, gateway, file conversion service, and tutorials. Configure external STT, TTS, and image-generation endpoints in Settings when you need them.</p>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-              <pre><code># Start / stop optional services without restarting the core stack:
-./extras.sh pentest on     # Kali Linux pentest toolchain
-./extras.sh image on       # FLUX image generation
-./extras.sh all on         # both
-./extras.sh status         # show what's running</code></pre>
+              <pre><code># Start the optional Kali pentest sidecar
+pnpm sai start --pentest
+
+# Health check the running stack
+pnpm sai health</code></pre>
             </div>
 
             <h3>Check all containers are healthy</h3>
@@ -428,13 +426,13 @@ docker compose logs -f gateway</code></pre>
               <div class="tab-panel" data-tab="unix">
                 <div class="code-block">
                   <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-                  <pre><code>./scripts/gen-token.sh</code></pre>
+                  <pre><code>pnpm sai token</code></pre>
                 </div>
               </div>
               <div class="tab-panel" data-tab="win">
                 <div class="code-block">
                   <div class="code-block-header"><span class="code-lang">cmd</span><button class="copy-btn">Copy</button></div>
-                  <pre><code>scripts\gen-token.bat</code></pre>
+                  <pre><code>pnpm sai token</code></pre>
                 </div>
               </div>
             </div>
@@ -501,25 +499,23 @@ docker compose logs -f gateway</code></pre>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
               <pre><code># Stop all services
-./start.sh --down
+pnpm sai stop
 
 # Stop and wipe all data (fresh start next time)
-./start.sh --down --volumes
+pnpm sai stop --volumes
 
 # Force rebuild after a git pull
 git pull
-./start.sh --build
+pnpm sai start --build
 
 # Full clean rebuild with no cache
-./start.sh --no-cache
+pnpm sai start --no-cache
 
 # Start with Kali pentest service
-./start.sh --pentest
+pnpm sai start --pentest
 
-# Manage optional services on a running stack
-./extras.sh pentest on
-./extras.sh image on
-./extras.sh status
+# Generate a fresh dashboard token
+pnpm sai token
 
 # Restart a single container
 docker compose restart gateway

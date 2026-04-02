@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import WebSocket from "ws";
 
 describe("gateway HTTP bridge", () => {
   const gatewayTestTimeoutMs = 45_000;
@@ -28,6 +29,7 @@ describe("gateway HTTP bridge", () => {
     delete process.env["SAI_MASTER_KEY"];
     delete process.env["SAI_CRED_STORE"];
     delete process.env["SAI_AUDIT_LOG"];
+    delete process.env["SAI_USER_MEMORY_PATH"];
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
@@ -117,6 +119,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -215,6 +218,242 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("round-trips the structured personality profile through the gateway API", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-personality-api-"));
+    const port = 19150 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "p".repeat(32),
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_USER_MEMORY_PATH"] = join(tempDir, ".starlingai", "state");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const initialResponse = await fetch(`${baseUrl}/api/personality`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(initialResponse.status).toBe(200);
+      const initial = await initialResponse.json() as {
+        schemaVersion: number;
+        identity: { core: string };
+        collaboration: { defaults: string[]; avoidances: string[] };
+      };
+      expect(initial.schemaVersion).toBe(2);
+      expect(initial.identity.core).toBeTruthy();
+      expect(initial.collaboration.defaults.length).toBeGreaterThan(0);
+
+      const updateResponse = await fetch(`${baseUrl}/api/personality`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          schemaVersion: 2,
+          identity: {
+            core: "A rigorous but slightly sharper implementation partner.",
+          },
+          voice: {
+            tone: ["Measured.", "Blunt when tradeoffs matter."],
+            style: ["State the constraint, then recommend."],
+            quirks: ["Dry humor in short bursts."],
+          },
+          collaboration: {
+            defaults: ["Lead with the decisive tradeoff."],
+            avoidances: ["Do not pad the answer with generic reassurance."],
+          },
+          growth: {
+            notes: ["The user likes stronger architectural judgment."],
+          },
+          reason: "Refined the durable operating shape",
+        }),
+      });
+
+      expect(updateResponse.status).toBe(200);
+      const updated = await updateResponse.json() as {
+        schemaVersion: number;
+        identity: { core: string };
+        voice: { tone: string[] };
+        collaboration: { defaults: string[]; avoidances: string[] };
+        growth: { notes: string[] };
+        updatedBy: string;
+      };
+      expect(updated).toMatchObject({
+        schemaVersion: 2,
+        identity: { core: "A rigorous but slightly sharper implementation partner." },
+        collaboration: {
+          defaults: ["Lead with the decisive tradeoff."],
+          avoidances: ["Do not pad the answer with generic reassurance."],
+        },
+        growth: {
+          notes: ["The user likes stronger architectural judgment."],
+        },
+        updatedBy: "user",
+      });
+      expect(updated.voice.tone).toContain("Measured.");
+
+      const resetResponse = await fetch(`${baseUrl}/api/personality/reset`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(resetResponse.status).toBe(200);
+      const reset = await resetResponse.json() as {
+        schemaVersion: number;
+        identity: { core: string };
+        collaboration: { defaults: string[]; avoidances: string[] };
+        updatedBy: string;
+      };
+      expect(reset.schemaVersion).toBe(2);
+      expect(reset.updatedBy).toBe("user");
+      expect(reset.identity.core).not.toBe("A rigorous but slightly sharper implementation partner.");
+      expect(reset.collaboration.defaults.length).toBeGreaterThan(0);
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("lists scene metadata from config and runtime storage through the gateway API", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scenes-catalog-"));
+    const port = 19250 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "r".repeat(32),
+      },
+      scenes: {
+        code_review: {
+          description: "Review a repository for bugs and regressions",
+          task: "Review {{repo|packages/core}} for regressions and summarize the findings.",
+          allowedAgents: ["git_developer", "project_planner"],
+          humanInLoopSteps: ["git_commit", "send_email"],
+          approvalChannel: "ops_review",
+          params: {
+            repo: {
+              description: "Repository path to review",
+              default: "packages/core",
+            },
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const createResponse = await fetch(`${baseUrl}/api/scenes/runtime_review`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          description: "Runtime review workflow",
+          task: "Inspect the changed files and summarize the highest-risk regressions.",
+          webhookKey: "runtime-webhook-key-123456",
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+
+      const listResponse = await fetch(`${baseUrl}/api/scenes`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(listResponse.status).toBe(200);
+
+      const scenes = await listResponse.json() as Array<{
+        name: string;
+        source: string;
+        description: string;
+        task: string;
+        webhookKey?: string;
+        allowedAgents?: string[];
+        humanInLoopSteps?: string[];
+        approvalChannel?: string;
+        params?: Record<string, { description?: string; default?: string }>;
+      }>;
+
+      const configScene = scenes.find((scene) => scene.name === "code_review");
+      expect(configScene).toMatchObject({
+        source: "config",
+        description: "Review a repository for bugs and regressions",
+        allowedAgents: ["git_developer", "project_planner"],
+        humanInLoopSteps: ["git_commit", "send_email"],
+        approvalChannel: "ops_review",
+      });
+      expect(configScene?.params).toEqual({
+        repo: {
+          description: "Repository path to review",
+          default: "packages/core",
+        },
+      });
+
+      const runtimeScene = scenes.find((scene) => scene.name === "runtime_review");
+      expect(runtimeScene).toMatchObject({
+        source: "store",
+        description: "Runtime review workflow",
+        task: "Inspect the changed files and summarize the highest-risk regressions.",
+        webhookKey: "runtime-webhook-key-123456",
+      });
+      expect(runtimeScene?.allowedAgents).toBeUndefined();
+      expect(runtimeScene?.humanInLoopSteps).toBeUndefined();
+      expect(runtimeScene?.approvalChannel).toBeUndefined();
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -289,6 +528,59 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("persists websocket auth failures to the audit log", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-audit-log-"));
+    const port = 19750 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const auditLogPath = join(tempDir, ".starlingai", "audit.jsonl");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "t".repeat(32),
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = auditLogPath;
+
+    vi.resetModules();
+
+    const [{ createGateway }, audit] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../audit/logger.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    try {
+      await waitForHealth(`http://127.0.0.1:${port}/healthz`);
+
+      const closeCode = await waitForWebSocketClose(`ws://127.0.0.1:${port}/ws?token=invalid-token`);
+      expect(closeCode).toBe(4401);
+
+      await audit.flushAuditLog();
+
+      const authFailures = readAuditEvents(auditLogPath).filter((event) => event.type === "auth_failure");
+      expect(authFailures).toHaveLength(1);
+      expect(authFailures[0]).toMatchObject({
+        severity: "warn",
+        data: {
+          ip: expect.any(String),
+        },
+      });
+    } finally {
+      await gateway.stop();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -385,6 +677,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -462,6 +755,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -585,6 +879,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -643,6 +938,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -876,6 +1172,129 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("exposes provider runtime status for failover chains", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-provider-status-"));
+    const port = 22600 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 25600 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const upstreamBaseUrl = `http://127.0.0.1:${upstreamPort}/v1`;
+
+    upstreamServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          data: [
+            { id: "lmstudio/orchestrator-a" },
+            { id: "lmstudio/orchestrator-b" },
+          ],
+        }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "i".repeat(32),
+      },
+      providers: {
+        lmstudio: {
+          baseUrl: upstreamBaseUrl,
+          apiKey: "provider-key",
+          timeoutMs: 45_000,
+          maxRetries: 2,
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/orchestrator-a",
+            fallback: "lmstudio/orchestrator-b",
+            baseUrl: upstreamBaseUrl,
+            apiKey: "orch-key-a",
+            maxTokens: 2048,
+          },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const response = await fetch(`${baseUrl}/api/providers/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as {
+        healthy: boolean;
+        mode: string;
+        activeModel?: string;
+        endpoints: Array<{
+          priority: string;
+          active: boolean;
+          healthy: boolean;
+          requestTimeoutMs?: number;
+          configuredMaxRetries?: number;
+          lastHealthCheckAt?: string;
+        }>;
+      };
+
+      expect(body.healthy).toBe(true);
+      expect(body.mode).toBe("failover");
+      expect(body.activeModel).toBe("lmstudio/orchestrator-a");
+      expect(body.endpoints).toHaveLength(2);
+      expect(body.endpoints.find((endpoint) => endpoint.priority === "primary")).toMatchObject({
+        active: true,
+        healthy: true,
+        requestTimeoutMs: 71_200,
+        configuredMaxRetries: 2,
+      });
+      expect(body.endpoints.find((endpoint) => endpoint.priority === "primary")?.lastHealthCheckAt).toBeTruthy();
+      expect(body.endpoints.find((endpoint) => endpoint.priority === "fallback")).toMatchObject({
+        active: false,
+        healthy: true,
+        requestTimeoutMs: 71_200,
+        configuredMaxRetries: 2,
+      });
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -955,6 +1374,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -1056,8 +1476,8 @@ describe("gateway HTTP bridge", () => {
       },
       multimodal: {
         files: { baseUrl: `http://127.0.0.1:${upstreamPort}` },
-        stt: { baseUrl: `http://127.0.0.1:${upstreamPort}` },
-        tts: { baseUrl: `http://127.0.0.1:${upstreamPort}` },
+        stt: { baseUrl: `http://127.0.0.1:${upstreamPort}`, model: "Qwen/Qwen3-ASR-1.7B" },
+        tts: { baseUrl: `http://127.0.0.1:${upstreamPort}`, api: "qwen-compatible", defaultSpeaker: "Vivian" },
       },
     }), "utf8");
 
@@ -1209,6 +1629,7 @@ describe("gateway HTTP bridge", () => {
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);
@@ -1256,4 +1677,53 @@ async function waitForChannelStatus(
   }
 
   throw new Error(`Channel status did not converge for ${type}`);
+}
+
+async function waitForWebSocketClose(url: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`WebSocket did not close in time: ${url}`));
+    }, 5_000);
+
+    socket.once("close", (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+
+    socket.once("unexpected-response", (_request, response) => {
+      clearTimeout(timeout);
+      reject(new Error(`Unexpected websocket HTTP response: ${response.statusCode ?? "unknown"}`));
+    });
+
+    socket.once("error", () => {
+      // Connection failures still surface a close event for auth rejection.
+    });
+  });
+}
+
+function readAuditEvents(auditLogPath: string): Array<{
+  type: string;
+  severity?: string;
+  data?: Record<string, unknown>;
+}> {
+  if (!existsSync(auditLogPath)) return [];
+  return readFileSync(auditLogPath, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as {
+      type: string;
+      severity?: string;
+      data?: Record<string, unknown>;
+    });
+}
+
+async function flushAuditLogForTests(): Promise<void> {
+  try {
+    const audit = await import("../audit/logger.js");
+    await audit.flushAuditLog();
+  } catch {
+    // Some tests may not load the audit logger.
+  }
 }

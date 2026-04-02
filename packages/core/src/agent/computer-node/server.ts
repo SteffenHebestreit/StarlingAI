@@ -20,6 +20,12 @@ import type {
 const log = childLogger("computer-node");
 const execFileAsync = promisify(execFile);
 
+import { POST_ACTION_SETTLE_MS } from "../computer-adapters/constants.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type NutJsModule = {
   screen: {
     width(): Promise<number>;
@@ -429,6 +435,11 @@ async function executeDesktopAction(action: ComputerAction): Promise<ComputerNod
       default:
         throw new Error(`Unsupported action type: ${(action as { type: string }).type}`);
     }
+
+    // Wait for the screen to settle after the action before capturing.
+    // Windows desktop rendering can be slow — without this delay the
+    // screenshot captures the pre-action state and the agent misreads it.
+    await sleep(POST_ACTION_SETTLE_MS);
 
     const snapshot = await captureDesktopSnapshot();
     return {

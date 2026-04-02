@@ -12,3 +12,28 @@ coverage/
 guardedswarm.json
 starlingai.json
 packages/core/.starlingai/
+
+# Transpiled JS in web source (accidental build artifacts)
+packages/web/src/**/*.js
+
+# Runtime artifacts
+.starlingai/*.log
+.starlingai/*.wav
+.starlingai/*.pid
+.starlingai/*.json
+.starlingai/*.ndjson
+.starlingai/*.jsonl
+.starlingai/recordings/
+.starlingai/pentest-artifacts/
+.starlingai/live-check/
+computer-remote-build.log
+*.deb
+
+# Agent-mutable runtime overrides (local state)
+workspace/runtime/runtime.overrides.json
+
+# Local IDE / tool settings
+.claude/settings.local.json
+
+# Test artifacts
+packages/core/tmp/

@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
-const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; task: string }) => `${agentName}:${task}:done`);
+const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
 
 vi.mock("../agent/sub-agent.js", () => ({
   runSubAgent: runSubAgentMock,
-  runSubAgentWithStats: vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+  runSubAgentWithStats: vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
     output: await runSubAgentMock(args),
     stats: {
       agentName: args.agentName,

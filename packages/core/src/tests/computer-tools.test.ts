@@ -276,6 +276,24 @@ describe("computer tools", () => {
     expect(fetchMock.mock.calls.length).toBe(beforeCalls);
   });
 
+  it("blocks Windows key hotkeys that can launch unpredictable system UI", async () => {
+    const ctx = {
+      sessionId: "controller-hotkey-validate",
+      workspacePath: tempDir,
+      approvalCallback: async () => true,
+    };
+
+    const start = await executeTool("computer_session_start", { adapter: "remote_node" }, ctx);
+    expect(start.success).toBe(true);
+    const sessionId = String(start.metadata?.["sessionId"]);
+
+    const beforeCalls = fetchMock.mock.calls.length;
+    const hotkey = await executeTool("computer_hotkey", { sessionId, keys: "win+r" }, ctx);
+    expect(hotkey.success).toBe(false);
+    expect(hotkey.error).toContain("Windows/Meta shortcuts can open system UI");
+    expect(fetchMock.mock.calls.length).toBe(beforeCalls);
+  });
+
   it("auto-resumes a paused session when a tool call arrives", async () => {
     const ctx = {
       sessionId: "controller-resume",
@@ -291,7 +309,7 @@ describe("computer tools", () => {
 
     // Manually transition to paused (simulates heartbeat timeout)
     const session = computerSessionManager.getSession(sessionId)!;
-    (session as Record<string, unknown>).state = "paused";
+    (session as unknown as { state: string }).state = "paused";
     expect(computerSessionManager.getSession(sessionId)?.state).toBe("paused");
 
     // Tool call should auto-resume the session instead of failing

@@ -127,6 +127,92 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
+  it("reduces computer-use agents to read-only tools for observation tasks", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-computer-observe-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        computer_use_agent: {
+          description: "Computer use agent",
+          systemPrompt: "Inspect the user's desktop.",
+          tools: [
+            "computer_list_nodes",
+            "computer_session_start",
+            "computer_session_attach",
+            "computer_list_windows",
+            "computer_snapshot",
+            "computer_capture_region",
+            "computer_click",
+            "computer_type",
+            "computer_hotkey",
+          ],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const stubToolNames = [
+      "computer_list_nodes",
+      "computer_session_start",
+      "computer_session_attach",
+      "computer_list_windows",
+      "computer_snapshot",
+      "computer_capture_region",
+      "computer_click",
+      "computer_type",
+      "computer_hotkey",
+    ];
+    for (const toolName of stubToolNames) {
+      registerTool({
+        name: toolName,
+        description: `Stub tool ${toolName}`,
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { success: true, output: `${toolName} ok` };
+        },
+      });
+    }
+
+    completeMock.mockImplementationOnce(async (_messages: unknown, tools: unknown) => {
+      const toolNames = Array.isArray(tools)
+        ? (tools as Array<{ name?: string }>).map((tool) => tool.name).filter(Boolean)
+        : [];
+      expect(toolNames).toContain("computer_snapshot");
+      expect(toolNames).not.toContain("computer_click");
+      expect(toolNames).not.toContain("computer_type");
+      expect(toolNames).not.toContain("computer_hotkey");
+      return {
+        content: "snapshot reviewed",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      };
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "computer_use_agent",
+        task: "Take a screenshot of the remote PC and describe what is visible on screen.",
+        parentSessionId: "parent-observe",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toBe("snapshot reviewed");
+      expect(completeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const toolName of stubToolNames) {
+        unregisterTool(toolName);
+      }
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects coordinator-style completion claims when no tool calls were executed", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-hallucinated-completion-"));
     const configPath = join(tempDir, "starlingai.json");

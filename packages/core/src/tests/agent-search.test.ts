@@ -270,6 +270,94 @@ describe("search_agents tool", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("routes inbox and recent-email requests to mail_agent", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        mail_agent: {
+          description: "Mailbox triage and drafting specialist for multiple mail accounts with approval-gated sending.",
+          capabilities: ["mail triage", "mail search", "reply drafting", "multi-account mailbox operations"],
+          tags: ["mail", "email", "inbox", "drafts", "communications"],
+          tools: ["mail_search", "mail_read", "mail_list_unread", "mail_prepare_draft", "mail_send_draft"],
+          maxIterations: 8,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("Kannst du mir meine letzten 3 emails zeigen?", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("mail_agent");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes reminder and timer requests to productivity_agent", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        productivity_agent: {
+          description: "Personal productivity specialist for notes, reminders, timers, and lightweight follow-up tracking.",
+          capabilities: ["note taking", "workspace memory", "reminder scheduling", "timer management"],
+          tags: ["productivity", "notes", "reminder", "timer", "alarm", "todo"],
+          tools: ["memory_store", "memory_search", "reminder_create", "reminder_list", "timer_start", "timer_list", "timer_cancel"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("Please remind me tomorrow at 9 and start a 5 minute timer", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("productivity_agent");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
 });
 
 describe("circuit breaker", () => {

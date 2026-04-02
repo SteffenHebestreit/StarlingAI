@@ -25,6 +25,22 @@
 				"compose",
 				"ps"
 			],
+			"windows": {
+				"command": "docker",
+				"args": [
+					"compose",
+					"ps"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
 			"isBackground": false
 		},
 		{
@@ -35,6 +51,22 @@
 				"-i",
 				"http://localhost:8765/healthz"
 			],
+			"windows": {
+				"command": "curl.exe",
+				"args": [
+					"-i",
+					"http://localhost:8765/healthz"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
 			"isBackground": false
 		},
 		{
@@ -45,6 +77,38 @@
 				"-I",
 				"http://localhost:3001/"
 			],
+			"windows": {
+				"command": "curl.exe",
+				"args": [
+					"-I",
+					"http://localhost:3001/"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "run core tests (powershell)",
+			"type": "shell",
+			"command": "pnpm --filter @starlingai/core test"
+		},
+		{
+			"label": "core tests powershell",
+			"type": "shell",
+			"command": "powershell.exe -NoProfile -Command \"cd F:\\StarlingAI; pnpm --filter @starlingai/core test\""
+		},
+		{
+			"label": "core tests ps",
+			"type": "shell",
+			"command": "pnpm --filter @starlingai/core test",
 			"isBackground": false
 		}
 	]

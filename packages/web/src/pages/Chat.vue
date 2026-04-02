@@ -17,6 +17,7 @@
         <select
           v-if="activeSessions.length > 0"
           :value="gateway.currentSessionId ?? ''"
+          aria-label="Active session"
           class="rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300"
           @change="handleSessionSwitch"
         >
@@ -91,15 +92,15 @@
               >
                 {{ expandedMessageHistory ? `Hide ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` : `Show ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` }}
               </button>
-              <span class="chat-history-collapsed__hint">Composer locked while the current turn is running.</span>
             </div>
 
             <MessageBubble
-              v-for="msg in visibleMessages"
+              v-for="(msg, idx) in visibleMessages"
               :key="msg.id"
               :message="msg"
               :is-streaming="msg.id === 'streaming'"
               :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
+              :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
             />
           </div>
         </section>
@@ -129,6 +130,7 @@
     <!-- Human-in-the-loop approval banner -->
     <Transition name="approval">
       <div v-if="gateway.pendingApproval"
+           role="alertdialog" aria-live="assertive"
            class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
            style="background: rgba(15,12,30,0.97); border: 1px solid rgba(168,85,247,0.5); box-shadow: 0 0 24px rgba(168,85,247,0.25);">
         <div class="px-5 py-4">
@@ -162,6 +164,7 @@
 
     <Transition name="approval">
       <div v-if="gateway.pendingIntervention"
+           role="alert" aria-live="assertive"
            class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
            :class="gateway.pendingIntervention.severity === 'error' ? 'border border-red-500/45' : 'border border-amber-500/45'"
            style="background: rgba(18,14,28,0.97); box-shadow: 0 0 24px rgba(245,158,11,0.16);">
@@ -408,6 +411,23 @@
                     </button>
                   </div>
                 </div>
+
+                <div v-if="configuredJobs.length > 0" class="chat-dropdown__group">
+                  <div class="chat-dropdown__label">Jobs</div>
+                  <div class="chat-dropdown__scene-grid">
+                    <button
+                      v-for="job in configuredJobs"
+                      :key="job.name"
+                      @click="triggerJob(job.name)"
+                      :disabled="gateway.isLoading || !gateway.connected || isJobRunning(job.name)"
+                      :title="job.description"
+                      class="chat-scene-pill"
+                    >
+                      <span class="text-cyan-400 transition-colors">{{ isJobRunning(job.name) ? '●' : '↻' }}</span>
+                      {{ job.name.replace(/_/g, ' ') }}
+                    </button>
+                  </div>
+                </div>
               </div>
             </details>
 
@@ -425,6 +445,7 @@
                     <div>
                       <div class="flex items-center gap-2">
                         <span class="text-sm font-medium text-gray-100">{{ formatSceneName(job.sceneName) }}</span>
+                        <span class="rounded-full bg-white/10 px-2 py-0.5 text-[11px] uppercase tracking-wide text-gray-300">{{ job.definitionType === 'job' ? 'job' : 'scene' }}</span>
                         <span :class="sceneStatusClass(job.status)">{{ job.status }}</span>
                       </div>
                       <div class="mt-1 text-[11px] uppercase tracking-wide text-gray-500">Job {{ shortJobId(job.id) }}</div>
@@ -463,6 +484,11 @@
                     </div>
                   </div>
 
+                  <div v-if="job.progress.totalSteps" class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
+                    <span>Steps {{ job.progress.completedSteps ?? 0 }} / {{ job.progress.totalSteps }}</span>
+                    <span v-if="job.progress.currentStep">Current step: {{ job.progress.currentStep }}</span>
+                  </div>
+
                   <div class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-gray-300 sm:grid-cols-4">
                     <div class="rounded-xl bg-black/20 px-2 py-1.5">
                       <div class="text-gray-500">Tools</div>
@@ -483,7 +509,7 @@
                   </div>
 
                   <p v-if="job.status === 'queued' || job.status === 'running' || job.status === 'cancelling'" class="mt-2 text-xs text-sky-200/90">
-                    {{ job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : 'Scene is running in the background.' }}
+                    {{ job.progress.currentTool ? `Current tool: ${job.progress.currentTool}` : job.progress.currentAgent ? `Current agent: ${job.progress.currentAgent}` : job.definitionType === 'job' ? 'Job is running in the background.' : 'Scene is running in the background.' }}
                   </p>
                   <p v-else-if="job.error" class="mt-2 line-clamp-3 text-xs text-red-200/90">
                     {{ job.error }}
@@ -580,7 +606,8 @@
 import { ref, computed, nextTick, watch, onMounted, onUnmounted, defineAsyncComponent } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { useGatewayStore } from "@/stores/gateway";
+import { sanitizeAssistantMessageContent, useGatewayStore } from "@/stores/gateway";
+import { useJobsStore } from "@/stores/jobs";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
 import { useComputerStore } from "@/stores/computer";
@@ -594,6 +621,7 @@ import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
 const gateway = useGatewayStore();
+const jobsStore = useJobsStore();
 const scenesStore = useScenesStore();
 const multimodalStore = useMultimodalStore();
 const computerStore = useComputerStore();
@@ -621,7 +649,7 @@ const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
 const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
 const previewModalUrl = ref<string | null>(null);
-const expandedMessageHistory = ref(true);
+const expandedMessageHistory = ref(false);
 
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
@@ -780,6 +808,7 @@ const orbAiState = computed(() => {
 
 const displayMessages = computed(() => gateway.messages);
 const sceneJobs = computed(() => scenesStore.recentJobs);
+const configuredJobs = computed(() => jobsStore.jobs);
 const activeSessions = computed(() => gateway.activeSessions);
 const showJobsDropdown = computed(() => sceneJobs.value.length > 0 || Boolean(scenesStore.runError));
 const jobsDropdownLabel = computed(() => {
@@ -795,13 +824,22 @@ const showOptionsDropdown = computed(() => (
   || showWakeMode.value
   || showSpeechPlayback.value
   || gateway.scenes.length > 0
+  || configuredJobs.value.length > 0
 ));
 const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+const VISIBLE_TAIL = 6;
 const visibleMessages = computed(() => {
-  if (!compactComposer.value || expandedMessageHistory.value || displayMessages.value.length <= 6) {
+  if (expandedMessageHistory.value || displayMessages.value.length <= VISIBLE_TAIL) {
     return displayMessages.value;
   }
-  return displayMessages.value.slice(-6);
+  return displayMessages.value.slice(-VISIBLE_TAIL);
+});
+/** Index of the last assistant message inside visibleMessages (never auto-collapsed). */
+const lastAssistantVisibleIdx = computed(() => {
+  for (let i = visibleMessages.value.length - 1; i >= 0; i--) {
+    if (visibleMessages.value[i].role === 'assistant') return i;
+  }
+  return -1;
 });
 const collapsedMessageCount = computed(() => Math.max(0, displayMessages.value.length - visibleMessages.value.length));
 const latestAssistantText = computed(() => {
@@ -1209,6 +1247,16 @@ async function sendMessage() {
   const trimmedText = inputText.value.trim();
   if ((!trimmedText && pendingImageContexts.value.length === 0) || gateway.isLoading) return;
 
+  const jobMatch = pendingImageContexts.value.length === 0
+    ? trimmedText.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s)
+    : null;
+  if (jobMatch && jobMatch[1]?.toLowerCase() !== "help") {
+    inputText.value = "";
+    const params = parseInlineParams(jobMatch[2] ?? "");
+    await scenesStore.runJob(jobMatch[1]!, Object.keys(params).length > 0 ? params : undefined);
+    return;
+  }
+
   const pending = pendingImageContexts.value;
   pendingImageContexts.value = [];
   inputText.value = "";
@@ -1246,6 +1294,11 @@ async function triggerScene(name: string) {
   await scenesStore.run(name);
 }
 
+async function triggerJob(name: string) {
+  if (gateway.isLoading) return;
+  await scenesStore.runJob(name);
+}
+
 async function approveAction(approved: boolean) {
   if (!gateway.pendingApproval) return;
   await gateway.respondApproval(gateway.pendingApproval.approvalId, approved);
@@ -1273,8 +1326,13 @@ async function resetSession() {
     await gateway.createSession();
     return;
   }
-  await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
-  await gateway.loadSession(gateway.currentSessionId);
+  try {
+    await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
+    await gateway.loadSession(gateway.currentSessionId);
+  } catch {
+    // If reset fails, create a fresh session instead
+    await gateway.createSession();
+  }
 }
 
 async function archiveCurrentSession() {
@@ -1307,6 +1365,18 @@ function openJobs() {
 
 function isSceneRunning(name: string): boolean {
   return scenesStore.runningJobs.some((job) => job.sceneName === name);
+}
+
+function isJobRunning(name: string): boolean {
+  return scenesStore.runningJobs.some((job) => job.definitionType === "job" && job.sceneName === name);
+}
+
+function parseInlineParams(raw: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const match of raw.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)) {
+    params[match[1]!] = (match[2] ?? "").replace(/^"|"$/g, "").replace(/\\"/g, '"');
+  }
+  return params;
 }
 
 function formatSceneName(name: string | undefined): string {
@@ -1370,10 +1440,45 @@ function exportRoleLabel(role: GatewaySessionTranscriptMessage["role"]): string 
   return "**StarlingAI**";
 }
 
+function sanitizeExportMessageContent(message: GatewaySessionTranscriptMessage): string {
+  if (message.role === "assistant") {
+    return sanitizeAssistantMessageContent(message.content, message.toolCalls) || message.content;
+  }
+
+  if (!/\[Tool:|<tool_call>|<function=|<parameter=/i.test(message.content)) {
+    return message.content;
+  }
+
+  const paragraphs = message.content
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  const kept: string[] = [];
+
+  for (const paragraph of paragraphs) {
+    if (/^\s*(let me|now let me|first let me|i(?:'ll| will)|i(?:'m| am) going to)\b/i.test(paragraph)) {
+      break;
+    }
+    if (paragraph.split(/\r?\n/).some((line) => line.trim().startsWith("[Tool:"))) {
+      break;
+    }
+    kept.push(paragraph);
+  }
+
+  return kept.length > 0 ? kept.join("\n\n") : message.content;
+}
+
+function sanitizeExportMessage(message: GatewaySessionTranscriptMessage): GatewaySessionTranscriptMessage {
+  return {
+    ...message,
+    content: sanitizeExportMessageContent(message),
+  };
+}
+
 async function getExportTranscriptMessages(): Promise<GatewaySessionTranscriptMessage[]> {
   if (gateway.currentSessionId) {
     const result = await gateway.getSessionTranscript(gateway.currentSessionId);
-    return result.transcript;
+    return result.transcript.map(sanitizeExportMessage);
   }
 
   return gateway.messages
@@ -1384,7 +1489,8 @@ async function getExportTranscriptMessages(): Promise<GatewaySessionTranscriptMe
       content: message.content,
       timestamp: message.timestamp.toISOString(),
       toolCalls: message.toolCalls,
-    }));
+    }))
+    .map(sanitizeExportMessage);
 }
 
 function buildMarkdownExport(messages: GatewaySessionTranscriptMessage[]): string {
@@ -1509,8 +1615,7 @@ function scrollToBottom() {
 
 watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
-watch(compactComposer, (compact) => {
-  expandedMessageHistory.value = !compact;
+watch(compactComposer, () => {
   nextTick(() => { adjustComposerHeight(); });
 }, { immediate: true });
 watch(inputText, () => {
@@ -1531,6 +1636,7 @@ watch(() => gateway.connected, async (connected) => {
   if (!gateway.currentSessionId) await gateway.createSession();
   await multimodalStore.fetch();
   await gateway.loadScenes();
+  await jobsStore.fetch();
   await scenesStore.fetch();
 }, { immediate: true });
 
@@ -1716,11 +1822,6 @@ onUnmounted(() => {
 .chat-history-collapsed__button:hover {
   border-color: rgba(125, 211, 252, 0.48);
   color: white;
-}
-
-.chat-history-collapsed__hint {
-  font-size: 0.72rem;
-  color: rgb(100 116 139);
 }
 
 .chat-composer {

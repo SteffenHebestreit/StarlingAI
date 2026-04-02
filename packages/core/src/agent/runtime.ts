@@ -16,6 +16,9 @@ import { childLogger } from "../logger.js";
 import type { AgentSession } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import { formatFlowMemoryGuidance } from "./flow-memory.js";
+import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
+import { formatScopedMemoryGuidance } from "../memory/service.js";
 
 const log = childLogger("agent:runtime");
 
@@ -47,6 +50,26 @@ const SOURCE_HINT_TERMS = [
   "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
   "repo", "repository", "roadmap", "source", "sources", "spec", "specification", "standard",
 ];
+const MAIL_HINT_TERMS = [
+  "e-mail", "e-mails", "email", "emails", "mail", "mails", "testmail",
+  "inbox", "mailbox", "mailboxes", "posteingang", "postfach",
+  "draft", "drafts", "entwurf", "entwürfe", "reply", "replies", "antwort", "antworten",
+];
+const MAIL_TASK_PATTERNS = [
+  /\b(schreib|schreibe|verfass|verfasse|send|sende|versend|versende|draft|entwurf|reply|antworte?)\b[\s\S]{0,60}\b(e-?mail|emails?|mails?)\b/,
+  /\b(lese|lies|zeige|fass zusammen|zusammenfassung|summary|summarize)\b[\s\S]{0,60}\b(e-?mail|emails?|mails?|inbox|posteingang)\b/,
+];
+const PRODUCTIVITY_HINT_TERMS = [
+  "remind", "reminder", "reminders", "timer", "timers", "alarm", "alarms",
+  "note", "notes", "notiz", "notizen", "todo", "todos", "follow-up", "follow up",
+  "remember this", "take a note", "merk dir", "erinnere mich",
+];
+const PRODUCTIVITY_TASK_PATTERNS = [
+  /\b(remind me|set a reminder|set reminder|erinnere mich|erinnerung)\b/,
+  /\b(start|set|create)\b[\s\S]{0,40}\b(timer|alarm)\b/,
+  /\b(cancel|stop|remove|delete)\b[\s\S]{0,40}\b(timer|reminder)\b/,
+  /\b(note|notes|notiz|notizen|remember this|take a note|save this)\b/,
+];
 const COMPUTER_ACCESS_HINT_TERMS = [
   "use my computer", "access my computer", "my computer", "my pc", "my machine",
   "remote windows pc", "remote pc", "remote desktop", "rdp", "vnc",
@@ -58,16 +81,22 @@ const OWNED_COMPUTER_ACCESS_PATTERNS = [
   /\b(access|control|connect to|use|work on)\s+(my|our)\s+(remote\s+)?(windows\s+|linux\s+|mac\s+|macos\s+)?(pc|computer|machine|workstation|desktop|laptop)\b/,
 ];
 const PENTEST_HINT_TERMS = [
-  "pentest", "security test", "security assessment", "vulnerability", "vuln", "scan",
+  "pentest", "pentesting", "penetration test", "penetration testing", "security test", "security assessment", "vulnerability", "vuln", "scan",
   "nmap", "nikto", "sqlmap", "exploit", "cve", "audit", "hardening",
+];
+const PENTEST_METHODOLOGY_PATTERNS = [
+  /\b(how would you|how do you|what plan|which plan|what schema|which schema|what methodology|which methodology|what workflow|which workflow)\b[\s\S]{0,80}\b(pentest|pentesting|penetration test|penetration testing|security assessment)\b/,
+  /\b(pentest|pentesting|penetration test|penetration testing|security assessment|pentest-agent|pentest agent|pentest_coordinator)\b[\s\S]{0,80}\b(plan|schema|methodology|workflow|playbook|steps|phases|prompt)\b/,
+  /\b(check|inspect|review|read|analyze|ask)\b[\s\S]{0,80}\b(pentest[_ -]?agent|pentest[_ -]?coordinator|prompt)\b/,
+  /\b(do not want to do the pentest|don't want to do the pentest|not asking you to do the pentest|wanna know what schema it follows)\b/,
 ];
 
 export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   onChunk?: (text: string) => void;
-  onToolCall?: (name: string, args: Record<string, unknown>) => void;
-  onToolResult?: (name: string, result: string, metadata?: Record<string, unknown>) => void;
+  onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
+  onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
@@ -120,8 +149,11 @@ export interface DynamicTurnGuidance {
   prompt: string;
   sourceSensitive: boolean;
   freshnessSensitive: boolean;
+  mailSensitive?: boolean;
+  productivitySensitive?: boolean;
   computerAccessSensitive?: boolean;
   pentestSensitive?: boolean;
+  pentestMethodologySensitive?: boolean;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -136,12 +168,72 @@ export function buildDelegationLoopResponse(latestOutput: string, reason: "ident
   return `${intro}\n\nLatest delegated response:\n\n${normalized}`;
 }
 
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerialize(entry)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function buildRepeatedOutputFingerprint(toolName: string, args: Record<string, unknown>, resultText: string): string {
+  return `${toolName}|${stableSerialize(args)}|${resultText.slice(0, 500)}`;
+}
+
+function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
+  return sanitizeAssistantContent(value, toolIterations > 0);
+}
+
+function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
+  if (toolIterations === 0) return false;
+  if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
+  return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
+}
+
+async function finalizeUserFacingAssistantResponse(
+  rawResponse: string,
+  toolIterations: number,
+  session: AgentSession,
+  provider: ChatProvider,
+  signal: AbortSignal,
+): Promise<string> {
+  const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
+  if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
+    return cleaned || rawResponse.trim() || "(no response)";
+  }
+
+  const synthesized = await forceSynthesis(
+    session,
+    provider,
+    signal,
+    "You have already executed the necessary tools. Write the final user-facing answer now. Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
+  );
+  if (synthesized) {
+    const cleanedSynthesized = sanitizeUserFacingAssistantResponse(synthesized, 0);
+    if (cleanedSynthesized) {
+      return cleanedSynthesized;
+    }
+  }
+
+  return cleaned || rawResponse.trim() || "(no response)";
+}
+
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
 function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+function truncatePlainText(value: string, maxChars: number): string {
+  const normalized = value.trim();
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
@@ -157,6 +249,13 @@ function stripPresentationFormatting(value: string): string {
     .replace(/__(.*?)__/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .trim();
+}
+
+function looksLikeDelegatedFailureEvidence(value: string): boolean {
+  const preview = value.trim().slice(0, 600);
+  if (!preview) return false;
+  return /^error:/i.test(preview)
+    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|delegation limit|already failed|not permitted)\b/i.test(preview);
 }
 
 export function buildModelVisibleToolResult(
@@ -175,34 +274,92 @@ export function buildModelVisibleToolResult(
       ? metadata["routingReason"] as Record<string, unknown>
       : undefined;
     const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
-    const summary = truncateForContext(cleaned, 320);
+    const delegationFailed = metadata?.["delegationSucceeded"] === false
+      || /^error:/i.test(cleaned)
+      || looksLikeDelegatedFailureEvidence(cleaned);
+
+    if (agentName === "computer_use_agent") {
+      const evidence = truncatePlainText(cleaned, 1600);
+      if (delegationFailed) {
+        const parts = [
+          `Delegated result from ${agentName} — TASK FAILED.`,
+          attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
+          routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+          "IMPORTANT: This delegated attempt failed. Report the failure honestly using only the explicit evidence below.",
+          "Do NOT claim the task was completed.",
+          "Do NOT invent root causes like connectivity, firewall, permissions, or configuration unless the evidence explicitly says so.",
+          "Do NOT delegate again for the same information in this turn.",
+          `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+        ].filter(Boolean);
+        return parts.join("\n");
+      }
+      const parts = [
+        `Delegated result from ${agentName} — TASK COMPLETED SUCCESSFULLY.`,
+        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
+        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+        "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, sizes, statuses) in your answer. Do NOT omit items, say 'partially visible', or claim information is 'cut off' if the evidence lists it. The evidence is authoritative.",
+        "Do NOT delegate again for the same information — it has already been collected.",
+        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+      ].filter(Boolean);
+      return parts.join("\n");
+    }
+
+    const evidence = truncatePlainText(cleaned, 1600);
+    if (delegationFailed) {
+      const parts = [
+        `Delegated result from ${agentName} — TASK FAILED.`,
+        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
+        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+        "IMPORTANT: This delegated attempt failed. Report the failure honestly using only the explicit evidence below.",
+        "Do NOT claim the task was completed or infer extra causes that are not explicitly present in the evidence.",
+        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+      ].filter(Boolean);
+      return parts.join("\n");
+    }
     const parts = [
-      `Delegated result from ${agentName}.`,
+      `Delegated result from ${agentName} — TASK COMPLETED.`,
       attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
       routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-      `Result summary: ${summary || "No usable delegated result returned."}`,
+      "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names.",
+      `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
     ].filter(Boolean);
-    return parts.join(" ");
+    return parts.join("\n");
   }
 
   if (toolName === "parallel_delegate") {
     const succeeded = Number(metadata?.["succeeded"] ?? 0);
     const failed = Number(metadata?.["failed"] ?? 0);
     const taskCount = Number(metadata?.["taskCount"] ?? succeeded + failed);
-    return `Parallel delegation completed. Successful tasks: ${succeeded}/${taskCount}. Failed tasks: ${failed}. Result summary: ${truncateForContext(resultText, 260)}`;
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      `Parallel delegation completed. Successful tasks: ${succeeded}/${taskCount}. Failed tasks: ${failed}.`,
+      "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values, statuses) in your answer. Do NOT replace them with guessed details.",
+      `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+    ].join("\n");
   }
 
   if (toolName === "run_task_graph") {
     const completed = Array.isArray(metadata?.["completed"]) ? (metadata?.["completed"] as unknown[]).length : 0;
     const failed = Array.isArray(metadata?.["failed"]) ? (metadata?.["failed"] as unknown[]).length : 0;
     const blocked = Array.isArray(metadata?.["blocked"]) ? (metadata?.["blocked"] as unknown[]).length : 0;
-    return `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}. Result summary: ${truncateForContext(resultText, 260)}`;
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`,
+      "IMPORTANT: Relay ALL specific details from the evidence below (task states, selected agents, values) in your answer. Do NOT replace them with guessed details.",
+      `Observed evidence:\n${evidence || "No usable task-graph result returned."}`,
+    ].join("\n");
   }
 
   if (toolName === "create_ephemeral_agent") {
     const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "ephemeral agent";
     const rejectedTools = Array.isArray(metadata?.["rejectedTools"]) ? (metadata?.["rejectedTools"] as unknown[]).map(String).filter(Boolean) : [];
-    return `Ephemeral agent ${agentName} completed. ${rejectedTools.length > 0 ? `Rejected tools: ${rejectedTools.join(", ")}. ` : ""}Result summary: ${truncateForContext(stripPresentationFormatting(stripAgentPrefix(resultText)), 260)}`;
+    const evidence = truncatePlainText(stripPresentationFormatting(stripAgentPrefix(resultText)), 1600);
+    return [
+      `Ephemeral agent ${agentName} completed.`,
+      rejectedTools.length > 0 ? `Rejected tools: ${rejectedTools.join(", ")}.` : "",
+      "IMPORTANT: Relay ALL specific details from the evidence below in your answer.",
+      `Observed evidence:\n${evidence || "No usable ephemeral-agent result returned."}`,
+    ].filter(Boolean).join("\n");
   }
 
   return fallback;
@@ -229,16 +386,25 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
 
   const freshnessSensitive = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
   const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term));
+  const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
+    || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
+  const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
+    || PRODUCTIVITY_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const computerAccessSensitive = COMPUTER_ACCESS_HINT_TERMS.some((term) => normalized.includes(term))
     || OWNED_COMPUTER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized));
   const pentestSensitive = PENTEST_HINT_TERMS.some((term) => normalized.includes(term));
+  const pentestMethodologySensitive = pentestSensitive
+    && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
 
-  if (!freshnessSensitive && !sourceSensitive && !computerAccessSensitive) return null;
+  if (!freshnessSensitive && !sourceSensitive && !mailSensitive && !productivitySensitive && !computerAccessSensitive && !pentestMethodologySensitive) return null;
 
   const reasons: string[] = [];
   if (freshnessSensitive) reasons.push("freshness-sensitive");
   if (sourceSensitive) reasons.push("source-sensitive");
+  if (mailSensitive) reasons.push("mail-task");
+  if (productivitySensitive) reasons.push("productivity-task");
   if (computerAccessSensitive && !pentestSensitive) reasons.push("owned-computer-access");
+  if (pentestMethodologySensitive) reasons.push("pentest-methodology");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
@@ -257,7 +423,40 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
       "If the user asks for their local desktop or local Windows desktop, include in the task context that the computer_use_agent should prefer adapter 'remote_node' rather than 'local_vscode' unless the user explicitly asked to control the VS Code workbench itself.",
       "If delegation to computer_use_agent returns a partial or incomplete result, you may retry delegation ONCE with a more specific task description. Do NOT fall back to calling computer_* tools directly — they are NOT in your tool set and will fail.",
       "CRITICAL: If the computer_use_agent has already failed or been exhausted for this turn, do NOT retry it again. Synthesize from whatever partial results you have and tell the user what happened.",
+      "Do NOT delegate a desktop/remote-PC/screenshot task to browser_agent, researcher, or any other non-computer-use agent. Only computer_use_agent can interact with the user's desktop. If it failed, report the failure honestly instead of routing to an agent that cannot see the desktop.",
       "Ignore prior pentest-related tool results unless the user explicitly switches back to security testing.",
+    );
+  }
+
+  if (mailSensitive) {
+    promptParts.push(
+      "The user is asking for mailbox access, inbox triage, draft preparation, or sending email.",
+      "Do NOT answer that you cannot access email or send mail if the mail_agent is available. This system has a dedicated mail_agent for those tasks.",
+      "You MUST use the delegate_to_agent tool with agentName='mail_agent' for reading recent emails, searching inboxes, preparing drafts, and mailbox triage.",
+      "If the user asks to send an email, route the task to mail_agent so it can prepare the draft first. Sending itself must go through mail_send_draft and requires explicit per-call approval; do not claim sending is impossible.",
+      "If the target account is ambiguous, have mail_agent inspect the available mail accounts or ask one concise clarification question.",
+    );
+  }
+
+  if (productivitySensitive) {
+    promptParts.push(
+      "The user is asking for note-taking, reminders, timers, or lightweight follow-up tracking.",
+      "Do NOT answer that reminders or timers are unavailable if the productivity_agent is available. This system has a dedicated productivity_agent for those tasks.",
+      "You MUST use the delegate_to_agent tool with agentName='productivity_agent' for saving notes, creating reminders, starting timers, or reviewing and cancelling them.",
+      "Reminder scheduling should go through reminder_create and timer countdowns should go through timer_start inside productivity_agent; do not improvise unsupported scheduling behavior.",
+      "If the timing is ambiguous, have productivity_agent ask one concise clarification question rather than guessing.",
+    );
+  }
+
+  if (pentestMethodologySensitive) {
+    promptParts.push(
+      "The user is asking about the pentest plan, methodology, configured workflow, or pentest-agent behavior. This is NOT a request to start a live pentest engagement.",
+      "Do NOT ask for authorization, target scope, asset-owner confirmation, or testing windows unless the user explicitly switches to running a real engagement.",
+      delegateMode
+        ? "Use delegation to inspect or explain the configured pentest workflow. Prefer pentest_coordinator in maintenance mode, or another specialist that can inspect local config and docs, instead of treating this as a live assessment request."
+        : "Inspect the local pentest definitions and docs first. Prefer reading workspace/agents/30-subagents-pentest.jsonc and starlingai.example.json before answering.",
+      "Summarize the actual configured phases, approval gates, and specialist handoffs. If a previous answer incorrectly asked for authorization for a methodology question, say that plainly and then give the plan.",
+      "Do not call pentest_set_scope, nmap_scan, nikto_scan, sqlmap_scan, metasploit_exec, pentest_exec, or other active pentest tools for this kind of request.",
     );
   }
 
@@ -270,6 +469,9 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
       delegateMode
         ? "Use delegate_to_agent for simple specialist routing. For multi-step specialist collaboration, delegate to a coordinator-style agent that can orchestrate researcher, browser, and evidence-analysis agents."
         : "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
+      delegateMode
+        ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists."
+        : "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, gather evidence from multiple sources before drafting the answer. If you choose to delegate, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists.",
       "For live factual values such as lottery numbers, prices, scores, exchange rates, dates, or schedules, copy the exact value and its associated date from the freshest tool result. Do not substitute prior knowledge or older values.",
       delegateMode
         ? "If a page is JS-driven, route it through a browser specialist. If another agent needs the extracted evidence, ensure the browser specialist publishes key facts with share_finding so downstream agents can read them via read_shared_facts."
@@ -286,8 +488,11 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     prompt: promptParts.join(" "),
     sourceSensitive,
     freshnessSensitive,
+    mailSensitive,
+    productivitySensitive,
     computerAccessSensitive,
     pentestSensitive,
+    pentestMethodologySensitive,
   };
 }
 
@@ -416,6 +621,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const _recentOutputsByTool = new Map<string, string[]>();
   const _turnToolCallCounts = new Map<string, number>();
   const _lastToolResultByName = new Map<string, string>();
+  const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown> }>();
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -445,15 +651,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           "The request timed out mid-turn. Using ONLY the tool results gathered so far, write the most useful partial response you can. Be explicit about what was completed and what was not.",
         );
         if (synthesized) {
-          session.addMessage({ role: "assistant", content: synthesized });
-          if (opts.onChunk) opts.onChunk(synthesized);
+          const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+          session.addMessage({ role: "assistant", content: finalResponse });
+          if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt, firstModelResponseMs, llmCalls, llmTimeMs, toolCallsRequested,
-            toolExecutionTimeMs, lastPromptMetrics, completionChars: synthesized.length,
+            toolExecutionTimeMs, lastPromptMetrics, completionChars: finalResponse.length,
             finishReason: "aborted_synthesized", blocked: false, toolIterations: iterationCount,
           });
           return {
-            response: synthesized, toolCallsExecuted: iterationCount,
+            response: finalResponse, toolCallsExecuted: iterationCount,
             guardrailEvents, usage: totalUsage, blocked: false,
             swarmState: toolContext.swarmState, performance,
           };
@@ -481,11 +688,24 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const systemPrompt = session.getSystemPrompt();
     const temporalContext = buildTemporalContextPrompt();
     const dynamicGuidance = iterationCount === 0 ? (initialDynamicGuidance ?? buildDynamicTurnGuidance(userMessage, effectiveToolMode)) : null;
+    const flowGuidance = iterationCount === 0
+      ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
+      : "";
+    const memoryGuidance = iterationCount === 0
+      ? await formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
+          sessionId: session.id,
+          scopes: ["session", "workspace", "user"],
+          limit: 4,
+          maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
+        })
+      : "";
     const collapsedHistory = session.getCollapsedHistory();
     const systemMessages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
+      ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
+      ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
     ];
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
 
@@ -558,7 +778,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       // Output guardrail scan
       const outputScan = scanOutput(rawResponse);
-      let finalResponse = rawResponse;
+      let finalResponse = await finalizeUserFacingAssistantResponse(rawResponse, iterationCount, session, provider, signal);
 
       if (!outputScan.safe && outputScan.redacted) {
         finalResponse = outputScan.redacted;
@@ -639,7 +859,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       })),
     });
 
-    const toolResultMessages: LLMMessage[] = [];
+    const toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }> = [];
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
@@ -660,6 +880,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           severity: "warn",
         });
         guardrailEvents.push({ type: "tool_blocked", details: `${tc.name}:per_turn_limit` });
+
+        const limitMessage = `Error: Tool '${tc.name}' call limit (${perTurnToolLimit}) reached for this turn. Stop calling this tool and synthesize your findings or ask the user for the missing information directly.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, limitMessage);
 
         if (tc.name === "delegate_to_agent") {
           const finalResponse = buildDelegationLoopResponse(_lastToolResultByName.get(tc.name) ?? "", "limit");
@@ -704,7 +927,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         toolResultMessages.push({
           role: "tool",
-          content: `Error: Tool '${tc.name}' call limit (${perTurnToolLimit}) reached for this turn. Stop calling this tool and synthesize your findings or ask the user for the missing information directly.`,
+          content: limitMessage,
           tool_call_id: tc.id,
         });
         continue;
@@ -713,9 +936,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // Rate limit tool calls
       const toolRl = await checkRateLimit(session.id, "tool_call");
       if (!toolRl.allowed) {
+        const rateLimitMessage = "Error: Rate limit exceeded for tool calls. Please reduce frequency.";
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, rateLimitMessage);
         toolResultMessages.push({
           role: "tool",
-          content: "Rate limit exceeded for tool calls. Please reduce frequency.",
+          content: rateLimitMessage,
           tool_call_id: tc.id,
         });
         continue;
@@ -727,9 +952,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           severity: "warn",
         });
         guardrailEvents.push({ type: "tool_blocked", details: `${tc.name}:not_in_turn_toolset` });
+        const unavailableMessage = `Error: Tool '${tc.name}' is not available in this turn. Use only the tools that were provided for this request. If this is a desktop-control task, delegate to computer_use_agent instead of calling direct computer_* or browser_* tools.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, unavailableMessage);
         toolResultMessages.push({
           role: "tool",
-          content: `Tool '${tc.name}' is not available in this turn. Use only the tools that were provided for this request. If this is a desktop-control task, delegate to computer_use_agent instead of calling direct computer_* or browser_* tools.`,
+          content: unavailableMessage,
           tool_call_id: tc.id,
         });
         continue;
@@ -742,16 +969,18 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           severity: "warn",
         });
         guardrailEvents.push({ type: "tool_blocked", details: tc.name });
+        const blockedMessage = `Error: Tool '${tc.name}' is blocked by security policy.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, blockedMessage);
         toolResultMessages.push({
           role: "tool",
-          content: `Tool '${tc.name}' is blocked by security policy.`,
+          content: blockedMessage,
           tool_call_id: tc.id,
         });
         continue;
       }
 
       logAudit("tool_call_requested", { tool: tc.name, args: tc.arguments }, { sessionId: session.id });
-      if (opts.onToolCall) opts.onToolCall(tc.name, tc.arguments);
+      if (opts.onToolCall) opts.onToolCall(tc.id, tc.name, tc.arguments);
 
       // Reject tool calls with unparseable arguments from the LLM
       if (tc.arguments && "_parse_error" in tc.arguments) {
@@ -772,10 +1001,42 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sessionId: session.id, severity: "warn",
         });
         if (intervention) opts.onIntervention?.(intervention);
+        const parseErrorMessage = `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Please retry with valid JSON arguments.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, parseErrorMessage);
         toolResultMessages.push({
           role: "tool",
-          content: `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Please retry with valid JSON arguments.`,
+          content: parseErrorMessage,
           tool_call_id: tc.id,
+        });
+        continue;
+      }
+
+      const argsSig = JSON.stringify(tc.arguments ?? {});
+      const cachedToolCall = _lastToolCallSig.get(tc.name);
+      if (tc.name !== "delegate_to_agent" && cachedToolCall && cachedToolCall.args === argsSig) {
+        const cachedResultText = `${cachedToolCall.result}\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        _lastToolResultByName.set(tc.name, cachedToolCall.result);
+
+        logAudit("tool_call_completed", {
+          tool: tc.name,
+          success: true,
+          outputChars: cachedToolCall.result.length,
+          metadata: cachedToolCall.metadata,
+          cachedResult: true,
+          suspiciousReturn: false,
+          intervention: null,
+        }, {
+          sessionId: session.id,
+          severity: "warn",
+        });
+
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, cachedResultText, cachedToolCall.metadata);
+
+        toolResultMessages.push({
+          role: "tool",
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata),
+          tool_call_id: tc.id,
+          metadata: cachedToolCall.metadata,
         });
         continue;
       }
@@ -814,7 +1075,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // ── Identical output loop detection ──────────────────────────────────
       // Track BOTH successes and failures — repeated errors are loops too.
       {
-        const outputFingerprint = resultText.slice(0, 500);
+        const outputFingerprint = buildRepeatedOutputFingerprint(tc.name, tc.arguments, resultText);
         const prev = _recentOutputsByTool.get(tc.name) ?? [];
         prev.push(outputFingerprint);
         if (prev.length > IDENTICAL_OUTPUT_LOOP_THRESHOLD) prev.shift();
@@ -936,7 +1197,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }
       }
 
-      if (opts.onToolResult) opts.onToolResult(tc.name, resultText, result.metadata);
+      _lastToolCallSig.set(tc.name, {
+        args: argsSig,
+        result: resultText,
+        metadata: result.metadata,
+      });
+
+      if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, resultText, result.metadata);
 
       const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata);
 
@@ -944,10 +1211,40 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         role: "tool",
         content: modelVisibleResultText,
         tool_call_id: tc.id,
+        metadata: result.metadata,
       });
     }
 
     session.addMessages(toolResultMessages);
+
+    // ── Post-orchestration synthesis nudge ─────────────────────────────────
+    // When orchestration returns grounded evidence, inject a strong nudge
+    // telling the model to synthesize NOW instead of re-delegating for the same data.
+    {
+      const evidenceBearingOrchestrationResults = toolResultMessages.filter((m) => {
+        const txt = typeof m.content === "string" ? m.content : "";
+        return txt.includes("Observed evidence:")
+          && !txt.includes("No usable")
+          && (
+            txt.includes("Delegated result from")
+            || txt.includes("Parallel delegation completed")
+            || txt.includes("Task graph completed")
+            || txt.includes("Ephemeral agent ")
+          );
+      });
+      if (evidenceBearingOrchestrationResults.length > 0) {
+        const nudge = {
+          role: "system" as const,
+          content:
+            "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks. " +
+            "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. " +
+            "Do NOT delegate again for the same information — the evidence is already collected. " +
+            "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
+        };
+        session.addMessage(nudge);
+      }
+    }
+
     iterationCount++;
 
     // ── All-blocked iteration guard ────────────────────────────────────────
@@ -1030,7 +1327,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     session, provider, signal,
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.",
   );
-  const finalMsg = synthesized ?? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
+  const fallbackMsg = "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
+  const finalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
   session.addMessage({ role: "assistant", content: finalMsg });
   if (opts.onChunk) opts.onChunk(finalMsg);
 
