@@ -113,20 +113,11 @@ export async function handleAguiStream(
         sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: text });
       },
 
-      onToolCall: (name, args) => {
-        const toolCallId = randomUUID();
-        // Attach the id to be retrieved on done — store on the event itself
+      onToolCall: (toolCallId, name, args) => {
         sseEvent(res, { type: "TOOL_CALL_STARTED", toolCallId, toolCallName: name, parentMessageId: messageId, args });
-        // Tag for matching in onToolResult — we use the tool name as a simple key
-        (res as ServerResponse & { _lastToolCallId?: string; _lastToolCallName?: string })
-          ._lastToolCallId   = toolCallId;
-        (res as ServerResponse & { _lastToolCallName?: string })
-          ._lastToolCallName = name;
       },
 
-      onToolResult: (name, result, metadata) => {
-        const r = res as ServerResponse & { _lastToolCallId?: string };
-        const toolCallId = r._lastToolCallId ?? randomUUID();
+      onToolResult: (toolCallId, name, result, metadata) => {
         sseEvent(res, { type: "TOOL_CALL_ENDED", toolCallId, toolCallName: name, output: result, metadata });
       },
 

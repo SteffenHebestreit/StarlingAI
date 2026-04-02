@@ -72,7 +72,7 @@ printf '\n'
 if (( status == 0 )); then
   printf 'Strix Halo ROCm preflight passed.\n'
 else
-  printf 'Strix Halo ROCm preflight failed. Review docs/strix-halo.md before starting qwen-image-service.\n'
+  printf 'Strix Halo ROCm preflight failed. Review docs/strix-halo.md before configuring any external ROCm-backed multimodal service.\n'
 fi
 
 exit "$status"

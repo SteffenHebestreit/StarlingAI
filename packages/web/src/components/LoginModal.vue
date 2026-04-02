@@ -1,5 +1,6 @@
 <template>
-  <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+  <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+       role="dialog" aria-modal="true" aria-labelledby="login-heading">
     <div class="glass-card w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
 
       <!-- Header -->
@@ -9,7 +10,7 @@
           alt="StarlingAI logo"
           class="h-20 w-20 mx-auto mb-4 object-contain drop-shadow-[0_14px_34px_rgba(34,211,238,0.2)]"
         />
-        <h1 class="text-xl font-semibold bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent mb-1">
+        <h1 id="login-heading" class="text-xl font-semibold bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent mb-1">
           StarlingAI
         </h1>
         <p class="text-xs uppercase tracking-[0.18em] text-cyan-200/70 mb-3">- Guarded Agent Swarm -</p>

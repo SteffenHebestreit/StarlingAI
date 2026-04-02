@@ -203,6 +203,12 @@ describe("runtime reload reconciliation", () => {
     writeFileSync(configPath, JSON.stringify({
       providers: {
         lmstudio: { baseUrl: "http://localhost:1234/v1", apiKey: "global-key" },
+        openaiCompatible: {
+          openai: {
+            baseUrl: "https://api.openai.test/v1",
+            apiKey: "openai-test-key",
+          },
+        },
       },
       agents: {
         defaults: {
@@ -331,6 +337,8 @@ describe("runtime reload reconciliation", () => {
         defaults: {
           model: {
             primary: "lmstudio/general-model",
+            fallback: "lmstudio/general-fallback-model",
+            cloudFallback: "openai/general-cloud-model",
             embeddingModel: "lmstudio/embed-model",
             embeddingBaseUrl: "http://localhost:7000/v1",
           },
@@ -382,6 +390,10 @@ describe("runtime reload reconciliation", () => {
 
       const advertisedModels = url.startsWith("http://localhost:7000/")
         ? [{ id: "embed-model" }]
+        : url.startsWith("http://localhost:1234/")
+          ? [{ id: "general-model" }, { id: "general-fallback-model" }]
+          : url.startsWith("https://api.openai.test/")
+            ? [{ id: "general-cloud-model" }]
         : url.startsWith("http://localhost:8000/")
           ? [{ id: "coder-model" }]
           : url.startsWith("http://localhost:8200/")
@@ -405,6 +417,8 @@ describe("runtime reload reconciliation", () => {
     try {
       const endpoints = await syncModelEndpointRuntimeStatus();
       expect(endpoints.some((endpoint) => endpoint.role === "orchestrator")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "orchestrator:fallback")).toBe(true);
+      expect(endpoints.some((endpoint) => endpoint.role === "orchestrator:cloudFallback")).toBe(true);
       expect(endpoints.some((endpoint) => endpoint.role === "embeddings")).toBe(true);
       expect(endpoints.some((endpoint) => endpoint.role === "subagent:repo_engineer")).toBe(true);
       expect(endpoints.some((endpoint) => endpoint.role === "vision")).toBe(true);
@@ -414,7 +428,7 @@ describe("runtime reload reconciliation", () => {
       const snapshot = runtimeStatus.getRuntimeStatusSnapshot();
       const component = snapshot.components.find((entry) => entry.name === "model_endpoints");
       expect(component?.healthy).toBe(false);
-      expect(component?.lastError).toContain("1 model endpoint");
+      expect(component?.lastError).toContain("model endpoint(s) unhealthy");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -92,6 +92,80 @@
         </div>
 
         <div class="glass-card p-5">
+          <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+            <div>
+              <h3 class="section-title mb-0">Main AI Personality</h3>
+              <div class="text-xs text-gray-500 mt-1">Persistent voice guidance injected into the main assistant prompt and shared with the assistant’s self-profile tools.</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button v-if="gateway.connected" @click="personalityStore.fetch()" :disabled="personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button @click="resetPersonalityForm" :disabled="!personalityStore.lastLoaded || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
+              <button @click="restoreDefaultPersonality" :disabled="!gateway.connected || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Defaults</button>
+            </div>
+          </div>
+
+          <div v-if="!gateway.connected" class="empty-state">Connect to edit the main assistant personality.</div>
+          <div v-else-if="personalityStore.loading && !personalityStore.profile" class="empty-state">Loading…</div>
+          <div v-else class="space-y-4">
+            <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+              Keep this focused on tone, style, and durable preferences. It does not override safety rules or access boundaries.
+            </div>
+
+            <div v-if="personalityStore.profile" class="flex flex-wrap gap-2 text-[11px] text-gray-500">
+              <span class="badge-store">rev {{ personalityStore.profile.revision }}</span>
+              <span class="badge-config">updated by {{ personalityStore.profile.updatedBy }}</span>
+              <span class="badge-config">{{ formatPersonalityUpdatedAt(personalityStore.profile.updatedAt) }}</span>
+              <span v-if="personalityStore.profile.reason" class="badge-config max-w-full truncate" :title="personalityStore.profile.reason">{{ personalityStore.profile.reason }}</span>
+            </div>
+
+            <div>
+              <label class="field-label">Identity</label>
+              <textarea v-model="personalityForm.identity" rows="3" class="input-box min-h-[96px]" placeholder="Core identity and overall vibe for the main assistant." />
+            </div>
+
+            <div class="multimodal-grid">
+              <div>
+                <label class="field-label">Tone <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.toneText" rows="5" class="input-box min-h-[132px]" placeholder="Direct and plainspoken." />
+              </div>
+              <div>
+                <label class="field-label">Style <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.styleText" rows="5" class="input-box min-h-[132px]" placeholder="Lead with the decisive tradeoff." />
+              </div>
+              <div>
+                <label class="field-label">Collaboration Defaults <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.defaultsText" rows="4" class="input-box min-h-[112px]" placeholder="Lead with the decisive tradeoff before listing options." />
+              </div>
+              <div>
+                <label class="field-label">Avoidances <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.avoidancesText" rows="4" class="input-box min-h-[112px]" placeholder="Do not become flattering, theatrical, or vague." />
+              </div>
+              <div>
+                <label class="field-label">Quirks <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.quirksText" rows="4" class="input-box min-h-[112px]" placeholder="Dry humor when it helps." />
+              </div>
+              <div>
+                <label class="field-label">Growth Notes <span class="text-gray-600 font-normal">one per line</span></label>
+                <textarea v-model="personalityForm.growthNotesText" rows="4" class="input-box min-h-[112px]" placeholder="Stable lessons the assistant should carry forward." />
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label">Change Note <span class="text-gray-600 font-normal">optional</span></label>
+              <input v-model="personalityForm.reason" type="text" class="input-box" placeholder="Why this durable personality change matters." />
+            </div>
+
+            <div v-if="personalityForm.error || personalityStore.error" class="text-sm text-red-400">{{ personalityForm.error || personalityStore.error }}</div>
+
+            <div class="flex justify-end">
+              <button @click="submitPersonalityForm" :disabled="personalityStore.loading || personalityStore.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                {{ personalityStore.saving ? 'Saving…' : 'Save Personality' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3">
             <div>
               <h3 class="section-title mb-0">Multimodal</h3>
@@ -148,33 +222,34 @@
                 <div class="multimodal-health-card">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-gray-300 text-sm">Speech To Text</span>
-                    <span :class="multimodalStore.status.stt.ok ? 'badge-running' : 'badge-health-bad'">
-                      {{ multimodalStore.status.stt.ok ? 'available' : 'offline' }}
+                    <span :class="multimodalStore.status.stt.ok ? 'badge-running' : (multimodalStore.status.stt.disabled ? 'badge-off' : 'badge-health-bad')">
+                      {{ multimodalStore.status.stt.ok ? 'available' : (multimodalStore.status.stt.disabled ? 'disabled' : 'offline') }}
                     </span>
                   </div>
-                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.sttBaseUrl }}</div>
+                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.sttBaseUrl || 'not configured' }}</div>
                   <div v-if="multimodalStore.status.stt.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.stt.error }}</div>
                 </div>
 
                 <div class="multimodal-health-card">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-gray-300 text-sm">Text To Speech</span>
-                    <span :class="multimodalStore.status.tts.ok ? 'badge-running' : 'badge-health-bad'">
-                      {{ multimodalStore.status.tts.ok ? 'available' : 'offline' }}
+                    <span :class="multimodalStore.status.tts.ok ? 'badge-running' : (multimodalStore.status.tts.disabled ? 'badge-off' : 'badge-health-bad')">
+                      {{ multimodalStore.status.tts.ok ? 'available' : (multimodalStore.status.tts.disabled ? 'disabled' : 'offline') }}
                     </span>
                   </div>
-                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.ttsBaseUrl }}</div>
+                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.ttsBaseUrl || 'not configured' }}</div>
                   <div v-if="multimodalStore.status.tts.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.tts.error }}</div>
                 </div>
 
                 <div v-if="multimodalStore.status.imageGeneration !== null" class="multimodal-health-card">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-gray-300 text-sm">Image Generation</span>
-                    <span :class="multimodalStore.status.imageGeneration?.ok ? 'badge-running' : 'badge-health-bad'">
-                      {{ multimodalStore.status.imageGeneration?.ok ? 'available' : 'offline' }}
+                    <span :class="multimodalStore.status.imageGeneration?.ok ? 'badge-running' : (multimodalStore.status.imageGeneration?.disabled ? 'badge-off' : 'badge-health-bad')">
+                      {{ multimodalStore.status.imageGeneration?.ok ? 'available' : (multimodalStore.status.imageGeneration?.disabled ? 'disabled' : 'offline') }}
                     </span>
                   </div>
-                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.imageGenBaseUrl }}</div>
+                  <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.imageGenBaseUrl || 'not configured' }}</div>
+                  <div class="mt-1 text-[11px] text-gray-600 font-mono break-all">{{ multimodalForm.imageGenApi }}</div>
                   <div v-if="multimodalStore.status.imageGeneration?.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.imageGeneration.error }}</div>
                 </div>
               </div>
@@ -236,14 +311,23 @@
 
             <div class="border-t border-purple-500/10 pt-3 space-y-3">
               <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Speech To Text</div>
+              <div class="text-xs text-gray-500">Leave the endpoint empty to disable STT until an external service is configured.</div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">STT Endpoint</label>
-                  <input v-model="multimodalForm.sttBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:8000" />
+                  <label class="field-label">STT Endpoint <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.sttBaseUrl" type="text" class="input-box font-mono" placeholder="https://stt.example.com" />
+                </div>
+                <div>
+                  <label class="field-label">API Mode</label>
+                  <select v-model="multimodalForm.sttApi" class="input-box font-mono">
+                    <option value="auto">auto</option>
+                    <option value="openai-compatible">openai-compatible</option>
+                    <option value="transcribe-only">transcribe-only</option>
+                  </select>
                 </div>
                 <div>
                   <label class="field-label">Model</label>
-                  <input v-model="multimodalForm.sttModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3-ASR-1.7B" />
+                  <input v-model="multimodalForm.sttModel" type="text" class="input-box font-mono" placeholder="whisper-1" />
                 </div>
                 <div>
                   <label class="field-label">Timeout (ms)</label>
@@ -258,26 +342,34 @@
 
             <div class="border-t border-purple-500/10 pt-3 space-y-3">
               <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Text To Speech</div>
+              <div class="text-xs text-gray-500">Leave the endpoint empty to disable TTS until an external service is configured.</div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">TTS Endpoint</label>
-                  <input v-model="multimodalForm.ttsBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:5000" />
+                  <label class="field-label">TTS Endpoint <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.ttsBaseUrl" type="text" class="input-box font-mono" placeholder="https://tts.example.com" />
+                </div>
+                <div>
+                  <label class="field-label">API Mode</label>
+                  <select v-model="multimodalForm.ttsApi" class="input-box font-mono">
+                    <option value="openai-compatible">openai-compatible</option>
+                    <option value="qwen-compatible">qwen-compatible</option>
+                  </select>
                 </div>
                 <div>
                   <label class="field-label">Model <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="multimodalForm.ttsModel" type="text" class="input-box font-mono" placeholder="service default" />
+                  <input v-model="multimodalForm.ttsModel" type="text" class="input-box font-mono" :placeholder="multimodalForm.ttsApi === 'openai-compatible' ? 'tts-1' : 'service default'" />
                 </div>
                 <div>
                   <label class="field-label">Default Language</label>
                   <input v-model="multimodalForm.ttsDefaultLanguage" type="text" class="input-box font-mono" placeholder="English" />
                 </div>
                 <div>
-                  <label class="field-label">Default Speaker</label>
-                  <input v-model="multimodalForm.ttsDefaultSpeaker" type="text" class="input-box font-mono" placeholder="Vivian" />
+                  <label class="field-label">Default {{ multimodalForm.ttsApi === 'openai-compatible' ? 'Voice' : 'Speaker' }}</label>
+                  <input v-model="multimodalForm.ttsDefaultSpeaker" type="text" class="input-box font-mono" :placeholder="multimodalForm.ttsApi === 'openai-compatible' ? 'alloy' : 'Vivian'" />
                 </div>
                 <div>
-                  <label class="field-label">Saved Voice ID <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="multimodalForm.ttsDefaultVoiceId" type="text" class="input-box font-mono" placeholder="saved voice id from Qwen3 /voices" />
+                  <label class="field-label">Default Voice ID <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="multimodalForm.ttsDefaultVoiceId" type="text" class="input-box font-mono" :placeholder="multimodalForm.ttsApi === 'openai-compatible' ? 'provider voice id' : 'saved voice id from /voices'" />
                 </div>
                 <div>
                   <label class="field-label">Timeout (ms)</label>
@@ -287,20 +379,20 @@
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.ttsApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
                 </div>
-                <div class="md:col-span-2">
+                <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="md:col-span-2">
                   <label class="field-label">Audio Example Path <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.ttsVoiceSamplePath" type="text" class="input-box font-mono" placeholder="workspace-relative sample, e.g. samples/my-voice.wav" />
                 </div>
-                <div class="md:col-span-2">
+                <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="md:col-span-2">
                   <label class="field-label">Audio Example Transcript <span class="text-gray-600 font-normal">optional</span></label>
                   <textarea v-model="multimodalForm.ttsVoiceSampleText" class="input-box font-mono text-xs resize-none" rows="3" placeholder="Exact words spoken in the audio example for higher quality cloning" />
                 </div>
               </div>
 
-              <div class="rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3">
+              <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3">
                 <div>
-                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen3</div>
-                  <div class="text-xs text-gray-500 mt-1">Upload a sample once, save it in the Qwen voice library, and reuse the returned voice ID for faster synthesis.</div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen-Compatible Library</div>
+                  <div class="text-xs text-gray-500 mt-1">Upload a sample once, save it in a qwen-compatible voice library, and reuse the returned voice ID for faster synthesis.</div>
                 </div>
                 <div class="multimodal-grid">
                   <div>
@@ -328,15 +420,22 @@
 
             <div class="border-t border-purple-500/10 pt-3 space-y-3">
               <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Image Generation</div>
-              <div class="text-xs text-gray-500">Qwen-Image service for text-to-image generation. Leave endpoint empty to disable.</div>
+              <div class="text-xs text-gray-500">External image backends only. Leave the endpoint empty to disable image generation.</div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
                   <label class="field-label">Image Gen Endpoint <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="multimodalForm.imageGenBaseUrl" type="text" class="input-box font-mono" placeholder="http://image-generation-service:5005" />
+                  <input v-model="multimodalForm.imageGenBaseUrl" type="text" class="input-box font-mono" :placeholder="multimodalForm.imageGenApi === 'comfyui' ? 'http://localhost:8188' : 'http://localhost:7860'" />
+                </div>
+                <div>
+                  <label class="field-label">API Mode</label>
+                  <select v-model="multimodalForm.imageGenApi" class="input-box font-mono">
+                    <option value="automatic1111-compatible">automatic1111-compatible</option>
+                    <option value="comfyui">comfyui</option>
+                  </select>
                 </div>
                 <div>
                   <label class="field-label">Model <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="multimodalForm.imageGenModel" type="text" class="input-box font-mono" placeholder="black-forest-labs/FLUX.1-schnell" />
+                  <input v-model="multimodalForm.imageGenModel" type="text" class="input-box font-mono" :placeholder="multimodalForm.imageGenApi === 'comfyui' ? 'sd_xl_base_1.0.safetensors' : 'uses server default unless set'" />
                 </div>
                 <div>
                   <label class="field-label">Timeout (ms)</label>
@@ -361,6 +460,9 @@
                 <div class="md:col-span-2">
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.imageGenApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                </div>
+                <div v-if="multimodalForm.imageGenApi === 'comfyui'" class="md:col-span-2 text-xs text-gray-500">
+                  ComfyUI requires a checkpoint name. Set the model here or in the saved config before using generate_image.
                 </div>
                 <div class="md:col-span-2 space-y-2">
                   <label class="field-label">Default Negative Prompt <span class="text-gray-600 font-normal">applied to every generation unless overridden</span></label>
@@ -488,7 +590,7 @@
         <div class="glass-card p-5">
           <h3 class="section-title">About StarlingAI</h3>
           <div class="text-sm text-gray-500 space-y-1">
-            <p>Version: <span class="text-gray-300">0.2.0</span></p>
+            <p>Version: <span class="text-gray-300">0.3.0</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
             <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
           </div>
@@ -583,6 +685,47 @@
           </div>
 
           <div v-else class="empty-state">No scenes configured.</div>
+        </div>
+
+        <div class="glass-card p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="section-title mb-0">Jobs</h3>
+            <div class="flex gap-2">
+              <button v-if="gateway.connected && !jobsStore.jobs.length" @click="jobsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button @click="openJobForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Job</button>
+            </div>
+          </div>
+
+          <div v-if="!gateway.connected" class="empty-state">Connect to manage jobs.</div>
+          <div v-else-if="jobsStore.loading && !jobsStore.jobs.length" class="empty-state">Loading…</div>
+          <div v-else-if="jobsStore.error" class="text-sm text-red-400">{{ jobsStore.error }}</div>
+
+          <div v-else-if="jobsStore.jobs.length" class="space-y-2">
+            <div v-for="job in jobsStore.jobs" :key="job.name" class="scene-row">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-sm font-mono text-gray-100">{{ job.name }}</span>
+                    <span :class="job.source === 'config' ? 'badge-config' : 'badge-store'">{{ job.source }}</span>
+                    <span class="badge-store">{{ job.steps.length }} step{{ job.steps.length === 1 ? '' : 's' }}</span>
+                    <span v-if="job.triggers?.length" class="badge-running">{{ formatJobTriggerSummary(job.triggers) }}</span>
+                  </div>
+                  <div class="text-xs text-gray-400 mt-0.5">{{ job.description }}</div>
+                </div>
+                <div class="flex gap-1 shrink-0">
+                  <button v-if="job.source === 'store'" @click="openJobForm(job)" class="icon-btn" title="Edit">✏</button>
+                  <button v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" disabled>🔒</button>
+                  <button v-if="job.source === 'store'" @click="confirmDeleteJob(job.name)" :disabled="jobsStore.loading" class="icon-btn icon-btn--danger" title="Delete">✕</button>
+                </div>
+              </div>
+              <details class="mt-2">
+                <summary class="text-xs text-gray-600 cursor-pointer hover:text-purple-400 transition-colors select-none">Steps & triggers</summary>
+                <pre class="text-xs text-gray-500 mt-1.5 whitespace-pre-wrap break-words bg-gray-950/60 border border-purple-500/10 rounded-lg p-2.5 max-h-56 overflow-y-auto">{{ formatJobPreview(job) }}</pre>
+              </details>
+            </div>
+          </div>
+
+          <div v-else class="empty-state">No jobs configured.</div>
         </div>
 
         <!-- ── Sub-Agents ─────────────────────────────────────────────────── -->
@@ -932,6 +1075,198 @@
           </div>
         </div>
 
+        <div class="glass-card p-5">
+          <div class="flex items-center justify-between mb-4 gap-3">
+            <div>
+              <h3 class="section-title mb-0">Config Assistant</h3>
+              <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. StarlingAI drafts the changes, you review them, and nothing applies until you approve it.</div>
+            </div>
+            <button
+              v-if="gateway.connected"
+              @click="reloadConfigAssistant"
+              :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
+              class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+            >Reload</button>
+          </div>
+
+          <div v-if="!gateway.connected" class="empty-state">Connect to generate conversational configuration proposals.</div>
+          <div v-else class="space-y-4">
+            <div class="config-assistant-intro">
+              <div>
+                <div class="text-sm text-gray-100">Conversation-driven configuration</div>
+                <div class="text-xs text-gray-500 mt-1">Drafts are stored as proposals, prompt changes are consent-gated, and your feedback becomes reusable flow memory.</div>
+              </div>
+              <div class="text-right text-xs text-gray-500">
+                <div>{{ configAssistant.pendingProposals.length }} pending</div>
+                <div class="text-cyan-200 mt-1">{{ configAssistant.flowEntries.length }} flow memories</div>
+              </div>
+            </div>
+
+            <div class="space-y-3 rounded-2xl border border-cyan-500/15 bg-cyan-500/5 p-4">
+              <div class="config-assistant-grid">
+                <div>
+                  <label class="field-label">Mode</label>
+                  <select v-model="configAssistantForm.mode" class="input-box">
+                    <option value="setup">Initial setup</option>
+                    <option value="enhancement">Enhancement</option>
+                    <option value="prompt">Prompt improvement</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Target Agent <span class="text-gray-600 font-normal">optional</span></label>
+                  <select v-model="configAssistantForm.targetAgent" class="input-box">
+                    <option value="">General runtime</option>
+                    <option value="main_assistant">Main Assistant</option>
+                    <option v-for="agent in agentsStore.agents" :key="agent.name" :value="agent.name">{{ agent.name }}</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label class="field-label">Request</label>
+                <textarea
+                  v-model="configAssistantForm.request"
+                  rows="5"
+                  class="input-box config-assistant-textarea"
+                  placeholder="Example: Improve browser_agent so it stops looping on stable pages, hands visible evidence to vision_browser_analyst, and records the lesson if the handoff works."
+                />
+              </div>
+
+              <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ configAssistant.proposeError }}</div>
+
+              <div class="flex justify-end gap-2">
+                <button @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
+                <button @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
+                  {{ configAssistant.proposing ? 'Drafting…' : 'Generate Proposal' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="configAssistant.flowError" class="text-sm text-red-400">{{ configAssistant.flowError }}</div>
+            <div v-else-if="configAssistant.recentLearnings.length" class="space-y-2">
+              <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Recent Learnings</div>
+              <div class="space-y-2">
+                <div v-for="entry in configAssistant.recentLearnings" :key="entry.id" class="flow-memory-card">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm text-gray-100">{{ entry.summary }}</div>
+                      <div class="text-[11px] text-gray-500 mt-1">
+                        {{ formatConfigAssistantScope(entry.scope) }}<span v-if="entry.targetAgent"> • {{ entry.targetAgent }}</span> • {{ formatTimestamp(entry.ts) }}
+                      </div>
+                    </div>
+                    <span :class="flowBadgeClass(entry.outcome)">{{ formatConfigAssistantOutcome(entry.outcome) }}</span>
+                  </div>
+                  <div v-if="entry.lesson" class="text-xs text-cyan-100/80 mt-2">{{ entry.lesson }}</div>
+                  <div v-if="entry.actions.length" class="routing-chip-row mt-2">
+                    <span v-for="action in entry.actions" :key="`${entry.id}-${action}`" class="routing-chip">{{ action }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="configAssistant.mutationError" class="text-sm text-red-400">{{ configAssistant.mutationError }}</div>
+            <div v-if="configAssistant.error" class="text-sm text-red-400">{{ configAssistant.error }}</div>
+
+            <div v-if="configAssistant.loading && !configAssistant.proposals.length" class="empty-state">Loading proposals…</div>
+            <div v-else-if="configAssistant.proposals.length" class="space-y-3">
+              <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Proposals</div>
+              <details v-for="proposal in configAssistant.proposals" :key="proposal.id" class="config-proposal-card" :open="proposal.status === 'pending'">
+                <summary class="config-proposal-summary">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="text-sm font-medium text-gray-100">{{ proposal.summary }}</span>
+                      <span :class="proposalBadgeClass(proposal.status)">{{ proposal.status }}</span>
+                      <span class="routing-chip">{{ formatConfigAssistantScope(proposal.mode) }}</span>
+                    </div>
+                    <div class="text-[11px] text-gray-500 mt-1">
+                      {{ proposal.assistantAgent }}<span v-if="proposal.targetAgent"> → {{ proposal.targetAgent }}</span> • {{ formatTimestamp(proposal.ts) }}
+                    </div>
+                  </div>
+                  <span class="text-xs text-gray-600 shrink-0">Details ▾</span>
+                </summary>
+
+                <div class="mt-3 space-y-3 pl-1">
+                  <div class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
+
+                  <div v-if="proposal.validations.length" class="space-y-1.5">
+                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Checks</div>
+                    <ul class="config-proposal-list">
+                      <li v-for="validation in proposal.validations" :key="validation">{{ validation }}</li>
+                    </ul>
+                  </div>
+
+                  <div v-if="proposal.configChanges.length" class="space-y-2">
+                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Config Changes</div>
+                    <div v-for="change in proposal.configChanges" :key="`${proposal.id}-${change.path}`" class="config-change-card">
+                      <div class="text-xs font-mono text-cyan-200">{{ change.path }}</div>
+                      <div class="text-[11px] text-gray-500 mt-1">{{ change.reason }}</div>
+                      <pre class="config-change-preview">{{ stringifyPreview(change.value) }}</pre>
+                    </div>
+                  </div>
+
+                  <div v-if="proposal.promptChanges.length" class="space-y-2">
+                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Prompt Proposals</div>
+                    <div v-for="change in proposal.promptChanges" :key="`${proposal.id}-${change.agentName}`" class="config-change-card">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-xs font-mono text-cyan-200">{{ change.agentName }}</span>
+                        <span class="routing-chip">{{ change.strategy }}</span>
+                      </div>
+                      <div class="text-[11px] text-gray-500 mt-1">{{ change.rationale }}</div>
+                      <pre class="config-change-preview">{{ change.prompt }}</pre>
+                    </div>
+                  </div>
+
+                  <div v-if="proposal.feedbackHistory.length" class="space-y-2">
+                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Feedback History</div>
+                    <div v-for="feedback in proposal.feedbackHistory.slice().reverse()" :key="`${proposal.id}-${feedback.ts}-${feedback.outcome}`" class="flow-memory-card">
+                      <div class="flex items-center justify-between gap-3">
+                        <span :class="flowBadgeClass(feedback.outcome)">{{ formatConfigAssistantOutcome(feedback.outcome) }}</span>
+                        <span class="text-[11px] text-gray-500">{{ formatTimestamp(feedback.ts) }}</span>
+                      </div>
+                      <div v-if="feedback.lesson" class="text-xs text-cyan-100/80 mt-2">{{ feedback.lesson }}</div>
+                      <div v-if="feedback.notes" class="text-xs text-gray-500 mt-1">{{ feedback.notes }}</div>
+                    </div>
+                  </div>
+
+                  <div class="flex flex-wrap justify-end gap-2 pt-1">
+                    <button
+                      v-if="proposal.status === 'pending'"
+                      @click="applyConfigProposal(proposal.id)"
+                      :disabled="configAssistant.activeProposalId === proposal.id"
+                      class="btn-grad px-3 py-1.5 rounded-lg text-xs"
+                    >{{ configAssistant.activeProposalId === proposal.id ? 'Applying…' : 'Apply With Consent' }}</button>
+                    <button
+                      v-if="proposal.status === 'pending'"
+                      @click="sendProposalFeedback(proposal.id, 'rejected')"
+                      :disabled="configAssistant.activeProposalId === proposal.id"
+                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                    >Reject</button>
+                    <button
+                      v-if="proposal.status === 'applied'"
+                      @click="sendProposalFeedback(proposal.id, 'success')"
+                      :disabled="configAssistant.activeProposalId === proposal.id"
+                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                    >Worked</button>
+                    <button
+                      v-if="proposal.status === 'applied'"
+                      @click="sendProposalFeedback(proposal.id, 'partial')"
+                      :disabled="configAssistant.activeProposalId === proposal.id"
+                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                    >Partial</button>
+                    <button
+                      v-if="proposal.status === 'applied'"
+                      @click="sendProposalFeedback(proposal.id, 'failure')"
+                      :disabled="configAssistant.activeProposalId === proposal.id"
+                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                    >Did Not Work</button>
+                  </div>
+                </div>
+              </details>
+            </div>
+            <div v-else class="empty-state">No conversational proposals yet.</div>
+          </div>
+        </div>
+
         <!-- ── Channels ───────────────────────────────────────────────────── -->
         <div class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
@@ -1082,6 +1417,47 @@
         <button @click="siteForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
         <button @click="submitSiteForm" :disabled="sites.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ sites.loading ? 'Saving…' : 'Save' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="jobForm.open" class="modal-backdrop" @click.self="jobForm.open = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="font-semibold text-gray-100">{{ jobForm.editing ? 'Edit Job' : 'Add Job' }}</h3>
+        <button @click="jobForm.open = false" class="modal-close">✕</button>
+      </div>
+
+      <div class="space-y-4 p-5">
+        <div>
+          <label class="field-label">Name <span class="text-red-400">*</span></label>
+          <input v-model="jobForm.name" type="text" class="input-box font-mono" placeholder="e.g. morning_ops" :disabled="!!jobForm.editing" />
+        </div>
+        <div>
+          <label class="field-label">Description <span class="text-red-400">*</span></label>
+          <input v-model="jobForm.description" type="text" class="input-box" placeholder="One-line summary of the workflow" />
+        </div>
+        <div>
+          <label class="field-label">Params JSON</label>
+          <textarea v-model="jobForm.paramsJson" class="input-box font-mono text-xs resize-none" rows="4" placeholder='{"audience":{"default":"ops team"}}' />
+        </div>
+        <div>
+          <label class="field-label">Steps JSON <span class="text-red-400">*</span></label>
+          <textarea v-model="jobForm.stepsJson" class="input-box font-mono text-xs resize-none" rows="8" placeholder='[{"scene":"verified_research_brief","label":"Research"},{"scene":"multi_channel_broadcast","params":{"channels":"slack,email"}}]' />
+        </div>
+        <div>
+          <label class="field-label">Triggers JSON</label>
+          <textarea v-model="jobForm.triggersJson" class="input-box font-mono text-xs resize-none" rows="5" placeholder='[{"type":"api","webhookKey":"replace-with-secret"},{"type":"cron","expression":"0 8 * * 1-5","enabled":true},{"type":"channel","channels":["slack"],"pattern":"/ops-brief","mode":"prefix","captureRemainderAs":"topic","parseParams":false,"replyText":"Queued {{jobName}} for {{topic|status}} as {{jobId}}"}]' />
+        </div>
+      </div>
+
+      <div v-if="jobForm.error" class="px-5 pb-2 text-sm text-red-400">{{ jobForm.error }}</div>
+
+      <div class="modal-footer">
+        <button @click="jobForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
+        <button @click="submitJobForm" :disabled="jobsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+          {{ jobsStore.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
     </div>
@@ -1361,27 +1737,39 @@
 import { computed, reactive, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
+import { usePersonalityStore, type AssistantPersonalityProfile } from "@/stores/personality";
 import { useSitesStore, type SiteSummary } from "@/stores/sites";
 import { useScenesStore, type SceneDetail } from "@/stores/scenes";
+import { useJobsStore, type JobDetail, type JobTriggerInput, type JobStepInput } from "@/stores/jobs";
 import { useChannelsStore, type ChannelConfig, type ChannelDetail, type ChannelStatus } from "@/stores/channels";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useAgentsStore } from "@/stores/agents";
 import { useMultimodalStore, type MultimodalConfig } from "@/stores/multimodal";
+import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type ConfigAssistantMode, type FlowMemoryOutcome, type FlowMemoryScope } from "@/stores/configAssistant";
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
 
 const gateway = useGatewayStore();
 const guardrails = useGuardrailsStore();
+const personalityStore = usePersonalityStore();
 const sites = useSitesStore();
 const scenesStore = useScenesStore();
+const jobsStore = useJobsStore();
 const channelsStore = useChannelsStore();
 const runtime = useRuntimeStore();
 const agentsStore = useAgentsStore();
 const multimodalStore = useMultimodalStore();
+const configAssistant = useConfigAssistantStore();
 
 const routingLab = reactive({
   query: "",
   minConfidence: "medium" as "high" | "medium" | "low",
+});
+
+const configAssistantForm = reactive({
+  request: "",
+  mode: "enhancement" as ConfigAssistantMode,
+  targetAgent: "",
 });
 
 const multimodalLoaded = computed(() => Boolean(multimodalStore.config.files.baseUrl));
@@ -1426,19 +1814,20 @@ const multimodalForm = reactive({
   sttApi: "auto" as "auto" | "openai-compatible" | "transcribe-only",
   sttApiKey: "",
   sttTimeoutMs: 60_000,
-  sttModel: "Qwen/Qwen3-ASR-1.7B",
+  sttModel: "whisper-1",
   ttsBaseUrl: "",
-  ttsApi: "qwen-compatible" as "qwen-compatible" | "openai-compatible",
+  ttsApi: "openai-compatible" as "qwen-compatible" | "openai-compatible",
   ttsApiKey: "",
   ttsTimeoutMs: 60_000,
-  ttsModel: "",
+  ttsModel: "tts-1",
   ttsDefaultLanguage: "English",
-  ttsDefaultSpeaker: "Vivian",
+  ttsDefaultSpeaker: "alloy",
   ttsDefaultVoiceId: "",
   ttsVoiceSamplePath: "",
   ttsVoiceSampleText: "",
   ttsDefaultQuality: "medium",
   imageGenBaseUrl: "",
+  imageGenApi: "automatic1111-compatible" as "automatic1111-compatible" | "comfyui",
   imageGenApiKey: "",
   imageGenTimeoutMs: 120_000,
   imageGenModel: "",
@@ -1452,6 +1841,18 @@ const multimodalForm = reactive({
   wakeSilenceTimeoutMs: 4000,
   wakeKeywordsText: "Hey Guarded, Okay Guarded, Luna",
   wakeStopPhrasesText: "stop recording, end recording, stop listening, luna stop",
+  error: "",
+});
+
+const personalityForm = reactive({
+  identity: "",
+  toneText: "",
+  styleText: "",
+  defaultsText: "",
+  avoidancesText: "",
+  quirksText: "",
+  growthNotesText: "",
+  reason: "",
   error: "",
 });
 
@@ -1667,6 +2068,71 @@ function listFromCsv(value: string): string[] {
   return value.split(",").map((entry) => entry.trim()).filter(Boolean);
 }
 
+function listFromLines(value: string): string[] {
+  return value.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function linesFromList(values: readonly string[]): string {
+  return values.join("\n");
+}
+
+function syncPersonalityForm(profile: AssistantPersonalityProfile | null) {
+  personalityForm.identity = profile?.identity.core ?? "";
+  personalityForm.toneText = linesFromList(profile?.voice.tone ?? []);
+  personalityForm.styleText = linesFromList(profile?.voice.style ?? []);
+  personalityForm.defaultsText = linesFromList(profile?.collaboration.defaults ?? []);
+  personalityForm.avoidancesText = linesFromList(profile?.collaboration.avoidances ?? []);
+  personalityForm.quirksText = linesFromList(profile?.voice.quirks ?? []);
+  personalityForm.growthNotesText = linesFromList(profile?.growth.notes ?? []);
+  personalityForm.reason = "";
+  personalityForm.error = "";
+}
+
+function resetPersonalityForm() {
+  syncPersonalityForm(personalityStore.lastLoaded);
+}
+
+async function submitPersonalityForm() {
+  personalityForm.error = "";
+  if (!personalityForm.identity.trim()) {
+    personalityForm.error = "Identity is required";
+    return;
+  }
+
+  await personalityStore.save({
+    identity: {
+      core: personalityForm.identity.trim(),
+    },
+    voice: {
+      tone: listFromLines(personalityForm.toneText),
+      style: listFromLines(personalityForm.styleText),
+      quirks: listFromLines(personalityForm.quirksText),
+    },
+    collaboration: {
+      defaults: listFromLines(personalityForm.defaultsText),
+      avoidances: listFromLines(personalityForm.avoidancesText),
+    },
+    growth: {
+      notes: listFromLines(personalityForm.growthNotesText),
+    },
+    reason: personalityForm.reason.trim() || undefined,
+  });
+
+  if (personalityStore.error) personalityForm.error = personalityStore.error;
+}
+
+async function restoreDefaultPersonality() {
+  if (!confirm("Reset the main assistant personality to the built-in defaults?")) return;
+  personalityForm.error = "";
+  await personalityStore.reset();
+  if (personalityStore.error) personalityForm.error = personalityStore.error;
+}
+
+function formatPersonalityUpdatedAt(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
 function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.maxUploadBytes = config.maxUploadBytes;
   multimodalForm.filesBaseUrl = config.files.baseUrl;
@@ -1694,6 +2160,7 @@ function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.ttsDefaultQuality = config.tts.defaultQuality;
   savedVoiceForm.language = config.tts.defaultLanguage;
   multimodalForm.imageGenBaseUrl = config.imageGeneration?.baseUrl ?? "";
+  multimodalForm.imageGenApi = config.imageGeneration?.api ?? "automatic1111-compatible";
   multimodalForm.imageGenApiKey = config.imageGeneration?.apiKey ?? "";
   multimodalForm.imageGenTimeoutMs = config.imageGeneration?.timeoutMs ?? 120_000;
   multimodalForm.imageGenModel = config.imageGeneration?.model ?? "";
@@ -1765,8 +2232,8 @@ async function submitMultimodalForm() {
   const wakeKeywords = listFromCsv(multimodalForm.wakeKeywordsText);
   const wakeStopPhrases = listFromCsv(multimodalForm.wakeStopPhrasesText);
 
-  if (!multimodalForm.filesBaseUrl.trim() || !multimodalForm.sttBaseUrl.trim() || !multimodalForm.ttsBaseUrl.trim()) {
-    multimodalForm.error = "Files, STT, and TTS endpoints are required";
+  if (!multimodalForm.filesBaseUrl.trim()) {
+    multimodalForm.error = "A file conversion endpoint is required";
     return;
   }
   if (!wakeKeywords.length) {
@@ -1819,6 +2286,7 @@ async function submitMultimodalForm() {
     },
     imageGeneration: imageGenBaseUrl ? {
       baseUrl: imageGenBaseUrl,
+      api: multimodalForm.imageGenApi,
       apiKey: multimodalForm.imageGenApiKey.trim() || undefined,
       timeoutMs: multimodalForm.imageGenTimeoutMs,
       model: multimodalForm.imageGenModel.trim() || undefined,
@@ -1826,7 +2294,6 @@ async function submitMultimodalForm() {
       defaultHeight: multimodalForm.imageGenDefaultHeight,
       defaultSteps: multimodalForm.imageGenDefaultSteps,
       defaultGuidanceScale: multimodalForm.imageGenGuidanceScale,
-      cpuOffload: true,
       defaultNegativePrompt: multimodalForm.imageGenDefaultNegativePrompt.trim() || undefined,
     } : undefined,
   });
@@ -1947,6 +2414,101 @@ async function submitSceneForm() {
 
 async function confirmDeleteScene(name: string) {
   if (confirm(`Delete scene "${name}"?`)) await scenesStore.remove(name);
+}
+
+const jobForm = reactive({
+  open: false,
+  editing: null as string | null,
+  name: "",
+  description: "",
+  paramsJson: "{}",
+  stepsJson: "[]",
+  triggersJson: "[]",
+  error: "",
+});
+
+function openJobForm(job: JobDetail | null) {
+  jobForm.error = "";
+  if (job) {
+    jobForm.editing = job.name;
+    jobForm.name = job.name;
+    jobForm.description = job.description;
+    jobForm.paramsJson = JSON.stringify(job.params ?? {}, null, 2);
+    jobForm.stepsJson = JSON.stringify(job.steps ?? [], null, 2);
+    jobForm.triggersJson = JSON.stringify(job.triggers ?? [], null, 2);
+  } else {
+    jobForm.editing = null;
+    jobForm.name = "";
+    jobForm.description = "";
+    jobForm.paramsJson = "{}";
+    jobForm.stepsJson = "[]";
+    jobForm.triggersJson = "[]";
+  }
+  jobForm.open = true;
+}
+
+async function submitJobForm() {
+  jobForm.error = "";
+  if (!jobForm.name.trim()) { jobForm.error = "Name is required"; return; }
+  if (!jobForm.description.trim()) { jobForm.error = "Description is required"; return; }
+
+  let params: Record<string, { description?: string; default?: string }> | undefined;
+  let steps: JobStepInput[];
+  let triggers: JobTriggerInput[] | undefined;
+
+  try {
+    const parsed = JSON.parse(jobForm.paramsJson || "{}");
+    params = parsed && Object.keys(parsed).length > 0 ? parsed : undefined;
+  } catch {
+    jobForm.error = "Params JSON is invalid";
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(jobForm.stepsJson || "[]");
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error();
+    steps = parsed as JobStepInput[];
+  } catch {
+    jobForm.error = "Steps JSON must be a non-empty array";
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(jobForm.triggersJson || "[]");
+    if (!Array.isArray(parsed)) throw new Error();
+    triggers = parsed.length > 0 ? parsed as JobTriggerInput[] : undefined;
+  } catch {
+    jobForm.error = "Triggers JSON must be an array";
+    return;
+  }
+
+  await jobsStore.save(jobForm.name.trim(), {
+    description: jobForm.description.trim(),
+    params,
+    steps,
+    triggers,
+  });
+
+  if (!jobsStore.error) jobForm.open = false;
+  else jobForm.error = jobsStore.error;
+}
+
+async function confirmDeleteJob(name: string) {
+  if (confirm(`Delete job "${name}"?`)) await jobsStore.remove(name);
+}
+
+function formatJobPreview(job: JobDetail): string {
+  return JSON.stringify({
+    params: job.params ?? {},
+    steps: job.steps,
+    triggers: job.triggers ?? [],
+  }, null, 2);
+}
+
+function formatJobTriggerSummary(triggers: JobTriggerInput[] | undefined): string {
+  if (!triggers?.length) return "";
+  const labels = triggers.map((trigger) => trigger.type);
+  return labels.join(" + ");
 }
 
 // ── Channel form ─────────────────────────────────────────────────────────────
@@ -2070,7 +2632,11 @@ function formatRuntimeName(name: string | undefined): string {
 }
 
 function formatModelEndpointRole(role: string): string {
-  return role.replace(/^subagent:/, "sub-agent: ").replace(/_/g, " ");
+  return role
+    .replace(/^subagent:/, "sub-agent: ")
+    .replace(/:cloudFallback$/, " cloud fallback")
+    .replace(/:fallback$/, " fallback")
+    .replace(/_/g, " ");
 }
 
 async function runRoutingLab() {
@@ -2085,21 +2651,117 @@ function clearRoutingLab() {
   agentsStore.clearRoutingResult();
 }
 
+function resetConfigAssistantForm() {
+  configAssistantForm.request = "";
+  configAssistantForm.mode = "enhancement";
+  configAssistantForm.targetAgent = "";
+}
+
+async function submitConfigAssistantRequest() {
+  const request = configAssistantForm.request.trim();
+  if (!request) return;
+  const proposal = await configAssistant.propose({
+    request,
+    mode: configAssistantForm.mode,
+    targetAgent: configAssistantForm.targetAgent || undefined,
+  });
+  if (proposal) {
+    configAssistantForm.request = "";
+  }
+}
+
+async function reloadConfigAssistant() {
+  await Promise.all([
+    configAssistant.fetchProposals(),
+    configAssistant.fetchFlowMemory(),
+  ]);
+}
+
+async function applyConfigProposal(id: string) {
+  await configAssistant.applyProposal(id);
+}
+
+async function sendProposalFeedback(id: string, outcome: ConfigAssistantFeedbackOutcome) {
+  const lessonPrompt = outcome === "success"
+    ? "What worked? This note becomes reusable flow memory."
+    : outcome === "partial"
+      ? "What partly worked and what still needs adjustment?"
+      : outcome === "rejected"
+        ? "Why are you rejecting this proposal?"
+        : "What failed? This note becomes reusable flow memory.";
+  const lesson = window.prompt(lessonPrompt, "")?.trim() || undefined;
+  const notes = outcome === "rejected"
+    ? (window.prompt("Optional extra notes for the rejection", "")?.trim() || undefined)
+    : undefined;
+  await configAssistant.submitFeedback(id, { outcome, lesson, notes });
+}
+
+function stringifyPreview(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatConfigAssistantScope(scope: FlowMemoryScope): string {
+  switch (scope) {
+    case "setup": return "Initial setup";
+    case "enhancement": return "Enhancement";
+    case "prompt": return "Prompt";
+    case "workflow": return "Workflow";
+    default: return scope;
+  }
+}
+
+function formatConfigAssistantOutcome(outcome: FlowMemoryOutcome): string {
+  switch (outcome) {
+    case "proposed": return "Proposed";
+    case "applied": return "Applied";
+    case "success": return "Worked";
+    case "failure": return "Failed";
+    case "partial": return "Partial";
+    case "rejected": return "Rejected";
+    default: return outcome;
+  }
+}
+
+function proposalBadgeClass(status: string): string {
+  if (status === "applied") return "badge-running";
+  if (status === "rejected") return "badge-health-bad";
+  return "badge-config";
+}
+
+function flowBadgeClass(outcome: FlowMemoryOutcome): string {
+  if (outcome === "success" || outcome === "applied") return "badge-running";
+  if (outcome === "failure" || outcome === "rejected") return "badge-health-bad";
+  return "badge-config";
+}
+
 // ── Auto-load when connected ─────────────────────────────────────────────────
 
 watch(() => gateway.connected, (connected) => {
   if (connected) {
     if (!guardrails.state) guardrails.fetch();
+    personalityStore.fetch();
     sites.fetch();
     scenesStore.fetch();
+    jobsStore.fetch();
     channelsStore.fetch();
     channelsStore.fetchDeadLetterCount();
     runtime.fetch();
     agentsStore.fetch();
     multimodalStore.fetch();
     fetchModelEndpointConfig();
+    configAssistant.fetchProposals();
+    configAssistant.fetchFlowMemory();
   }
 }, { immediate: true });
+
+watch(() => personalityStore.profile, (profile) => {
+  if (profile) syncPersonalityForm(profile);
+}, { immediate: true, deep: true });
 
 watch(() => multimodalStore.config, (config) => {
   syncMultimodalForm(config);
@@ -2132,11 +2794,97 @@ watch(() => multimodalStore.config, (config) => {
   background: rgba(8, 11, 24, 0.28);
 }
 
+.config-assistant-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(6, 182, 212, 0.12);
+  background: linear-gradient(135deg, rgba(8, 11, 24, 0.9), rgba(10, 32, 45, 0.55));
+}
+
+.config-assistant-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.config-assistant-textarea {
+  min-height: 7.5rem;
+  resize: vertical;
+}
+
+.flow-memory-card {
+  padding: 0.85rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(56, 189, 248, 0.14);
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.config-proposal-card {
+  padding: 0.9rem 1rem;
+  border-radius: 1.1rem;
+  border: 1px solid rgba(168, 85, 247, 0.16);
+  background: rgba(8, 11, 24, 0.42);
+}
+
+.config-proposal-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.config-proposal-summary::-webkit-details-marker {
+  display: none;
+}
+
+.config-proposal-list {
+  margin: 0;
+  padding-left: 1rem;
+  color: rgb(148 163 184);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.config-change-card {
+  padding: 0.8rem 0.9rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(34, 211, 238, 0.12);
+  background: rgba(2, 6, 23, 0.5);
+}
+
+.config-change-preview {
+  margin-top: 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: rgb(226 232 240);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 0.85rem;
+  padding: 0.7rem 0.8rem;
+}
+
 @media (max-width: 900px) {
   .settings-grid { grid-template-columns: 1fr; }
 
   .routing-lab-controls {
     grid-template-columns: 1fr;
+  }
+
+  .config-assistant-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-assistant-intro {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

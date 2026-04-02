@@ -16,6 +16,7 @@ import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
 import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, runChannelTurn } from "./base.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelHealthCheck, setChannelRunning, setChannelStopped } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
@@ -157,6 +158,14 @@ export async function handleWhatsappEvent(c: Context): Promise<Response> {
         if (text === "/reset") {
           deleteChannelSession(`whatsapp:${senderId}`);
           await waSend(accessToken, phoneNumberId, senderId, "Session reset.");
+          continue;
+        }
+
+        const triggeredJob = await dispatchChannelTriggeredJob({ channel: "whatsapp", senderId, text });
+        if (triggeredJob.matched) {
+          if (triggeredJob.responseText) {
+            await waSend(accessToken, phoneNumberId, senderId, triggeredJob.responseText);
+          }
           continue;
         }
 

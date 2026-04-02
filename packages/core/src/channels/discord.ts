@@ -12,6 +12,7 @@ import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
 import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, runChannelTurn } from "./base.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelRunning, setChannelStopped, setChannelError, setChannelHealthCheck } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
@@ -54,6 +55,26 @@ async function discordSend(token: string, channelId: string, content: string): P
       chunk,
       { channel: "discord" }
     );
+  }
+}
+
+/**
+ * Send a Discord message using the configured bot token.
+ * Callable from tools — reads token from channel config.
+ */
+export async function sendDiscordMessage(
+  channelId: string,
+  content: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const config = getConfig();
+  const discordConfig = getEffectiveChannelConfig("discord", config.channels.discord);
+  const token = resolveToken(discordConfig.token);
+  if (!token) return { ok: false, error: "Discord bot token not configured" };
+  try {
+    await discordSend(token, channelId, content);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -143,6 +164,14 @@ export function startDiscordChannel(): () => Promise<void> {
             if (content === "/reset") {
               deleteChannelSession(`discord:${senderId}`);
               await discordSend(token, channelId, "Session reset.");
+              break;
+            }
+
+            const triggeredJob = await dispatchChannelTriggeredJob({ channel: "discord", senderId, text: content });
+            if (triggeredJob.matched) {
+              if (triggeredJob.responseText) {
+                await discordSend(token, channelId, triggeredJob.responseText);
+              }
               break;
             }
 

@@ -53,6 +53,11 @@ const WRITING_INTENT_TOKENS = new Set([
   "letter", "outreach", "subject", "application",
 ]);
 
+const MAIL_INTENT_TOKENS = new Set([
+  "mail", "email", "emails", "inbox", "mailbox", "mailboxes", "posteingang", "postfach",
+  "unread", "ungelesen", "draft", "drafts", "entwurf", "entwurfe", "reply", "replies",
+]);
+
 const GIT_VCS_TOKENS = new Set([
   "git", "commit", "branch", "merge", "rebase", "stash", "diff",
   "checkout", "pull", "push", "clone",
@@ -125,6 +130,19 @@ function isResearchSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean 
     );
 }
 
+function isMailSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return (cfg.tools ?? []).some((tool) => tool.startsWith("mail_"))
+    || keywords.some((keyword) =>
+      keyword.includes("mail")
+      || keyword.includes("email")
+      || keyword.includes("inbox")
+      || keyword.includes("mailbox")
+      || keyword.includes("posteingang")
+    )
+    || /(mail|email|inbox|mailbox|posteingang)/.test(combined);
+}
+
 function isTtsSpecialist(cfg: SubAgentConfig): boolean {
   const tools = cfg.tools ?? [];
   const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
@@ -194,6 +212,13 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     ]);
   const writingIntent = writingIntentRaw
     && !(gitContext && queryTokens.filter(t => WRITING_INTENT_TOKENS.has(t)).every(t => t === "message"));
+  const mailIntent = hasToken(queryTokens, MAIL_INTENT_TOKENS)
+    || hasPhrase(normalizedQuery, [
+      /last\s+\d+\s+emails?/,
+      /recent\s+emails?/,
+      /letzten?\s+\d+\s+emails?/,
+      /zeige.*emails?/,
+    ]);
 
   // Audio direction intent
   const ttsIntent = hasPhrase(normalizedQuery, TTS_PHRASES);
@@ -208,6 +233,7 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
 
   const writingSpecialist = isWritingSpecialist(cfg, keywords);
   const researchSpecialist = isResearchSpecialist(cfg, keywords);
+  const mailSpecialist = isMailSpecialist(cfg, keywords);
 
   let adjustment = 0;
 
@@ -220,6 +246,12 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (writingIntent) {
     if (writingSpecialist) adjustment += 0.1;
     if (researchSpecialist && !writingSpecialist) adjustment -= 0.04;
+  }
+
+  // ── Mailbox triage / reading / drafting ──
+  if (mailIntent) {
+    if (mailSpecialist) adjustment += 0.38;
+    if (researchSpecialist && !mailSpecialist) adjustment -= 0.12;
   }
 
   // ── TTS vs STT ──
@@ -267,6 +299,19 @@ function normalizeSearchText(value: string): string {
 
 function tokenizeSearchText(value: string): string[] {
   return [...new Set(normalizeSearchText(value).split(" ").filter(token => token.length >= 2))];
+}
+
+function expandTokenVariants(token: string): string[] {
+  const variants = new Set<string>([token]);
+
+  if (token.length > 4 && token.endsWith("es")) {
+    variants.add(token.slice(0, -2));
+  }
+  if (token.length > 3 && token.endsWith("s")) {
+    variants.add(token.slice(0, -1));
+  }
+
+  return [...variants].filter((value) => value.length >= 2);
 }
 
 export function inferAgentSearchKeywords(agentName: string, cfg: SubAgentConfig): string[] {
@@ -344,12 +389,23 @@ export function scoreAgentKeywordMatch(
 
   for (const token of queryTokens) {
     let tokenScore = 0;
+    const variants = expandTokenVariants(token);
 
-    if (nameText.split(" ").includes(token) || nameText.includes(token)) tokenScore = Math.max(tokenScore, 0.95);
-    if (descriptionText.includes(token)) tokenScore = Math.max(tokenScore, 0.75);
-    if (keywordTokens.some(keyword => keyword === token || keyword.includes(token))) tokenScore = Math.max(tokenScore, 0.85);
-    if (toolsText.includes(token)) tokenScore = Math.max(tokenScore, 0.65);
-    if (promptText.includes(token)) tokenScore = Math.max(tokenScore, 0.4);
+    if (variants.some((variant) => nameText.split(" ").includes(variant) || nameText.includes(variant))) {
+      tokenScore = Math.max(tokenScore, 0.95);
+    }
+    if (variants.some((variant) => descriptionText.includes(variant))) {
+      tokenScore = Math.max(tokenScore, 0.75);
+    }
+    if (variants.some((variant) => keywordTokens.some(keyword => keyword === variant || keyword.includes(variant)))) {
+      tokenScore = Math.max(tokenScore, 0.85);
+    }
+    if (variants.some((variant) => toolsText.includes(variant))) {
+      tokenScore = Math.max(tokenScore, 0.65);
+    }
+    if (variants.some((variant) => promptText.includes(variant))) {
+      tokenScore = Math.max(tokenScore, 0.4);
+    }
 
     if (tokenScore > 0) {
       score += tokenScore;

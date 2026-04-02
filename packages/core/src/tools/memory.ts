@@ -7,47 +7,105 @@
  * memory_store  — write or overwrite an entry by key
  * memory_search — full-text substring search across keys, content, and tags
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
-import { writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
+import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
+import { emitSwarmEvent } from "../swarm/bus.js";
+import { logAudit } from "../audit/logger.js";
+import { isAgentMessagingSuppressed } from "../agent/warden.js";
+import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
+import { getSession } from "../agent/session.js";
+import {
+  compactUserMemoryRecords,
+  compactWorkspaceMemoryRecords,
+  promoteMemoryRecords,
+  searchMemoryRecords,
+  storeUserMemoryRecord,
+  storeWorkspaceMemoryRecord,
+  type DurableMemoryScope,
+  type MemoryKind,
+  type MemoryScope,
+} from "../memory/service.js";
+import {
+  loadMainAssistantPersonality,
+  updateMainAssistantPersonality,
+  type MainAssistantPersonalityUpdate,
+} from "../personality/service.js";
 
 const log = childLogger("tool:memory");
-const MEMORY_SUBDIR = ".starlingai/memory";
 
-function memoryDir(workspacePath: string): string {
-  return resolve(workspacePath, MEMORY_SUBDIR);
+/**
+ * Publish a finding to the shared session memory.
+ * Exported for use by the cron scheduler and other internal callers.
+ */
+export async function shareFinding(sessionId: string, key: string, value: string): Promise<void> {
+  const parentSessionId = deriveSharedSessionId(sessionId);
+  const sanitizedKey = key.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 80);
+  await writeSharedFact(parentSessionId, sanitizedKey, value.trim());
 }
 
-function ensureDir(workspacePath: string): string {
-  const dir = memoryDir(workspacePath);
-  mkdirSync(dir, { recursive: true });
-  return dir;
+function deriveSharedSessionId(sessionId: string): string {
+  const parts = sessionId.split(":");
+  return parts.length >= 2 ? parts.slice(0, 2).join(":") : sessionId;
+}
+
+function deriveAgentName(sessionId: string): string {
+  const parts = sessionId.split(":");
+  return parts.length >= 3 ? parts[2]! : "orchestrator";
+}
+
+function resolveBroadcastTargets(fromAgent: string, args: Record<string, unknown>): string[] {
+  const config = getConfig();
+  const promotedAgents = readPromotedAgents(config.workspacePath);
+  const allAgents = { ...promotedAgents, ...config.subAgents };
+  const targetAgent = String(args["targetAgent"] ?? "").trim();
+  const domain = String(args["domain"] ?? "").trim().toLowerCase();
+  const tags = Array.isArray(args["tags"])
+    ? args["tags"].map(String).map((tag) => tag.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const exclude = new Set([
+    fromAgent,
+    ...(Array.isArray(args["excludeAgents"]) ? args["excludeAgents"] : []).map(String),
+  ]);
+
+  if (targetAgent) {
+    return allAgents[targetAgent] && !exclude.has(targetAgent) ? [targetAgent] : [];
+  }
+
+  if (!domain && tags.length === 0) return [];
+
+  return Object.entries(allAgents)
+    .filter(([name, cfg]) => {
+      if (exclude.has(name)) return false;
+      if (domain && String(cfg.domain ?? "").trim().toLowerCase() !== domain) return false;
+      if (tags.length > 0) {
+        const keywords = new Set([
+          ...(cfg.tags ?? []).map((entry) => entry.toLowerCase()),
+          ...(cfg.capabilities ?? []).map((entry) => entry.toLowerCase()),
+        ]);
+        if (!tags.every((tag) => keywords.has(tag))) return false;
+      }
+      return true;
+    })
+    .map(([name]) => name)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 function safeKey(raw: string): string {
   return raw.trim().replace(/[^a-z0-9_-]/gi, "_").slice(0, 100);
 }
 
-interface MemoryEntry {
-  key: string;
-  content: string;
-  tags: string[];
-  storedAt: string;
-  updatedAt: string;
-}
-
 registerTool({
   name: "memory_store",
   description:
-    "Persist a piece of information in the workspace memory store. " +
+    "Persist a piece of information in the durable memory store. " +
     "Use a descriptive, stable key (e.g. 'project_goals', 'client_preferences'). " +
     "Overwrites any previous entry with the same key. " +
-    "Memory survives across sessions within this workspace.",
+    "Use scope='workspace' for repo-local memory and scope='user' for durable cross-workspace preferences or habits.",
   parameters: {
     type: "object",
     properties: {
@@ -64,6 +122,20 @@ registerTool({
         items: { type: "string" },
         description: "Optional tags for categorisation (e.g. ['client', 'deadline'])",
       },
+      kind: {
+        type: "string",
+        enum: ["note", "fact", "preference", "lesson", "decision", "summary"],
+        description: "Optional durable memory kind for retrieval quality (default: note).",
+      },
+      subject: {
+        type: "string",
+        description: "Optional human-readable subject line used during retrieval. Defaults to the key.",
+      },
+      scope: {
+        type: "string",
+        enum: ["workspace", "user"],
+        description: "Durable destination scope. Use 'user' for cross-workspace preferences or long-lived personal defaults.",
+      },
     },
     required: ["key", "content"],
   },
@@ -71,27 +143,26 @@ registerTool({
     const key = safeKey(String(args["key"] ?? ""));
     const content = String(args["content"] ?? "").trim();
     const tags = Array.isArray(args["tags"]) ? args["tags"].map(String) : [];
+    const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
+    const subject = String(args["subject"] ?? "").trim();
+    const scope = String(args["scope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
 
     if (!key) return { success: false, output: "", error: "key is required" };
     if (!content) return { success: false, output: "", error: "content is required" };
+    if (scope !== "workspace" && scope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
 
     try {
-      const dir = ensureDir(ctx.workspacePath);
-      const existing: Partial<MemoryEntry> = existsSync(join(dir, `${key}.json`))
-        ? JSON.parse(readFileSync(join(dir, `${key}.json`), "utf-8"))
-        : {};
-      const entry: MemoryEntry = {
+      const entry = (scope === "user" ? storeUserMemoryRecord : storeWorkspaceMemoryRecord)(ctx.workspacePath, {
         key,
         content,
         tags,
-        storedAt: existing.storedAt ?? new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      writeFileSync(join(dir, `${key}.json`), JSON.stringify(entry, null, 2), "utf-8");
+        kind: kind || undefined,
+        subject: subject || undefined,
+      });
       return {
         success: true,
-        output: `Memory stored: '${key}' (${content.length} chars)`,
-        metadata: { key },
+        output: `${scope === "user" ? "User" : "Workspace"} memory stored: '${entry.key ?? key}' as ${entry.kind} (${content.length} chars)`,
+        metadata: { key: entry.key ?? key, kind: entry.kind, subject: entry.subject, scope: entry.scope },
       };
     } catch (err) {
       log.error({ err, key }, "memory_store failed");
@@ -103,8 +174,8 @@ registerTool({
 registerTool({
   name: "memory_search",
   description:
-    "Search the workspace memory store for entries matching a keyword. " +
-    "Matches against entry key, content, and tags. " +
+    "Search memory across user-global, workspace, session-shared facts, and agent lessons/flow memory. " +
+    "Matches against subject, content, tags, and memory kind. " +
     "Returns up to `limit` results (default 10).",
   parameters: {
     type: "object",
@@ -118,51 +189,302 @@ registerTool({
         description: "Maximum results to return (default 10, max 50)",
         default: 10,
       },
+      scopes: {
+        type: "array",
+        items: { type: "string", enum: ["workspace", "user", "session", "agent"] },
+        description: "Optional scope filter. Defaults to all scopes.",
+      },
+      kinds: {
+        type: "array",
+        items: { type: "string", enum: ["note", "fact", "preference", "lesson", "decision", "summary"] },
+        description: "Optional memory kind filter.",
+      },
+      targetAgent: {
+        type: "string",
+        description: "Optional agent name filter when searching agent-specific memory.",
+      },
     },
     required: ["query"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "").trim().toLowerCase();
     const limit = Math.min(50, Math.max(1, Number(args["limit"] ?? 10)));
+    const scopes = Array.isArray(args["scopes"])
+      ? args["scopes"].map(String).filter((value): value is MemoryScope => value === "workspace" || value === "user" || value === "session" || value === "agent")
+      : undefined;
+    const kinds = Array.isArray(args["kinds"])
+      ? args["kinds"].map(String).filter((value): value is MemoryKind => ["note", "fact", "preference", "lesson", "decision", "summary"].includes(value))
+      : undefined;
+    const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
 
     if (!query) return { success: false, output: "", error: "query is required" };
 
-    const dir = memoryDir(ctx.workspacePath);
-    if (!existsSync(dir)) {
-      return { success: true, output: "No memories stored yet in this workspace.", metadata: { count: 0 } };
-    }
-
     try {
-      const files = readdirSync(dir).filter(f => f.endsWith(".json"));
-      const results: MemoryEntry[] = [];
-
-      for (const file of files) {
-        if (results.length >= limit) break;
-        try {
-          const entry = JSON.parse(readFileSync(resolve(dir, file), "utf-8")) as MemoryEntry;
-          const haystack = `${entry.key} ${entry.content} ${(entry.tags ?? []).join(" ")}`.toLowerCase();
-          if (haystack.includes(query)) results.push(entry);
-        } catch { /* skip corrupted entries */ }
-      }
+      const results = await searchMemoryRecords(ctx.workspacePath, query, {
+        limit,
+        scopes,
+        kinds,
+        sessionId: deriveSharedSessionId(ctx.sessionId),
+        targetAgent,
+      });
 
       if (results.length === 0) {
         return { success: true, output: `No memories found matching '${query}'.`, metadata: { count: 0 } };
       }
 
       const formatted = results
-        .map(r =>
-          `**${r.key}**${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
+        .map((r) =>
+          `**[${r.scope}/${r.kind}] ${r.subject}**${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
         )
         .join("\n\n---\n\n");
 
       return {
         success: true,
         output: `Found ${results.length} memory entry(ies) for '${query}':\n\n${formatted}`,
-        metadata: { count: results.length },
+        metadata: { count: results.length, scopes: scopes ?? ["workspace", "user", "session", "agent"] },
       };
     } catch (err) {
       log.error({ err, query }, "memory_search failed");
       return { success: false, output: "", error: `Search failed: ${String(err)}` };
+    }
+  },
+});
+
+registerTool({
+  name: "assistant_personality_view",
+  description:
+    "Read the persistent main-assistant personality profile. " +
+    "Use this when the user asks about your persona, tone, or long-lived style, or before making a durable personality adjustment.",
+  parameters: {
+    type: "object",
+    properties: {},
+  },
+  async execute(): Promise<ToolResult> {
+    const profile = loadMainAssistantPersonality();
+    const lines = [
+      `Revision: ${profile.revision}`,
+      `Updated: ${profile.updatedAt} by ${profile.updatedBy}`,
+      profile.reason ? `Reason: ${profile.reason}` : "",
+      "",
+      `Identity: ${profile.identity.core}`,
+      profile.voice.tone.length ? `Tone: ${profile.voice.tone.join(" | ")}` : "",
+      profile.voice.style.length ? `Style: ${profile.voice.style.join(" | ")}` : "",
+      profile.collaboration.defaults.length ? `Collaboration Defaults: ${profile.collaboration.defaults.join(" | ")}` : "",
+      profile.collaboration.avoidances.length ? `Avoidances: ${profile.collaboration.avoidances.join(" | ")}` : "",
+      profile.voice.quirks.length ? `Quirks: ${profile.voice.quirks.join(" | ")}` : "",
+      profile.growth.notes.length ? `Growth Notes: ${profile.growth.notes.join(" | ")}` : "",
+    ].filter(Boolean);
+
+    return {
+      success: true,
+      output: lines.join("\n"),
+      metadata: profile,
+    };
+  },
+});
+
+registerTool({
+  name: "assistant_personality_update",
+  description:
+    "Update the persistent main-assistant personality profile. " +
+    "This changes long-lived voice guidance only. Never use it to alter safety rules, honesty rules, or authorization boundaries.",
+  parameters: {
+    type: "object",
+    properties: {
+      identity: {
+        type: "string",
+        description: "Optional replacement for the core identity statement.",
+      },
+      tone: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional tone list. Replaces the current list unless append=true.",
+      },
+      style: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional style list. Replaces the current list unless append=true.",
+      },
+      defaults: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional durable collaboration defaults. Replaces the current list unless append=true.",
+      },
+      avoidances: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional things the assistant should consistently avoid. Replaces the current list unless append=true.",
+      },
+      quirks: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional quirks list. Replaces the current list unless append=true.",
+      },
+      growthNotes: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional durable growth notes. Replaces the current list unless append=true.",
+      },
+      append: {
+        type: "boolean",
+        description: "When true, append provided arrays to existing ones with deduplication instead of replacing them.",
+        default: false,
+      },
+      reset: {
+        type: "boolean",
+        description: "When true, start from the default personality before applying any provided fields.",
+        default: false,
+      },
+      reason: {
+        type: "string",
+        description: "Short note explaining why this durable personality change is useful.",
+      },
+    },
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    try {
+      const profile = updateMainAssistantPersonality(args as MainAssistantPersonalityUpdate, "assistant");
+      return {
+        success: true,
+        output: `Main assistant personality updated to revision ${profile.revision}. Identity: ${profile.identity.core}`,
+        metadata: profile,
+      };
+    } catch (error) {
+      log.error({ error }, "assistant_personality_update failed");
+      return { success: false, output: "", error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+});
+
+registerTool({
+  name: "memory_promote",
+  description:
+    "Promote high-value session facts, agent lessons, or workspace notes into durable workspace or user-global memory, with deduplication and tag merging. " +
+    "Use workspace for repo-local memory and user for cross-workspace habits, preferences, or defaults.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Query used to select the memory entries to promote.",
+      },
+      limit: {
+        type: "number",
+        description: "Maximum number of candidate entries to promote (default 5, max 20).",
+        default: 5,
+      },
+      scopes: {
+        type: "array",
+        items: { type: "string", enum: ["workspace", "session", "agent"] },
+        description: "Optional source scopes to promote from. Defaults depend on destination scope.",
+      },
+      kind: {
+        type: "string",
+        enum: ["note", "fact", "preference", "lesson", "decision", "summary"],
+        description: "Optional destination kind override for promoted records.",
+      },
+      targetAgent: {
+        type: "string",
+        description: "Optional agent filter when promoting from agent memory.",
+      },
+      destinationScope: {
+        type: "string",
+        enum: ["workspace", "user"],
+        description: "Durable destination scope. Defaults to workspace.",
+      },
+    },
+    required: ["query"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const query = String(args["query"] ?? "").trim();
+    const limit = Math.min(20, Math.max(1, Number(args["limit"] ?? 5)));
+    const scopes = Array.isArray(args["scopes"])
+      ? args["scopes"].map(String).filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent")
+      : undefined;
+    const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
+    const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
+    const destinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
+
+    if (!query) return { success: false, output: "", error: "query is required" };
+    if (destinationScope !== "workspace" && destinationScope !== "user") {
+      return { success: false, output: "", error: "destinationScope must be 'workspace' or 'user'" };
+    }
+
+    try {
+      const result = await promoteMemoryRecords(ctx.workspacePath, query, {
+        sessionId: deriveSharedSessionId(ctx.sessionId),
+        scopes,
+        targetAgent,
+        destinationKind: kind || undefined,
+        destinationScope,
+        maxPromotions: limit,
+      });
+
+      const promotedLines = result.promoted.map((record) => `- promoted **${record.subject}** as ${record.kind}`);
+      const mergedLines = result.merged.map((record) => `- merged into **${record.subject}** as ${record.kind}`);
+      const lines = [...promotedLines, ...mergedLines];
+
+      return {
+        success: true,
+        output: lines.length > 0
+          ? `${result.destinationScope === "user" ? "User" : "Workspace"} memory promotion completed.\n\n${lines.join("\n")}`
+          : `${result.destinationScope === "user" ? "User" : "Workspace"} memory promotion completed, but no matching entries were promoted.`,
+        metadata: {
+          promoted: result.promoted.length,
+          merged: result.merged.length,
+          skipped: result.skipped,
+          destinationScope: result.destinationScope,
+        },
+      };
+    } catch (err) {
+      log.error({ err, query }, "memory_promote failed");
+      return { success: false, output: "", error: `Promotion failed: ${String(err)}` };
+    }
+  },
+});
+
+registerTool({
+  name: "memory_compact",
+  description:
+    "Compact durable workspace or user-global memory by merging duplicate records and consolidating tags. " +
+    "Use dryRun=true first when you want to inspect the impact before rewriting the durable store.",
+  parameters: {
+    type: "object",
+    properties: {
+      dryRun: {
+        type: "boolean",
+        description: "When true, report what would be compacted without rewriting files.",
+      },
+      scope: {
+        type: "string",
+        enum: ["workspace", "user"],
+        description: "Durable scope to compact. Defaults to workspace.",
+      },
+    },
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    try {
+      const scope = String(args["scope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
+      if (scope !== "workspace" && scope !== "user") {
+        return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
+      }
+      const result = (scope === "user" ? compactUserMemoryRecords : compactWorkspaceMemoryRecords)(ctx.workspacePath, {
+        dryRun: args["dryRun"] === true,
+      });
+      return {
+        success: true,
+        output: `${scope === "user" ? "User" : "Workspace"} memory compaction ${result.dryRun ? "previewed" : "completed"}. Kept: ${result.kept}. Removed: ${result.removed}. Merged groups: ${result.merged}.`,
+        metadata: {
+          kept: result.kept,
+          removed: result.removed,
+          merged: result.merged,
+          dryRun: result.dryRun,
+          scope: result.scope,
+        },
+      };
+    } catch (err) {
+      log.error({ err }, "memory_compact failed");
+      return { success: false, output: "", error: `Compaction failed: ${String(err)}` };
     }
   },
 });
@@ -223,6 +545,106 @@ registerTool({
 });
 
 registerTool({
+  name: "send_agent_message",
+  description:
+    "Send a direct message to another agent in the current swarm session, or broadcast to matching agents by domain/tags. " +
+    "Use this when another specialist needs a concise handoff, warning, or fact before its next delegated turn.",
+  parameters: {
+    type: "object",
+    properties: {
+      targetAgent: {
+        type: "string",
+        description: "Exact agent name that should receive the message on its next turn",
+      },
+      domain: {
+        type: "string",
+        description: "Optional domain filter for broadcasts",
+      },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional capability/tag filters for broadcasts. All tags must match.",
+      },
+      excludeAgents: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional agent names to exclude from a broadcast.",
+      },
+      message: {
+        type: "string",
+        description: "Short message to deliver (max 1200 chars)",
+      },
+    },
+    required: ["message"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const message = String(args["message"] ?? "").trim();
+
+    if (!message) return { success: false, output: "", error: "message is required" };
+
+    const sharedSessionId = deriveSharedSessionId(ctx.sessionId);
+    const fromAgent = deriveAgentName(ctx.sessionId);
+    if (isAgentMessagingSuppressed(sharedSessionId, fromAgent)) {
+      return {
+        success: false,
+        output: "",
+        error: `Direct messaging for agent '${fromAgent}' is temporarily suppressed by Warden due to message flooding.`,
+      };
+    }
+
+    const recipients = resolveBroadcastTargets(fromAgent, args);
+    if (recipients.length === 0) {
+      return {
+        success: false,
+        output: "",
+        error: "No matching target agents found. Provide targetAgent, or use domain/tags for a broadcast.",
+      };
+    }
+
+    const timestamp = new Date().toISOString();
+    for (const recipient of recipients) {
+      await appendAgentMessage({
+        sessionId: sharedSessionId,
+        id: randomUUID(),
+        fromAgent,
+        toAgent: recipient,
+        content: message,
+        ts: timestamp,
+      });
+    }
+
+    const isBroadcast = recipients.length > 1 || !String(args["targetAgent"] ?? "").trim();
+    emitSwarmEvent(isBroadcast ? "agent_broadcast" : "agent_message", {
+      sessionId: sharedSessionId,
+      agentName: fromAgent,
+      data: {
+        recipients,
+        recipientCount: recipients.length,
+        domain: args["domain"],
+        tags: Array.isArray(args["tags"]) ? args["tags"] : [],
+        preview: message.slice(0, 120),
+      },
+    });
+    logAudit("agent_message_sent", {
+      fromAgent,
+      recipients,
+      recipientCount: recipients.length,
+      broadcast: isBroadcast,
+      domain: args["domain"],
+      tags: Array.isArray(args["tags"]) ? args["tags"] : [],
+    }, { sessionId: sharedSessionId, severity: "info" });
+
+    return {
+      success: true,
+      output: recipients.length === 1
+        ? `Direct message queued for agent "${recipients[0]}".`
+        : `Broadcast queued for ${recipients.length} agents: ${recipients.join(", ")}.`,
+      metadata: { fromAgent, recipients, sessionId: sharedSessionId },
+    };
+  },
+});
+
+registerTool({
   name: "share_finding",
   description:
     "Publish a key finding to the session's shared memory so other agents in this swarm session can read it. " +
@@ -252,8 +674,7 @@ registerTool({
     if (!value) return { success: false, output: "", error: "value is required" };
 
     // Derive parent session ID from sub-agent sessionId (format: sub:parentId:agentName:ts)
-    const parts = ctx.sessionId.split(":");
-    const parentSessionId = parts.length >= 2 ? parts.slice(0, 2).join(":") : ctx.sessionId;
+    const parentSessionId = deriveSharedSessionId(ctx.sessionId);
 
     await writeSharedFact(parentSessionId, key, value);
     log.info({ key, parentSessionId }, "Shared finding published");
@@ -288,8 +709,7 @@ registerTool({
     required: [],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const parts = ctx.sessionId.split(":");
-    const parentSessionId = parts.length >= 2 ? parts.slice(0, 2).join(":") : ctx.sessionId;
+    const parentSessionId = deriveSharedSessionId(ctx.sessionId);
     const query = String(args["query"] ?? "").trim();
 
     const config = getConfig();
@@ -336,6 +756,54 @@ registerTool({
       success: true,
       output: `## Shared Session Facts (${entries.length})\n\n${formatted}`,
       metadata: { count: entries.length },
+    };
+  },
+});
+
+// ── session_status ────────────────────────────────────────────────────────────
+
+registerTool({
+  name: "session_status",
+  description:
+    "Get metadata about the current session: session ID, channel, creation time, turn count, " +
+    "message count, and age. Read-only — useful for context-aware decisions.",
+  parameters: {
+    type: "object",
+    properties: {},
+  },
+  async execute(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const parentSessionId = deriveSharedSessionId(ctx.sessionId);
+    const session = getSession(parentSessionId);
+    if (!session) {
+      return {
+        success: true,
+        output: `Session ${parentSessionId} — no metadata available (sub-agent context).`,
+        metadata: { sessionId: parentSessionId },
+      };
+    }
+
+    const now = new Date();
+    const ageMs = now.getTime() - session.createdAt.getTime();
+    const ageMinutes = Math.round(ageMs / 60_000);
+
+    const lines = [
+      `**Session ID:** ${session.id}`,
+      `**Channel:** ${session.channel}`,
+      `**Created:** ${session.createdAt.toISOString()}`,
+      `**Age:** ${ageMinutes} minute${ageMinutes === 1 ? "" : "s"}`,
+      `**Turns:** ${session.getTurnCount()}`,
+    ];
+
+    return {
+      success: true,
+      output: lines.join("\n"),
+      metadata: {
+        sessionId: session.id,
+        channel: session.channel,
+        createdAt: session.createdAt.toISOString(),
+        ageMinutes,
+        turnCount: session.getTurnCount(),
+      },
     };
   },
 });

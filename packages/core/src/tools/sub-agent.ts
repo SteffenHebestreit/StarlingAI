@@ -15,6 +15,7 @@ import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } fr
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { readPromotedAgents, promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
+import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
 import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact } from "../swarm/memory.js";
@@ -592,11 +593,50 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
 
   // Deduplicate by name, exclude already-attempted agents
   const seen = new Set<string>();
-  return candidates.filter(c => {
+  const routed = candidates.filter(c => {
     if (excluded.has(c.name) || seen.has(c.name)) return false;
     seen.add(c.name);
     return true;
   });
+
+  return [...routed, ...buildHeuristicRoutingCandidates(query, ctx, excluded, seen)];
+}
+
+function buildHeuristicRoutingCandidates(
+  query: string,
+  ctx: ToolContext,
+  excluded: Set<string>,
+  seen: Set<string>,
+): AgentRoutingCandidate[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [];
+
+  const config = getConfig();
+  const defaultModel = config.agents.defaults.model.primary;
+  const heuristicCandidates: AgentRoutingCandidate[] = [];
+  const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
+  const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now)\b/i.test(normalized);
+  const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
+  const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
+
+  const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
+    if (excluded.has(name) || seen.has(name)) return;
+    if (ctx.allowedAgents && !ctx.allowedAgents.includes(name)) return;
+    const cfg = config.subAgents[name];
+    if (!cfg) return;
+    seen.add(name);
+    heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
+  };
+
+  if (looksWebTask && (looksBroad || looksFresh || looksSourceHeavy)) {
+    maybeAdd("web_task_coordinator", 0.62, ["web", "research", ...(looksBroad ? ["guide"] : []), ...(looksFresh ? ["current"] : []), ...(looksSourceHeavy ? ["sources"] : [])]);
+  }
+
+  if (looksSourceHeavy || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
+    maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
+  }
+
+  return heuristicCandidates;
 }
 
 // ─── Architect fallback ───────────────────────────────────────────────────────
@@ -751,6 +791,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
         attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        delegationSucceeded: true,
         reused: true,
       },
     };
@@ -780,6 +821,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
         attemptedAgents,
+        delegationSucceeded: false,
         reused: true,
         priorFailure: true,
       },
@@ -838,7 +880,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         success: false,
         output: "",
         error: "Turn cancelled — delegation aborted.",
-        metadata: { taskId, attemptedAgents },
+        metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
 
@@ -852,7 +894,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         success: false,
         output: "",
         error: `Turn delegation limit (${MAX_TOTAL_DELEGATIONS_PER_TURN}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
-        metadata: { taskId, attemptedAgents },
+        metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
 
@@ -880,7 +922,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
-          if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+          const shouldQueueRoutedCandidate = explicitAgentRequested
+            || attemptedAgents.length > 0
+            || !shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold);
+          if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
               confidence: topCandidate.confidence,
               matchedTerms: topCandidate.matchedTerms,
@@ -931,10 +976,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     const lockOwner = await acquireTaskLock(taskId);
 
     const attempt = taskState.attempts[taskState.attempts.length - 1]!;
+    const config = getConfig();
+    const promotedAgents = readPromotedAgents(config.workspacePath);
+    const agentCfg = config.subAgents[candidate] ?? promotedAgents[candidate];
+    announceAgentCapability({
+      sessionId: ctx.sessionId,
+      agentName: candidate,
+      domain: agentCfg?.domain,
+      capabilities: agentCfg?.capabilities ?? [],
+      tags: agentCfg?.tags ?? [],
+      availability: "busy",
+      activeTaskId: taskId,
+      source: "runtime",
+    });
 
     try {
       // Inject shared facts from other agents into this sub-agent's context
-      const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId);
+      const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: candidate });
       const enrichedContext = sharedCtx
         ? `${sharedCtx}\n\n---\n\n${request.context ?? ""}`.trim()
         : request.context;
@@ -991,6 +1049,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
         publishSwarmState(ctx);
         emitSwarmEvent("task_failed", { sessionId: ctx.sessionId, taskId, agentName: candidate, data: { reason: "weak_result" } });
+        announceAgentCapability({
+          sessionId: ctx.sessionId,
+          agentName: candidate,
+          domain: agentCfg?.domain,
+          capabilities: agentCfg?.capabilities ?? [],
+          tags: agentCfg?.tags ?? [],
+          availability: "degraded",
+          activeTaskId: taskId,
+          source: "runtime",
+        });
         if (lockOwner) await releaseTaskLock(taskId, lockOwner);
         // Infrastructure failures cannot be solved by a different agent — stop immediately
         if (lastFailureWasInfrastructure) break;
@@ -1011,6 +1079,15 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
       publishSwarmState(ctx);
       emitSwarmEvent("task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
+      announceAgentCapability({
+        sessionId: ctx.sessionId,
+        agentName: candidate,
+        domain: agentCfg?.domain,
+        capabilities: agentCfg?.capabilities ?? [],
+        tags: agentCfg?.tags ?? [],
+        availability: "idle",
+        source: "runtime",
+      });
       if (lockOwner) await releaseTaskLock(taskId, lockOwner);
 
       const routingInfo = routingCandidateMap.get(candidate);
@@ -1024,6 +1101,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           agentName: candidate,
           taskId,
           attemptedAgents,
+          delegationSucceeded: true,
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -1037,6 +1115,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
       publishSwarmState(ctx);
       emitSwarmEvent("task_failed", { sessionId: ctx.sessionId, taskId, agentName: candidate, data: { error: message } });
+      announceAgentCapability({
+        sessionId: ctx.sessionId,
+        agentName: candidate,
+        domain: agentCfg?.domain,
+        capabilities: agentCfg?.capabilities ?? [],
+        tags: agentCfg?.tags ?? [],
+        availability: "degraded",
+        activeTaskId: taskId,
+        source: "runtime",
+      });
       if (lockOwner) await releaseTaskLock(taskId, lockOwner);
     }
   }
@@ -1057,7 +1145,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       publishSwarmState(ctx);
       return {
         ...architectResult,
-        metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore },
+        metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success },
       };
     }
   }
@@ -1071,7 +1159,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     success: false,
     output: "",
     error: `All candidate agents failed for task '${title}'. ${taskState.error}`,
-    metadata: { taskId, attemptedAgents },
+    metadata: { taskId, attemptedAgents, delegationSucceeded: false },
   };
 }
 

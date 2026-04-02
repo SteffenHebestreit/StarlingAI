@@ -763,6 +763,9 @@ registerTool({
 
       // Block dangerous key combos that behave differently depending on window focus
       const normalized = keys.toLowerCase().replace(/\s+/g, "");
+      if (/^(?:win|meta)(?:\+|$)/i.test(normalized)) {
+        return fail(`Hotkey '${keys}' is blocked: Windows/Meta shortcuts can open system UI or launch dialogs unpredictably. Use computer_click on visible UI elements instead.`);
+      }
       const BLOCKED_HOTKEYS: Record<string, string> = {
         "ctrl+alt+delete": "system security screen",
         "ctrl+alt+del": "system security screen",

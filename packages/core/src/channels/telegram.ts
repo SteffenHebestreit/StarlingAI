@@ -4,6 +4,7 @@ import { runTurn } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { checkChannelIngress, type ChannelBaseConfig } from "./base.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
 import { setChannelHealthCheck } from "./registry.js";
@@ -12,6 +13,27 @@ const log = childLogger("channel:telegram");
 
 // Maps Telegram chat IDs → session IDs
 const chatSessions = new Map<number, string>();
+
+// Exported bot API reference for the send_telegram tool
+let _botApi: Bot<Context>["api"] | null = null;
+
+/** Send a message to a Telegram chat. Returns true on success. */
+export async function sendTelegramMessage(
+  chatId: number,
+  text: string,
+  parseMode: "Markdown" | "HTML" | undefined = "Markdown",
+): Promise<{ ok: boolean; error?: string }> {
+  if (!_botApi) {
+    return { ok: false, error: "Telegram bot is not running" };
+  }
+  try {
+    await _botApi.sendMessage(chatId, text, parseMode ? { parse_mode: parseMode } : {});
+    return { ok: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
 
 export async function startTelegramBot(): Promise<(() => Promise<void>) | null> {
   const config = getConfig();
@@ -79,6 +101,22 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
       sessionId = session.id;
     }
 
+    const triggeredJob = await dispatchChannelTriggeredJob({
+      channel: "telegram",
+      senderId: String(userId ?? ctx.chat.id),
+      text: ctx.message.text,
+    });
+    if (triggeredJob.matched) {
+      if (triggeredJob.responseText) {
+        await deliverWithRetry(
+          () => ctx.reply(triggeredJob.responseText!).then(() => undefined),
+          triggeredJob.responseText,
+          { channel: "telegram" },
+        );
+      }
+      return;
+    }
+
     const { getSession } = await import("../agent/session.js");
     const session = getSession(sessionId);
     if (!session) {
@@ -102,6 +140,7 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
   });
 
   await bot.api.getMe();
+  _botApi = bot.api;
   bot.start().catch(err => log.error({ err }, "Telegram bot error"));
   log.info("Telegram bot started");
 
@@ -116,6 +155,7 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
   });
 
   return async () => {
+    _botApi = null;
     await bot.stop();
   };
 }

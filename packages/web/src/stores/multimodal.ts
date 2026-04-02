@@ -36,12 +36,12 @@ export interface MultimodalTtsConfig extends MultimodalServiceConfig {
 }
 
 export interface MultimodalImageGenerationConfig extends MultimodalServiceConfig {
+  api: "automatic1111-compatible" | "comfyui";
   model?: string;
   defaultWidth: number;
   defaultHeight: number;
   defaultSteps: number;
   defaultGuidanceScale: number;
-  cpuOffload: boolean;
   defaultNegativePrompt?: string;
 }
 
@@ -64,6 +64,7 @@ export interface MultimodalConfig {
 
 export interface MultimodalServiceStatus {
   ok: boolean;
+  disabled?: boolean;
   status?: number;
   error?: string;
 }
@@ -89,20 +90,20 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     visionApiKey: "",
   },
   stt: {
-    baseUrl: "http://qwen3-asr-service:5002",
+    baseUrl: "",
     apiKey: "",
     timeoutMs: 60_000,
     api: "auto",
-    model: "Qwen/Qwen3-ASR-1.7B",
+    model: "whisper-1",
   },
   tts: {
-    baseUrl: "http://qwen3-tts-service:5004",
+    baseUrl: "",
     apiKey: "",
     timeoutMs: 60_000,
-    api: "qwen-compatible",
-    model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+    api: "openai-compatible",
+    model: "tts-1",
     defaultLanguage: "English",
-    defaultSpeaker: "Vivian",
+    defaultSpeaker: "alloy",
     defaultVoiceId: "",
     voiceSamplePath: "",
     voiceSampleText: "",
@@ -232,9 +233,17 @@ export const useMultimodalStore = defineStore("multimodal", () => {
       status.value = {
         files: { ok: false },
         vision: config.value.files.visionModel ? { ok: false } : null,
-        stt: { ok: false },
-        tts: { ok: false },
-        imageGeneration: config.value.imageGeneration ? { ok: false } : null,
+        stt: config.value.stt.baseUrl.trim()
+          ? { ok: false }
+          : { ok: false, disabled: true, error: "Disabled: no STT endpoint configured." },
+        tts: config.value.tts.baseUrl.trim()
+          ? { ok: false }
+          : { ok: false, disabled: true, error: "Disabled: no TTS endpoint configured." },
+        imageGeneration: config.value.imageGeneration
+          ? (config.value.imageGeneration.baseUrl.trim()
+              ? { ok: false }
+              : { ok: false, disabled: true, error: "Disabled: no image generation endpoint configured." })
+          : null,
         wakeWord: config.value.wakeWord,
       };
     } finally {

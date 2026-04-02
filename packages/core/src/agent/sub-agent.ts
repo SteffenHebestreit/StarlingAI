@@ -20,13 +20,77 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs } from "./outcomes.js";
+import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
+import { formatScopedMemoryGuidance } from "../memory/service.js";
 
 const log = childLogger("agent:sub-agent");
 
 const DEFAULT_MAX_ITERATIONS = 5;
+
+// Per-tool call caps enforced inside sub-agent runs.
+// These prevent a single tool from dominating the iteration budget
+// (e.g. repeated computer_session_start after a connection failure).
+const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
+  computer_session_start: 3,
+  computer_session_stop: 2,
+  computer_session_attach: 2,
+  computer_list_nodes: 2,
+  computer_list_windows: 3,
+  computer_focus_window: 3,
+  computer_snapshot: 8,
+  computer_click: 6,
+  computer_type: 4,
+  computer_hotkey: 4,
+  delegate_to_agent: 3,
+  create_ephemeral_agent: 1,
+};
+
+const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
+  "computer_list_nodes",
+  "computer_session_start",
+  "computer_session_attach",
+  "computer_list_windows",
+  "computer_snapshot",
+  "computer_capture_region",
+  "computer_wait_for",
+]);
+
+function isComputerObservationOnlyTask(task: string): boolean {
+  const normalized = task.toLowerCase();
+  if (!normalized.trim()) return false;
+
+  const observationIntent = /(list|identify|inspect|analy[sz]e|describe|report|read|check|show|visible|screenshot|snapshot|screen|what is on (?:the )?screen|loaded models|model names|welche|liste|prüfe|analysiere|beschreibe|sichtbar)/i.test(normalized);
+  if (!observationIntent) return false;
+
+  const explicitInteraction = /(click|doubleclick|type|press|hotkey|shortcut|open|launch|navigate|scroll|drag|upload|download|log in|login|sign in|fill|submit|reply|send|switch tab|switch window|focus the input|paste)/i.test(normalized);
+  return !explicitInteraction;
+}
+
+function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, task: string): string[] | undefined {
+  if (!configuredTools) return configuredTools;
+  if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
+    return configuredTools;
+  }
+  return configuredTools.filter((toolName) => COMPUTER_OBSERVATION_ONLY_TOOLS.has(toolName));
+}
+
+function buildTaskModeGuidance(agentName: string, task: string): string {
+  if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
+    return "";
+  }
+
+  return [
+    "TASK MODE — READ-ONLY OBSERVATION.",
+    "The user asked you to inspect, list, or describe the current state, not to operate the desktop UI.",
+    "Start with connection/session discovery if needed, then capture a computer_snapshot immediately.",
+    "Prefer additional computer_snapshot or computer_capture_region calls over any interaction.",
+    "Do NOT click, type, use hotkeys, scroll, drag, open apps, or launch dialogs for this task.",
+    "If the current desktop does not already show the requested evidence, report that limitation explicitly instead of probing blindly.",
+  ].join("\n");
+}
 
 function looksLikeNarratedToolCall(content: string): boolean {
   const preview = content.slice(0, 2000);
@@ -290,28 +354,6 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
     const provider = createChatProvider(modelConfig, providerEndpoint);
 
-    // Build system prompt
-    const today = new Date().toLocaleDateString("en-US", {
-      weekday: "long", year: "numeric", month: "long", day: "numeric",
-    });
-    const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}`;
-
-    // Get available tools for this agent
-    const tools = getToolsAsLLMDefs(agentCfg.tools);
-
-    const toolContext: ToolContext = {
-      sessionId: subSessionId,
-      workspacePath: opts.workspacePath,
-      approvalCallback: opts.approvalCallback,
-      humanInLoopSteps: opts.humanInLoopSteps,
-      onComputerAction: opts.onComputerAction,
-      onComputerScreenshot: opts.onComputerScreenshot,
-      onComputerSessionState: opts.onComputerSessionState,
-      signal,
-    };
-
     // Sanitize task: strip keyboard shortcut instructions that cause wrong-window side effects.
     // The orchestrator LLM sometimes composes tasks with explicit shortcut instructions
     // (e.g. "use Ctrl+Shift+P to open Command Palette") which the sub-agent follows
@@ -324,6 +366,41 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         .replace(/(?:command\s+palette|Ctrl\+Shift\+P)/gi, "visible UI elements")
         .replace(/(?:keyboard\s+shortcut|shortcut|key\s*(?:combo|combination))\s+(?:to\s+)?(?:open|toggle|show|launch)/gi, "mouse click to open");
     }
+
+    // Build system prompt
+    const today = new Date().toLocaleDateString("en-US", {
+      weekday: "long", year: "numeric", month: "long", day: "numeric",
+    });
+    const flowGuidance = formatFlowMemoryGuidance(opts.workspacePath, sanitizedTask, {
+      targetAgent: opts.agentName,
+      limit: 3,
+    });
+    const memoryGuidance = await formatScopedMemoryGuidance(opts.workspacePath, sanitizedTask, {
+      sessionId: opts.parentSessionId,
+      targetAgent: opts.agentName,
+      scopes: ["session", "workspace", "user", "agent"],
+      limit: 4,
+      maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+    });
+    const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
+    const systemPrompt = agentCfg.systemPrompt
+      ? `${agentCfg.systemPrompt}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+
+    // Get available tools for this agent
+    const effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
+    const tools = getToolsAsLLMDefs(effectiveToolNames);
+
+    const toolContext: ToolContext = {
+      sessionId: subSessionId,
+      workspacePath: opts.workspacePath,
+      approvalCallback: opts.approvalCallback,
+      humanInLoopSteps: opts.humanInLoopSteps,
+      onComputerAction: opts.onComputerAction,
+      onComputerScreenshot: opts.onComputerScreenshot,
+      onComputerSessionState: opts.onComputerSessionState,
+      signal,
+    };
 
     // Build initial message
     const userContent = opts.context
@@ -339,6 +416,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
     const lastToolCallSig = new Map<string, { args: string; result: string }>();
+    // Per-tool call counters — prevents a single tool from dominating iteration budget
+    const perToolCallCount = new Map<string, number>();
 
     const buildStats = (terminalState: SubAgentExecutionStats["terminalState"] = "completed"): SubAgentExecutionStats => ({
       agentName: opts.agentName,
@@ -506,7 +585,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         toolCount++;
 
         // Enforce tool allow-list
-        if (agentCfg.tools && !agentCfg.tools.includes(tc.name)) {
+        if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
           log.warn({ agentName: opts.agentName, tool: tc.name }, "Sub-agent attempted disallowed tool");
           logAudit(
             "sub_agent_tool_blocked",
@@ -537,6 +616,23 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         );
 
         toolNames.push(tc.name);
+
+        // Per-tool call cap — prevent wasteful loops on a single tool
+        const priorCount = perToolCallCount.get(tc.name) ?? 0;
+        const toolCap = SUB_AGENT_PER_TOOL_CAPS[tc.name];
+        if (toolCap !== undefined && priorCount >= toolCap) {
+          log.warn(
+            { agentName: opts.agentName, tool: tc.name, count: priorCount, cap: toolCap },
+            "Sub-agent exceeded per-tool call cap",
+          );
+          toolResults.push({
+            role: "tool",
+            content: `Tool '${tc.name}' has been called ${priorCount} times this run (limit: ${toolCap}). You must proceed without calling it again. Work with the results you already have.`,
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
+        perToolCallCount.set(tc.name, priorCount + 1);
 
         // Consecutive-duplicate detection: if same tool + same args as the
         // immediately prior call, return the cached result with a warning

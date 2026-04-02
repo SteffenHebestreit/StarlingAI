@@ -8,6 +8,7 @@ const router = createRouter({
     { path: "/jobs", component: () => import("@/pages/Jobs.vue") },
     { path: "/sessions", component: () => import("@/pages/Sessions.vue") },
     { path: "/settings", component: () => import("@/pages/Settings.vue") },
+    { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });
 

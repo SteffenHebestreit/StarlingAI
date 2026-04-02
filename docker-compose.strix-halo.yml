@@ -1,11 +1,11 @@
-services:
+services: {}
   # ── Strix Halo / AMD ROCm build-arg overrides ─────────────────────────────
   # Switches all ML services from the CPU PyTorch wheel to the ROCm 6.2 wheel.
   # The app code already detects CUDA / ROCm / CPU at runtime via COMPUTE_BACKEND.
   #
   # Usage:
-  #   docker compose -f docker-compose.yml -f docker-compose.strix-halo.yml \
-  #     --profile image up -d
+  #   docker compose -f docker-compose.yml -f docker-compose.strix-halo.yml up -d
+  # External STT, TTS, and image-generation backends are configured outside the compose stack.
   #
   # ── GPU access: WSL2 vs native Linux ──────────────────────────────────────
   # WSL2 (current): AMD does NOT expose /dev/kfd in WSL2. The correct device
@@ -35,68 +35,3 @@ services:
   # processors=16    # match core count
   # swap=0           # prevent paging GPU allocations
 
-  qwen3-asr-service:
-    build:
-      args:
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/rocm6.2
-    image: starlingai/qwen3-asr-service:rocm
-    environment:
-      HSA_OVERRIDE_GFX_VERSION: "11.5.1"
-      HSA_ENABLE_SDMA: "0"
-      HSA_XNACK: "1"
-      HSA_FORCE_FINE_GRAIN_PCIE: "1"
-      ROCBLAS_USE_HIPBLASLT: "1"
-      PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
-    # ── Native Linux only — uncomment when /dev/kfd is present ──────────────
-    # devices:
-    #   - /dev/kfd:/dev/kfd
-    #   - /dev/dri:/dev/dri
-    # group_add: [video, render]
-    # security_opt: [seccomp=unconfined]
-    #
-    # ── WSL2 path — uncomment when AMD fixes librocdxg for gfx1151 ──────────
-    # devices:
-    #   - /dev/dxg:/dev/dxg      # WDDM proxy — WSL2 equivalent of /dev/kfd
-    #   - /dev/dri:/dev/dri
-    # volumes:
-    #   - /usr/lib/wsl:/usr/lib/wsl:ro
-    # environment:
-    #   LD_LIBRARY_PATH: /usr/lib/wsl/lib
-
-  qwen3-tts-service:
-    build:
-      args:
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/rocm6.2
-    image: starlingai/qwen3-tts-service:rocm
-    environment:
-      HSA_OVERRIDE_GFX_VERSION: "11.5.1"
-      HSA_ENABLE_SDMA: "0"
-      HSA_XNACK: "1"
-      HSA_FORCE_FINE_GRAIN_PCIE: "1"
-      ROCBLAS_USE_HIPBLASLT: "1"
-      PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
-    # devices: [/dev/kfd, /dev/dri]          # native Linux
-    # devices: [/dev/dxg, /dev/dri]          # WSL2 (when AMD fixes gfx1151 bug)
-
-  qwen-image-service:
-    build:
-      args:
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/rocm6.2
-    image: starlingai/qwen-image-service:rocm
-    # Activate with: --profile image
-    gpus: !reset []                           # suppress the Nvidia runtime requirement
-    environment:
-      COMPUTE_BACKEND: auto
-      NVIDIA_VISIBLE_DEVICES: !reset null
-      NVIDIA_DRIVER_CAPABILITIES: !reset null
-      QWEN_IMAGE_CPU_OFFLOAD: "false"
-      UNIFIED_MEMORY: "true"
-      HSA_OVERRIDE_GFX_VERSION: "11.5.1"
-      PYTORCH_ROCM_ARCH: "gfx1151"
-      HSA_ENABLE_SDMA: "0"
-      HSA_XNACK: "1"
-      HSA_FORCE_FINE_GRAIN_PCIE: "1"
-      ROCBLAS_USE_HIPBLASLT: "1"
-      PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
-    # devices: [/dev/kfd, /dev/dri]          # native Linux
-    # devices: [/dev/dxg, /dev/dri]          # WSL2 (when AMD fixes gfx1151 bug)

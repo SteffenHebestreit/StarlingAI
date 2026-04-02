@@ -9,6 +9,7 @@
  * Storage layout (Redis):
  *   starlingai:mem:{sessionId}:facts      — Hash  (key → value strings)
  *   starlingai:mem:{sessionId}:results    — List  (JSON entries, newest last)
+ *   starlingai:mem:{sessionId}:messages   — List  (JSON entries, pending direct messages)
  *
  * Both keys expire after SESSION_TTL_S (4 h). When Redis is absent, an
  * in-process Map provides the same API with process-lifetime scope.
@@ -27,6 +28,7 @@ const RESULT_CONTENT_MAX = 1200;    // chars — injected into sub-agent context
 
 const _facts  = new Map<string, Map<string, string>>();
 const _results = new Map<string, PartialResult[]>();
+const _messages = new Map<string, AgentMessage[]>();
 const _factEmbeddingCache = new Map<string, { signature: string; vectors: Array<{ key: string; value: string; vector: Float32Array }> }>();
 
 // ── Redis client (lazy, reuses REDIS_URL) ────────────────────────────────────
@@ -70,6 +72,20 @@ export interface SharedFactMatch {
   key: string;
   value: string;
   score: number;
+}
+
+export interface AgentMessage {
+  id: string;
+  fromAgent: string;
+  toAgent: string;
+  content: string;
+  ts: string;
+}
+
+export interface AgentMessageBacklogSnapshot {
+  sessionId: string;
+  pending: number;
+  targets: Record<string, number>;
 }
 
 // ── Facts API ────────────────────────────────────────────────────────────────
@@ -181,6 +197,7 @@ export async function searchSharedFacts(
 // ── Partial results API ──────────────────────────────────────────────────────
 
 const resultsKey = (sid: string) => `starlingai:mem:${sid}:results`;
+const messagesKey = (sid: string) => `starlingai:mem:${sid}:messages`;
 
 /**
  * Append a partial result from a completed sub-agent.
@@ -230,6 +247,94 @@ export async function readPartialResults(sessionId: string): Promise<PartialResu
   return [...(_results.get(sessionId) ?? [])];
 }
 
+// ── Direct agent messages ───────────────────────────────────────────────────
+
+export async function appendAgentMessage(entry: AgentMessage & { sessionId: string }): Promise<void> {
+  const { sessionId, ...rest } = entry;
+  const safeEntry: AgentMessage = {
+    ...rest,
+    content: rest.content.slice(0, RESULT_CONTENT_MAX),
+  };
+  const redis = await getRedis();
+
+  if (redis) {
+    try {
+      const key = messagesKey(sessionId);
+      await (redis as { rpush: (k: string, v: string) => Promise<void> })
+        .rpush(key, JSON.stringify(safeEntry));
+      await (redis as { ltrim: (k: string, s: number, e: number) => Promise<void> })
+        .ltrim(key, -RESULTS_MAX, -1);
+      await (redis as { expire: (k: string, ttl: number) => Promise<void> }).expire(key, SESSION_TTL_S);
+      return;
+    } catch (err) {
+      log.warn({ err, toAgent: rest.toAgent }, "appendAgentMessage Redis failed — using in-process");
+    }
+  }
+
+  const list = _messages.get(sessionId) ?? [];
+  list.push(safeEntry);
+  if (list.length > RESULTS_MAX) list.splice(0, list.length - RESULTS_MAX);
+  _messages.set(sessionId, list);
+}
+
+export async function consumeAgentMessages(sessionId: string, agentName: string): Promise<AgentMessage[]> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const key = messagesKey(sessionId);
+      const raw = await (redis as { lrange: (k: string, s: number, e: number) => Promise<string[]> })
+        .lrange(key, 0, -1);
+      const parsed = raw
+        .map((value) => {
+          try {
+            return JSON.parse(value) as AgentMessage;
+          } catch {
+            return null;
+          }
+        })
+        .filter((value): value is AgentMessage => value !== null);
+
+      const matched = parsed.filter((message) => message.toAgent === agentName);
+      const remaining = parsed.filter((message) => message.toAgent !== agentName);
+
+      await (redis as { del: (k: string) => Promise<void> }).del(key);
+      if (remaining.length > 0) {
+        await (redis as { rpush: (k: string, ...v: string[]) => Promise<void> })
+          .rpush(key, ...remaining.map((message) => JSON.stringify(message)));
+        await (redis as { expire: (k: string, ttl: number) => Promise<void> }).expire(key, SESSION_TTL_S);
+      }
+
+      return matched;
+    } catch (err) {
+      log.warn({ err, agentName }, "consumeAgentMessages Redis failed — using in-process");
+    }
+  }
+
+  const list = _messages.get(sessionId) ?? [];
+  const matched = list.filter((message) => message.toAgent === agentName);
+  const remaining = list.filter((message) => message.toAgent !== agentName);
+  if (remaining.length > 0) {
+    _messages.set(sessionId, remaining);
+  } else {
+    _messages.delete(sessionId);
+  }
+  return matched;
+}
+
+export function getAgentMessageBacklogSnapshot(): AgentMessageBacklogSnapshot[] {
+  return [..._messages.entries()]
+    .map(([sessionId, messages]) => ({
+      sessionId,
+      pending: messages.length,
+      targets: messages.reduce<Record<string, number>>((acc, message) => {
+        acc[message.toAgent] = (acc[message.toAgent] ?? 0) + 1;
+        return acc;
+      }, {}),
+    }))
+    .filter((entry) => entry.pending > 0)
+    .sort((left, right) => right.pending - left.pending || left.sessionId.localeCompare(right.sessionId));
+}
+
 // ── Prompt injection ─────────────────────────────────────────────────────────
 
 /**
@@ -240,11 +345,21 @@ export async function readPartialResults(sessionId: string): Promise<PartialResu
  */
 export async function formatSharedContextForPrompt(
   sessionId: string,
-  opts: { includeFacts?: boolean; includeResults?: boolean; maxResults?: number } = {},
+  opts: { includeFacts?: boolean; includeResults?: boolean; maxResults?: number; agentName?: string } = {},
 ): Promise<string> {
-  const { includeFacts = true, includeResults = true, maxResults = 5 } = opts;
+  const { includeFacts = true, includeResults = true, maxResults = 5, agentName } = opts;
 
   const sections: string[] = [];
+
+  if (agentName) {
+    const messages = await consumeAgentMessages(sessionId, agentName);
+    if (messages.length > 0) {
+      sections.push(
+        "## Direct Messages (from other agents this session)\n" +
+        messages.map((message) => `- **${message.fromAgent}**: ${message.content}`).join("\n"),
+      );
+    }
+  }
 
   if (includeFacts) {
     const facts = await readAllFacts(sessionId);
@@ -293,6 +408,7 @@ export function extractFactsFromOutput(output: string): Record<string, string> {
 export async function resetSharedMemoryForTests(): Promise<void> {
   _facts.clear();
   _results.clear();
+  _messages.clear();
   _factEmbeddingCache.clear();
   if (_redis) {
     try { await (_redis as { quit: () => Promise<void> }).quit(); } catch { /* ignore */ }

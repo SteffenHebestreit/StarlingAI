@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+const OptionalEndpointUrlSchema = z.preprocess(
+  (value) => typeof value === "string" ? value.trim() : value,
+  z.union([z.literal(""), z.string().url()]),
+);
+
 export const LMStudioProviderSchema = z.object({
   baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
   apiKey: z.string().default("lm-studio"),
@@ -69,6 +74,7 @@ export const RateLimitSchema = z.object({
 
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("hybrid"),
+  customInstructions: z.string().trim().min(1).max(6000).optional(),
 });
 
 export const EphemeralGenerationSchema = z.object({
@@ -199,17 +205,17 @@ export const MultimodalFileServiceSchema = MultimodalServiceSchema.extend({
 });
 
 export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
-  baseUrl: z.string().url().default("http://qwen3-asr-service:5002"),
+  baseUrl: OptionalEndpointUrlSchema.default(""),
   api: z.enum(["auto", "openai-compatible", "transcribe-only"]).default("auto"),
-  model: z.string().min(1).default("Qwen/Qwen3-ASR-1.7B"),
+  model: z.string().min(1).default("whisper-1"),
 });
 
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
-  baseUrl: z.string().url().default("http://qwen3-tts-service:5004"),
-  api: z.enum(["qwen-compatible", "openai-compatible"]).default("qwen-compatible"),
-  model: z.string().min(1).default("Qwen/Qwen3-TTS-12Hz-0.6B-Instruct"),
+  baseUrl: OptionalEndpointUrlSchema.default(""),
+  api: z.enum(["qwen-compatible", "openai-compatible"]).default("openai-compatible"),
+  model: z.string().min(1).default("tts-1"),
   defaultLanguage: z.string().min(2).default("English"),
-  defaultSpeaker: z.string().min(1).default("Vivian"),
+  defaultSpeaker: z.string().min(1).default("alloy"),
   defaultVoiceId: z.string().min(1).optional(),
   voiceSamplePath: z.string().min(1).optional(),
   voiceSampleText: z.string().min(1).optional(),
@@ -221,14 +227,13 @@ export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
 });
 
 export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
-  baseUrl: z.string().url().default("http://image-generation-service:5005"),
-  model: z.string().min(1).default("black-forest-labs/FLUX.1-schnell"),
-  defaultWidth: z.number().int().min(256).max(2048).default(768),
-  defaultHeight: z.number().int().min(256).max(2048).default(768),
-  defaultSteps: z.number().int().min(1).max(100).default(4),
-  defaultGuidanceScale: z.number().min(0).max(20).default(0),
-  /** Disable CPU offloading when the GPU has enough VRAM (>= 24 GB). */
-  cpuOffload: z.boolean().default(true),
+  baseUrl: OptionalEndpointUrlSchema.default(""),
+  api: z.enum(["automatic1111-compatible", "comfyui"]).default("automatic1111-compatible"),
+  model: z.string().min(1).optional(),
+  defaultWidth: z.number().int().min(256).max(2048).default(1024),
+  defaultHeight: z.number().int().min(256).max(2048).default(1024),
+  defaultSteps: z.number().int().min(1).max(100).default(28),
+  defaultGuidanceScale: z.number().min(0).max(20).default(7),
   /** Default negative prompt appended to every generate_image call unless the agent supplies one. */
   defaultNegativePrompt: z.string().optional(),
 });
@@ -547,6 +552,12 @@ export const PentestSchema = z.object({
   profiles: z.record(PentestProfileSchema).default({}),
 });
 
+export const MailServiceSchema = z.object({
+  serviceUrl: z.string().url().default("http://mail-service:5020"),
+  timeoutMs: z.number().int().min(1000).max(300000).default(20000),
+  authToken: z.string().min(1).optional(),
+});
+
 // ─── Guardrails ───────────────────────────────────────────────────────────────
 
 export const GuardrailsSchema = z.object({
@@ -590,6 +601,63 @@ export const SceneConfigSchema = z.object({
 export const ScenesSchema = z.record(SceneConfigSchema);
 export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 
+// ─── Jobs ────────────────────────────────────────────────────────────────────
+// Jobs orchestrate one or more scenes. They can be triggered explicitly via
+// API and, for configured cron triggers, automatically by the gateway.
+
+export const JobStepSchema = z.object({
+  scene: z.string().min(1),
+  label: z.string().optional(),
+  params: z.record(z.string()).optional(),
+});
+
+export const ApiJobTriggerSchema = z.object({
+  type: z.literal("api"),
+  webhookKey: z.string().min(16).optional(),
+  params: z.record(z.string()).optional(),
+});
+
+export const CronJobTriggerSchema = z.object({
+  type: z.literal("cron"),
+  expression: z.string().min(1),
+  enabled: z.boolean().default(true),
+  params: z.record(z.string()).optional(),
+});
+
+export const ChannelJobTriggerSchema = z.object({
+  type: z.literal("channel"),
+  channels: z.array(z.enum(["slack", "discord", "whatsapp", "email", "signal", "telegram"]))
+    .min(1)
+    .optional(),
+  pattern: z.string().min(1),
+  mode: z.enum(["prefix", "exact", "contains", "regex"]).default("prefix"),
+  ignoreCase: z.boolean().default(true),
+  parseParams: z.boolean().default(true),
+  silent: z.boolean().default(false),
+  replyText: z.string().min(1).optional(),
+  captureMessageAs: z.string().min(1).optional(),
+  captureRemainderAs: z.string().min(1).optional(),
+  params: z.record(z.string()).optional(),
+});
+
+export const JobTriggerSchema = z.discriminatedUnion("type", [
+  ApiJobTriggerSchema,
+  CronJobTriggerSchema,
+  ChannelJobTriggerSchema,
+]);
+
+export const JobConfigSchema = z.object({
+  description: z.string(),
+  params: z.record(SceneParamSchema).optional(),
+  steps: z.array(JobStepSchema).min(1),
+  triggers: z.array(JobTriggerSchema).optional(),
+});
+
+export const JobsSchema = z.record(JobConfigSchema);
+export type JobConfig = z.infer<typeof JobConfigSchema>;
+export type JobTriggerConfig = z.infer<typeof JobTriggerSchema>;
+export type JobStepConfig = z.infer<typeof JobStepSchema>;
+
 export const ConfigSchema = z.object({
   providers: ProvidersSchema.default({}),
   agents: z.object({
@@ -617,6 +685,7 @@ export const ConfigSchema = z.object({
   }).default({}),
   subAgents: SubAgentsSchema.default({}),
   scenes: ScenesSchema.default({}),
+  jobs: JobsSchema.default({}),
   channels: ChannelsSchema.default({}),
   gateway: GatewaySchema.default({}),
   guardrails: GuardrailsSchema.default({}),
@@ -628,6 +697,7 @@ export const ConfigSchema = z.object({
   approvalChannels: ApprovalChannelsSchema.default({}),
   infrastructure: InfrastructureSchema.default({}),
   pentest: PentestSchema.default({}),
+  mail: MailServiceSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
@@ -641,3 +711,4 @@ export type MultimodalSpeechToTextConfig = z.infer<typeof MultimodalSpeechToText
 export type MultimodalTextToSpeechConfig = z.infer<typeof MultimodalTextToSpeechSchema>;
 export type RetrievalSearchConfig = z.infer<typeof RetrievalSearchSchema>;
 export type InfrastructureAutomationProfile = z.infer<typeof InfrastructureAutomationProfileSchema>;
+export type MailServiceConfig = z.infer<typeof MailServiceSchema>;

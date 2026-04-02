@@ -84,16 +84,41 @@ describe("tool-tiers", () => {
   it("classifies Tier 0 tools correctly", () => {
     expect(getToolTier("web_search").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("read_file").tier).toBe(ToolTier.ZERO_READ_ONLY);
+    expect(getToolTier("export_workspace_artifact").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("memory_search").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("read_shared_facts").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("web_fetch").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("extract_file_content").tier).toBe(ToolTier.ZERO_READ_ONLY);
     expect(getToolTier("analyze_image").tier).toBe(ToolTier.ZERO_READ_ONLY);
+    expect(getToolTier("git_status").tier).toBe(ToolTier.ZERO_READ_ONLY);
+    expect(getToolTier("git_log").tier).toBe(ToolTier.ZERO_READ_ONLY);
+    expect(getToolTier("git_diff").tier).toBe(ToolTier.ZERO_READ_ONLY);
   });
 
   it("classifies Tier 2 tools as requiring sandbox", () => {
     expect(getToolTier("shell_exec").requiresSandbox).toBe(true);
     expect(getToolTier("shell_exec").tier).toBe(ToolTier.TWO_EXECUTE);
+    expect(getToolTier("git_commit").requiresSandbox).toBe(true);
+    expect(getToolTier("git_commit").tier).toBe(ToolTier.TWO_EXECUTE);
+    expect(getToolTier("git_checkout").requiresSandbox).toBe(true);
+    expect(getToolTier("git_checkout").tier).toBe(ToolTier.TWO_EXECUTE);
+  });
+
+  it("keeps new execute-level API and git mutation tools approval-gated", () => {
+    expect(getToolTier("http_request").tier).toBe(ToolTier.TWO_EXECUTE);
+    expect(getToolTier("http_request").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("http_request").requiresSandbox).toBe(false);
+    expect(getToolTier("git_commit").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("git_checkout").requiresPerCallApproval).toBe(true);
+  });
+
+  it("classifies document export tools as Tier 1 writes", () => {
+    expect(getToolTier("generate_document").tier).toBe(ToolTier.ONE_WRITE);
+    expect(getToolTier("generate_document").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("generate_chart_html").tier).toBe(ToolTier.ONE_WRITE);
+    expect(getToolTier("generate_chart_html").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("generate_pdf").tier).toBe(ToolTier.ONE_WRITE);
+    expect(getToolTier("generate_pdf").requiresPerCallApproval).toBe(false);
   });
 
   it("keeps browser mutation tools and credential injection approval-gated", () => {
@@ -132,6 +157,23 @@ describe("tool-tiers", () => {
     expect(getToolTier("terraform_exec").requiresPerCallApproval).toBe(true);
     expect(getToolTier("service_check").tier).toBe(ToolTier.THREE_PRIVILEGED);
     expect(getToolTier("service_check").requiresPerCallApproval).toBe(true);
+  });
+
+  it("classifies new messaging and clone tools as privileged", () => {
+    expect(getToolTier("git_clone").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("git_clone").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("git_clone").requiresSandbox).toBe(true);
+    expect(getToolTier("send_slack").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("send_slack").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("send_slack").requiresSandbox).toBe(false);
+    expect(getToolTier("send_discord").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("send_discord").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("send_email").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("send_email").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("mail_send_draft").tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(getToolTier("mail_send_draft").requiresPerCallApproval).toBe(true);
+    expect(getToolTier("mail_search").tier).toBe(ToolTier.ZERO_READ_ONLY);
+    expect(getToolTier("mail_prepare_draft").tier).toBe(ToolTier.ONE_WRITE);
   });
 
   it("blocks Tier 4 tools", () => {

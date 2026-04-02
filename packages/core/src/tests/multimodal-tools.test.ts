@@ -32,6 +32,7 @@ const BASE_CONFIG = {
     },
     tts: {
       baseUrl: "http://tts.local",
+      api: "qwen-compatible",
       timeoutMs: 5_000,
       model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
       defaultLanguage: "English",

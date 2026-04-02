@@ -63,6 +63,16 @@ At the infrastructure level:
 
 **Current status:** Implemented. Delegation fallback chains, retry logic, dead-letter queues, container heartbeats, circuit breakers, and adaptive timeouts all provide layered fault tolerance.
 
+### 3.5. Begrenzte Selbstverbesserung (Bounded Self-Improvement)
+
+The swarm is designed to learn and improve from outcomes, but only within bounded non-crucial surfaces. In practice this means StarlingAI may refine its managed prompts, update user or workflow memory, create new sub-agents, improve existing sub-agents, and adjust approved tool assignments for those agents when the change stays inside the platform's declared security envelope.
+
+This does not override the earlier principles; it extends them. Self-improvement strengthens local rules, specialist matching, and long-term operator fit, but it must never replace the guarded contract with unconstrained autonomy. The swarm is allowed to tune itself only insofar as it remains faithful to the README philosophy and the compile-time/runtime controls that enforce it.
+
+The hard boundary is secrets and privilege escalation. Stored credentials must never be read into model context or exposed as plain text to an agent. They may only be consumed through dedicated secret-handling tools such as `site_fill_credentials` and `computer_type_credential`, under approval and audit. The same rule applies to sandboxing, tool tiers, approval gates, and host access: self-improvement may optimize behavior, but it may not weaken the controls.
+
+**Current status:** Partially implemented and intentionally guarded. Flow memory, proposal-based config changes, prompt refinement, and agent evolution exist; privileged boundaries still remain outside autonomous control.
+
 ### 4. Guarded (The Watched Swarm)
 
 Every agent action passes through a four-layer guardrail stack before it can affect the outside world. Tool calls are classified into five tiers at compile time — not runtime-configurable. A shell command always runs inside a Docker sandbox, never on the host. Outputs are scanned for secrets before being returned to the user.

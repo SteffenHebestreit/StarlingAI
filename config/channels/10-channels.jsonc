@@ -1,0 +1,60 @@
+{
+  "channels": {
+    "webchat": {
+      "enabled": true,
+      "port": 3001
+    },
+    "telegram": {
+      "enabled": false,
+      "botToken": "$TELEGRAM_BOT_TOKEN",
+      "allowedUserIds": []
+    },
+    "slack": {
+      "enabled": false,
+      "botToken": "$SLACK_BOT_TOKEN",
+      "signingSecret": "$SLACK_SIGNING_SECRET",
+      "appToken": "$SLACK_APP_TOKEN",
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "discord": {
+      "enabled": false,
+      "token": "$DISCORD_BOT_TOKEN",
+      "guildIds": [],
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "whatsapp": {
+      "enabled": false,
+      "accessToken": "$WHATSAPP_ACCESS_TOKEN",
+      "phoneNumberId": "$WHATSAPP_PHONE_NUMBER_ID",
+      "verifyToken": "$WHATSAPP_VERIFY_TOKEN",
+      "appSecret": "$WHATSAPP_APP_SECRET",
+      "dmPolicy": "pairing",
+      "allowFrom": []
+    },
+    "email": {
+      "enabled": false,
+      "imapHost": "imap.example.com",
+      "imapPort": 993,
+      "imapUser": "$EMAIL_IMAP_USER",
+      "imapPassword": "$EMAIL_IMAP_PASSWORD",
+      "smtpHost": "smtp.example.com",
+      "smtpPort": 587,
+      "smtpUser": "$EMAIL_SMTP_USER",
+      "smtpPassword": "$EMAIL_SMTP_PASSWORD",
+      "smtpFrom": "StarlingAI <bot@example.com>",
+      "dmPolicy": "allowlist",
+      "allowFrom": [
+        "ops@example.com"
+      ]
+    },
+    "signal": {
+      "enabled": false,
+      "account": "+49123456789",
+      "signalCliPath": "signal-cli",
+      "dmPolicy": "disabled",
+      "allowFrom": []
+    }
+  }
+}

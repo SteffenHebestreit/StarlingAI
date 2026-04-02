@@ -1,0 +1,9 @@
+Zusammenfassung der letzten 3 E-Mails:
+
+KANN NICHT DURCHGEFÜHRT WERDEN - KEINE ANMELDEINFORMATIONEN VERFÜGBAR
+
+Es wurden keine gespeicherten Anmeldeinformationen für E-Mail-Dienste (Gmail, Outlook, etc.) gefunden. Um die E-Mails lesen zu können, müssen entweder:
+1. Die Anmeldeinformationen im System konfiguriert werden (Settings → Site Credentials)
+2. Der Benutzer gibt seine E-Mail-Adresse und Passwort an
+
+Ohne gültige Anmeldeinformationen kann auf das E-Mail-Konto nicht zugegriffen werden.

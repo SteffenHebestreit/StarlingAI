@@ -8,6 +8,7 @@
  *   repeated_failures       — an agent fails ≥3 times within 2 minutes
  *   tool_escape_attempt     — a sub-agent has ≥3 blocked tool calls in one session
  *   rate_limit_flood        — a channel sender is rate-limited ≥5 times within 1 minute
+ *   agent_message_flood     — an agent sends >20 direct/broadcast messages in 1 minute
  *   repeated_identical_output — a tool returns the same output ≥3 times in a row (loop)
  *
  * Computer-use anomalies (Stage 9):
@@ -52,6 +53,10 @@ const ESCAPE_THRESHOLD = 3;                    // blocked tool attempts per sub-
 const RATE_FLOOD_WINDOW_MS = 60 * 1_000;       // 1 min
 const RATE_FLOOD_THRESHOLD = 5;                // rate-limit hits per sender
 
+const AGENT_MESSAGE_WINDOW_MS = 60 * 1_000;    // 1 min
+const AGENT_MESSAGE_THRESHOLD = 20;            // direct/broadcast messages per agent per session
+const AGENT_MESSAGE_SUPPRESSION_MS = 60 * 1_000;
+
 // Computer-use anomaly windows
 const COMPUTER_FOCUS_WINDOW_MS = 60 * 1_000;    // 1 min
 const COMPUTER_FOCUS_THRESHOLD = 10;             // focus switches per session
@@ -84,6 +89,12 @@ const _blockedAttempts = new Map<string, { agentName: string; count: number }>()
 /** "channel:senderId" → rate-limit hit timestamps */
 const _rateLimitHits = new Map<string, number[]>();
 
+/** "sessionId:agentName" → agent-message timestamps */
+const _agentMessagesBySender = new Map<string, number[]>();
+
+/** "sessionId:agentName" → suppression expiry timestamp */
+const _agentMessageSuppression = new Map<string, number>();
+
 /**
  * sessionId → breach details for turns that exceeded their SLO.
  * Fired immediately on detection (not on sweep) but recorded here for stats.
@@ -112,16 +123,27 @@ let _unsubscribeAudit: (() => void) | null = null;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop";
   severity: "warn" | "error";
   subject: string;
   detail: string;
-  action: "logged" | "circuit_tripped" | "session_emergency_stopped" | "lease_auto_revoked";
+  action: "logged" | "circuit_tripped" | "session_emergency_stopped" | "lease_auto_revoked" | "message_suppressed";
   intervention?: InterventionNotice;
 }
 
 export function getWardenStats(): { running: boolean; alertsEmitted: number } {
   return { running: _wardenInterval !== null, alertsEmitted: _alertsEmitted };
+}
+
+export function isAgentMessagingSuppressed(sessionId: string, agentName: string): boolean {
+  const key = `${sessionId}:${agentName}`;
+  const expiry = _agentMessageSuppression.get(key);
+  if (!expiry) return false;
+  if (expiry <= Date.now()) {
+    _agentMessageSuppression.delete(key);
+    return false;
+  }
+  return true;
 }
 
 export function startWarden(): void {
@@ -183,6 +205,16 @@ export function startWarden(): void {
         const hits = _rateLimitHits.get(key) ?? [];
         hits.push(now);
         _rateLimitHits.set(key, hits);
+      }
+    }
+
+    if (event.type === "agent_message_sent" && event.sessionId) {
+      const fromAgent = String(event.data["fromAgent"] ?? "");
+      if (fromAgent) {
+        const key = `${event.sessionId}:${fromAgent}`;
+        const hits = _agentMessagesBySender.get(key) ?? [];
+        hits.push(now);
+        _agentMessagesBySender.set(key, hits);
       }
     }
 
@@ -319,6 +351,8 @@ export function resetWardenForTests(): void {
   _agentFailures.clear();
   _blockedAttempts.clear();
   _rateLimitHits.clear();
+  _agentMessagesBySender.clear();
+  _agentMessageSuppression.clear();
   _sloBreaches.clear();
   _toolIssuesBySession.clear();
   _computerFocusSwitches.clear();
@@ -471,7 +505,31 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 6. Computer focus thrashing ──────────────────────────────────────────────
+  // 6. Agent message flood ───────────────────────────────────────────────────
+  for (const [key, timestamps] of _agentMessagesBySender) {
+    const recent = timestamps.filter(t => now - t < AGENT_MESSAGE_WINDOW_MS);
+    if (recent.length === 0) {
+      _agentMessagesBySender.delete(key);
+      continue;
+    }
+    _agentMessagesBySender.set(key, recent);
+
+    if (recent.length >= AGENT_MESSAGE_THRESHOLD) {
+      _agentMessageSuppression.set(key, now + AGENT_MESSAGE_SUPPRESSION_MS);
+      const alert = makeAlert(
+        "agent_message_flood",
+        "warn",
+        key,
+        `Agent '${key}' sent ${recent.length} direct/broadcast messages in 1 minute — messaging suppressed for 60 seconds`,
+        "message_suppressed",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      _agentMessagesBySender.set(key, []);
+    }
+  }
+
+  // 7. Computer focus thrashing ──────────────────────────────────────────────
   for (const [csId, timestamps] of _computerFocusSwitches) {
     const recent = timestamps.filter(t => now - t < COMPUTER_FOCUS_WINDOW_MS);
     if (recent.length === 0) {
@@ -494,7 +552,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 7. Computer click storm ──────────────────────────────────────────────────
+  // 8. Computer click storm ──────────────────────────────────────────────────
   for (const [csId, timestamps] of _computerClicks) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CLICK_WINDOW_MS);
     if (recent.length === 0) {
@@ -518,7 +576,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 8. Computer credential prompt loop ───────────────────────────────────────
+  // 9. Computer credential prompt loop ───────────────────────────────────────
   for (const [csId, timestamps] of _computerCredentialPrompts) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CREDENTIAL_WINDOW_MS);
     if (recent.length === 0) {
@@ -542,7 +600,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 9. Computer clipboard exfiltration ───────────────────────────────────────
+  // 10. Computer clipboard exfiltration ───────────────────────────────────────
   for (const [csId, timestamps] of _computerClipboardReads) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CLIPBOARD_WINDOW_MS);
     if (recent.length === 0) {
@@ -566,7 +624,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 10. Computer stale loop ──────────────────────────────────────────────────
+  // 11. Computer stale loop ──────────────────────────────────────────────────
   for (const [csId, hashes] of _computerScreenshotHashes) {
     if (hashes.length >= COMPUTER_STALE_LOOP_THRESHOLD) {
       const tail = hashes.slice(-COMPUTER_STALE_LOOP_THRESHOLD);

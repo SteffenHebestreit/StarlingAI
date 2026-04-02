@@ -1,0 +1,190 @@
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+import { EmailParser } from "./email-parser.js";
+import { MailAccountClient } from "./imap-client.js";
+import { log } from "./logger.js";
+import { sendDraft } from "./smtp-client.js";
+import type { CategoryRecord, DraftRecord, MailAccountConfig, MailSummary } from "./types.js";
+import { DraftStore } from "./draft-store.js";
+
+const SearchRequestSchema = z.object({
+  accountIds: z.array(z.string()).optional(),
+  mailboxes: z.array(z.string()).optional(),
+  query: z.string().default(""),
+  limit: z.number().int().min(1).max(200).default(50),
+});
+
+const ReadRequestSchema = z.object({
+  accountId: z.string().min(1),
+  mailbox: z.string().min(1),
+  uid: z.number().int().positive(),
+});
+
+const DraftCreateSchema = z.object({
+  accountId: z.string().min(1),
+  to: z.array(z.string().email()).min(1),
+  cc: z.array(z.string().email()).default([]),
+  bcc: z.array(z.string().email()).default([]),
+  subject: z.string().min(1),
+  textBody: z.string().min(1),
+  htmlBody: z.string().optional(),
+  replyTo: z.object({
+    accountId: z.string().min(1),
+    mailbox: z.string().min(1),
+    uid: z.number().int().positive(),
+  }).optional(),
+});
+
+const DraftUpdateSchema = DraftCreateSchema.partial().omit({ accountId: true });
+
+const CategorizeRequestSchema = z.object({
+  items: z.array(z.object({
+    accountId: z.string().min(1),
+    mailbox: z.string().min(1),
+    uid: z.number().int().positive(),
+    category: z.string().min(1),
+    note: z.string().optional(),
+  })).min(1),
+});
+
+function buildSummary(parsed: Awaited<ReturnType<typeof EmailParser.parse>>, category: CategoryRecord | null): MailSummary {
+  return {
+    accountId: parsed.accountId,
+    mailbox: parsed.mailbox,
+    uid: parsed.uid,
+    messageId: parsed.messageId,
+    from: parsed.from,
+    to: parsed.to,
+    cc: parsed.cc,
+    subject: parsed.subject,
+    date: parsed.date,
+    attachmentCount: parsed.attachments.length,
+    categories: category ? [category.category] : [],
+    note: category?.note,
+    textPreview: parsed.textBody.slice(0, 240),
+  };
+}
+
+function getAccount(accounts: MailAccountConfig[], accountId: string): MailAccountConfig {
+  const account = accounts.find((entry) => entry.id === accountId);
+  if (!account) {
+    throw new HTTPException(404, { message: `Unknown account: ${accountId}` });
+  }
+  return account;
+}
+
+export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftStore; authToken?: string }) {
+  const app = new Hono();
+
+  app.use("*", async (c, next) => {
+    if (!opts.authToken) {
+      await next();
+      return;
+    }
+    const auth = c.req.header("authorization") ?? "";
+    if (auth !== `Bearer ${opts.authToken}`) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    await next();
+  });
+
+  app.get("/health", (c) => c.json({ ok: true, accounts: opts.accounts.length }));
+
+  app.get("/api/accounts", (c) => c.json(opts.accounts.map((account) => ({
+    id: account.id,
+    address: account.address,
+    displayName: account.displayName,
+  }))));
+
+  app.get("/api/accounts/:accountId/mailboxes", async (c) => {
+    const account = getAccount(opts.accounts, c.req.param("accountId"));
+    const client = new MailAccountClient(account);
+    return c.json(await client.listMailboxes());
+  });
+
+  app.post("/api/messages/search", async (c) => {
+    const body = SearchRequestSchema.parse(await c.req.json());
+    const targetAccounts = body.accountIds?.length
+      ? opts.accounts.filter((account) => body.accountIds?.includes(account.id))
+      : opts.accounts;
+
+    const summaries: MailSummary[] = [];
+    for (const account of targetAccounts) {
+      const client = new MailAccountClient(account);
+      const messages = await client.search(body.query, body.mailboxes ?? ["INBOX"], body.limit);
+      for (const message of messages) {
+        const parsed = await EmailParser.parse(message);
+        const category = await opts.store.getCategory({ accountId: parsed.accountId, mailbox: parsed.mailbox, uid: parsed.uid });
+        summaries.push(buildSummary(parsed, category));
+      }
+    }
+
+    summaries.sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime());
+    return c.json(summaries.slice(0, body.limit));
+  });
+
+  app.post("/api/messages/read", async (c) => {
+    const body = ReadRequestSchema.parse(await c.req.json());
+    const account = getAccount(opts.accounts, body.accountId);
+    const client = new MailAccountClient(account);
+    const message = await client.readMessage(body.mailbox, body.uid);
+    if (!message) {
+      return c.json({ error: "Message not found" }, 404);
+    }
+    const parsed = await EmailParser.parse(message);
+    const category = await opts.store.getCategory({ accountId: parsed.accountId, mailbox: parsed.mailbox, uid: parsed.uid });
+    return c.json({
+      ...parsed,
+      categories: category ? [category.category] : [],
+      note: category?.note,
+    });
+  });
+
+  app.post("/api/messages/categorize", async (c) => {
+    const body = CategorizeRequestSchema.parse(await c.req.json());
+    const now = new Date().toISOString();
+    await opts.store.categorize(body.items.map((item) => ({ ...item, updatedAt: now })));
+    return c.json({ ok: true, count: body.items.length });
+  });
+
+  app.post("/api/drafts", async (c) => {
+    const body = DraftCreateSchema.parse(await c.req.json());
+    getAccount(opts.accounts, body.accountId);
+    const draft = await opts.store.createDraft(body);
+    return c.json(draft, 201);
+  });
+
+  app.get("/api/drafts/:draftId", async (c) => {
+    const draft = await opts.store.getDraft(c.req.param("draftId"));
+    if (!draft) return c.json({ error: "Draft not found" }, 404);
+    return c.json(draft);
+  });
+
+  app.patch("/api/drafts/:draftId", async (c) => {
+    const patch = DraftUpdateSchema.parse(await c.req.json());
+    const draft = await opts.store.updateDraft(c.req.param("draftId"), patch);
+    if (!draft) return c.json({ error: "Draft not found" }, 404);
+    return c.json(draft);
+  });
+
+  app.post("/api/drafts/:draftId/send", async (c) => {
+    const draft = await opts.store.getDraft(c.req.param("draftId"));
+    if (!draft) return c.json({ error: "Draft not found" }, 404);
+    if (draft.status === "sent") return c.json({ error: "Draft already sent" }, 409);
+    const account = getAccount(opts.accounts, draft.accountId);
+    await sendDraft(account, draft);
+    const updated = await opts.store.markDraftSent(draft.id);
+    return c.json(updated);
+  });
+
+  app.onError((err, c) => {
+    log.error({ err }, "mail service request failed");
+    if (err instanceof HTTPException) {
+      return err.getResponse();
+    }
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  });
+
+  return app;
+}

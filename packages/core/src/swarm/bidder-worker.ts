@@ -32,6 +32,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { childLogger } from "../logger.js";
 import { emitSwarmEvent, onSwarmEvent, isSwarmBusConnected, type SwarmEvent } from "./bus.js";
+import { announceAgentCapability } from "./capabilities.js";
 import type { SubAgentConfig } from "../config/schema.js";
 
 const log = childLogger("swarm:bidder-worker");
@@ -105,6 +106,16 @@ export function refreshAgentIndex(
   }
 
   _agentIndex = entries;
+  for (const entry of entries) {
+    announceAgentCapability({
+      agentName: entry.name,
+      domain: entry.config.domain,
+      capabilities: entry.config.capabilities ?? [],
+      tags: entry.config.tags ?? [],
+      availability: "idle",
+      source: "catalog_refresh",
+    });
+  }
   log.info({ agentCount: entries.length }, "Agent index refreshed");
 }
 

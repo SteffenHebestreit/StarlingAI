@@ -40,22 +40,27 @@
           <div
             v-for="(item, i) in executionItems"
             :key="`${item.kind}-${item.key}`"
-            class="tool-history__item"
+            class="tool-history__item-wrap"
           >
-            <span class="tool-history__step">{{ i + 1 }}</span>
-            <div class="tool-history__details">
-              <span class="tool-history__name">{{ item.name }}</span>
-              <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
+            <div class="tool-history__item">
+              <span class="tool-history__step">{{ i + 1 }}</span>
+              <div class="tool-history__details">
+                <span class="tool-history__name">{{ item.name }}</span>
+                <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
+              </div>
+              <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
+                {{ item.statusSymbol }}
+              </span>
             </div>
-            <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
-              {{ item.statusSymbol }}
-            </span>
+            <div v-if="item.result" class="tool-history__result">
+              <pre>{{ item.result.length > 600 ? item.result.substring(0, 600) + '…' : item.result }}</pre>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Thinking section -->
-      <div v-if="thinkingContent || isThinking" class="thinking-section">
+      <div v-if="displayThinkingContent || isThinking" class="thinking-section">
         <div class="thinking-header" @click="thinkingOpen = !thinkingOpen">
           <span v-if="isThinking" class="thinking-indicators">
             <span class="thinking-dot">·</span>
@@ -67,35 +72,95 @@
           </span>
           <span v-if="!isThinking" class="thinking-chevron">{{ thinkingOpen ? '▲' : '▼' }}</span>
         </div>
-        <div v-if="thinkingOpen || isThinking" class="thinking-body">
-          {{ thinkingContent }}
+        <div v-if="thinkingOpen || isThinking || (isStreaming && displayThinkingContent)" class="thinking-body">
+          {{ displayThinkingContent }}
         </div>
       </div>
 
-      <!-- Image attachments (user messages only) -->
-      <div v-if="message.attachments?.length" class="message-attachments">
-        <img
-          v-for="(att, i) in message.attachments"
-          :key="i"
-          :src="att.dataUrl"
-          :alt="att.filename"
-          class="message-attachment-img"
-          @click="lightboxUrl = att.dataUrl"
-          title="Click to enlarge"
-        />
+      <!-- Image attachments -->
+      <div v-if="imageAttachments.length" class="message-attachments">
+        <figure
+          v-for="(att, i) in imageAttachments"
+          :key="`${att.filename}-${i}`"
+          class="message-attachment-figure"
+        >
+          <img
+            :src="att.dataUrl"
+            :alt="att.filename"
+            class="message-attachment-img"
+            @click="previewAttachment(att)"
+            title="Click to enlarge"
+          />
+          <figcaption class="message-attachment-caption">
+            <span class="message-attachment-name">{{ att.filename }}</span>
+            <button class="artifact-action" @click="downloadAttachment(att)">Download</button>
+          </figcaption>
+        </figure>
+      </div>
+
+      <div v-if="artifactAttachments.length" class="artifact-list">
+        <div
+          v-for="(att, i) in artifactAttachments"
+          :key="`${att.filename}-${i}`"
+          class="artifact-card"
+        >
+          <div class="artifact-card__body">
+            <div class="artifact-card__eyebrow">{{ attachmentLabel(att) }}</div>
+            <div class="artifact-card__title">{{ att.title || att.filename }}</div>
+            <div class="artifact-card__meta">
+              <span>{{ att.filename }}</span>
+              <span v-if="att.size">{{ formatAttachmentSize(att.size) }}</span>
+            </div>
+          </div>
+          <div class="artifact-card__actions">
+            <button
+              v-if="isPreviewable(att)"
+              class="artifact-action"
+              :disabled="artifactPreviewLoading === att.filename"
+              @click="previewAttachment(att)"
+            >
+              {{ artifactPreviewLoading === att.filename ? 'Loading…' : 'Preview' }}
+            </button>
+            <button
+              v-if="!att.isDirectory"
+              class="artifact-action"
+              @click="downloadAttachment(att)"
+            >
+              Download
+            </button>
+            <button
+              v-if="att.relativePath"
+              class="artifact-action"
+              @click="downloadAttachment(att, true)"
+            >
+              {{ att.isDirectory ? 'Download ZIP' : 'ZIP' }}
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Main content -->
       <div
-        v-if="isStreaming"
-        class="message-content prose-content"
-        v-html="renderedStreamingContent"
-      />
-      <div
-        v-else-if="mainContent"
-        class="message-content prose-content"
-        v-html="renderedContent"
-      />
+        :class="['message-content-wrapper', { 'message-content-wrapper--collapsed': contentCollapsed && isLongContent && !isStreaming }]"
+      >
+        <div
+          v-if="isStreaming"
+          class="message-content prose-content"
+          v-html="renderedStreamingContent"
+        />
+        <div
+          v-else-if="mainContent"
+          class="message-content prose-content"
+          v-html="renderedContent"
+        />
+      </div>
+      <button
+        v-if="isLongContent && !isStreaming"
+        @click="contentCollapsed = !contentCollapsed"
+        class="collapse-toggle"
+      >
+        {{ contentCollapsed ? 'Show more ▼' : 'Show less ▲' }}
+      </button>
 
       <!-- Timestamp + usage row -->
       <div class="message-footer">
@@ -133,13 +198,43 @@
       </div>
     </div>
   </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="artifactPreview"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      @click.self="closeArtifactPreview"
+      @keydown.esc.window="closeArtifactPreview"
+    >
+      <div class="artifact-preview-modal">
+        <div class="artifact-preview-modal__header">
+          <div>
+            <div class="artifact-preview-modal__eyebrow">Artifact Preview</div>
+            <div class="artifact-preview-modal__title">{{ artifactPreview.title }}</div>
+          </div>
+          <button @click="closeArtifactPreview" class="artifact-preview-modal__close">✕</button>
+        </div>
+
+        <div class="artifact-preview-modal__body">
+          <iframe
+            v-if="artifactPreview.kind === 'html' || artifactPreview.kind === 'pdf'"
+            :src="artifactPreview.url"
+            class="artifact-preview-frame"
+            :sandbox="artifactPreview.kind === 'html' ? 'allow-scripts' : undefined"
+          />
+          <pre v-else-if="artifactPreview.kind === 'text'">{{ artifactPreview.text }}</pre>
+          <audio v-else-if="artifactPreview.kind === 'audio'" :src="artifactPreview.url" controls class="artifact-preview-audio" />
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import type { ChatMessage } from "@/stores/gateway";
+import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
 
 type ExecutionStatus = "running" | "done" | "failed";
 
@@ -151,6 +246,15 @@ interface ExecutionItem {
   status: ExecutionStatus;
   statusSymbol: string;
   startedAt?: string;
+  result?: string;
+}
+
+interface ArtifactPreviewState {
+  title: string;
+  filename: string;
+  kind: "html" | "pdf" | "text" | "audio";
+  url?: string;
+  text?: string;
 }
 
 function mapExecutionStatus(status: "running" | "completed" | "failed"): ExecutionStatus {
@@ -168,11 +272,19 @@ const props = defineProps<{
   message: ChatMessage;
   isStreaming?: boolean;
   streamingText?: string;
+  autoCollapse?: boolean;
 }>();
+
+const gateway = useGatewayStore();
+
+const COLLAPSE_CHAR_THRESHOLD = 400;
 
 const toolHistoryOpen = ref(false);
 const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
+const artifactPreview = ref<ArtifactPreviewState | null>(null);
+const artifactPreviewLoading = ref<string | null>(null);
+const contentCollapsed = ref(props.autoCollapse ?? false);
 
 // ── Parse thinking blocks out of content ─────────────────────────────────────
 const THINKING_RE = /<(thinking|think)>([\s\S]*?)<\/(thinking|think)>/gi;
@@ -186,9 +298,27 @@ function splitContent(raw: string): { thinking: string; main: string } {
   return { thinking, main };
 }
 
-const parsed = computed(() => splitContent(props.message.content ?? ""));
+const parsed = computed(() => splitContent(
+  props.message.role === "assistant"
+    ? sanitizeAssistantMessageContent(props.message.content ?? "", props.message.toolCalls)
+    : (props.message.content ?? "")
+));
 const thinkingContent = computed(() => parsed.value.thinking);
 const mainContent = computed(() => parsed.value.main);
+
+const streamingThinkingContent = computed(() => {
+  if (!props.isStreaming) return "";
+  const text = props.streamingText ?? "";
+  const completed = Array.from(text.matchAll(THINKING_RE), (match) => (match[2] ?? "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const openMatch = text.match(/<(thinking|think)>([\s\S]*?)$/i);
+  const open = (openMatch?.[2] ?? "").trim();
+  return [completed, open].filter(Boolean).join("\n\n");
+});
+const displayThinkingContent = computed(() => props.isStreaming
+  ? streamingThinkingContent.value
+  : thinkingContent.value);
 
 // During streaming, detect an open <think> tag that hasn't closed yet
 const isThinking = computed(() => {
@@ -201,10 +331,12 @@ const isThinking = computed(() => {
 
 const mainStreamingText = computed(() => {
   const text = props.streamingText ?? "";
-  return text.replace(/<(thinking|think)>[\s\S]*$/i, "").trim();
+  const visibleText = text.replace(/<(thinking|think)>[\s\S]*$/i, "").trim();
+  if (props.message.role !== "assistant") return visibleText;
+  return sanitizeAssistantMessageContent(visibleText, props.message.toolCalls);
 });
 
-// ── Block label — distinguish guardrail blocks from technical errors ──────────
+const isLongContent = computed(() => (mainContent.value?.length ?? 0) > COLLAPSE_CHAR_THRESHOLD);
 const blockLabel = computed((): string => {
   const details = props.message.guardrailEvents?.[0]?.details ?? props.message.content ?? "";
   if (details.startsWith("LLM error:")) return "⚠ LLM connection error";
@@ -252,13 +384,25 @@ const swarmExecutionItems = computed<ExecutionItem[]>(() => Object.values(props.
     return left.key.localeCompare(right.key);
   }));
 
-const toolExecutionItems = computed<ExecutionItem[]>(() => (props.message.toolCalls ?? []).map((toolCall, index) => ({
-  key: `${toolCall.name}-${index}`,
-  kind: "tool" as const,
-  name: toolCall.name,
-  status: toolCall.result !== undefined ? "done" : "running",
-  statusSymbol: toolCall.result !== undefined ? executionStatusSymbol("done") : executionStatusSymbol("running"),
-})));
+const toolExecutionItems = computed<ExecutionItem[]>(() => (props.message.toolCalls ?? []).map((toolCall, index) => {
+  const argsSummary = Object.entries(toolCall.args ?? {})
+    .map(([k, v]) => `${k}: ${String(v).substring(0, 80)}`)
+    .join(", ");
+  const status: ExecutionStatus = toolCall.result === undefined
+    ? "running"
+    : toolCall.result.trim().startsWith("Error:")
+      ? "failed"
+      : "done";
+  return {
+    key: toolCall.id ?? `${toolCall.name}-${index}`,
+    kind: "tool" as const,
+    name: toolCall.name,
+    meta: argsSummary || undefined,
+    status,
+    statusSymbol: executionStatusSymbol(status),
+    result: toolCall.result,
+  };
+}));
 
 const executionItems = computed<ExecutionItem[]>(() => {
   if (swarmExecutionItems.value.length > 0) return swarmExecutionItems.value;
@@ -293,6 +437,109 @@ const activeExecutionLabel = computed(() => {
     ? `${items.filter((item) => item.kind === "subagent").length} sub-agent action${items.filter((item) => item.kind === "subagent").length !== 1 ? "s" : ""} completed${swarmToolCallCount.value > 0 ? ` · ${swarmToolCallCount.value} tool call${swarmToolCallCount.value === 1 ? "" : "s"}` : ""}`
     : `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
+
+const imageAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) =>
+  Boolean(attachment.dataUrl?.startsWith("data:image/")) || attachment.previewMode === "image" || attachment.contentType?.startsWith("image/")
+));
+
+const artifactAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) => !imageAttachments.value.includes(attachment)));
+
+function attachmentLabel(attachment: ChatAttachment): string {
+  if (attachment.isDirectory) {
+    return "Folder artifact";
+  }
+
+  switch (attachment.previewMode) {
+    case "html":
+      return "HTML artifact";
+    case "pdf":
+      return "PDF artifact";
+    case "audio":
+      return "Audio artifact";
+    case "json":
+      return "JSON artifact";
+    case "text":
+      return "Document artifact";
+    default:
+      return attachment.sourceTool ? `${attachment.sourceTool} output` : "Workspace artifact";
+  }
+}
+
+function formatAttachmentSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function isPreviewable(attachment: ChatAttachment): boolean {
+  return Boolean(attachment.relativePath) && ["html", "pdf", "text", "json", "audio"].includes(attachment.previewMode ?? "download");
+}
+
+function closeArtifactPreview(): void {
+  if (artifactPreview.value?.url) {
+    URL.revokeObjectURL(artifactPreview.value.url);
+  }
+  artifactPreview.value = null;
+}
+
+async function previewAttachment(attachment: ChatAttachment): Promise<void> {
+  if (attachment.dataUrl?.startsWith("data:image/")) {
+    lightboxUrl.value = attachment.dataUrl;
+    return;
+  }
+
+  if (!attachment.relativePath) return;
+
+  artifactPreviewLoading.value = attachment.filename;
+  closeArtifactPreview();
+
+  try {
+    const { blob, filename } = await gateway.fetchWorkspaceArtifactBlob(attachment.relativePath, { disposition: "inline" });
+    if ((attachment.previewMode ?? "download") === "text" || attachment.previewMode === "json") {
+      artifactPreview.value = {
+        title: attachment.title || filename,
+        filename,
+        kind: "text",
+        text: await blob.text(),
+      };
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    artifactPreview.value = {
+      title: attachment.title || filename,
+      filename,
+      kind: attachment.previewMode === "audio" ? "audio" : attachment.previewMode === "pdf" ? "pdf" : "html",
+      url,
+    };
+  } catch (error) {
+    artifactPreview.value = {
+      title: attachment.title || attachment.filename,
+      filename: attachment.filename,
+      kind: "text",
+      text: `Preview failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    artifactPreviewLoading.value = null;
+  }
+}
+
+async function downloadAttachment(attachment: ChatAttachment, archive = false): Promise<void> {
+  if (attachment.relativePath) {
+    await gateway.downloadWorkspaceArtifact(attachment.relativePath, {
+      archive,
+      suggestedFilename: archive ? `${attachment.filename}.zip` : attachment.filename,
+    });
+    return;
+  }
+
+  if (!attachment.dataUrl) return;
+  const anchor = document.createElement("a");
+  anchor.href = attachment.dataUrl;
+  anchor.download = attachment.filename;
+  anchor.click();
+}
 
 // ── Rendered markdown ─────────────────────────────────────────────────────────
 function renderMarkdown(raw: string): string {
@@ -381,6 +628,10 @@ function formatDuration(ms: number): string {
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${(ms / 60000).toFixed(1)}m`;
 }
+
+onBeforeUnmount(() => {
+  closeArtifactPreview();
+});
 </script>
 
 <style scoped>
@@ -390,6 +641,12 @@ function formatDuration(ms: number): string {
   flex-wrap: wrap;
   gap: 0.375rem;
   margin-bottom: 0.5rem;
+}
+.message-attachment-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
 }
 .message-attachment-img {
   max-width: 220px;
@@ -401,6 +658,160 @@ function formatDuration(ms: number): string {
   transition: opacity 0.15s;
 }
 .message-attachment-img:hover { opacity: 0.85; }
+.message-attachment-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.message-attachment-name {
+  color: #cdbce6;
+  font-size: 0.72rem;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 0.6rem;
+  margin-bottom: 0.65rem;
+}
+
+.artifact-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.9rem;
+  background: rgba(11, 16, 29, 0.56);
+  border: 1px solid rgba(125, 211, 252, 0.2);
+}
+
+.artifact-card__body {
+  min-width: 0;
+  display: grid;
+  gap: 0.18rem;
+}
+
+.artifact-card__eyebrow {
+  color: #7dd3fc;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-card__title {
+  color: #f4f0ff;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  color: #b8a7d9;
+  font-size: 0.72rem;
+}
+
+.artifact-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.artifact-action {
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  background: rgba(125, 211, 252, 0.08);
+  color: #dff7ff;
+  border-radius: 999px;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.72rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.artifact-action:hover:not(:disabled) {
+  background: rgba(125, 211, 252, 0.16);
+  border-color: rgba(125, 211, 252, 0.4);
+}
+
+.artifact-action:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.artifact-preview-modal {
+  width: min(92vw, 1080px);
+  max-height: 88vh;
+  background: rgba(13, 17, 29, 0.96);
+  border: 1px solid rgba(125, 211, 252, 0.2);
+  border-radius: 1.2rem;
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.artifact-preview-modal__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.artifact-preview-modal__eyebrow {
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-preview-modal__title {
+  color: #f4f0ff;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.artifact-preview-modal__close {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #d6c8ff;
+}
+
+.artifact-preview-modal__body {
+  padding: 1rem 1.1rem 1.1rem;
+}
+
+.artifact-preview-modal__body pre {
+  margin: 0;
+  max-height: 68vh;
+  overflow: auto;
+  padding: 1rem;
+  border-radius: 0.9rem;
+  background: rgba(5, 8, 18, 0.86);
+  color: #d7efff;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.artifact-preview-frame {
+  width: 100%;
+  height: 68vh;
+  border: none;
+  border-radius: 0.9rem;
+  background: white;
+}
+
+.artifact-preview-audio {
+  width: 100%;
+}
 
 /* ── Layout ──────────────────────────────────────────────────────────────────── */
 .message-row {
@@ -487,11 +898,9 @@ function formatDuration(ms: number): string {
 .tool-status__chevron { font-size: 0.6rem; opacity: 0.6; font-style: normal; }
 
 .tool-history {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 1000;
+  margin-top: 4px;
   min-width: 280px;
+  max-width: 100%;
   background: rgba(15, 12, 28, 0.95);
   border: 1px solid rgba(168, 85, 247, 0.25);
   border-radius: 0.75rem;
@@ -509,13 +918,16 @@ function formatDuration(ms: number): string {
   background: rgba(168, 85, 247, 0.1);
   border-bottom: 1px solid rgba(168, 85, 247, 0.15);
 }
+.tool-history__item-wrap {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.tool-history__item-wrap:last-child { border-bottom: none; }
 .tool-history__item {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   padding: 0.4rem 0.75rem;
   font-size: 0.78rem;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
   color: #c4b5fd;
 }
 .tool-history__item:last-child { border-bottom: none; }
@@ -540,6 +952,23 @@ function formatDuration(ms: number): string {
 .tool-history__status--done    { color: #4ade80; }
 .tool-history__status--running { color: #e879f9; animation: pulse 1s infinite; }
 .tool-history__status--failed  { color: #f87171; }
+
+.tool-history__result {
+  padding: 0 0.75rem 0.4rem 2.25rem;
+}
+.tool-history__result pre {
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  color: #9ca3af;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 0.375rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
 
 /* ── Thinking section ────────────────────────────────────────────────────────── */
 .thinking-section {
@@ -582,6 +1011,41 @@ function formatDuration(ms: number): string {
   overflow-y: auto;
   white-space: pre-wrap;
 }
+
+/* ── Content collapse ────────────────────────────────────────────────────────── */
+.message-content-wrapper { position: relative; }
+.message-content-wrapper--collapsed {
+  max-height: 150px;
+  overflow: hidden;
+}
+.message-content-wrapper--collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(transparent, rgba(30, 27, 46, 0.95));
+  pointer-events: none;
+}
+.message-bubble--user .message-content-wrapper--collapsed::after {
+  background: linear-gradient(transparent, rgba(48, 20, 80, 0.95));
+}
+.collapse-toggle {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.2rem 0;
+  background: none;
+  border: none;
+  font-size: 0.72rem;
+  color: #a78bfa;
+  cursor: pointer;
+  text-align: center;
+  opacity: 0.7;
+  transition: opacity 0.12s;
+}
+.collapse-toggle:hover { opacity: 1; }
 
 /* ── Message content ──────────────────────────────────────────────────────────── */
 .message-content { white-space: pre-wrap; }
