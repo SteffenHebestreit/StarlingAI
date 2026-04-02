@@ -160,6 +160,9 @@ Run `pnpm sai config build` to compile both zones into `starlingai.json` (the ar
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | System layout, swarm principles, and runtime boundaries |
 | [docs/api.md](docs/api.md) | REST, WebSocket, scene job, approval, and A2A interfaces |
+| [docs/channels.md](docs/channels.md) | Channel capability matrix and delivery model |
+| [docs/channel-setup.md](docs/channel-setup.md) | Channel onboarding and configuration walkthrough |
+| [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
 | [docs/security.md](docs/security.md) | Auth, credential storage, sandboxing, and audit behavior |
 | [docs/tool-tiers.md](docs/tool-tiers.md) | Hard-coded tool permission tiers and approval rules |
 
