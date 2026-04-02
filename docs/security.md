@@ -12,7 +12,7 @@ The swarm is allowed to improve itself only within bounded non-crucial surfaces:
 
 In particular, secrets are outside autonomous control. Stored credentials, tokens, and secret material must never be read into model context or surfaced as plain text to an agent. They may only be consumed through dedicated secret-safe tools under the existing approval, audit, and redaction rules.
 
-See also: [Tool Tiers & Guardrails](tool-tiers.md) · [Configuration Reference](configuration.md) · [REST API & WebSocket](api.md)
+See also: [Tool Tiers & Guardrails](tool-tiers.md) · [Configuration Layout](../config/README.md) · [REST API & WebSocket](api.md)
 
 ---
 
@@ -33,15 +33,12 @@ If none of the above is present, a cryptographically random secret is generated 
 ### Generating Tokens
 
 ```bash
-# Default token (WSL / Git Bash)
-./scripts/gen-token.sh
-
-# Windows CMD
-scripts\gen-token.bat
+# Default token
+pnpm sai token
 
 # Named user with role and custom expiry
-./scripts/gen-token.sh --user alice --role viewer --ttl 7d
-./scripts/gen-token.sh --user deploy-bot --role admin --ttl 30d
+pnpm sai token --user alice --role viewer --ttl 7d
+pnpm sai token --user deploy-bot --role admin --ttl 30d
 ```
 
 Tokens carry a `user` claim (default: `admin`), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.

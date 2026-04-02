@@ -33,8 +33,7 @@ Generate tokens with:
 
 ```bash
 pnpm token
-./scripts/gen-token.sh
-scripts\gen-token.bat
+pnpm sai token
 ```
 
 Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`.

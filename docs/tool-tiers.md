@@ -8,7 +8,7 @@ StarlingAI enforces a five-tier tool classification system on every tool call. T
 
 This classification system is domain-agnostic. Whether the swarm is analyzing data, writing code, automating browsers, or sending emails, the same tier checks apply to every tool invocation.
 
-See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
+See also: [Security Model](security.md) · [Architecture & Design](architecture.md)
 
 ---
 

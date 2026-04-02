@@ -8,7 +8,7 @@ StarlingAI is a general-purpose AI agent swarm built around four principles borr
 
 This document explains how the system implements each swarm principle at the code level, describes the full runtime architecture, and maps the flow from user message to final response.
 
-See also: [Sub-Agent Reference](agents.md) · [Configuration Reference](configuration.md)
+See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md)
 
 ---
 
