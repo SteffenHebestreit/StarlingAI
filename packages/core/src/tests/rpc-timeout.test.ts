@@ -142,4 +142,42 @@ describe("rpc timeout cleanup", () => {
     expect(olderPayload.transcript.map((message) => message.content)).toEqual(["one"]);
     expect(olderPayload.nextBeforeMessageId).toBeUndefined();
   });
+
+  it("blocks flag-only chat submissions before calling the provider", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-flag-only",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-flag-only",
+        message: "--auto",
+      },
+    }));
+
+    const statusEvent = sent.find((event) => {
+      if (event["type"] !== "status") return false;
+      const data = event["data"] as Record<string, unknown> | undefined;
+      return data?.["requestId"] === "turn-flag-only";
+    });
+
+    expect((statusEvent?.["data"] as Record<string, unknown> | undefined)?.["status"]).toBe("blocked");
+    expect(String((statusEvent?.["data"] as Record<string, unknown> | undefined)?.["response"] ?? "")).toContain("include an instruction");
+    expect(active.getHistory()).toHaveLength(0);
+  });
 });

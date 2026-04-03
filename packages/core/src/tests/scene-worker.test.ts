@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -109,6 +109,7 @@ describe("scene job worker", () => {
       expect(completed.progress.toolCallsCompleted).toBe(1);
       expect(completed.progress.stage).toBe("completed");
     } finally {
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -201,6 +202,105 @@ describe("scene job worker", () => {
       expect(cancelled.progress.stage).toBe("cancelled");
     } finally {
       if (gateway) await gateway.stop();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes webhook-authenticated scene jobs and persists completion audit events", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-webhook-"));
+    const port = 23100 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const auditLogPath = join(tempDir, ".starlingai", "audit.jsonl");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "u".repeat(32),
+        turnTimeoutMs: 30_000,
+      },
+      workspacePath: tempDir,
+      scenes: {
+        webhook_scene: {
+          description: "Webhook-only scene",
+          task: "Analyze {{topic|routing}} thoroughly.",
+          webhookKey: "webhook-scene-key-123456",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = auditLogPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async () => ({
+        response: "scene completed",
+        toolCallsExecuted: 0,
+        guardrailEvents: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        blocked: false,
+      })),
+    }));
+
+    let gateway: { start: () => Promise<void>; stop: () => Promise<void> } | null = null;
+
+    try {
+      const configLoader = await import("../config/loader.js");
+
+      configLoader.resetConfigForTests();
+      configLoader.loadConfig();
+
+      const [{ createGateway }, worker, audit, jobs] = await Promise.all([
+        import("../gateway/index.js"),
+        import("../agent/scene-worker.js"),
+        import("../audit/logger.js"),
+        import("../agent/jobs.js"),
+      ]);
+
+      gateway = createGateway();
+      await gateway.start();
+      await worker.startSceneJobWorker();
+
+      const baseUrl = `http://127.0.0.1:${port}`;
+      await waitForHealth(`${baseUrl}/healthz`);
+
+      const runResponse = await fetch(`${baseUrl}/api/scenes/webhook_scene/run?key=webhook-scene-key-123456`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          params: { topic: "delegation" },
+        }),
+      });
+      expect(runResponse.status).toBe(200);
+
+      const runBody = await runResponse.json() as { jobId: string; status: string };
+      expect(runBody.status).toBe("queued");
+
+      const completed = await waitForJobStatus(jobs.getJob, runBody.jobId, "completed");
+      expect(completed.progress.stage).toBe("completed");
+
+      await audit.flushAuditLog();
+
+      const completionEvents = readAuditEvents(auditLogPath).filter((event) => event.type === "scene_job_completed");
+      expect(completionEvents).toHaveLength(1);
+      expect(completionEvents[0]).toMatchObject({
+        channel: "scene",
+        severity: "info",
+        data: {
+          jobId: runBody.jobId,
+          sceneName: "webhook_scene",
+          status: "completed",
+          blocked: false,
+          toolCallsExecuted: 0,
+        },
+      });
+    } finally {
+      if (gateway) await gateway.stop();
+      await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -265,4 +365,31 @@ async function waitForApiJobStatus(
 
 async function sleep(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function readAuditEvents(auditLogPath: string): Array<{
+  type: string;
+  severity?: string;
+  channel?: string;
+  data?: Record<string, unknown>;
+}> {
+  if (!existsSync(auditLogPath)) return [];
+  return readFileSync(auditLogPath, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as {
+      type: string;
+      severity?: string;
+      channel?: string;
+      data?: Record<string, unknown>;
+    });
+}
+
+async function flushAuditLogForTests(): Promise<void> {
+  try {
+    const audit = await import("../audit/logger.js");
+    await audit.flushAuditLog();
+  } catch {
+    // Some tests may not load the audit logger.
+  }
 }

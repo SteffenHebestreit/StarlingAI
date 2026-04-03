@@ -130,24 +130,26 @@
         <div class="section-title">Configuration</div>
         <p>
           Add a <code>multimodal</code> block to your <code>starlingai.json</code>. Every sub-block is
-          optional — leave out what you don't need.
+          optional — leave the endpoint empty to disable that capability until you connect an external service.
         </p>
 
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   "multimodal": {
-    // Speech-to-text (Qwen3-ASR service)
+    // Speech-to-text
     "stt": {
-      "baseUrl": "http://host.docker.internal:5002",
-      "model": "Qwen/Qwen3-ASR-1.7B"
+      "baseUrl": "https://stt.example.com",
+      "api": "auto",
+      "model": "whisper-1"
     },
-    // Text-to-speech (Qwen3-TTS service)
+    // Text-to-speech
     "tts": {
-      "baseUrl": "http://host.docker.internal:5004",
-      "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+      "baseUrl": "https://tts.example.com",
+      "api": "openai-compatible",
+      "model": "tts-1",
       "defaultLanguage": "English",
-      "defaultSpeaker": "Vivian"
+      "defaultSpeaker": "alloy"
     },
     // File-to-Markdown conversion
     "files": {
@@ -174,20 +176,22 @@
       <div class="section">
         <div class="section-title">Speech-to-text (STT)</div>
         <p>
-          The <code>transcribe_audio</code> tool POSTs an audio file to the configured Qwen3-ASR endpoint.
-          StarlingAI first tries the OpenAI-style <code>/v1/audio/transcriptions</code> route and falls back to
-          Qwen3-ASR's native <code>/transcribe</code> route when needed.
+          The <code>transcribe_audio</code> tool POSTs an audio file to the configured STT endpoint.
+          StarlingAI can speak to OpenAI-compatible transcription APIs and can also fall back to a simpler
+          <code>/transcribe</code> route when the backend only exposes a native transcription endpoint.
         </p>
 
-        <h3>Quick start with Qwen3-ASR</h3>
-        <p>The Docker Compose stack includes a dedicated Qwen3-ASR container. To start just the STT service:</p>
+        <h3>Connecting an external STT service</h3>
+        <p>Point <code>multimodal.stt.baseUrl</code> at any reachable transcription service. Leaving it blank disables STT cleanly.</p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-          <pre><code># Start the Qwen3-ASR server on port 5002
-docker compose up -d qwen3-asr-service
+          <pre><code># Example: OpenAI-compatible STT endpoint
+curl https://stt.example.com/v1/audio/transcriptions \
+  -H "Authorization: Bearer $STT_API_KEY"
 
-# Verify it is reachable
-curl http://localhost:5002/health</code></pre>
+# Or configure the endpoint in the dashboard
+pnpm sai start
+# Open Settings → Multimodal and fill in the STT endpoint</code></pre>
         </div>
 
         <h3>Example — transcribing a file</h3>
@@ -225,18 +229,18 @@ curl http://localhost:5002/health</code></pre>
         <div class="section-title">Text-to-speech (TTS)</div>
         <p>
           The <code>synthesize_speech</code> tool sends text to a TTS REST API and saves the returned audio
-          as a WAV file. The default self-hosted option in this stack is <strong>Qwen3-TTS</strong>, with built-in
-          speakers, saved voices, and voice cloning.
+          as a WAV file. StarlingAI supports external OpenAI-compatible and qwen-compatible TTS endpoints.
         </p>
 
-        <h3>Quick start with Qwen3-TTS</h3>
+        <h3>Connecting an external TTS service</h3>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-          <pre><code># Start Qwen3-TTS on port 5004
-docker compose up -d qwen3-tts-service
+          <pre><code># Example: OpenAI-compatible TTS endpoint
+curl https://tts.example.com/v1/audio/speech \
+  -H "Authorization: Bearer $TTS_API_KEY"
 
-# List saved voices
-curl http://localhost:5004/voices</code></pre>
+# Optional: qwen-compatible voice libraries can expose /voices
+curl https://tts.example.com/voices</code></pre>
         </div>
 
         <h3>Example — generating speech</h3>
@@ -247,7 +251,7 @@ curl http://localhost:5004/voices</code></pre>
   "tool": "synthesize_speech",
   "input": {
     "text": "Your weekly digest is ready. Here are the top five stories.",
-    "speaker": "Vivian",
+    "speaker": "alloy",
     "outputPath": "/workspace/audio/digest.wav"
   }
 }
@@ -255,7 +259,7 @@ curl http://localhost:5004/voices</code></pre>
 // Result
 {
   "filePath": "/workspace/audio/digest.wav",
-  "speaker": "Vivian",
+  "speaker": "alloy",
   "durationSeconds": 4.2
 }</code></pre>
         </div>
@@ -443,7 +447,7 @@ curl http://localhost:5004/voices</code></pre>
             <tr><td><code>POST</code></td><td><code>/api/tools/file_to_markdown</code></td><td>Convert uploaded file to Markdown</td></tr>
             <tr><td><code>POST</code></td><td><code>/api/multimodal/transcribe</code></td><td>Transcribe an uploaded audio file</td></tr>
             <tr><td><code>GET</code></td><td><code>/api/multimodal/voices</code></td><td>List saved voices, built-in speakers, and TTS models</td></tr>
-            <tr><td><code>POST</code></td><td><code>/api/multimodal/voices/save</code></td><td>Upload a reusable voice sample to Qwen3-TTS</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/multimodal/voices/save</code></td><td>Upload a reusable voice sample to a qwen-compatible TTS backend</td></tr>
             <tr><td><code>POST</code></td><td><code>/api/multimodal/tts</code></td><td>Synthesize speech from text</td></tr>
           </tbody>
         </table>

@@ -15,11 +15,14 @@ import {
 } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { listAllScenes } from "../credentials/scenes.js";
+import { createJob } from "../agent/jobs.js";
+import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
+import { subscribeToNotifications } from "../runtime/notifications.js";
 
 const log = childLogger("gateway:rpc");
 
@@ -35,8 +38,11 @@ export type RpcMethod =
   | "session.reset"
   | "audit.subscribe"
   | "audit.unsubscribe"
+  | "notifications.subscribe"
+  | "notifications.unsubscribe"
   | "gateway.status"
   | "scenes.list"
+  | "jobs.list"
   | "approval.respond"
   | "computer.list_sessions"
   | "computer.emergency_stop"
@@ -136,11 +142,81 @@ function parseKeyValuePairs(raw: string): Record<string, string> {
   return params;
 }
 
+function formatJobListResponse(): string {
+  const jobs = listAllJobs();
+  if (jobs.length === 0) {
+    return "No jobs are configured. Define jobs in Settings or under workspace/jobs/*.jsonc.";
+  }
+
+  const lines = jobs.map((job) => {
+    const triggerLabels = (job.triggers ?? []).map((trigger) => trigger.type).join(", ") || "manual";
+    return `- ${job.name}: ${job.description} (${job.steps.length} step${job.steps.length === 1 ? "" : "s"}; triggers: ${triggerLabels})`;
+  });
+
+  return [
+    "Configured jobs:",
+    "",
+    ...lines,
+    "",
+    "Run one with /job <name> or inspect one with /job help <name>.",
+  ].join("\n");
+}
+
+function formatJobHelpResponse(jobName?: string): string {
+  if (!jobName) {
+    return [
+      "Job command syntax:",
+      "",
+      "- /jobs",
+      "- /job <name>",
+      "- /job <name> key=value other=\"value with spaces\"",
+      "- /job help <name>",
+      "",
+      "Jobs are multi-step workflows that orchestrate one or more scenes.",
+    ].join("\n");
+  }
+
+  const job = getJobDefinition(jobName);
+  if (!job) {
+    return `Job not found: ${jobName}`;
+  }
+
+  const params = Object.entries(job.params ?? {}).map(([key, def]) =>
+    `- ${key}: ${def.description ?? "no description"}${def.default !== undefined ? ` (default: ${def.default})` : ""}`,
+  );
+  const steps = job.steps.map((step, index) =>
+    `- ${index + 1}. ${step.label ?? step.scene}: scene=${step.scene}${step.params ? ` params=${JSON.stringify(step.params)}` : ""}`,
+  );
+  const triggers = (job.triggers ?? []).map((trigger) =>
+    trigger.type === "cron"
+      ? `- cron: ${trigger.expression}${trigger.enabled === false ? " (disabled)" : ""}`
+      : trigger.type === "channel"
+        ? `- channel: ${trigger.channels?.join(", ") ?? "any inbound channel"} ${trigger.mode} ${JSON.stringify(trigger.pattern)}`
+        : `- api${trigger.webhookKey ? ": webhook configured" : ""}`,
+  );
+
+  return [
+    `Job ${job.name}`,
+    "",
+    job.description,
+    "",
+    "Params:",
+    ...(params.length > 0 ? params : ["- none"]),
+    "",
+    "Steps:",
+    ...steps,
+    "",
+    "Triggers:",
+    ...(triggers.length > 0 ? triggers : ["- manual only"]),
+  ].join("\n");
+}
+
 export class RpcConnection {
   readonly connId: string;
   private ws: WebSocket;
   private activeSessionId: string | null = null;
   private auditUnsubscribe: (() => void) | null = null;
+  private notificationsUnsubscribe: (() => void) | null = null;
   private abortControllers = new Map<string, AbortController>();
   private pendingApprovals = new Map<string, PendingApproval>();
 
@@ -255,6 +331,9 @@ export class RpcConnection {
       case "scenes.list":
         return listAllScenes().map(s => ({ name: s.name, description: s.description, source: s.source }));
 
+      case "jobs.list":
+        return listAllJobs().map((job) => ({ name: job.name, description: job.description, source: job.source }));
+
       case "approval.respond": {
         const approvalId = String(params["approvalId"] ?? "");
         const approved = Boolean(params["approved"]);
@@ -280,10 +359,96 @@ export class RpcConnection {
         // Parse inline override flags (--auto, --iter N, --agent NAME) before scene handling
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
+        const effectiveTurnTimeoutMs = overrideFlags.turnTimeoutSec !== undefined
+          ? overrideFlags.turnTimeoutSec * 1000
+          : turnTimeoutMs;
+
+        if (!message.trim()) {
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "blocked",
+              requestId,
+              response: "Please include an instruction in addition to override flags.",
+            },
+          });
+          return { accepted: false, requestId };
+        }
+
+        if (/^\/jobs\s*$/i.test(message)) {
+          this.sendEvent({ type: "status", data: { status: "accepted", requestId, info: "Listing jobs" } });
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "ok",
+              requestId,
+              response: formatJobListResponse(),
+              toolCallsExecuted: 0,
+              guardrailEvents: [],
+              usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            },
+          });
+          return { accepted: true, requestId };
+        }
+
+        const jobHelpMatch = message.match(/^\/job\s+help(?:\s+(\S+))?\s*$/i);
+        if (jobHelpMatch) {
+          this.sendEvent({ type: "status", data: { status: "accepted", requestId, info: "Showing job help" } });
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "ok",
+              requestId,
+              response: formatJobHelpResponse(jobHelpMatch[1]),
+              toolCallsExecuted: 0,
+              guardrailEvents: [],
+              usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            },
+          });
+          return { accepted: true, requestId };
+        }
 
         // Handle /run <sceneName> [key=value ...] — substitute scene task with params
         let sceneAllowedAgents: string[] | undefined;
         let humanInLoopSteps: string[] | undefined;
+
+        const jobMatch = message.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s);
+        if (jobMatch) {
+          const jobName = jobMatch[1]!;
+          const job = getJobDefinition(jobName);
+          if (!job) {
+            this.sendEvent({ type: "status", data: { status: "error", requestId, error: `Job not found: ${jobName}` } });
+            return { accepted: false, requestId };
+          }
+
+          try {
+            const params = parseKeyValuePairs(jobMatch[2] ?? "");
+            const steps = resolveJobSteps(job, params);
+            const queued = await createJob({
+              sceneName: jobName,
+              definitionType: "job",
+              userId: `job:${jobName}`,
+              steps,
+              turnTimeoutMs: effectiveTurnTimeoutMs,
+            });
+            this.sendEvent({ type: "status", data: { status: "accepted", requestId, info: `Queued job: ${jobName}` } });
+            this.sendEvent({
+              type: "status",
+              data: {
+                status: "ok",
+                requestId,
+                response: `Queued job ${jobName} as ${queued.id}. Track progress in the Jobs panel.`,
+                toolCallsExecuted: 0,
+                guardrailEvents: [],
+                usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              },
+            });
+            return { accepted: true, queued: true, requestId, jobId: queued.id };
+          } catch (err) {
+            this.sendEvent({ type: "status", data: { status: "error", requestId, error: err instanceof Error ? err.message : String(err) } });
+            return { accepted: false, requestId };
+          }
+        }
 
         const runMatch = message.match(/^\/run\s+(\S+)(?:\s+(.*))?$/s);
         if (runMatch) {
@@ -336,11 +501,6 @@ export class RpcConnection {
           this.abortControllers.delete(requestId);
         };
 
-        // Apply --timeout override to both the inner runTurn and the outer watchdog
-        const effectiveTurnTimeoutMs = overrideFlags.turnTimeoutSec !== undefined
-          ? overrideFlags.turnTimeoutSec * 1000
-          : turnTimeoutMs;
-
         // --agent flag overrides sceneAllowedAgents (narrows to a single agent)
         const effectiveAllowedAgents = overrideFlags.forceAgent
           ? [overrideFlags.forceAgent]
@@ -388,14 +548,15 @@ export class RpcConnection {
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
-          onToolCall: (name, args) => {
-            this.sendEvent({ type: "agent.tool_start", data: { requestId, name, args } });
+          onToolCall: (toolCallId, name, args) => {
+            this.sendEvent({ type: "agent.tool_start", data: { requestId, toolCallId, name, args } });
           },
-          onToolResult: (name, result, metadata) => {
+          onToolResult: (toolCallId, name, result, metadata) => {
             this.sendEvent({
               type: "agent.tool_done",
               data: {
                 requestId,
+                toolCallId,
                 name,
                 result: result.substring(0, 500),
                 metadata,
@@ -481,6 +642,19 @@ export class RpcConnection {
         this.auditUnsubscribe = null;
         return { unsubscribed: true };
 
+      case "notifications.subscribe": {
+        this.notificationsUnsubscribe?.();
+        this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
+          this.sendEvent({ type: "notification.event", data: notification });
+        });
+        return { subscribed: true };
+      }
+
+      case "notifications.unsubscribe":
+        this.notificationsUnsubscribe?.();
+        this.notificationsUnsubscribe = null;
+        return { unsubscribed: true };
+
       // ── Computer-use session RPC ───────────────────────────────────────
       case "computer.list_sessions":
         return { sessions: computerSessionManager.listSessions() };
@@ -505,6 +679,7 @@ export class RpcConnection {
 
   close(): void {
     this.auditUnsubscribe?.();
+    this.notificationsUnsubscribe?.();
     for (const ac of this.abortControllers.values()) ac.abort();
     // Reject any pending approvals so tool calls unblock immediately
     for (const [, pending] of this.pendingApprovals) {

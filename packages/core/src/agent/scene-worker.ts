@@ -3,7 +3,7 @@ import type { SwarmState } from "../tools/registry.js";
 import type { InterventionNotice } from "./interventions.js";
 import { createSession, endSession } from "./session.js";
 import { archiveSession } from "./session.js";
-import { runTurn } from "./runtime.js";
+import { runTurn, type TurnOutput, type TurnPerformanceMetrics } from "./runtime.js";
 import {
   claimNextJob,
   completeJob,
@@ -20,6 +20,7 @@ import {
 import { requestApprovalViaChannel } from "../approval/index.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { publishNotification } from "../runtime/notifications.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -152,57 +153,19 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
 
   await safeProgressUpdate(job.id, {
     stage: "running",
-    message: "Scene job running",
+    message: job.payload.steps?.length ? "Job workflow running" : "Scene job running",
     percent: 5,
+    totalSteps: job.payload.steps?.length ?? 0,
+    completedSteps: 0,
+    currentStep: job.payload.steps?.[0]?.label,
     lastEventAt: new Date().toISOString(),
     lastEventType: "job_started",
   });
 
   try {
-    const output = await runTurn({
-      session,
-      userMessage: job.payload.task,
-      allowedAgents: job.payload.allowedAgents,
-      humanInLoopSteps: job.payload.humanInLoopSteps,
-      approvalCallback: buildApprovalCallback(job, controller, counters),
-      signal: controller.signal,
-      onToolCall: (name) => {
-        counters.toolCallsRequested += 1;
-        void safeProgressUpdate(job.id, {
-          stage: "tool",
-          message: `Running tool ${name}`,
-          currentTool: name,
-          toolCallsRequested: counters.toolCallsRequested,
-          toolCallsCompleted: counters.toolCallsCompleted,
-          approvalsRequested: counters.approvalsRequested,
-          subAgentsStarted: counters.subAgentsStarted,
-          percent: computeRuntimePercent(counters.toolCallsRequested, counters.toolCallsCompleted),
-          lastEventAt: new Date().toISOString(),
-          lastEventType: "tool_call_requested",
-        });
-      },
-      onToolResult: (name) => {
-        counters.toolCallsCompleted += 1;
-        void safeProgressUpdate(job.id, {
-          stage: "tool",
-          message: `Completed tool ${name}`,
-          currentTool: name,
-          toolCallsRequested: counters.toolCallsRequested,
-          toolCallsCompleted: counters.toolCallsCompleted,
-          approvalsRequested: counters.approvalsRequested,
-          subAgentsStarted: counters.subAgentsStarted,
-          percent: computeRuntimePercent(counters.toolCallsRequested, counters.toolCallsCompleted),
-          lastEventAt: new Date().toISOString(),
-          lastEventType: "tool_call_completed",
-        });
-      },
-      onIntervention: (notice) => {
-        void safeProgressUpdate(job.id, progressFromIntervention(notice, counters));
-      },
-      onSwarmState: (state) => {
-        void safeProgressUpdate(job.id, progressFromSwarmState(state, counters));
-      },
-    });
+    const output = job.payload.steps?.length
+      ? await runWorkflowJob(job, session, controller, counters)
+      : await runSingleSceneJob(job, session, controller, counters);
 
     const current = await getJob(job.id);
     if (current?.status === "cancelling" || (controller.signal.aborted && !timedOut)) {
@@ -278,12 +241,202 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
   }
 }
 
+async function runSingleSceneJob(
+  job: ClaimedSceneJob,
+  session: ReturnType<typeof createSession>,
+  controller: AbortController,
+  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
+): Promise<TurnOutput> {
+  return runTurn({
+    session,
+    userMessage: job.payload.task ?? "",
+    ...buildTurnHooks(job, controller, counters),
+  });
+}
+
+async function runWorkflowJob(
+  job: ClaimedSceneJob,
+  session: ReturnType<typeof createSession>,
+  controller: AbortController,
+  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
+): Promise<TurnOutput> {
+  const steps = job.payload.steps ?? [];
+  const outputs: TurnOutput[] = [];
+
+  for (const [index, step] of steps.entries()) {
+    if (controller.signal.aborted) break;
+
+    await safeProgressUpdate(job.id, {
+      stage: "step",
+      message: `Running step ${index + 1}/${steps.length}: ${step.label}`,
+      totalSteps: steps.length,
+      completedSteps: index,
+      currentStep: step.label,
+      percent: Math.max(5, Math.round((index / Math.max(1, steps.length)) * 100)),
+      lastEventAt: new Date().toISOString(),
+      lastEventType: "job_step_started",
+    });
+
+    const output = await runTurn({
+      session,
+      userMessage: step.task,
+      allowedAgents: step.allowedAgents,
+      humanInLoopSteps: step.humanInLoopSteps,
+      approvalCallback: buildApprovalCallback(job, controller, counters, step.approvalChannel),
+      signal: controller.signal,
+      ...buildTurnStreamingHooks(job, counters, {
+        totalSteps: steps.length,
+        completedSteps: index,
+        currentStep: step.label,
+      }),
+    });
+
+    outputs.push(output);
+
+    await safeProgressUpdate(job.id, {
+      stage: output.blocked ? "failed" : "step",
+      message: output.blocked
+        ? `Step ${index + 1}/${steps.length} blocked: ${step.label}`
+        : `Completed step ${index + 1}/${steps.length}: ${step.label}`,
+      totalSteps: steps.length,
+      completedSteps: index + 1,
+      currentStep: step.label,
+      percent: Math.max(5, Math.min(95, Math.round(((index + 1) / Math.max(1, steps.length)) * 100))),
+      lastEventAt: new Date().toISOString(),
+      lastEventType: output.blocked ? "job_step_blocked" : "job_step_completed",
+    });
+
+    if (output.blocked) {
+      return mergeWorkflowOutputs(outputs, steps);
+    }
+  }
+
+  return mergeWorkflowOutputs(outputs, steps);
+}
+
+function buildTurnHooks(
+  job: ClaimedSceneJob,
+  controller: AbortController,
+  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
+) {
+  return {
+    allowedAgents: job.payload.allowedAgents,
+    humanInLoopSteps: job.payload.humanInLoopSteps,
+    approvalCallback: buildApprovalCallback(job, controller, counters),
+    signal: controller.signal,
+    ...buildTurnStreamingHooks(job, counters),
+  };
+}
+
+function buildTurnStreamingHooks(
+  job: ClaimedSceneJob,
+  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
+  stepMeta?: { totalSteps?: number; completedSteps?: number; currentStep?: string },
+) {
+  return {
+    onToolCall: (_toolCallId: string, name: string) => {
+      counters.toolCallsRequested += 1;
+      void safeProgressUpdate(job.id, {
+        stage: "tool",
+        message: `Running tool ${name}`,
+        currentTool: name,
+        totalSteps: stepMeta?.totalSteps,
+        completedSteps: stepMeta?.completedSteps,
+        currentStep: stepMeta?.currentStep,
+        toolCallsRequested: counters.toolCallsRequested,
+        toolCallsCompleted: counters.toolCallsCompleted,
+        approvalsRequested: counters.approvalsRequested,
+        subAgentsStarted: counters.subAgentsStarted,
+        percent: computeRuntimePercent(counters.toolCallsRequested, counters.toolCallsCompleted),
+        lastEventAt: new Date().toISOString(),
+        lastEventType: "tool_call_requested",
+      });
+    },
+    onToolResult: (_toolCallId: string, name: string) => {
+      counters.toolCallsCompleted += 1;
+      void safeProgressUpdate(job.id, {
+        stage: "tool",
+        message: `Completed tool ${name}`,
+        currentTool: name,
+        totalSteps: stepMeta?.totalSteps,
+        completedSteps: stepMeta?.completedSteps,
+        currentStep: stepMeta?.currentStep,
+        toolCallsRequested: counters.toolCallsRequested,
+        toolCallsCompleted: counters.toolCallsCompleted,
+        approvalsRequested: counters.approvalsRequested,
+        subAgentsStarted: counters.subAgentsStarted,
+        percent: computeRuntimePercent(counters.toolCallsRequested, counters.toolCallsCompleted),
+        lastEventAt: new Date().toISOString(),
+        lastEventType: "tool_call_completed",
+      });
+    },
+    onIntervention: (notice: InterventionNotice) => {
+      void safeProgressUpdate(job.id, {
+        ...progressFromIntervention(notice, counters),
+        totalSteps: stepMeta?.totalSteps,
+        completedSteps: stepMeta?.completedSteps,
+        currentStep: stepMeta?.currentStep,
+      });
+    },
+    onSwarmState: (state: SwarmState) => {
+      void safeProgressUpdate(job.id, {
+        ...progressFromSwarmState(state, counters),
+        totalSteps: stepMeta?.totalSteps,
+        completedSteps: stepMeta?.completedSteps,
+        currentStep: stepMeta?.currentStep,
+      });
+    },
+  };
+}
+
+function mergeWorkflowOutputs(outputs: TurnOutput[], steps: NonNullable<ClaimedSceneJob["payload"]["steps"]>): TurnOutput {
+  const combinedResponse = outputs.map((output, index) => {
+    const label = steps[index]?.label ?? `Step ${index + 1}`;
+    return `## ${label}\n\n${output.response.trim()}`.trim();
+  }).join("\n\n").trim();
+
+  return {
+    response: combinedResponse,
+    toolCallsExecuted: outputs.reduce((sum, output) => sum + output.toolCallsExecuted, 0),
+    guardrailEvents: outputs.flatMap((output) => output.guardrailEvents),
+    usage: outputs.reduce((usage, output) => ({
+      promptTokens: usage.promptTokens + output.usage.promptTokens,
+      completionTokens: usage.completionTokens + output.usage.completionTokens,
+      totalTokens: usage.totalTokens + output.usage.totalTokens,
+    }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 }),
+    blocked: outputs.some((output) => output.blocked),
+    swarmState: outputs.at(-1)?.swarmState,
+    performance: aggregatePerformance(outputs.map((output) => output.performance).filter((value): value is TurnPerformanceMetrics => Boolean(value))),
+  };
+}
+
+function aggregatePerformance(metrics: TurnPerformanceMetrics[]): TurnPerformanceMetrics | undefined {
+  if (metrics.length === 0) return undefined;
+  return {
+    turnDurationMs: metrics.reduce((sum, entry) => sum + entry.turnDurationMs, 0),
+    firstModelResponseMs: metrics.find((entry) => entry.firstModelResponseMs !== undefined)?.firstModelResponseMs,
+    llmCalls: metrics.reduce((sum, entry) => sum + entry.llmCalls, 0),
+    llmTimeMs: metrics.reduce((sum, entry) => sum + entry.llmTimeMs, 0),
+    toolCallsRequested: metrics.reduce((sum, entry) => sum + entry.toolCallsRequested, 0),
+    toolExecutionTimeMs: metrics.reduce((sum, entry) => sum + entry.toolExecutionTimeMs, 0),
+    systemPromptChars: metrics.reduce((sum, entry) => sum + entry.systemPromptChars, 0),
+    collapsedHistoryMessages: metrics.reduce((sum, entry) => sum + entry.collapsedHistoryMessages, 0),
+    collapsedHistoryChars: metrics.reduce((sum, entry) => sum + entry.collapsedHistoryChars, 0),
+    promptChars: metrics.reduce((sum, entry) => sum + entry.promptChars, 0),
+    completionChars: metrics.reduce((sum, entry) => sum + entry.completionChars, 0),
+    toolIterations: metrics.reduce((sum, entry) => sum + entry.toolIterations, 0),
+    finishReason: metrics.at(-1)?.finishReason ?? "workflow_completed",
+    blocked: metrics.some((entry) => entry.blocked),
+  };
+}
+
 function buildApprovalCallback(
   job: ClaimedSceneJob,
   controller: AbortController,
-  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number }
+  counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
+  approvalChannelOverride?: string,
 ): ((toolName: string, args: Record<string, unknown>) => Promise<boolean>) | undefined {
-  const approvalChannel = job.payload.approvalChannel;
+  const approvalChannel = approvalChannelOverride ?? job.payload.approvalChannel;
   if (!approvalChannel || !job.payload.humanInLoopSteps?.length) return undefined;
 
   return async (toolName: string, args: Record<string, unknown>) => {
@@ -298,6 +451,17 @@ function buildApprovalCallback(
       subAgentsStarted: counters.subAgentsStarted,
       lastEventAt: new Date().toISOString(),
       lastEventType: "approval_requested",
+    });
+
+    publishNotification({
+      title: "Approval required",
+      message: `${job.sceneName} is waiting for approval to run ${toolName}.`,
+      level: "warn",
+      category: "approval",
+      sessionId: job.sessionId,
+      jobId: job.id,
+      targetPath: "/jobs",
+      sticky: true,
     });
 
     const approved = await raceAgainstAbort(

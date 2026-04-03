@@ -20,6 +20,7 @@ import {
   sweepAnomaliesNow,
   resetWardenForTests,
   getWardenStats,
+  isAgentMessagingSuppressed,
   startWarden,
   stopWarden,
 } from "../agent/warden.js";
@@ -186,6 +187,30 @@ describe("Warden — rate limit flood detection", () => {
     expect(hit).toBeDefined();
     expect(hit?.severity).toBe("warn");
     expect(hit?.subject).toBe("whatsapp:spammer");
+  });
+});
+
+describe("Warden — direct agent message flood detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("suppresses direct messaging when an agent floods messages", () => {
+    for (let i = 0; i < 20; i++) {
+      fireEvent({ type: "agent_message_sent", sessionId: "sub:parent", data: { fromAgent: "planner", recipientCount: 1 } });
+    }
+
+    const alerts = sweepAnomaliesNow();
+    const hit = alerts.find(a => a.type === "agent_message_flood");
+    expect(hit).toBeDefined();
+    expect(hit?.action).toBe("message_suppressed");
+    expect(isAgentMessagingSuppressed("sub:parent", "planner")).toBe(true);
   });
 });
 

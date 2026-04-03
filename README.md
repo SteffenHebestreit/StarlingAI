@@ -5,21 +5,18 @@
     </td>
     <td valign="middle" width="75%">
       <strong style="font-size:1.4em;">StarlingAI</strong><br/>
-      <sub>GUARDED AGENT SWARM &nbsp;·&nbsp; <em>v0.2.0</em></sub>
+      <sub>GUARDED AGENT SWARM &nbsp;&middot;&nbsp; <em>v0.3.0</em></sub>
     </td>
   </tr>
 </table>
 
 **A general-purpose AI agent swarm that tackles any task by composing the right specialists — not a collection of one-off pipelines.**
 
-<a href="docs/architecture.md">Architecture</a> ·
-<a href="docs/agents.md">Agents</a> ·
-<a href="docs/api.md">API</a> ·
-<a href="docs/model-serving.md">Model Serving</a> ·
-<a href="docs/security.md">Security</a> ·
-<a href="docs/pentest.md">Pentesting</a> ·
-<a href="docs/strix-halo.md">Strix Halo</a> ·
-<a href="QUICKSTART.md">Quick Start</a>
+<a href="docs/architecture.md">Architecture</a> &middot;
+<a href="docs/api.md">API</a> &middot;
+<a href="docs/security.md">Security</a> &middot;
+<a href="docs/tool-tiers.md">Tool Tiers</a> &middot;
+<a href="http://localhost:3002">Tutorials</a>
 
 ---
 
@@ -63,6 +60,12 @@ Tasks are not assigned to fixed agents. Each task triggers the creation of a spe
 
 Independent sub-tasks run concurrently. Dependency-aware task graphs handle sequencing. Outcome-weighted routing improves specialist selection over time — the swarm gets smarter the more it works.
 
+### Bounded Self-Improvement
+
+The swarm is allowed to improve itself, but only inside non-crucial boundaries that preserve the base philosophy above. It can refine its own system-prompt, update durable user and workflow memory, create new sub-agents, improve existing sub-agents, and adjust which approved tools those sub-agents may use. This self-improvement is meant to strengthen the swarm's local rules and specialist fit over time, not to replace the guarded architecture or bypass operator intent.
+
+The boundary is strict: the swarm must never read secrets or stored credentials into model context. Credentials may only be used through dedicated tool calls such as `site_fill_credentials` or `computer_type_credential`, under the existing approval and audit rules. Self-improvement may tune behavior, memory, prompts, and agent composition, but it must never weaken the guarded sandbox, tool-tier policy, approval gates, or the core README philosophy that speed and autonomy do not come at the cost of control.
+
 ### Guarded Sandboxing
 
 Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-only`, and `--network none` enforced. A four-layer guardrail stack (input scanner → tool-tier check → output scanner → final redactor) ensures speed and autonomy never come at the cost of control.
@@ -75,6 +78,7 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Ephemeral Agents** — When no specialist fits, the swarm architects and launches a purpose-built agent on demand. Successful ones are promoted to the permanent catalog.
 - **Parallel Delegation** — Independent sub-tasks run concurrently. Task graphs handle complex dependencies with per-node fallbacks.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
+- **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
 - **Multimodal Tools** — Speech-to-text, speech synthesis, image analysis, file-to-markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
 - **Credential-Safe Automation** — Stored site credentials never need to enter the LLM context. Agents inspect login metadata with `get_site_credentials` and inject secrets only through `site_fill_credentials` or `computer_type_credential` under approval.
 - **Remote Access Sidecar** — Raw VNC, RDP, and SSH sessions can run through a dedicated `computer-remote` service so native desktop tooling stays isolated from the main gateway.
@@ -82,9 +86,8 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Multi-Channel Messaging** — Webchat, Telegram, Slack, Discord, WhatsApp, and email with consistent delivery SLOs, dead-letter queues, and retry with backoff.
 - **Warden Monitoring** — A background warden detects tool storms, escape attempts, failure spikes, and SLO breaches in real time.
 - **Live Observability** — Token streaming to the dashboard via AG-UI SSE, full per-turn performance telemetry, and a complete audit trail in JSONL + PostgreSQL.
-- **Model Routing UI** — The dashboard can now edit separate OpenAI-compatible endpoints for the orchestrator, embeddings, reranker, and guard moderation roles, with live model-advertisement health checks.
 - **Scenes** — Reusable workflows launchable from chat, the dashboard, or webhooks and tracked as async jobs.
-- **Penetration Testing** — Full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit and more via `pentest_exec`) wrapped in a scope-enforcing swarm. A mandatory authorization workflow prevents any active scanning without written consent. Partial results are preserved on timeout. Loop detection and tool-suggestion hints prevent agents getting stuck. Findings are compiled into a structured Markdown report.
+- **Penetration Testing** — Full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 
 ---
 
@@ -93,30 +96,78 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 ```bash
 git clone https://github.com/SteffenHebestreit/StarlingAI starlingai
 cd starlingai
-node scripts/setup.mjs   # generates .env secrets (first run only)
-cp starlingai.example.json starlingai.json
-./start.sh               # builds images + starts all core services
+pnpm install
+pnpm sai setup        # check prerequisites, generate .env secrets
+pnpm sai start        # build config, build images, start services
 ```
 
-Windows CMD: `start.bat`
+Repo-local launchers are available too: use `./sai ...` in Bash/WSL or `./sai ...` / `.\sai ...` from the repository root on Windows PowerShell.
 
-Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup guide. The gateway listens on `http://localhost:8765`.
+Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup tutorials. The gateway listens on `http://localhost:8765`.
 
-The bundled multimodal stack defaults to Qwen3 across the board: Qwen3.5 for agent reasoning, Qwen3-ASR for speech-to-text, and Qwen3-TTS for speech synthesis with optional voice cloning.
+### Internal Domain / HAProxy
+
+For an internal domain behind HAProxy or another reverse proxy, publish the web entrypoint on port `3001` and route the domain to that service. The bundled Nginx layer already forwards `/api` and `/ws` to the gateway, so the browser can stay same-origin and the dashboard will auto-use the current host for WebSocket and REST calls.
+
+```haproxy
+frontend starling_https
+  bind *:443 ssl crt /etc/haproxy/certs/starlingai.pem
+  acl host_starling hdr(host) -i ai.internal.example
+  use_backend starling_web if host_starling
+
+backend starling_web
+  option http-server-close
+  server starling 127.0.0.1:3001 check
+```
+
+If you expose the gateway directly on a separate origin instead of going through the web entrypoint, update the gateway CORS allowlist first.
 
 ### Optional services
 
 ```bash
-./extras.sh pentest on   # start Kali Linux pentest service
-./extras.sh image on     # start image-generation service
-./start.sh --computer-desktop  # start the bundled VNC desktop for computer-use flows
-./extras.sh all on       # start both
-./extras.sh status       # show what's running
+pnpm sai start --pentest           # include Kali Linux pentest service
+pnpm sai start --computer-desktop  # include VNC desktop for computer-use
+pnpm sai start --all               # all remaining optional services
 ```
 
-Windows CMD: `extras.bat pentest on` etc. For the bundled desktop, use `start.bat --computer-desktop`.
+### Other CLI commands
 
-> See [QUICKSTART.md](QUICKSTART.md) for detailed setup steps and configuration options.
+```bash
+pnpm sai stop                  # stop all services
+pnpm sai stop --volumes        # stop + wipe all data
+pnpm sai start --build         # force rebuild images
+pnpm sai config build          # recompile config/ + workspace/ → starlingai.json
+pnpm sai token                 # generate dashboard login JWT
+pnpm sai health                # check service health endpoints
+pnpm security:pack             # verify packed artifacts contain no .map or debug files
+pnpm sai dev gateway           # start gateway in dev mode
+pnpm sai dev web               # start web UI in dev mode
+```
+
+---
+
+## Configuration — Two-Zone Layout
+
+Configuration is split into two directories with a clear separation of concerns:
+
+```
+config/                  # Infrastructure — you set this up once
+  providers/             # Model backends (LM Studio, Ollama, Anthropic)
+  gateway/               # Gateway port, guardrails, sandbox policy
+  channels/              # Messaging (Telegram, Slack, Discord, etc.)
+  multimodal/            # STT, TTS, image generation service URLs
+  integrations/          # n8n, webhooks, sites, approval channels
+  tooling/               # Retrieval, computer-use, pentest, MCP servers
+
+workspace/               # Agent-tunable — the swarm self-improves here
+  agents/                # Agent definitions, sub-agent prompts & models
+  scenes/                # Workflow / mission definitions
+  runtime/               # runtime.overrides.json (live config changes)
+```
+
+**The agent cannot modify `config/`.** Only paths under `workspace/` (agents, sub-agents, scenes) are mutable by the config-assistant and dashboard.
+
+Run `pnpm sai config build` to compile both zones into `starlingai.json` (the artifact Docker mounts). See [config/README.md](config/README.md) and [workspace/README.md](workspace/README.md) for details.
 
 ---
 
@@ -125,15 +176,14 @@ Windows CMD: `extras.bat pentest on` etc. For the bundled desktop, use `start.ba
 | Document | Purpose |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | System layout, swarm principles, and runtime boundaries |
-| [docs/configuration.md](docs/configuration.md) | `starlingai.json` schema and environment variables |
-| [docs/model-serving.md](docs/model-serving.md) | Running unsupported Qwen checkpoints on separate OpenAI-compatible servers |
-| [docs/agents.md](docs/agents.md) | Agent catalog, routing, ephemeral agents, and evaluation |
-| [docs/channels.md](docs/channels.md) | Channel support matrix, policies, runtime behavior, and APIs |
-| [docs/channel-setup.md](docs/channel-setup.md) | Practical setup steps for each channel |
 | [docs/api.md](docs/api.md) | REST, WebSocket, scene job, approval, and A2A interfaces |
+| [docs/channels.md](docs/channels.md) | Channel capability matrix and delivery model |
+| [docs/channel-setup.md](docs/channel-setup.md) | Channel onboarding and configuration walkthrough |
+| [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
 | [docs/security.md](docs/security.md) | Auth, credential storage, sandboxing, and audit behavior |
 | [docs/tool-tiers.md](docs/tool-tiers.md) | Hard-coded tool permission tiers and approval rules |
-| [docs/pentest.md](docs/pentest.md) | Kali Linux pentest swarm — setup, authorization workflow, tools, and agents |
+
+For setup guides, channel configuration, agent details, and more, see the **[interactive tutorials](http://localhost:3002)** (available after `pnpm sai start`).
 
 ---
 

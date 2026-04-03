@@ -2,6 +2,7 @@ import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { initPostgresAudit } from "./audit/postgres.js";
+import { flushAuditLog } from "./audit/logger.js";
 import { initProviders } from "./providers/index.js";
 import { childLogger } from "./logger.js";
 import { initMcpServers, shutdownMcpServers } from "./mcp/registry.js";
@@ -11,6 +12,7 @@ import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { loadConfig } from "./config/loader.js";
+import { stopAllCronJobs } from "./runtime/scheduler.js";
 
 import "./tools/filesystem.js";
 import "./tools/shell.js";
@@ -25,10 +27,18 @@ import "./tools/terraform.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/memory.js";
+import "./personality/service.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
 import "./tools/multimodal.js";
+import "./tools/document-output.js";
+import "./tools/computer-use.js";
 import "./tools/pentest.js";
+import "./tools/telegram.js";
+import "./tools/cron.js";
+import "./tools/http-request.js";
+import "./tools/git.js";
+import "./tools/messaging.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 const log = childLogger("scene-worker:main");
@@ -55,6 +65,8 @@ export async function main() {
     await stopManagedChannels();
     await shutdownMcpServers();
     await shutdownSceneJobStore();
+    stopAllCronJobs();
+    await flushAuditLog();
     process.exit(0);
   };
 

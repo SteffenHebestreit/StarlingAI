@@ -6,11 +6,9 @@ import type { LLMMessage } from "../providers/lmstudio.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
-import {
-  getAvailableDirectMainToolNames,
-  getAvailableOrchestrationToolNames,
-} from "./default-tools.js";
+import { sanitizeTranscriptContent } from "./sanitize-response.js";
 
 const log = childLogger("agent:session");
 
@@ -31,6 +29,7 @@ export interface TurnResult {
 
 export interface SessionHistoryMessage extends LLMMessage {
   timestamp: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SessionSummary {
@@ -51,7 +50,7 @@ export interface SessionTranscriptMessage {
   role: "system" | "user" | "assistant";
   content: string;
   timestamp: string;
-  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string }>;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
 }
 
 export interface SessionTranscriptPage {
@@ -182,7 +181,12 @@ export class AgentSession {
               .join(", ");
           } catch { /* leave raw */ }
           const result = resultMap.get(call.id) ?? "(no result)";
-          const resultSnippet = result.length > 500 ? result.substring(0, 500) + "…" : result;
+          // Delegation results carry sub-agent evidence that the orchestrator must
+          // relay faithfully.  A 500-char cap truncated evidence and caused
+          // hallucinations.  Use 2000 chars for delegation results, 500 for others.
+          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph)$/.test(call.function.name);
+          const snippetLimit = isDelegation ? 2000 : 500;
+          const resultSnippet = result.length > snippetLimit ? result.substring(0, snippetLimit) + "…" : result;
           return `[Tool: ${call.function.name}(${argsStr}) → ${resultSnippet}]`;
         });
 
@@ -209,7 +213,7 @@ export class AgentSession {
         continue;
       }
 
-      collapsed.push(msg);
+      collapsed.push({ role: msg.role, content: msg.content ?? "" });
       i++;
     }
 
@@ -239,14 +243,14 @@ export class AgentSession {
     return this.workspacePath;
   }
 
-  addMessage(msg: LLMMessage): void {
+  addMessage(msg: LLMMessage & { metadata?: Record<string, unknown> }): void {
     this.history.push(withTimestamp(msg));
     this.touch();
     this.maybeTrimHistory();
     persistSessionStore();
   }
 
-  addMessages(msgs: LLMMessage[]): void {
+  addMessages(msgs: Array<LLMMessage & { metadata?: Record<string, unknown> }>): void {
     this.history.push(...msgs.map(withTimestamp));
     this.touch();
     this.maybeTrimHistory();
@@ -309,6 +313,13 @@ export class AgentSession {
     const previewSource = [...this.history].reverse().find((message) =>
       (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0,
     );
+    const preview = previewSource
+      ? sanitizeTranscriptContent(
+          previewSource.role,
+          previewSource.content,
+          Array.isArray((previewSource as { tool_calls?: unknown[] }).tool_calls) && (((previewSource as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
+        )
+      : undefined;
 
     return {
       id: this.id,
@@ -320,12 +331,12 @@ export class AgentSession {
       turns: this.turnCount,
       messageCount: this.history.length,
       lastMessageAt: this.history.at(-1)?.timestamp,
-      preview: previewSource?.content ? previewSource.content.slice(0, 160) : undefined,
+      preview: preview ? preview.slice(0, 160) : undefined,
     };
   }
 
   toTranscript(): SessionTranscriptMessage[] {
-    const transcript: SessionTranscriptMessage[] = [];
+    const raw: SessionTranscriptMessage[] = [];
     let index = 0;
 
     while (index < this.history.length) {
@@ -337,17 +348,21 @@ export class AgentSession {
 
       if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
         const results = new Map<string, string>();
+        const metadataByCallId = new Map<string, Record<string, unknown>>();
         let cursor = index + 1;
         while (cursor < this.history.length && this.history[cursor]?.role === "tool") {
           const toolMessage = this.history[cursor]!;
           if (toolMessage.tool_call_id) results.set(toolMessage.tool_call_id, toolMessage.content ?? "");
+          if (toolMessage.tool_call_id && toolMessage.metadata && typeof toolMessage.metadata === "object") {
+            metadataByCallId.set(toolMessage.tool_call_id, toolMessage.metadata);
+          }
           cursor += 1;
         }
 
-        transcript.push({
+        raw.push({
           id: `${this.id}:${index}`,
           role: "assistant",
-          content: message.content ?? "",
+          content: sanitizeTranscriptContent("assistant", message.content ?? "", true),
           timestamp: message.timestamp,
           toolCalls: message.tool_calls.map((toolCall) => {
             let args: Record<string, unknown> = {};
@@ -360,6 +375,7 @@ export class AgentSession {
               name: toolCall.function.name,
               args,
               result: results.get(toolCall.id),
+              metadata: metadataByCallId.get(toolCall.id),
             };
           }),
         });
@@ -367,13 +383,34 @@ export class AgentSession {
         continue;
       }
 
-      transcript.push({
+      raw.push({
         id: `${this.id}:${index}`,
         role: message.role,
-        content: message.content ?? "",
+        content: sanitizeTranscriptContent(message.role, message.content ?? "", false),
         timestamp: message.timestamp,
       });
       index += 1;
+    }
+
+    // Merge consecutive assistant entries that belong to the same turn.
+    // During a multi-iteration tool-use turn the history contains several
+    // assistant messages (one per LLM call) interleaved with tool results.
+    // The live UI shows them as one message — replicate that on reload.
+    const transcript: SessionTranscriptMessage[] = [];
+    for (const entry of raw) {
+      const prev = transcript[transcript.length - 1];
+      if (prev && prev.role === "assistant" && entry.role === "assistant") {
+        // Combine tool calls
+        if (entry.toolCalls?.length) {
+          prev.toolCalls = [...(prev.toolCalls ?? []), ...entry.toolCalls];
+        }
+        // Keep the last non-empty content (the final synthesis text)
+        if (entry.content) {
+          prev.content = entry.content;
+        }
+      } else {
+        transcript.push({ ...entry });
+      }
     }
 
     return transcript;
@@ -520,7 +557,7 @@ export function resetSessionsForTests(): void {
   persistSessionStore();
 }
 
-function withTimestamp(message: LLMMessage): SessionHistoryMessage {
+function withTimestamp(message: LLMMessage & { metadata?: Record<string, unknown> }): SessionHistoryMessage {
   return {
     ...message,
     timestamp: new Date().toISOString(),
@@ -613,6 +650,12 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
   if (hasSubAgent(config, "browser_agent")) {
     lines.push(`- Browser automation / site login → delegate_to_agent(agentName: "browser_agent", ...)${directFallbackNote}`);
   }
+  if (hasSubAgent(config, "mail_agent")) {
+    lines.push(`- Inbox triage / reading recent emails / drafting replies → delegate_to_agent(agentName: "mail_agent", ...)${directFallbackNote}`);
+  }
+  if (hasSubAgent(config, "productivity_agent")) {
+    lines.push(`- Notes / reminders / timers / follow-up tracking → delegate_to_agent(agentName: "productivity_agent", ...)${directFallbackNote}`);
+  }
   if (hasSubAgent(config, "vision_browser_analyst")) {
     lines.push(`- Browser evidence interpretation → delegate_to_agent(agentName: "vision_browser_analyst", ...)`);
   }
@@ -640,43 +683,45 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
 }
 
 function defaultSystemPrompt(workspacePath?: string): string {
-  const formatTool = (name: string) => `- **${name}**`;
-  const toolMode = getConfig().agents.mainAssistant.toolMode;
-  const directTools = getAvailableDirectMainToolNames(toolMode);
-  const orchestration = getAvailableOrchestrationToolNames(toolMode);
+  const config = getConfig();
+  const toolMode = config.agents.mainAssistant.toolMode;
   const delegateOnly = toolMode === "delegate_only";
   const orchestrationOnly = toolMode === "orchestration_only";
+  const customInstructions = config.agents.mainAssistant.customInstructions?.trim();
+  const personalityGuidance = formatMainAssistantPersonalityGuidance();
 
-  const toolSection = [
-    directTools.length
-      ? `## Direct Tools\nUse these yourself before delegating. Prefer them for repo inspection, workspace memory reads, file extraction, web access, browser steps, STT/TTS, image analysis, and approval-gated credential lookups when a site login is required.\n${directTools.map(formatTool).join("\n")}`
-      : "",
-    orchestration.length
-      ? `## Orchestration Tools\nUse these when the task genuinely needs a specialist or a multi-agent workflow.\n${orchestration.map(formatTool).join("\n")}`
-      : "",
-  ].filter(Boolean).join("\n\n");
+  const toolDiscoverySection = `## Tool Discovery
+- The runtime provides the real callable tool schemas separately. Use those definitions for exact tool names, parameters, and availability.
+- Do not invent tool names from memory or from older prompts.
+- ${delegateOnly ? "In this mode, routine direct execution is disabled. Use orchestration tools for work, but assistant_personality_view and assistant_personality_update remain available for self-profile management." : orchestrationOnly ? "In this mode, routine direct execution tools are unavailable. Use orchestration tools for work, but assistant_personality_view and assistant_personality_update remain available for self-profile management." : "In this mode, prefer direct tools for repository inspection, workspace memory, web access, browser steps, multimodal helpers, credential-safe login flows, and self-profile management before delegating."}
+- Use delegate_to_agent only when the task genuinely needs a specialist or a multi-agent workflow.
+- Use get_swarm_state when you need runtime progress, not as a substitute for tool discovery.`;
 
-  // List configured sub-agents inline so the LLM doesn't have to call list_agents first
-  const config = getConfig();
   const subAgentEntries = Object.entries(config.subAgents ?? {});
-  const subAgentSection = subAgentEntries.length > 0
-    ? `## Available Sub-Agents (use via delegate_to_agent ONLY)\nThese are agentName values for delegate_to_agent — they are NOT callable tools.\nExample: delegate_to_agent(agentName: "researcher", task: "...")\n\n${subAgentEntries.map(([name, cfg]) => {
-      const capabilityText = cfg.capabilities && cfg.capabilities.length > 0
-        ? ` [${cfg.capabilities.slice(0, 4).join(", ")}]`
-        : "";
-      return `- agentName="${name}": ${cfg.description}${capabilityText}`;
-    }).join("\n")}`
+  const agentDiscoverySection = subAgentEntries.length > 0
+    ? `## Agent Discovery\n${subAgentEntries.length} specialist sub-agents are configured. Prefer search_agents for discovery and routing instead of relying on a static catalog in the prompt. search_agents uses semantic ranking plus runtime history, so it can surface the best match even when agent names are non-obvious. Use list_agents only when the user explicitly asks for the full catalog or when you need to inspect every configured agent.`
+    : "## Agent Discovery\nNo specialist agents are configured. Use the direct tools available to you.";
+  const customInstructionsSection = customInstructions
+    ? `\n\n## Main Assistant Custom Instructions\n${customInstructions}`
     : "";
 
-  return `You are StarlingAI, a pragmatic AI assistant that can work directly with built-in tools and coordinate specialized sub-agents when needed.
+  return `You are StarlingAI, a pragmatic AI assistant whose primary role is planning, orchestration, and synthesis across specialized sub-agents.
 
 ## Core Principles
 - ${delegateOnly ? "You do not have direct execution tools in this mode. Use delegate_to_agent to hand work to the right specialist or coordinator." : orchestrationOnly ? "You do not have direct execution tools in this mode. Use orchestration tools to route work to specialists and coordinators." : "Prefer direct tools first for routine work you can complete yourself"}
 - ${delegateOnly || orchestrationOnly ? "Use sub-agents as the execution layer. Complex work should flow through cooperating specialists that exchange facts via shared session memory." : "Delegate only when the task genuinely needs a specialist agent or a multi-step swarm"}
+- You are responsible for task decomposition, semantic agent discovery, agent selection, task wording, sequencing, parallelism, and final synthesis
+- You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints. Specialists execute work; they do not negotiate with the user
+- When a delegated step produces meaningful confirmed results and more work is still required, provide a concise user-facing progress update before triggering the next wave of actions
 - Be helpful, accurate, and concise in your final synthesized response
+- When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
 - If the request is missing necessary identifiers, scope, or target details, ask one concise clarifying question instead of guessing
+
+${customInstructionsSection.trim()}
+
+${personalityGuidance}
 
 ## Response Format
 - **Always respond in Markdown.** Use headings (##, ###), bullet lists, numbered lists, bold/italic, inline code, fenced code blocks with language tags (e.g. \`\`\`python), and tables where they add clarity.
@@ -691,7 +736,9 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - ${delegateOnly ? "If a task needs multiple specialists, delegate to a coordinator agent that has parallel_delegate or run_task_graph available." : "If two sub-tasks are independent, prefer parallel_delegate so the swarm can work concurrently."}
 - ${delegateOnly ? "For dependency-heavy missions, delegate to a coordinator agent that can run a task graph and pass shared facts across specialists." : "For dependency-heavy missions, prefer run_task_graph so the swarm can schedule ready nodes and respect prerequisites."}
 - If one specialist fails or returns a weak result, immediately route the sub-task to the next best candidate or create a narrowly scoped ephemeral agent.
-- If a delegated agent asks the user for clarification, authorization, or missing scope details, surface that request to the user once and stop delegating until they answer.
+- If a delegated agent asks for clarification, authorization, approval, or missing scope details, surface that request to the user yourself once and stop delegating until they answer.
+- Do not let sub-agents interact with the user directly. Convert their needs into one concise question or approval request from the main assistant.
+- When additional work remains after one or more delegated results, summarize the confirmed intermediate results, say what remains open, and then continue orchestration only if another action is justified.
 - For resilient sequential delegation: pass fallbackAgents=["alt1","alt2"] to delegate_to_agent — the runtime will automatically try each fallback before surfacing an error. Use this whenever a task has obvious substitutes.
 - Preserve swarm cohesion: synthesize partial results into one answer instead of exposing fragmented agent chatter.
 - **Recurring failure detection**: If the same tool or agent has failed with the same error twice in the current turn, STOP trying that approach entirely. Use a different agent, a different tool, or synthesize from partial results instead.
@@ -699,13 +746,17 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - **Always synthesize**: Even if sub-agents failed or data is incomplete, you MUST return a useful response. Use what you have. Partial answers with clear caveats are better than silence.
 
 ## Tool Use Discipline (IMPORTANT)
-- ${delegateOnly ? "Use delegate_to_agent for every non-trivial action. Pick a specialist directly when obvious; otherwise route to a coordinator specialist that can break the task down further." : orchestrationOnly ? "Use orchestration tools to route every non-trivial action to specialists. Do not attempt to solve web or browser tasks in the main assistant." : "For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating."}
+- ${delegateOnly ? "Use delegate_to_agent for every non-trivial action. Pick a specialist directly when obvious; otherwise route to a coordinator specialist that can break the task down further." : orchestrationOnly ? "Use orchestration tools to route every non-trivial action to specialists. The main assistant is the planner and reviewer, not the worker." : "For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating."}
 - ${delegateOnly || orchestrationOnly ? "When one agent discovers reusable evidence, ensure it publishes the result with share_finding so sibling agents can read it via read_shared_facts." : "For mixed tasks, do the direct-tool portion first, then delegate only the remaining specialist work."}
 - ${delegateOnly || orchestrationOnly ? "Browser-heavy tasks should go to browser specialists; interpretation-heavy follow-up should go to evidence or summarization specialists, not back to the same browser loop." : "Do NOT delegate just to read repository files, fetch a web page, inspect one screenshot, or navigate a straightforward browser flow."}
 - ${delegateOnly || orchestrationOnly ? "For multi-step web retrieval, prefer a coordinator agent that can combine researcher, browser_agent, and evidence_analyst outputs." : "For simple login or form tasks, use get_site_credentials only for metadata, then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not type stored credentials manually. Delegate browser_agent only for longer or fragile browser workflows."}
 - ${delegateOnly || orchestrationOnly ? "File or image interpretation should be routed to a specialist with analyze_image or extract_file_content and access to shared facts." : "For file or image attachments, prefer extract_file_content or analyze_image first; delegate only if the result still needs specialist follow-on work."}
+- ${delegateOnly || orchestrationOnly ? "If a delegated result implies a user decision, pause orchestration and ask the user directly from the main assistant instead of passing that interaction back into the swarm." : "If a delegated result implies a user decision, ask the user directly before continuing."}
+- assistant_personality_view and assistant_personality_update are reserved for durable voice guidance. Use them only for personality changes, never for safety policy or authorization changes.
 - Requests to access, control, or work on the user's own computer, workstation, desktop, editor, or remote Windows PC are computer-use tasks, not pentest tasks.
 - For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.
+- Requests asking how the pentest swarm works, what methodology or plan it follows, how the pentest coordinator would approach an engagement, or whether a prior pentest answer was correct are planning and prompt-analysis tasks, not live pentest engagements.
+- For those pentest methodology or prompt-analysis requests, inspect the local pentest config and docs or delegate to pentest_coordinator in maintenance mode. Do not ask for authorization or scope unless the user explicitly switches to running a real assessment.
 - If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.
 - If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.
 - For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.
@@ -715,7 +766,7 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - Maximum 1 create_ephemeral_agent call per turn, and only when existing agents are clearly insufficient.
 - Simple questions that don't need external data must be answered directly — do NOT delegate.
 - Once you have enough information from delegations, STOP calling tools and write your final answer.
-- Do NOT call list_agents every turn — the available agents are listed below.
+- Do NOT call list_agents every turn — prefer search_agents for routing. Call list_agents only when the user explicitly wants the full catalog or when you must inspect every configured agent.
 - Call get_swarm_state when you need to inspect current swarm progress instead of re-planning from scratch.
 - When unsure which agent handles a task, call search_agents first — it finds the best match even if you don't know the exact name or query is in a non-English language.
 - **NEVER pass minConfidence="high" to search_agents. Always use the default "medium". Only use "low" if "medium" returns no results.**
@@ -731,9 +782,9 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - **If a sub-agent fails with a clear actionable error (not found, permission denied, wrong tool), delegate to the next best alternative. But exhaustion-type failures are terminal — synthesize, do not retry.**
 - **After search_agents returns candidates, immediately call delegate_to_agent with the top result — do NOT describe what you plan to do.**
 
-${subAgentSection}
+${agentDiscoverySection}
 
-${toolSection}
+${toolDiscoverySection}
 
 ## Orchestration Strategy
 Use these only when direct tools are not enough. All of these require delegate_to_agent(agentName: "...", task: "..."):

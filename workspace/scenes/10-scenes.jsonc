@@ -1,0 +1,153 @@
+{
+  "scenes": {
+    "apply_jobs": {
+      "description": "Run a browser-assisted application workflow for one approved freelance lead.",
+      "task": "Use web_task_coordinator to review one approved lead, gather any missing context, and delegate browser submission steps only when stored credentials exist for the target site and secure credential fill has been approved.",
+      "webhookKey": "$SCENE_APPLY_JOBS_KEY",
+      "allowedAgents": [
+        "web_task_coordinator",
+        "browser_agent",
+        "researcher",
+        "summarizer"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials",
+        "mcp__playwright__browser_navigate"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "minRating": {
+          "description": "Minimum lead rating to accept",
+          "default": "0.7"
+        }
+      }
+    },
+    "source_backed_paper": {
+      "description": "Produce a paper or report grounded in official sources and verified citations.",
+      "task": "Use document_intake first when the input includes attached reports or files, citation_researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "allowedAgents": [
+        "document_intake",
+        "citation_researcher",
+        "evidence_analyst",
+        "paper_author",
+        "source_verifier",
+        "researcher",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "outputStyle": {
+          "description": "Requested style or citation format",
+          "default": "technical report with inline references"
+        }
+      }
+    },
+    "verified_research_brief": {
+      "description": "Produce a concise fact-checked research brief with named sources and explicit unresolved uncertainties.",
+      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery, citation_researcher for authoritative references when needed, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
+      "allowedAgents": [
+        "document_intake",
+        "researcher",
+        "citation_researcher",
+        "evidence_analyst",
+        "source_verifier",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Intended audience for the brief",
+          "default": "technical stakeholder"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable sources available and call out publication dates"
+        }
+      }
+    },
+    "meeting_briefing_packet": {
+      "description": "Produce a concise meeting brief or handoff packet from attached material, prior findings, and project context.",
+      "task": "Use document_intake first when source material includes files or long notes, data_analyst for tabular attachments, evidence_analyst to reconcile the evidence ledger, policy_compliance_reviewer when approvals or constraints matter, and meeting_briefing_agent to produce the final brief or handoff packet. Use qa_guard when the packet needs an explicit verification pass.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "evidence_analyst",
+        "policy_compliance_reviewer",
+        "meeting_briefing_agent",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Target audience for the packet",
+          "default": "project stakeholders"
+        },
+        "outputFormat": {
+          "description": "Preferred delivery format",
+          "default": "markdown brief with actions, decisions, and open risks"
+        }
+      }
+    },
+    "code_review": {
+      "description": "Git-based code review workflow: inspect changes, analyze quality, and produce a structured review report.",
+      "task": "Use git_developer to inspect the current diff and recent commits, code_analyst to review code quality and identify issues, qa_guard to verify the findings, and summarizer to produce the final review report. When a target branch or commit range is specified, use git_diff with the appropriate ref parameter.",
+      "allowedAgents": [
+        "git_developer",
+        "code_analyst",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "targetRef": {
+          "description": "Git ref, branch, or commit range to review",
+          "default": "HEAD~5..HEAD"
+        },
+        "focusAreas": {
+          "description": "Specific areas to focus on (security, performance, style, logic)",
+          "default": "all"
+        }
+      }
+    },
+    "api_test_suite": {
+      "description": "Test and validate API endpoints with structured request/response analysis and documentation.",
+      "task": "Use api_integrator to execute HTTP requests against the target API, researcher to gather API documentation if needed, code_analyst to review response schemas, and qa_guard to validate the test results. Produce a structured test report with pass/fail status, response details, and identified issues.",
+      "allowedAgents": [
+        "api_integrator",
+        "researcher",
+        "code_analyst",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "baseUrl": {
+          "description": "Base URL of the API to test",
+          "default": ""
+        },
+        "authMethod": {
+          "description": "Authentication method (bearer, api-key, basic, none)",
+          "default": "none"
+        }
+      }
+    },
+    "multi_channel_broadcast": {
+      "description": "Draft and send a coordinated message across multiple communication channels with platform-appropriate formatting.",
+      "task": "Use summarizer or paper_author to draft the core message based on the user's input and any shared evidence, then notification_agent to send platform-adapted versions to the requested channels. Use qa_guard to review the draft before sending when accuracy is critical.",
+      "allowedAgents": [
+        "notification_agent",
+        "summarizer",
+        "paper_author",
+        "qa_guard"
+      ],
+      "params": {
+        "channels": {
+          "description": "Comma-separated list of target channels (telegram, slack, discord, email)",
+          "default": "telegram"
+        },
+        "tone": {
+          "description": "Message tone (formal, casual, urgent, informational)",
+          "default": "informational"
+        }
+      }
+    }
+  }
+}

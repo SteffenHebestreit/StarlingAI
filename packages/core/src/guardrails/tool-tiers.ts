@@ -118,9 +118,21 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  export_workspace_artifact: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Expose an existing workspace file or folder as a downloadable chat artifact",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   memory_search: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Search RAG memory store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  assistant_personality_view: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read the persistent main-assistant personality profile",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -139,6 +151,78 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   workspace_search: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Full-text keyword search across workspace text files",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  git_status: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Show working tree status (porcelain v2)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  git_log: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Show commit history with optional path and count filters",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  git_diff: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Show diff of staged, unstaged, or between refs",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0/1: Agent data store ─────────────────────────────────────────
+  agent_store_read: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read temporary data from the agent data store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  agent_store_write: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write temporary data to the agent data store (24h TTL)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  agent_store_delete: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete temporary data from the agent data store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0/2/3: Tool development ────────────────────────────────────────
+  tool_dev_start: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Start a tool development session in the Docker sandbox",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  tool_dev_test: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Run tests against tool code in the Docker sandbox",
+    requiresPerCallApproval: false,
+    requiresSandbox: true,
+  },
+  tool_dev_submit: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Submit a tested tool for human approval and deployment",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0/1: Self-improvement ──────────────────────────────────────────
+  request_new_capability: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Request development of a new tool to fill a capability gap",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  list_capability_gaps: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List detected capability gaps and their status",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -174,6 +258,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  memory_promote: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Promote session or agent memory into durable workspace memory",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  memory_compact: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Compact and deduplicate durable workspace memory",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  assistant_personality_update: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Update the persistent main-assistant personality profile",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   synthesize_speech: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate speech audio and save it inside the workspace",
@@ -186,9 +288,21 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  generate_chart_html: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate an HTML chart report and save it inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   share_finding: {
     tier: ToolTier.ONE_WRITE,
     description: "Publish a finding into shared swarm memory for sibling agents",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  send_agent_message: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Queue a direct message for another agent in the current swarm session",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -233,6 +347,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   run_script: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Run script file in Docker sandbox",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  http_request: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Make an HTTP request to a URL (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  git_commit: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Stage files and create a git commit",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  git_checkout: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Switch or create branches, restore files",
     requiresPerCallApproval: true,
     requiresSandbox: true,
   },
@@ -286,6 +418,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   pentest_report: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate a structured pentest report from collected findings and save it to the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_document: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate and save a workspace document as Markdown, text, HTML, or JSON",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_pdf: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate and save a simple PDF document in the workspace",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -351,6 +495,162 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   cron_create: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Create scheduled cron task",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  cron_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List active cron jobs",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  cron_remove: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Stop and remove a cron job",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  reminder_create: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a one-time in-memory reminder notification",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  reminder_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List active reminders for the current session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  reminder_remove: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Remove a scheduled reminder",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  timer_start: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Start a one-time in-memory timer notification",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  timer_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List active timers for the current session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  timer_cancel: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Cancel an active timer",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  git_clone: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Clone a remote repository (HTTPS only, network access required)",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  send_slack: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Send a message to a Slack channel or DM",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  send_discord: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Send a message to a Discord channel",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  send_email: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Send an email via configured SMTP",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  mail_list_accounts: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List configured mail accounts from the headless mail service",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_list_mailboxes: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List mailboxes for a configured mail account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_search: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search messages across one or more configured mail accounts",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_read: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read a specific mail message by account, mailbox, and UID",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_list_unread: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List unread messages across one or more configured mail accounts",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_get_draft: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read a prepared mail draft from the headless mail service",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_prepare_draft: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a draft email for a specific configured mail account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_update_draft: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Update an existing mail draft",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_categorize: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Persist local categories and notes for specific mail messages",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_create_mailbox: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a mailbox or folder for a configured mail account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_delete_mailbox: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete an empty mailbox or folder for a configured mail account",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  mail_move: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Move one or more mail messages into another mailbox or folder",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_delete: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete or trash one or more mail messages from a configured mail account",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  mail_send_draft: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Send a prepared mail draft through the configured mail account",
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
@@ -609,6 +909,16 @@ export function getToolTier(toolName: string): ToolTierDef {
       description: `MCP bridge: ${toolName}`,
       requiresPerCallApproval: true,
       requiresSandbox: false,
+    };
+  }
+
+  // Self-developed dynamic tools: selfdev__<name> → Tier 2, sandboxed, per-call approval
+  if (/^selfdev__[a-z0-9_]+$/i.test(toolName)) {
+    return {
+      tier: ToolTier.TWO_EXECUTE,
+      description: `Self-developed tool: ${toolName}`,
+      requiresPerCallApproval: true,
+      requiresSandbox: true,
     };
   }
 

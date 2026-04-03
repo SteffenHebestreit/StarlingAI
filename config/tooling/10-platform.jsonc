@@ -1,0 +1,89 @@
+{
+  "retrieval": {
+    "search": {
+      "backend": "searxng",
+      "searxngBaseUrl": "http://search.k2o",
+      "timeoutMs": 12000
+    }
+  },
+  "computerUse": {
+    "enabled": true,
+    "adapters": {
+      "local_vscode": {
+        "codePath": "code"
+      }
+    },
+    "remoteAccessService": {
+      "baseUrl": "http://computer-remote:8890",
+      "authToken": "$SAI_COMPUTER_REMOTE_TOKEN",
+      "timeoutMs": 20000,
+      "label": "Remote access sidecar"
+    },
+    "nodes": {
+      "desktop": {
+        "adapter": "remote_vnc",
+        "host": "computer-desktop",
+        "port": 5901,
+        "protocol": "vnc",
+        "credentials": "starling",
+        "label": "Ephemeral VNC desktop"
+      },
+      "win-workstation": {
+        "adapter": "remote_rdp",
+        "host": "10.10.0.2",
+        "port": 3389,
+        "protocol": "rdp",
+        "credentials": "steffen:w778323",
+        "displayResolution": "1920x1080",
+        "label": "Windows PC (10.10.0.2)"
+      }
+    },
+    "recordingEnabled": true
+  },
+  "infrastructure": {
+    "automation": {
+      "profiles": {
+        "local_cli": {
+          "type": "local-cli",
+          "terraformBinary": "terraform",
+          "ansibleBinary": "ansible",
+          "ansiblePlaybookBinary": "ansible-playbook"
+        }
+      }
+    },
+    "virtualization": {
+      "profiles": {
+        "lab_proxmox": {
+          "type": "proxmox",
+          "apiUrl": "https://proxmox.example.com:8006",
+          "node": "pve-01",
+          "tokenId": "root@pam!starlingai",
+          "tokenSecret": "$PROXMOX_TOKEN_SECRET"
+        }
+      }
+    }
+  },
+  "pentest": {
+    "serviceUrl": "http://kali-pentest:5010"
+  },
+  "mcp": {
+    "servers": {
+      "playwright": {
+        "transport": "docker",
+        "image": "mcp/playwright:latest",
+        "network": "bridge",
+        "autoStart": true
+      },
+      "filesystem": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/workspace"
+        ],
+        "autoStart": true
+      }
+    }
+  }
+}

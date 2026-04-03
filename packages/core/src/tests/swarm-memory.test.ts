@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  appendAgentMessage,
+  consumeAgentMessages,
   writeSharedFact,
   readSharedFact,
   readAllFacts,
@@ -87,6 +89,46 @@ describe("Collective Memory — partial results", () => {
   });
 });
 
+describe("Collective Memory — direct agent messages", () => {
+  afterEach(async () => { await resetSharedMemoryForTests(); });
+
+  it("queues and consumes direct messages for the target agent", async () => {
+    await appendAgentMessage({
+      sessionId: "sess-msg",
+      id: "m1",
+      fromAgent: "researcher",
+      toAgent: "coder",
+      content: "Use the v2 API route",
+      ts: new Date().toISOString(),
+    });
+
+    const messages = await consumeAgentMessages("sess-msg", "coder");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.fromAgent).toBe("researcher");
+    expect(messages[0]?.content).toContain("v2 API");
+
+    const consumedAgain = await consumeAgentMessages("sess-msg", "coder");
+    expect(consumedAgain).toHaveLength(0);
+  });
+
+  it("does not deliver a direct message to the wrong agent", async () => {
+    await appendAgentMessage({
+      sessionId: "sess-msg-2",
+      id: "m2",
+      fromAgent: "planner",
+      toAgent: "tester",
+      content: "Verify the happy path first",
+      ts: new Date().toISOString(),
+    });
+
+    const wrongTarget = await consumeAgentMessages("sess-msg-2", "coder");
+    expect(wrongTarget).toHaveLength(0);
+
+    const rightTarget = await consumeAgentMessages("sess-msg-2", "tester");
+    expect(rightTarget).toHaveLength(1);
+  });
+});
+
 describe("Collective Memory — fact extraction and prompt formatting", () => {
   afterEach(async () => { await resetSharedMemoryForTests(); });
 
@@ -116,8 +158,11 @@ The endpoint accepts JSON.
   it("formats shared context for prompt when data exists", async () => {
     await writeSharedFact("sess-fmt", "api_key", "abc123");
     await appendPartialResult({ sessionId: "sess-fmt", taskId: "t1", agentName: "researcher", content: "Found the docs at example.com/docs", ts: new Date().toISOString() });
+    await appendAgentMessage({ sessionId: "sess-fmt", id: "m3", fromAgent: "planner", toAgent: "coder", content: "Focus on the config diff only", ts: new Date().toISOString() });
 
-    const prompt = await formatSharedContextForPrompt("sess-fmt");
+    const prompt = await formatSharedContextForPrompt("sess-fmt", { agentName: "coder" });
+    expect(prompt).toContain("Direct Messages");
+    expect(prompt).toContain("Focus on the config diff only");
     expect(prompt).toContain("Shared Facts");
     expect(prompt).toContain("api_key");
     expect(prompt).toContain("abc123");

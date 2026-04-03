@@ -16,6 +16,9 @@ export type AuditEventType =
   | "auth_failure"
   | "rate_limited"
   | "provider_health_check"
+  | "provider_failover"
+  | "provider_recovered"
+  | "agent_message_sent"
   | "channel_delivery_failed"
   | "agent_routing_evaluated"
   | "credential_accessed"
@@ -53,7 +56,18 @@ export type AuditEventType =
   | "computer_session_stop"
   | "computer_session_emergency_stop"
   | "computer_heartbeat_lost"
-  | "tool_loop_detected";
+  | "tool_loop_detected"
+  // Tool development & self-improvement
+  | "tool_dev_session_started"
+  | "tool_dev_session_completed"
+  | "tool_dev_session_terminated"
+  | "tool_deployed"
+  | "capability_gap_detected"
+  | "capability_gap_proposal"
+  | "self_improvement_completed"
+  | "ephemeral_cleanup"
+  | "warden:tool_dev_stuck"
+  | "warden:tool_dev_runaway";
 
 export interface AuditEvent {
   id: string;

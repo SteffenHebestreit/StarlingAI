@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
-const runSubAgentMock = vi.fn(async () => "delegated");
+const runSubAgentMock = vi.fn(async (_args: SubAgentRunOptions) => "delegated");
 
 vi.mock("../agent/sub-agent.js", () => ({
   runSubAgent: runSubAgentMock,
-  runSubAgentWithStats: vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+  runSubAgentWithStats: vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
     output: await runSubAgentMock(args),
     stats: {
       agentName: args.agentName,

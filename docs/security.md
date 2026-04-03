@@ -8,7 +8,11 @@ StarlingAI is designed for self-hosted deployment with no assumption of a truste
 
 Every component applies defence-in-depth: authentication at the edge, tool access control in the runtime, secret scanning on outputs, and a complete audit trail. This security model is domain-agnostic — the same guardrails protect the swarm whether it is doing research, writing code, automating browsers, or managing communications.
 
-See also: [Tool Tiers & Guardrails](tool-tiers.md) · [Configuration Reference](configuration.md) · [REST API & WebSocket](api.md)
+The swarm is allowed to improve itself only within bounded non-crucial surfaces: prompts, user and workflow memory, sub-agent definitions, and approved tool assignments for those sub-agents. That self-improvement must remain faithful to the base README philosophy and may never weaken the security contract described here.
+
+In particular, secrets are outside autonomous control. Stored credentials, tokens, and secret material must never be read into model context or surfaced as plain text to an agent. They may only be consumed through dedicated secret-safe tools under the existing approval, audit, and redaction rules.
+
+See also: [Tool Tiers & Guardrails](tool-tiers.md) · [Configuration Layout](../config/README.md) · [REST API & WebSocket](api.md)
 
 ---
 
@@ -29,15 +33,12 @@ If none of the above is present, a cryptographically random secret is generated 
 ### Generating Tokens
 
 ```bash
-# Default token (WSL / Git Bash)
-./scripts/gen-token.sh
-
-# Windows CMD
-scripts\gen-token.bat
+# Default token
+pnpm sai token
 
 # Named user with role and custom expiry
-./scripts/gen-token.sh --user alice --role viewer --ttl 7d
-./scripts/gen-token.sh --user deploy-bot --role admin --ttl 30d
+pnpm sai token --user alice --role viewer --ttl 7d
+pnpm sai token --user deploy-bot --role admin --ttl 30d
 ```
 
 Tokens carry a `user` claim (default: `admin`), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
@@ -176,8 +177,10 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 - [ ] Set `SAI_MASTER_KEY` to a randomly generated ≥32-character string (not the default from `setup.mjs`)
 - [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production
 - [ ] Set `gateway.publicUrl` in `starlingai.json` — required for channel webhook verification
+- [ ] If the dashboard calls the gateway across origins, add the dashboard origin to `gateway.corsAllowedOrigins`
 - [ ] Use `dmPolicy: "pairing"` or `"allowlist"` on all channels — never leave channels `"open"` in production
 - [ ] Mount `/data` as a named Docker volume with restricted host permissions
 - [ ] Do not expose ports 8765 or 5432 to the public internet — reverse proxy with TLS
+- [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals

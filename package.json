@@ -1,6 +1,6 @@
 {
   "name": "starlingai",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.6.0",
@@ -10,8 +10,20 @@
   "workspaces": [
     "packages/*"
   ],
+  "dependencies": {
+    "json5": "^2.2.3"
+  },
   "scripts": {
+    "sai": "node scripts/sai.mjs",
+    "setup": "node scripts/sai.mjs setup",
+    "start": "node scripts/sai.mjs start",
+    "stop": "node scripts/sai.mjs stop",
+    "config:build": "node scripts/sai.mjs config build",
+    "config:split": "node scripts/sai.mjs config split",
+    "token": "node scripts/sai.mjs token",
+    "health": "node scripts/sai.mjs health",
     "build": "pnpm -r build",
+    "security:pack": "pnpm --filter @starlingai/core security:pack",
     "dev": "pnpm -r --parallel dev",
     "test": "pnpm -r test",
     "check": "pnpm -r check",
@@ -21,8 +33,6 @@
     "computer-remote:dev": "pnpm --filter @starlingai/core dev:computer-remote",
     "web:dev": "pnpm --filter @starlingai/web dev",
     "agents:evaluate": "pnpm --filter @starlingai/core agents:evaluate",
-    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate",
-    "setup": "node scripts/setup.mjs",
-    "token": "node scripts/gen-token.mjs"
+    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate"
   }
 }

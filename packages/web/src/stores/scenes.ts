@@ -38,6 +38,9 @@ export interface SceneJobProgress {
   stage: string;
   message?: string;
   percent?: number;
+  totalSteps?: number;
+  completedSteps?: number;
+  currentStep?: string;
   toolCallsRequested: number;
   toolCallsCompleted: number;
   approvalsRequested: number;
@@ -53,6 +56,7 @@ export interface SceneJobProgress {
 export interface SceneJob {
   id: string;
   sceneName: string;
+  definitionType?: "scene" | "job";
   sessionId: string;
   status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
   createdAt?: string;
@@ -115,6 +119,11 @@ export const useScenesStore = defineStore("scenes", () => {
       clearTimeout(timer);
       pollTimers.delete(jobId);
     }
+  }
+
+  function stopAllPolling() {
+    for (const timer of pollTimers.values()) clearTimeout(timer);
+    pollTimers.clear();
   }
 
   async function fetchJob(jobId: string): Promise<SceneJob | null> {
@@ -227,9 +236,17 @@ export const useScenesStore = defineStore("scenes", () => {
   }
 
   async function run(name: string, params?: Record<string, string>): Promise<SceneJob | null> {
+    return queueRun(`/api/scenes/${encodeURIComponent(name)}/run`, name, params);
+  }
+
+  async function runJob(name: string, params?: Record<string, string>): Promise<SceneJob | null> {
+    return queueRun(`/api/jobs/${encodeURIComponent(name)}/run`, name, params, "job");
+  }
+
+  async function queueRun(path: string, name: string, params?: Record<string, string>, definitionType: "scene" | "job" = "scene"): Promise<SceneJob | null> {
     runError.value = null;
     try {
-      const res = await globalThis.fetch(restUrl(`/api/scenes/${encodeURIComponent(name)}/run`), {
+      const res = await globalThis.fetch(restUrl(path), {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(params && Object.keys(params).length > 0 ? { params } : {}),
@@ -243,6 +260,7 @@ export const useScenesStore = defineStore("scenes", () => {
       const job: SceneJob = {
         id: data.jobId,
         sceneName: data.sceneName,
+        definitionType,
         sessionId: data.sessionId,
         status: data.status,
         createdAt: new Date().toISOString(),
@@ -299,6 +317,10 @@ export const useScenesStore = defineStore("scenes", () => {
     if (token) resumeRunningJobs();
   }, { immediate: true });
 
+  watch(() => gateway.connected, (isConnected) => {
+    if (!isConnected) stopAllPolling();
+  });
+
   return {
     scenes,
     loading,
@@ -312,6 +334,7 @@ export const useScenesStore = defineStore("scenes", () => {
     save,
     remove,
     run,
+    runJob,
     cancel,
     dismissJob,
   };

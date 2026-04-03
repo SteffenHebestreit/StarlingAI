@@ -27,12 +27,16 @@
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { resolveToken, getOrCreateChannelSession, runChannelTurn } from "./base.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelStopped, setChannelError, setChannelHealthCheck, setChannelRunning } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
 
 const log = childLogger("channel:email");
 const INSTALL_HINT = "Email channel requires: pnpm add imapflow nodemailer";
+
+// Module-level ref for outbound email — set when channel starts, cleared on stop
+let _sendMail: ((to: string, subject: string, text: string) => Promise<void>) | null = null;
 
 export type EmailStopFn = () => Promise<void>;
 
@@ -102,6 +106,15 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
     );
   }
 
+  // Expose outbound email at module level for tool use
+  _sendMail = async (to: string, subject: string, text: string) => {
+    await deliverWithRetry(
+      () => transporter.sendMail({ from: smtpFrom, to, subject, text }).then(() => undefined),
+      text,
+      { channel: "email" },
+    );
+  };
+
   async function pollOnce(): Promise<void> {
     const client = new ImapFlowCtor({
       host: imapHost,
@@ -132,6 +145,15 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
           log.info({ from, subject }, "Email received");
 
           try {
+            const triggeredJob = await dispatchChannelTriggeredJob({ channel: "email", senderId: from, text: textBody.trim() });
+            if (triggeredJob.matched) {
+              if (triggeredJob.responseText) {
+                await sendReply(from, subject, triggeredJob.responseText);
+              }
+              await client.messageFlagsAdd({ uid: message["uid"] as number }, ["\\Seen"], { uid: true });
+              continue;
+            }
+
             const response = await runChannelTurn(sessionId, `Subject: ${subject}\n\n${textBody}`);
             await sendReply(from, subject, response);
           } catch (err) {
@@ -185,11 +207,30 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
   const stop: EmailStopFn = async () => {
     stopped = true;
     if (pollHandle) clearTimeout(pollHandle);
+    _sendMail = null;
     setChannelStopped("email");
   };
 
   setChannelRunning("email", stop);
   return stop;
+}
+
+/**
+ * Send an email using the running email channel's SMTP transporter.
+ * Callable from tools — requires the email channel to be started.
+ */
+export async function sendEmailMessage(
+  to: string,
+  subject: string,
+  text: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!_sendMail) return { ok: false, error: "Email channel not running or not configured" };
+  try {
+    await _sendMail(to, subject, text);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Extract plain-text body from raw RFC 2822 email */

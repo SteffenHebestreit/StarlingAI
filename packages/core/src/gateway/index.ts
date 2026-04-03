@@ -4,11 +4,12 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { resolve, basename, extname } from "node:path";
 import JSON5 from "json5";
 import { z } from "zod";
 import { WebSocketServer } from "ws";
+import { ZipFile } from "yazl";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
@@ -16,10 +17,18 @@ import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
+import {
+  listAllJobs as listJobDefinitions,
+  getJobDefinition,
+  saveJobDefinition,
+  deleteJobDefinition,
+  resolveJobSteps,
+  getApiWebhookKeys,
+} from "../credentials/jobs.js";
 import { getGuardrails, updateGuardrails, resetGuardrails } from "../guardrails/store.js";
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent } from "../agent/sub-agent.js";
-import { createJob, cancelJob, getJob, listJobs } from "../agent/jobs.js";
+import { createJob, cancelJob, getJob as getExecutionJob, listJobs } from "../agent/jobs.js";
 import { resolveApproval, getPendingApproval } from "../approval/store.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
@@ -30,17 +39,64 @@ import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js"
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
-import { resolveProviderEndpointForModel } from "../providers/index.js";
+import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
 import { getConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
+import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
+import { getAgentMessageBacklogSnapshot } from "../swarm/memory.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { computerSessionManager } from "../agent/computer-session.js";
+import { proposeConversationConfigChange } from "../agent/config-assistant.js";
+import {
+  applyPromptChange,
+  appendConversationConfigProposalFeedback,
+  applyObjectPath,
+  createConversationConfigProposal,
+  getConversationConfigProposal,
+  hasPromptTarget,
+  listConversationConfigProposals,
+  MAIN_ASSISTANT_PROMPT_TARGET,
+  updateConversationConfigProposal,
+} from "../agent/config-assistant-proposals.js";
+import { appendFlowMemoryEntry, readFlowMemoryEntries } from "../agent/flow-memory.js";
+import {
+  MainAssistantPersonalityEditableSchema,
+  loadMainAssistantPersonality,
+  resetMainAssistantPersonality,
+  saveMainAssistantPersonality,
+} from "../personality/service.js";
+import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
+import { JobConfigSchema } from "../config/schema.js";
+import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 const log = childLogger("gateway");
+
+function applyTemplate(template: string, params: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)(?:\|([^}]*))?\}\}/g, (match, key: string, defaultVal?: string) => {
+    if (key in params) return params[key] ?? "";
+    if (defaultVal !== undefined) return defaultVal;
+    return match;
+  });
+}
+
+function resolveWebhookSecret(secret: string | undefined): string {
+  if (!secret) return "";
+  return secret.startsWith("$") ? (process.env[secret.slice(1)] ?? "") : secret;
+}
+
+function originFromUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 export function createGateway() {
   const config = getConfig();
@@ -72,6 +128,30 @@ export function createGateway() {
     }),
     guard: ModelEndpointGuardSchema,
   });
+  const ConfigAssistantRequestSchema = z.object({
+    request: z.string().min(1).max(4000),
+    mode: z.enum(["setup", "enhancement", "prompt"]).default("enhancement"),
+    targetAgent: z.string().min(1).optional(),
+  });
+  const MainAssistantPersonalityRequestSchema = MainAssistantPersonalityEditableSchema.extend({
+    reason: z.string().trim().min(1).max(400).optional(),
+  });
+  const ConfigAssistantFeedbackSchema = z.object({
+    outcome: z.enum(["success", "failure", "partial", "rejected"]),
+    lesson: z.string().min(1).max(400).optional(),
+    notes: z.string().min(1).max(600).optional(),
+  });
+  const FlowMemoryCreateSchema = z.object({
+    scope: z.enum(["setup", "enhancement", "prompt", "workflow"]),
+    request: z.string().min(1).max(4000),
+    summary: z.string().min(1).max(1200),
+    assistantAgent: z.string().min(1).optional(),
+    targetAgent: z.string().min(1).optional(),
+    actions: z.array(z.string().min(1).max(240)).default([]),
+    outcome: z.enum(["proposed", "applied", "success", "failure", "partial", "rejected"]),
+    lesson: z.string().min(1).max(800).optional(),
+    tags: z.array(z.string().min(1).max(40)).default([]),
+  });
 
   // ── Request body size limit ──────────────────────────────────────────────
   const maxBodyBytes = config.gateway.maxBodyBytes ?? 1_048_576;
@@ -86,11 +166,16 @@ export function createGateway() {
   });
 
   app.use("*", cors({
-    origin: [
+    origin: Array.from(new Set([
       `http://localhost:${config.channels.webchat.port}`,
+      `http://127.0.0.1:${config.channels.webchat.port}`,
+      `http://host.docker.internal:${config.channels.webchat.port}`,
       "http://localhost:3001",   // Vite dev server
       "http://127.0.0.1:3001",
-    ],
+      "http://host.docker.internal:3001",
+      originFromUrl(config.gateway.publicUrl),
+      ...(config.gateway.corsAllowedOrigins ?? []).map((entry) => originFromUrl(entry)),
+    ].filter((origin): origin is string => Boolean(origin)))),
     credentials: true,
   }));
 
@@ -113,6 +198,116 @@ export function createGateway() {
       bytes.byteOffset + bytes.byteLength,
     ) as ArrayBuffer;
     return new Blob([arrayBuffer], { type: contentType });
+  }
+
+  function guessWorkspaceContentType(filePath: string): string {
+    const extension = extname(filePath).toLowerCase();
+    const contentTypes: Record<string, string> = {
+      ".html": "text/html; charset=utf-8",
+      ".htm": "text/html; charset=utf-8",
+      ".md": "text/markdown; charset=utf-8",
+      ".txt": "text/plain; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
+      ".pdf": "application/pdf",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml",
+      ".wav": "audio/wav",
+      ".mp3": "audio/mpeg",
+      ".m4a": "audio/mp4",
+      ".ogg": "audio/ogg",
+      ".webm": "audio/webm",
+      ".csv": "text/csv; charset=utf-8",
+    };
+    return contentTypes[extension] ?? "application/octet-stream";
+  }
+
+  function buildContentDisposition(filename: string, disposition: "inline" | "attachment"): string {
+    const sanitized = filename.replace(/[\r\n"]/g, "_");
+    return `${disposition}; filename="${sanitized}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+  }
+
+  function resolveWorkspaceTarget(requestedPath: string): { resolved: string; relativePath: string } {
+    return resolvePathWithinWorkspace(requestedPath, getConfig().workspacePath);
+  }
+
+  function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
+    if (error instanceof Error) {
+      if (/workspace boundary|relative path within the workspace/i.test(error.message)) {
+        return { status: 400, message: "Path must stay within the workspace" };
+      }
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { status: 404, message: "Workspace path not found" };
+      }
+      return { status: 500, message: error.message };
+    }
+    return { status: 500, message: String(error) };
+  }
+
+  async function addWorkspacePathToZip(zipFile: ZipFile, absolutePath: string, archivePath: string): Promise<void> {
+    const fileStat = await stat(absolutePath);
+    const normalizedArchivePath = archivePath.replace(/\\/g, "/");
+
+    if (fileStat.isFile()) {
+      zipFile.addFile(absolutePath, normalizedArchivePath);
+      return;
+    }
+
+    if (!fileStat.isDirectory()) {
+      throw new Error(`Unsupported workspace entry for archive: ${archivePath}`);
+    }
+
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+    if (entries.length === 0) {
+      zipFile.addEmptyDirectory(normalizedArchivePath);
+      return;
+    }
+
+    for (const entry of entries) {
+      await addWorkspacePathToZip(zipFile, resolve(absolutePath, entry.name), `${normalizedArchivePath}/${entry.name}`);
+    }
+  }
+
+  async function estimateDirectorySize(dirPath: string): Promise<{ totalBytes: number; entryCount: number }> {
+    let totalBytes = 0;
+    let entryCount = 0;
+    const visit = async (current: string) => {
+      const entries = await readdir(current, { withFileTypes: true });
+      for (const entry of entries) {
+        entryCount++;
+        const fullPath = resolve(current, entry.name);
+        if (entry.isFile()) {
+          const fileStat = await stat(fullPath);
+          totalBytes += fileStat.size;
+        } else if (entry.isDirectory()) {
+          await visit(fullPath);
+        }
+      }
+    };
+    await visit(dirPath);
+    return { totalBytes, entryCount };
+  }
+
+  async function buildWorkspaceArchiveBuffer(absolutePath: string, archiveRoot: string): Promise<Buffer> {
+    const zipFile = new ZipFile();
+    const chunks: Buffer[] = [];
+
+    const bufferPromise = new Promise<Buffer>((resolvePromise, rejectPromise) => {
+      zipFile.outputStream.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      zipFile.outputStream.on("end", () => {
+        resolvePromise(Buffer.concat(chunks));
+      });
+      zipFile.outputStream.on("error", rejectPromise);
+    });
+
+    await addWorkspacePathToZip(zipFile, absolutePath, archiveRoot);
+    zipFile.end();
+    return bufferPromise;
   }
 
   function currentModelEndpointConfig(cfg = getConfig()) {
@@ -360,11 +555,27 @@ export function createGateway() {
     }
   }
 
+  function multimodalServiceConfigured(baseUrl: string | undefined): boolean {
+    return typeof baseUrl === "string" && baseUrl.trim().length > 0;
+  }
+
+  function disabledServiceStatus(message: string): { ok: false; disabled: true; error: string } {
+    return { ok: false, disabled: true, error: message };
+  }
+
+  function disabledServiceResponse(message: string): Response {
+    return Response.json({ error: message, disabled: true }, { status: 503 });
+  }
+
   async function checkSttHealth(baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
     return checkSttHealthByApi("auto", baseUrl, apiKey, timeoutMs, model);
   }
 
   async function checkSttHealthByApi(api: "auto" | "openai-compatible" | "transcribe-only", baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+    if (!multimodalServiceConfigured(baseUrl)) {
+      return disabledServiceStatus("Disabled: no STT endpoint configured.");
+    }
+
     if (api === "transcribe-only") {
       const healthProbe = await checkEndpointHealth({
         baseUrl,
@@ -552,6 +763,10 @@ export function createGateway() {
     apiKey?: string;
     timeoutMs: number;
   }): Promise<Record<string, unknown>> {
+    if (!multimodalServiceConfigured(config.baseUrl)) {
+      throw new Error("TTS is disabled: no endpoint configured.");
+    }
+
     if (config.api === "openai-compatible") {
       const [voicesResponse, modelsResponse] = await Promise.all([
         fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
@@ -759,6 +974,12 @@ export function createGateway() {
     });
   });
 
+  app.get("/api/providers/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(await syncChatProviderRuntimeStatus());
+  });
+
   app.get("/api/model-endpoints/config", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -843,12 +1064,7 @@ export function createGateway() {
     const multimodalConfig = currentMultimodalConfig();
 
     const imageGenHealthPromise = multimodalConfig.imageGeneration
-      ? checkEndpointHealth({
-          baseUrl: multimodalConfig.imageGeneration.baseUrl,
-          apiKey: multimodalConfig.imageGeneration.apiKey,
-          timeoutMs: multimodalConfig.imageGeneration.timeoutMs,
-          path: "/health",
-        })
+      ? checkImageGenerationHealth(multimodalConfig.imageGeneration)
       : Promise.resolve(null);
 
     const visionModel = multimodalConfig.files.visionModel;
@@ -883,19 +1099,21 @@ export function createGateway() {
         path: "/api/health",
       }),
       checkSttHealthByApi(multimodalConfig.stt.api, multimodalConfig.stt.baseUrl, multimodalConfig.stt.apiKey, multimodalConfig.stt.timeoutMs, multimodalConfig.stt.model),
-      multimodalConfig.tts.api === "openai-compatible"
-        ? checkEndpointHealth({
-            baseUrl: multimodalConfig.tts.baseUrl,
-            apiKey: multimodalConfig.tts.apiKey,
-            timeoutMs: multimodalConfig.tts.timeoutMs,
-            path: "/models",
-          })
-        : checkEndpointHealth({
-            baseUrl: multimodalConfig.tts.baseUrl,
-            apiKey: multimodalConfig.tts.apiKey,
-            timeoutMs: multimodalConfig.tts.timeoutMs,
-            path: "/health",
-          }),
+      !multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
+        ? Promise.resolve(disabledServiceStatus("Disabled: no TTS endpoint configured."))
+        : multimodalConfig.tts.api === "openai-compatible"
+          ? checkEndpointHealth({
+              baseUrl: multimodalConfig.tts.baseUrl,
+              apiKey: multimodalConfig.tts.apiKey,
+              timeoutMs: multimodalConfig.tts.timeoutMs,
+              path: "/models",
+            })
+          : checkEndpointHealth({
+              baseUrl: multimodalConfig.tts.baseUrl,
+              apiKey: multimodalConfig.tts.apiKey,
+              timeoutMs: multimodalConfig.tts.timeoutMs,
+              path: "/health",
+            }),
       imageGenHealthPromise,
       vision,
     ]);
@@ -1082,6 +1300,9 @@ export function createGateway() {
     if (!(uploadedFile instanceof File)) {
       return c.json({ error: "file is required" }, 400);
     }
+    if (!multimodalServiceConfigured(multimodalConfig.stt.baseUrl)) {
+      return disabledServiceResponse("STT is disabled: configure multimodal.stt.baseUrl to enable transcription.");
+    }
 
     const audioBlob = new Blob([await uploadedFile.arrayBuffer()], { type: uploadedFile.type || "application/octet-stream" });
     const filename = uploadedFile.name || "audio.wav";
@@ -1134,6 +1355,10 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const multimodalConfig = currentMultimodalConfig();
 
+    if (!multimodalServiceConfigured(multimodalConfig.tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable voice discovery.");
+    }
+
     try {
       return c.json(await fetchTtsVoiceCatalog(multimodalConfig.tts));
     } catch (error) {
@@ -1145,6 +1370,10 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const multimodalConfig = currentMultimodalConfig();
+
+    if (!multimodalServiceConfigured(multimodalConfig.tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable voice saving.");
+    }
 
     const formData = await c.req.raw.formData();
     const uploadedFile = formData.get("file");
@@ -1218,6 +1447,10 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const multimodalConfig = currentMultimodalConfig();
+
+    if (!multimodalServiceConfigured(multimodalConfig.tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable speech synthesis.");
+    }
 
     let body: Record<string, unknown>;
     try {
@@ -1427,6 +1660,9 @@ export function createGateway() {
     if (!multimodalConfig.imageGeneration) {
       return c.json({ error: "Image generation is not configured. Add multimodal.imageGeneration to starlingai.json." }, 503);
     }
+    if (!imageGenerationServiceConfigured(multimodalConfig.imageGeneration.baseUrl)) {
+      return disabledServiceResponse("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
+    }
 
     let body: Record<string, unknown>;
     try {
@@ -1440,30 +1676,27 @@ export function createGateway() {
 
     const imgConfig = multimodalConfig.imageGeneration;
     try {
-      const upstream = await fetchWithTimeout(
-        upstreamUrl(imgConfig.baseUrl, "/generate"),
-        {
-          method: "POST",
-          headers: upstreamHeaders(imgConfig.apiKey, { "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            prompt,
-            negative_prompt: typeof body["negativePrompt"] === "string" ? body["negativePrompt"] : null,
-            width: typeof body["width"] === "number" ? body["width"] : imgConfig.defaultWidth,
-            height: typeof body["height"] === "number" ? body["height"] : imgConfig.defaultHeight,
-            num_inference_steps: typeof body["steps"] === "number" ? body["steps"] : imgConfig.defaultSteps,
-            guidance_scale: typeof body["guidanceScale"] === "number" ? body["guidanceScale"] : imgConfig.defaultGuidanceScale,
-            seed: typeof body["seed"] === "number" ? body["seed"] : null,
-          }),
-        },
-        imgConfig.timeoutMs,
-      );
+      const result = await requestImageGeneration(imgConfig, {
+        prompt,
+        model: typeof body["model"] === "string" && body["model"].trim() ? body["model"].trim() : imgConfig.model,
+        negativePrompt: typeof body["negativePrompt"] === "string" ? body["negativePrompt"] : imgConfig.defaultNegativePrompt,
+        width: typeof body["width"] === "number" ? body["width"] : imgConfig.defaultWidth,
+        height: typeof body["height"] === "number" ? body["height"] : imgConfig.defaultHeight,
+        steps: typeof body["steps"] === "number" ? body["steps"] : imgConfig.defaultSteps,
+        guidanceScale: typeof body["guidanceScale"] === "number" ? body["guidanceScale"] : imgConfig.defaultGuidanceScale,
+        seed: typeof body["seed"] === "number" ? body["seed"] : undefined,
+      });
 
-      if (!upstream.ok) {
-        const err = await extractUpstreamError(upstream, "Image generation failed");
-        return c.json({ error: err }, upstream.status as 400 | 500 | 502 | 503);
-      }
-
-      return c.json(await upstream.json());
+      return c.json({
+        image: result.imageBase64,
+        contentType: result.mimeType,
+        extension: result.extension,
+        width: result.width,
+        height: result.height,
+        seed: result.seed,
+        model: result.model,
+        elapsed_ms: result.elapsedMs,
+      });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
@@ -1520,6 +1753,89 @@ export function createGateway() {
       });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  const WORKSPACE_FILE_MAX_BYTES = 256 * 1024 * 1024; // 256 MB
+  const WORKSPACE_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024; // 512 MB
+  const WORKSPACE_ARCHIVE_MAX_ENTRIES = 10_000;
+
+  app.get("/api/workspace/file", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const requestedPath = c.req.query("path")?.trim();
+    if (!requestedPath) {
+      return c.json({ error: "path query parameter is required" }, 400);
+    }
+
+    const disposition = c.req.query("disposition") === "attachment" ? "attachment" : "inline";
+
+    try {
+      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
+      const fileStat = await stat(resolved);
+      if (!fileStat.isFile()) {
+        return c.json({ error: "Requested workspace path is not a file" }, 400);
+      }
+      if (fileStat.size > WORKSPACE_FILE_MAX_BYTES) {
+        return c.json({ error: `File too large (${Math.round(fileStat.size / 1024 / 1024)} MB). Maximum is ${WORKSPACE_FILE_MAX_BYTES / 1024 / 1024} MB.` }, 413);
+      }
+
+      const bytes = await readFile(resolved);
+      const filename = basename(resolved);
+      return c.body(bytes, 200, {
+        "Content-Type": guessWorkspaceContentType(filename),
+        "Content-Disposition": buildContentDisposition(filename, disposition),
+        "X-Workspace-Path": relativePath,
+      });
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
+  });
+
+  app.get("/api/workspace/archive", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const requestedPath = c.req.query("path")?.trim();
+    if (!requestedPath) {
+      return c.json({ error: "path query parameter is required" }, 400);
+    }
+
+    try {
+      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
+      const fileStat = await stat(resolved);
+      if (!fileStat.isFile() && !fileStat.isDirectory()) {
+        return c.json({ error: "Requested workspace path must be a file or directory" }, 400);
+      }
+
+      // Pre-flight size/entry check for directories
+      if (fileStat.isDirectory()) {
+        const { totalBytes, entryCount } = await estimateDirectorySize(resolved);
+        if (entryCount > WORKSPACE_ARCHIVE_MAX_ENTRIES) {
+          return c.json({ error: `Directory has too many entries (${entryCount}). Maximum is ${WORKSPACE_ARCHIVE_MAX_ENTRIES}.` }, 413);
+        }
+        if (totalBytes > WORKSPACE_ARCHIVE_MAX_BYTES) {
+          return c.json({ error: `Directory too large (${Math.round(totalBytes / 1024 / 1024)} MB). Maximum is ${WORKSPACE_ARCHIVE_MAX_BYTES / 1024 / 1024} MB.` }, 413);
+        }
+      } else if (fileStat.size > WORKSPACE_ARCHIVE_MAX_BYTES) {
+        return c.json({ error: `File too large (${Math.round(fileStat.size / 1024 / 1024)} MB). Maximum is ${WORKSPACE_ARCHIVE_MAX_BYTES / 1024 / 1024} MB.` }, 413);
+      }
+
+      const archiveBaseName = basename(resolved) || "workspace";
+      const archiveBytes = await buildWorkspaceArchiveBuffer(resolved, archiveBaseName);
+      const archiveName = `${archiveBaseName}.zip`;
+      const responseBytes = new Uint8Array(archiveBytes);
+
+      return c.body(responseBytes, 200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": buildContentDisposition(archiveName, "attachment"),
+        "X-Workspace-Path": relativePath,
+      });
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
     }
   });
 
@@ -1724,6 +2040,253 @@ export function createGateway() {
     return c.json({ agents, totalEntries: entries.length });
   });
 
+  app.get("/api/flow-memory", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const limitRaw = Number(c.req.query("limit") ?? "50");
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
+    const entries = readFlowMemoryEntries(getConfig().workspacePath, limit).reverse();
+    return c.json({ entries, totalEntries: entries.length });
+  });
+
+  app.post("/api/flow-memory", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = FlowMemoryCreateSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid flow-memory entry", details: parsed.error.flatten() }, 400);
+    }
+
+    const entry = appendFlowMemoryEntry(getConfig().workspacePath, parsed.data);
+    return c.json(entry, 201);
+  });
+
+  app.get("/api/config-assistant/proposals", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const limitRaw = Number(c.req.query("limit") ?? "50");
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 50;
+    const proposals = listConversationConfigProposals(getConfig().workspacePath, limit);
+    return c.json({ proposals, totalEntries: proposals.length });
+  });
+
+  app.get("/api/personality", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(loadMainAssistantPersonality());
+  });
+
+  app.put("/api/personality", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    try {
+      const body = await c.req.json<Record<string, unknown>>();
+      const parsed = MainAssistantPersonalityRequestSchema.parse(body);
+      const profile = saveMainAssistantPersonality(parsed, {
+        updatedBy: "user",
+        reason: parsed.reason,
+        revisionBase: loadMainAssistantPersonality().revision,
+      });
+      return c.json(profile);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/personality/reset", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(resetMainAssistantPersonality("user", "Reset from dashboard"));
+  });
+
+  app.post("/api/config-assistant/proposals", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = ConfigAssistantRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid config-assistant request", details: parsed.error.flatten() }, 400);
+    }
+
+    const cfg = getConfig();
+    if (!hasPromptTarget(cfg, parsed.data.targetAgent)) {
+      return c.json({ error: `Agent '${parsed.data.targetAgent}' not found` }, 404);
+    }
+
+    try {
+      const result = await proposeConversationConfigChange({
+        request: parsed.data.request,
+        mode: parsed.data.mode,
+        targetAgent: parsed.data.targetAgent,
+        workspacePath: cfg.workspacePath,
+      });
+
+      const proposal = createConversationConfigProposal(cfg.workspacePath, {
+        status: "pending",
+        mode: parsed.data.mode,
+        request: parsed.data.request,
+        summary: result.draft.summary,
+        assistantAgent: result.assistantAgent,
+        targetAgent: parsed.data.targetAgent,
+        configChanges: result.draft.configChanges,
+        promptChanges: result.draft.promptChanges,
+        validations: result.draft.validations,
+        tags: result.draft.tags,
+        lesson: result.draft.lesson,
+      });
+
+      const flowEntry = appendFlowMemoryEntry(cfg.workspacePath, {
+        scope: parsed.data.mode,
+        request: parsed.data.request,
+        summary: proposal.summary,
+        assistantAgent: proposal.assistantAgent,
+        targetAgent: proposal.targetAgent,
+        actions: [
+          ...proposal.configChanges.map((change) => `set ${change.path}`),
+          ...proposal.promptChanges.map((change) => `${change.strategy} prompt ${change.agentName}`),
+        ],
+        outcome: "proposed",
+        lesson: proposal.lesson,
+        tags: proposal.tags,
+      });
+
+      return c.json({ proposal, flowMemoryId: flowEntry.id }, 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  app.post("/api/config-assistant/proposals/:id/apply", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const id = c.req.param("id");
+    const cfg = getConfig();
+    const proposal = getConversationConfigProposal(cfg.workspacePath, id);
+    if (!proposal) return c.json({ error: "Proposal not found" }, 404);
+    if (proposal.status !== "pending") {
+      return c.json({ error: `Proposal is already ${proposal.status}` }, 409);
+    }
+
+    const protectedChange = proposal.configChanges.find((change) => /secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials/i.test(change.path));
+    if (protectedChange) {
+      return c.json({ error: `Protected config path cannot be applied automatically: ${protectedChange.path}` }, 400);
+    }
+
+    const missingAgent = proposal.promptChanges.find((change) => !hasPromptTarget(cfg, change.agentName));
+    if (missingAgent) {
+      return c.json({ error: `Prompt target agent '${missingAgent.agentName}' not found` }, 404);
+    }
+
+    try {
+      updateConfig((raw) => {
+        for (const change of proposal.configChanges) {
+          applyObjectPath(raw, change.path, change.value);
+        }
+
+        if (proposal.promptChanges.length > 0) {
+          for (const change of proposal.promptChanges) {
+            applyPromptChange(raw, change);
+          }
+        }
+      });
+
+      const updated = updateConversationConfigProposal(cfg.workspacePath, id, (current) => ({
+        ...current,
+        status: "applied",
+        appliedAt: new Date().toISOString(),
+      }));
+
+      appendFlowMemoryEntry(cfg.workspacePath, {
+        scope: proposal.mode,
+        request: proposal.request,
+        summary: proposal.summary,
+        assistantAgent: proposal.assistantAgent,
+        targetAgent: proposal.targetAgent,
+        actions: [
+          ...proposal.configChanges.map((change) => `set ${change.path}`),
+          ...proposal.promptChanges.map((change) => `${change.strategy} prompt ${change.agentName === MAIN_ASSISTANT_PROMPT_TARGET ? "main assistant" : change.agentName}`),
+        ],
+        outcome: "applied",
+        lesson: proposal.lesson,
+        tags: proposal.tags,
+      });
+
+      return c.json({ proposal: updated ?? proposal });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  app.post("/api/config-assistant/proposals/:id/feedback", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const id = c.req.param("id");
+    const cfg = getConfig();
+    const proposal = getConversationConfigProposal(cfg.workspacePath, id);
+    if (!proposal) return c.json({ error: "Proposal not found" }, 404);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = ConfigAssistantFeedbackSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid feedback payload", details: parsed.error.flatten() }, 400);
+    }
+
+    const withFeedback = appendConversationConfigProposalFeedback(cfg.workspacePath, id, {
+      outcome: parsed.data.outcome,
+      lesson: parsed.data.lesson,
+      notes: parsed.data.notes,
+    });
+    const updated = parsed.data.outcome === "rejected"
+      ? updateConversationConfigProposal(cfg.workspacePath, id, (current) => ({
+          ...current,
+          status: "rejected",
+        }))
+      : withFeedback;
+
+    appendFlowMemoryEntry(cfg.workspacePath, {
+      scope: proposal.mode,
+      request: proposal.request,
+      summary: proposal.summary,
+      assistantAgent: proposal.assistantAgent,
+      targetAgent: proposal.targetAgent,
+      actions: [
+        ...proposal.configChanges.map((change) => `set ${change.path}`),
+        ...proposal.promptChanges.map((change) => `${change.strategy} prompt ${change.agentName}`),
+      ],
+      outcome: parsed.data.outcome,
+      lesson: parsed.data.lesson ?? proposal.lesson,
+      tags: proposal.tags,
+    });
+
+    return c.json({ proposal: updated ?? proposal });
+  });
+
   // ── AG-UI streaming chat (SSE) ────────────────────────────────────────────
   // POST /api/chat/stream  →  Server-Sent Events following the AG-UI protocol
   // Frontend can use @ag-ui/client HttpAgent or plain EventSource / fetch + ReadableStream.
@@ -1799,9 +2362,7 @@ export function createGateway() {
     // Auth: Bearer token OR scene webhook key
     const bearerToken = extractBearerToken(c.req.header("Authorization"));
     const keyParam = c.req.query("key") ?? c.req.header("X-Scene-Key") ?? "";
-    const resolvedKey = scene.webhookKey?.startsWith("$")
-      ? (process.env[scene.webhookKey.slice(1)] ?? "")
-      : (scene.webhookKey ?? "");
+    const resolvedKey = resolveWebhookSecret(scene.webhookKey);
 
     const authed = (bearerToken && await verifyToken(bearerToken)) ||
       (resolvedKey.length >= 16 && keyParam.length === resolvedKey.length &&
@@ -1828,15 +2389,12 @@ export function createGateway() {
     Object.assign(mergedParams, bodyParams);
 
     const task = mergedParams && Object.keys(mergedParams).length > 0
-      ? scene.task.replace(/\{\{(\w+)(?:\|([^}]*))?\}\}/g, (match, key: string, defaultVal?: string) => {
-          if (key in mergedParams) return mergedParams[key]!;
-          if (defaultVal !== undefined) return defaultVal;
-          return match;
-        })
+      ? applyTemplate(scene.task, mergedParams)
       : scene.task;
 
     const job = await createJob({
       sceneName,
+      definitionType: "scene",
       userId: `scene:${sceneName}`,
       task,
       allowedAgents: scene.allowedAgents,
@@ -1848,6 +2406,93 @@ export function createGateway() {
     log.info({ sceneName, sessionId: job.sessionId, jobId: job.id }, "Scene job queued");
 
     return c.json({ ok: true, sceneName, jobId: job.id, sessionId: job.sessionId, status: job.status });
+  });
+
+  app.get("/api/jobs", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(listJobDefinitions());
+  });
+
+  app.post("/api/jobs/:name", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const existing = getJobDefinition(name);
+    if (existing?.source === "config") {
+      return c.json({ error: "Jobs declared in starlingai.json are read-only in the dashboard" }, 403);
+    }
+
+    let body: Record<string, unknown>;
+    try { body = await c.req.json<Record<string, unknown>>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    try {
+      const input = JobConfigSchema.parse(body);
+      saveJobDefinition(name, input);
+      syncConfiguredJobTriggers(turnTimeoutMs);
+      return c.json({ ok: true, name });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/jobs/:name", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const existing = getJobDefinition(name);
+    if (!existing) return c.json({ error: `Job not found: ${name}` }, 404);
+    if (existing.source === "config") return c.json({ error: "Config-file jobs cannot be deleted via the API — edit starlingai.json instead" }, 403);
+    deleteJobDefinition(name);
+    syncConfiguredJobTriggers(turnTimeoutMs);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/jobs/:name/run", async (c) => {
+    const jobName = c.req.param("name");
+    const definition = getJobDefinition(jobName);
+    if (!definition) return c.json({ error: `Job not found: ${jobName}` }, 404);
+
+    const bearerToken = extractBearerToken(c.req.header("Authorization"));
+    const keyParam = c.req.query("key") ?? c.req.header("X-Job-Key") ?? "";
+    const resolvedWebhookKeys = getApiWebhookKeys(definition).map((key) => resolveWebhookSecret(key));
+    const webhookAuthorized = resolvedWebhookKeys.some((resolvedKey) =>
+      resolvedKey.length >= 16 && keyParam.length === resolvedKey.length && timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey))
+    );
+    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookAuthorized;
+    if (!authed) return c.json({ error: "Unauthorized" }, 401);
+
+    let bodyParams: Record<string, string> = {};
+    try {
+      const body = await c.req.json<Record<string, unknown>>();
+      if (body && typeof body["params"] === "object" && body["params"] !== null) {
+        bodyParams = Object.fromEntries(
+          Object.entries(body["params"] as Record<string, unknown>).map(([key, value]) => [key, String(value)])
+        );
+      }
+    } catch { /* body is optional */ }
+
+    let steps;
+    try {
+      steps = resolveJobSteps(definition, bodyParams);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+
+    const queued = await createJob({
+      sceneName: jobName,
+      definitionType: "job",
+      userId: `job:${jobName}`,
+      steps,
+      turnTimeoutMs,
+    });
+    log.info({ jobName, sessionId: queued.sessionId, jobId: queued.id }, "Job workflow queued");
+
+    return c.json({ ok: true, sceneName: jobName, definitionType: "job", jobId: queued.id, sessionId: queued.sessionId, status: queued.status });
   });
 
   // ── Approval callback endpoints ──────────────────────────────────────────
@@ -1924,7 +2569,7 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const jobId = c.req.param("jobId");
-    const job = await getJob(jobId);
+    const job = await getExecutionJob(jobId);
     if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
     return c.json(job);
   });
@@ -1974,6 +2619,8 @@ export function createGateway() {
 
     const concurrency = getConcurrencySnapshot();
     const busConnected = isSwarmBusConnected();
+    const capabilities = getAgentCapabilitySnapshot();
+    const directMessages = getAgentMessageBacklogSnapshot();
     const bottlenecks = concurrency
       .filter(s => s.oldestQueuedMs > 0 || s.utilization >= 0.9)
       .sort((left, right) => right.oldestQueuedMs - left.oldestQueuedMs || right.utilization - left.utilization);
@@ -1981,10 +2628,16 @@ export function createGateway() {
     return c.json({
       bus: { connected: busConnected, mode: busConnected ? "redis" : "in-process" },
       bidderWorker: getBidderWorkerStatus(),
+      capabilities,
+      directMessages,
       concurrency,
       bottlenecks,
       summary: {
         activeAgents: concurrency.filter(s => s.active > 0).length,
+        announcedAgents: capabilities.length,
+        busyAgents: capabilities.filter((entry) => entry.availability === "busy" && !entry.stale).length,
+        staleAnnouncements: capabilities.filter((entry) => entry.stale).length,
+        pendingDirectMessages: directMessages.reduce((sum, entry) => sum + entry.pending, 0),
         queuedTasks: concurrency.reduce((sum, s) => sum + s.queued, 0),
         bottleneckCount: bottlenecks.length,
         peakQueuedWaitMs: concurrency.reduce((max, s) => Math.max(max, s.oldestQueuedMs), 0),

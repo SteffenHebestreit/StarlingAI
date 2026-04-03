@@ -1,5 +1,5 @@
 import { getConfig } from "../config/loader.js";
-import { resolveEmbeddingEndpoint, resolveProviderEndpoint, resolveProviderEndpointForModel } from "../providers/index.js";
+import { resolveEmbeddingEndpoint, resolveProviderChain, resolveProviderEndpointForModel } from "../providers/index.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./status.js";
 
 export interface ModelEndpointHealth {
@@ -99,7 +99,10 @@ async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealt
   try {
     const headers = new Headers();
     if (target.apiKey) headers.set("Authorization", `Bearer ${target.apiKey}`);
-    const response = await fetch(toModelsUrl(target.baseUrl), { method: "GET", headers });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    const response = await fetch(toModelsUrl(target.baseUrl), { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timer);
     if (!response.ok) {
       return {
         role: target.role,
@@ -171,15 +174,19 @@ function collectTargets(): EndpointTarget[] {
   const defaults = config.agents.defaults.model;
   const targets: EndpointTarget[] = [];
 
-  const orchestratorEndpoint = resolveProviderEndpoint(defaults, config);
+  const appendProviderChainTargets = (role: string, source: string, modelConfig: typeof defaults) => {
+    for (const endpoint of resolveProviderChain(modelConfig, config)) {
+      targets.push({
+        role: endpoint.priority === "primary" ? role : `${role}:${endpoint.priority}`,
+        model: endpoint.model,
+        baseUrl: endpoint.baseUrl,
+        apiKey: endpoint.apiKey,
+        source: endpoint.priority === "primary" ? source : `${source}.${endpoint.priority}`,
+      });
+    }
+  };
 
-  targets.push({
-    role: "orchestrator",
-    model: defaults.primary,
-    baseUrl: orchestratorEndpoint.baseUrl,
-    apiKey: orchestratorEndpoint.apiKey,
-    source: "agents.defaults.model",
-  });
+  appendProviderChainTargets("orchestrator", "agents.defaults.model", defaults);
 
   if (defaults.embeddingModel) {
     const embeddingEndpoint = resolveEmbeddingEndpoint(defaults, config);
@@ -194,14 +201,7 @@ function collectTargets(): EndpointTarget[] {
 
   for (const [name, agent] of Object.entries(config.subAgents ?? {})) {
     const model = { ...defaults, ...(agent.model ?? {}) };
-    const endpoint = resolveProviderEndpoint(model, config);
-    targets.push({
-      role: `subagent:${name}`,
-      model: model.primary,
-      baseUrl: endpoint.baseUrl,
-      apiKey: endpoint.apiKey,
-      source: `subAgents.${name}.model`,
-    });
+    appendProviderChainTargets(`subagent:${name}`, `subAgents.${name}.model`, model);
   }
 
   if (config.multimodal.files.visionModel) {

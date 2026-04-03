@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  ALWAYS_AVAILABLE_MAIN_TOOL_NAMES,
   DIRECT_MAIN_TOOL_NAMES,
   ORCHESTRATION_TOOL_NAMES,
   getAvailableDirectMainToolNames,
@@ -36,6 +37,7 @@ afterEach(() => {
 describe("default main assistant tools", () => {
   it("returns only direct tools that are currently registered", () => {
     registerStubTool("read_file");
+    registerStubTool("export_workspace_artifact");
     registerStubTool("memory_search");
     registerStubTool("web_search");
     // delegate_to_agent is orchestration — must not appear in direct list
@@ -44,8 +46,29 @@ describe("default main assistant tools", () => {
     const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
     const directToolSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
 
-    expect(availableDirectTools).toEqual(["read_file", "memory_search", "web_search"]);
+    expect(availableDirectTools).toEqual(["read_file", "export_workspace_artifact", "memory_search", "web_search"]);
     expect(availableDirectTools.every(name => directToolSet.has(name))).toBe(true);
+  });
+
+  it("surfaces document export tools in the direct tool list when registered", () => {
+    registerStubTool("generate_document");
+    registerStubTool("generate_chart_html");
+    registerStubTool("generate_pdf");
+
+    const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
+
+    expect(availableDirectTools).toEqual(["generate_document", "generate_chart_html", "generate_pdf"]);
+  });
+
+  it("surfaces the new git insight and http tools in the direct tool list when registered", () => {
+    registerStubTool("git_status");
+    registerStubTool("git_log");
+    registerStubTool("git_diff");
+    registerStubTool("http_request");
+
+    const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
+
+    expect(availableDirectTools).toEqual(["git_status", "git_log", "git_diff", "http_request"]);
   });
 
   it("combines registered direct and orchestration tools in policy order", () => {
@@ -68,16 +91,20 @@ describe("default main assistant tools", () => {
   });
 
   it("can restrict the main assistant to orchestration tools only", () => {
+    registerStubTool("assistant_personality_view");
+    registerStubTool("assistant_personality_update");
     registerStubTool("browser_snapshot");
     registerStubTool("delegate_to_agent");
     registerStubTool("search_agents");
 
     const tools = getMainAssistantToolNames("orchestration_only");
 
-    expect(tools).toEqual(["delegate_to_agent", "search_agents"]);
+    expect(tools).toEqual(["assistant_personality_view", "assistant_personality_update", "delegate_to_agent", "search_agents"]);
   });
 
   it("can restrict the main assistant to delegate_to_agent only", () => {
+    registerStubTool("assistant_personality_view");
+    registerStubTool("assistant_personality_update");
     registerStubTool("browser_snapshot");
     registerStubTool("delegate_to_agent");
     registerStubTool("search_agents");
@@ -85,7 +112,7 @@ describe("default main assistant tools", () => {
 
     const tools = getMainAssistantToolNames("delegate_only");
 
-    expect(tools).toEqual(["delegate_to_agent"]);
+    expect(tools).toEqual(["assistant_personality_view", "assistant_personality_update", "delegate_to_agent"]);
   });
 
   it("returns an empty array when no direct tools are registered", () => {
@@ -165,6 +192,16 @@ describe("default main assistant tools", () => {
     const directSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
     for (const name of ORCHESTRATION_TOOL_NAMES) {
       expect(directSet.has(name)).toBe(false);
+    }
+  });
+
+  it("keeps always-available personality tools out of the regular direct and orchestration lists", () => {
+    const directSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
+    const orchestrationSet = new Set<string>(ORCHESTRATION_TOOL_NAMES);
+
+    for (const name of ALWAYS_AVAILABLE_MAIN_TOOL_NAMES) {
+      expect(directSet.has(name)).toBe(false);
+      expect(orchestrationSet.has(name)).toBe(false);
     }
   });
 });
