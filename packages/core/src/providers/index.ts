@@ -1,5 +1,6 @@
 import { getConfig } from "../config/loader.js";
-import { LMStudioProvider, type ChatProvider } from "./lmstudio.js";
+import { LMStudioProvider, type ChatProvider, type OpenAICompatibleProviderRuntimeSnapshot } from "./lmstudio.js";
+import { FailoverChatProvider, type FailoverEndpointDescriptor, type FailoverEndpointRuntimeSnapshot, type FailoverProviderBinding } from "./failover.js";
 import { buildAgentIndex } from "./embeddings.js";
 import { childLogger } from "../logger.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "../runtime/status.js";
@@ -18,8 +19,23 @@ let _embeddingProviderSignature: string | null = null;
 
 export interface ResolvedProviderEndpoint {
   providerId: string;
+  model: string;
   baseUrl: string;
   apiKey: string;
+  priority: "primary" | "fallback" | "cloudFallback";
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+
+export interface ProviderRuntimeEndpointStatus extends FailoverEndpointRuntimeSnapshot {}
+
+export interface ProviderRuntimeStatusSnapshot {
+  healthy: boolean;
+  mode: "single" | "failover";
+  activeProviderId?: string;
+  activeModel?: string;
+  activeBaseUrl?: string;
+  endpoints: ProviderRuntimeEndpointStatus[];
 }
 
 function getProviderId(modelName: string | undefined): string {
@@ -33,14 +49,39 @@ function getNamedOpenAICompatibleProvider(providerId: string, config: Config) {
   return config.providers.openaiCompatible?.[providerId];
 }
 
-export function resolveProviderEndpoint(modelConfig: ModelConfig, config: Config = getConfig()): ResolvedProviderEndpoint {
-  const providerId = getProviderId(modelConfig.primary);
+function createSingleProvider(modelConfig: ModelConfig, endpoint: ResolvedProviderEndpoint): LMStudioProvider {
+  return new LMStudioProvider(endpoint.baseUrl, endpoint.apiKey, modelConfig, {
+    timeoutMs: endpoint.timeoutMs,
+    maxRetries: endpoint.maxRetries,
+  });
+}
+
+function resolveEndpointForProviderModel(
+  providerModel: string,
+  overrides: { baseUrl?: string; apiKey?: string } = {},
+  config: Config = getConfig(),
+  priority: ResolvedProviderEndpoint["priority"] = "primary",
+): ResolvedProviderEndpoint {
+  const providerId = getProviderId(providerModel);
   const providerConfig = getNamedOpenAICompatibleProvider(providerId, config);
   return {
     providerId,
-    baseUrl: modelConfig.baseUrl ?? providerConfig?.baseUrl ?? config.providers.lmstudio?.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
-    apiKey: modelConfig.apiKey ?? providerConfig?.apiKey ?? config.providers.lmstudio?.apiKey ?? DEFAULT_OPENAI_API_KEY,
+    model: providerModel,
+    baseUrl: overrides.baseUrl ?? providerConfig?.baseUrl ?? config.providers.lmstudio?.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
+    apiKey: overrides.apiKey ?? providerConfig?.apiKey ?? config.providers.lmstudio?.apiKey ?? DEFAULT_OPENAI_API_KEY,
+    priority,
+    timeoutMs: providerConfig?.timeoutMs,
+    maxRetries: providerConfig?.maxRetries,
   };
+}
+
+export function resolveProviderEndpoint(modelConfig: ModelConfig, config: Config = getConfig()): ResolvedProviderEndpoint {
+  return resolveEndpointForProviderModel(
+    modelConfig.primary,
+    { baseUrl: modelConfig.baseUrl, apiKey: modelConfig.apiKey },
+    config,
+    "primary",
+  );
 }
 
 export function resolveProviderEndpointForModel(
@@ -48,29 +89,78 @@ export function resolveProviderEndpointForModel(
   overrides: { baseUrl?: string; apiKey?: string } = {},
   config: Config = getConfig(),
 ): ResolvedProviderEndpoint {
-  return resolveProviderEndpoint(
-    {
-      ...config.agents.defaults.model,
-      primary: modelName,
-      baseUrl: overrides.baseUrl,
-      apiKey: overrides.apiKey,
-    },
-    config,
-  );
+  return resolveEndpointForProviderModel(modelName, overrides, config, "primary");
+}
+
+export function resolveProviderChain(
+  modelConfig: ModelConfig,
+  config: Config = getConfig(),
+  primaryEndpoint = resolveProviderEndpoint(modelConfig, config),
+): ResolvedProviderEndpoint[] {
+  const chain: ResolvedProviderEndpoint[] = [];
+  const seen = new Set<string>();
+
+  const pushUnique = (endpoint: ResolvedProviderEndpoint) => {
+    const key = `${endpoint.providerId}::${endpoint.baseUrl}::${endpoint.model}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    chain.push(endpoint);
+  };
+
+  pushUnique({
+    ...primaryEndpoint,
+    model: modelConfig.primary,
+    priority: "primary",
+  });
+
+  if (modelConfig.fallback) {
+    pushUnique(resolveEndpointForProviderModel(modelConfig.fallback, {}, config, "fallback"));
+  }
+
+  if (modelConfig.cloudFallback) {
+    pushUnique(resolveEndpointForProviderModel(modelConfig.cloudFallback, {}, config, "cloudFallback"));
+  }
+
+  return chain;
 }
 
 export function resolveEmbeddingEndpoint(modelConfig: ModelConfig, config: Config = getConfig()): ResolvedProviderEndpoint {
-  const providerId = getProviderId(modelConfig.embeddingModel ?? modelConfig.primary);
+  const model = modelConfig.embeddingModel ?? modelConfig.primary;
+  const providerId = getProviderId(model);
   const providerConfig = getNamedOpenAICompatibleProvider(providerId, config);
   return {
     providerId,
+    model,
     baseUrl: modelConfig.embeddingBaseUrl ?? modelConfig.baseUrl ?? providerConfig?.baseUrl ?? config.providers.lmstudio?.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
     apiKey: modelConfig.embeddingApiKey ?? modelConfig.apiKey ?? providerConfig?.apiKey ?? config.providers.lmstudio?.apiKey ?? DEFAULT_OPENAI_API_KEY,
+    priority: "primary",
+    timeoutMs: providerConfig?.timeoutMs,
+    maxRetries: providerConfig?.maxRetries,
   };
 }
 
-export function createChatProvider(modelConfig: ModelConfig, endpoint = resolveProviderEndpoint(modelConfig)): LMStudioProvider {
-  return new LMStudioProvider(endpoint.baseUrl, endpoint.apiKey, modelConfig);
+export function createChatProvider(modelConfig: ModelConfig, endpoint = resolveProviderEndpoint(modelConfig)): ChatProvider {
+  const config = getConfig();
+  const chain = resolveProviderChain(modelConfig, config, endpoint);
+  const bindings: FailoverProviderBinding[] = chain.map((resolved): FailoverProviderBinding => {
+    const perEndpointModelConfig: ModelConfig = {
+      ...modelConfig,
+      primary: resolved.model,
+      baseUrl: resolved.baseUrl,
+      apiKey: resolved.apiKey,
+      fallback: undefined,
+      cloudFallback: undefined,
+    };
+
+    return {
+      endpoint: resolved as FailoverEndpointDescriptor,
+      provider: createSingleProvider(perEndpointModelConfig, resolved),
+    };
+  });
+
+  return bindings.length === 1
+    ? bindings[0]!.provider
+    : new FailoverChatProvider(bindings);
 }
 
 export function getChatProvider(): ChatProvider {
@@ -102,7 +192,7 @@ export function getEmbeddingProvider(): LMStudioProvider {
   if (_embeddingProvider && _embeddingProviderSignature === signature) return _embeddingProvider;
 
   _embeddingProviderSignature = signature;
-  _embeddingProvider = createChatProvider(modelConfig, endpoint);
+  _embeddingProvider = createSingleProvider(modelConfig, endpoint);
   return _embeddingProvider;
 }
 
@@ -114,6 +204,92 @@ export function getLMStudioProviderWithOverride(override: Partial<ModelConfig>):
   return getChatProviderWithOverride(override);
 }
 
+function toSingleEndpointRuntimeStatus(
+  endpoint: ResolvedProviderEndpoint,
+  snapshot: OpenAICompatibleProviderRuntimeSnapshot,
+): ProviderRuntimeEndpointStatus {
+  return {
+    providerId: endpoint.providerId,
+    model: endpoint.model,
+    baseUrl: endpoint.baseUrl,
+    priority: endpoint.priority,
+    active: true,
+    healthy: snapshot.healthy,
+    available: true,
+    circuitState: "closed",
+    consecutiveFailures: 0,
+    lastError: snapshot.lastError,
+    requestTimeoutMs: snapshot.requestTimeoutMs,
+    configuredMaxRetries: snapshot.configuredMaxRetries,
+    requestCount: snapshot.requestCount,
+    successCount: snapshot.successCount,
+    failureCount: snapshot.failureCount,
+    lastLatencyMs: snapshot.lastLatencyMs,
+    averageLatencyMs: snapshot.averageLatencyMs,
+    lastUsedAt: snapshot.lastUsedAt,
+    lastSuccessAt: snapshot.lastSuccessAt,
+    lastFailureAt: snapshot.lastFailureAt,
+    lastHealthCheckAt: snapshot.lastHealthCheckAt,
+    lastHealthCheckLatencyMs: snapshot.lastHealthCheckLatencyMs,
+    loadedModel: snapshot.loadedModel,
+  };
+}
+
+export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeStatusSnapshot> {
+  const config = getConfig();
+  const modelConfig = config.agents.defaults.model;
+  const endpoint = resolveProviderEndpoint(modelConfig, config);
+  const provider = getChatProvider();
+
+  if (provider instanceof FailoverChatProvider) {
+    const endpoints = await provider.syncRuntimeStatus();
+    const activeEndpoint = endpoints.find((entry) => entry.active) ?? endpoints[0];
+    return {
+      healthy: endpoints.some((entry) => entry.healthy && entry.available),
+      mode: "failover",
+      activeProviderId: activeEndpoint?.providerId,
+      activeModel: activeEndpoint?.model,
+      activeBaseUrl: activeEndpoint?.baseUrl,
+      endpoints,
+    };
+  }
+
+  if (provider instanceof LMStudioProvider) {
+    await provider.checkHealth();
+    const endpointSnapshot = toSingleEndpointRuntimeStatus(endpoint, provider.getRuntimeSnapshot());
+    return {
+      healthy: endpointSnapshot.healthy,
+      mode: "single",
+      activeProviderId: endpointSnapshot.providerId,
+      activeModel: endpointSnapshot.model,
+      activeBaseUrl: endpointSnapshot.baseUrl,
+      endpoints: [endpointSnapshot],
+    };
+  }
+
+  const health = await provider.checkHealth();
+  return {
+    healthy: health.healthy,
+    mode: "single",
+    activeProviderId: endpoint.providerId,
+    activeModel: endpoint.model,
+    activeBaseUrl: endpoint.baseUrl,
+    endpoints: [{
+      providerId: endpoint.providerId,
+      model: endpoint.model,
+      baseUrl: endpoint.baseUrl,
+      priority: endpoint.priority,
+      active: true,
+      healthy: health.healthy,
+      available: true,
+      circuitState: "closed",
+      consecutiveFailures: 0,
+      lastError: health.error,
+      loadedModel: health.loadedModel,
+    }],
+  };
+}
+
 export type { ChatProvider } from "./lmstudio.js";
 
 export async function initProviders(): Promise<void> {
@@ -121,10 +297,21 @@ export async function initProviders(): Promise<void> {
 
   try {
     const config = getConfig();
-    const endpoint = resolveProviderEndpoint(config.agents.defaults.model, config);
+    const chain = resolveProviderChain(config.agents.defaults.model, config);
+    const endpoint = chain[0]!;
     const provider = getChatProvider();
     const health = await provider.checkHealth();
-    logAudit("provider_health_check", { provider: endpoint.providerId, ...health }, { severity: health.healthy ? "info" : "warn" });
+    logAudit("provider_health_check", {
+      provider: endpoint.providerId,
+      model: endpoint.model,
+      chain: chain.map((entry) => ({
+        priority: entry.priority,
+        provider: entry.providerId,
+        model: entry.model,
+        baseUrl: entry.baseUrl,
+      })),
+      ...health,
+    }, { severity: health.healthy ? "info" : "warn" });
 
     if (!health.healthy) {
       log.error(
@@ -140,7 +327,7 @@ export async function initProviders(): Promise<void> {
 
     log.info({ model: health.loadedModel, provider: endpoint.providerId, baseUrl: endpoint.baseUrl }, "Model endpoint connected");
 
-    const modelId = config.agents.defaults.model.primary.split("/").slice(1).join("/") || health.loadedModel!;
+    const modelId = endpoint.model.split("/").slice(1).join("/") || health.loadedModel!;
     const toolsSupported = await provider.verifyToolCallSupport(modelId);
 
     if (!toolsSupported) {
@@ -154,6 +341,12 @@ export async function initProviders(): Promise<void> {
 
     markRuntimeComponentSuccess("providers", {
       provider: endpoint.providerId,
+      providerChain: chain.map((entry) => ({
+        priority: entry.priority,
+        provider: entry.providerId,
+        model: entry.model,
+        baseUrl: entry.baseUrl,
+      })),
       loadedModel: health.loadedModel,
       configuredModel: modelId,
       toolCallingVerified: toolsSupported,

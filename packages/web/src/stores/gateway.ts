@@ -3,6 +3,7 @@ import { ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
+import { useNotificationStore } from "./notifications";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -38,8 +39,18 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: Date;
-  attachments?: Array<{ filename: string; dataUrl: string }>;
-  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string }>;
+  attachments?: Array<{
+    filename: string;
+    dataUrl?: string;
+    relativePath?: string;
+    contentType?: string;
+    previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "download";
+    size?: number;
+    isDirectory?: boolean;
+    title?: string;
+    sourceTool?: string;
+  }>;
+  toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   guardrailEvents?: Array<{ type: string; details: string }>;
   blocked?: boolean;
   swarmState?: SwarmState;
@@ -109,7 +120,7 @@ export interface GatewaySessionTranscriptMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
-  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string }>;
+  toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
 }
 
 export interface GatewaySessionTranscript {
@@ -124,6 +135,45 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
+const LEGACY_DIRECT_GATEWAY_WS_URL = "ws://localhost:8765/ws";
+
+export function defaultGatewayWsUrl(): string {
+  if (typeof window === "undefined") {
+    return LEGACY_DIRECT_GATEWAY_WS_URL;
+  }
+
+  const { protocol, host } = window.location;
+  if (!host || protocol === "file:") {
+    return LEGACY_DIRECT_GATEWAY_WS_URL;
+  }
+
+  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProtocol}//${host}/ws`;
+}
+
+function normalizeGatewayWsUrl(raw: string | null | undefined): string {
+  const trimmed = raw?.trim();
+  if (!trimmed || trimmed === LEGACY_DIRECT_GATEWAY_WS_URL) {
+    return defaultGatewayWsUrl();
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    }
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return defaultGatewayWsUrl();
+    }
+    if (!parsed.pathname || parsed.pathname === "/") {
+      parsed.pathname = "/ws";
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
 
 export interface FileToMarkdownResult {
   success: boolean;
@@ -152,38 +202,224 @@ export interface SceneInfo {
   description: string;
 }
 
-interface ChatAttachment {
+export interface ChatAttachment {
   filename: string;
-  dataUrl: string;
+  dataUrl?: string;
+  relativePath?: string;
+  contentType?: string;
+  previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "download";
+  size?: number;
+  isDirectory?: boolean;
+  title?: string;
+  sourceTool?: string;
+}
+
+function cloneToolCalls(toolCalls: ChatMessage["toolCalls"]): ChatMessage["toolCalls"] {
+  if (!toolCalls?.length) return undefined;
+  return toolCalls.map((toolCall) => ({
+    ...toolCall,
+    args: { ...(toolCall.args ?? {}) },
+    metadata: toolCall.metadata && typeof toolCall.metadata === "object"
+      ? { ...toolCall.metadata }
+      : undefined,
+  }));
+}
+
+function cloneAttachments(attachments: ChatMessage["attachments"]): ChatMessage["attachments"] {
+  if (!attachments?.length) return undefined;
+  return attachments.map((attachment) => ({ ...attachment }));
+}
+
+function cloneGuardrailEvents(events: ChatMessage["guardrailEvents"]): ChatMessage["guardrailEvents"] {
+  if (!events?.length) return undefined;
+  return events.map((event) => ({ ...event }));
+}
+
+function normalizeHydratedMessages(input: ChatMessage[]): ChatMessage[] {
+  const normalized: ChatMessage[] = [];
+
+  for (const entry of input) {
+    const message: ChatMessage = {
+      ...entry,
+      timestamp: new Date(entry.timestamp),
+      attachments: cloneAttachments(entry.attachments),
+      toolCalls: cloneToolCalls(entry.toolCalls),
+      guardrailEvents: cloneGuardrailEvents(entry.guardrailEvents),
+    };
+    const previous = normalized[normalized.length - 1];
+
+    if (previous?.role === "assistant" && message.role === "assistant") {
+      previous.id = message.id;
+      previous.timestamp = message.timestamp;
+      previous.toolCalls = [
+        ...(previous.toolCalls ?? []),
+        ...(message.toolCalls ?? []),
+      ];
+      previous.attachments = [
+        ...(previous.attachments ?? []),
+        ...(message.attachments ?? []),
+      ];
+      previous.guardrailEvents = [
+        ...(previous.guardrailEvents ?? []),
+        ...(message.guardrailEvents ?? []),
+      ];
+      previous.blocked = previous.blocked || message.blocked;
+      previous.swarmState = message.swarmState ?? previous.swarmState;
+      previous.usage = message.usage ?? previous.usage;
+      previous.perf = message.perf ?? previous.perf;
+      if (message.content.trim()) {
+        previous.content = message.content;
+      }
+      continue;
+    }
+
+    normalized.push(message);
+  }
+
+  return normalized;
 }
 
 const THINKING_BLOCK_RE = /<(thinking|think)>[\s\S]*?<\/(thinking|think)>/gi;
+const NARRATED_TOOL_TEXT_RE = /<tool_call>|<function=|<parameter=|\[Tool:/i;
+const EXECUTION_CHATTER_START_RE = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i found some useful information|let me fetch|let me search|now let me create|now i can)\b/i;
+
+function stripNarratedToolTags(text: string): string {
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function=[^>]*>[\s\S]*?<\/function>/gi, "")
+    .replace(/<parameter=[^>]*>[\s\S]*?<\/parameter>/gi, "")
+    .replace(/<\/?tool_call>/gi, "")
+    .trim();
+}
+
+export function sanitizeAssistantMessageContent(
+  content: string | null | undefined,
+  toolCalls?: Array<unknown>,
+): string {
+  const raw = typeof content === "string" ? content.trim() : "";
+  if (!raw) return "";
+
+  let cleaned = stripNarratedToolTags(raw)
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith("[Tool:"))
+    .join("\n")
+    .trim();
+
+  if (!cleaned) return "";
+
+  if (NARRATED_TOOL_TEXT_RE.test(raw) || (toolCalls?.length ?? 0) > 0) {
+    cleaned = cleaned
+      .split(/\n\s*\n/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean)
+      .filter((paragraph) => !EXECUTION_CHATTER_START_RE.test(paragraph))
+      .join("\n\n")
+      .trim();
+  }
+
+  return cleaned;
+}
+
+function inferContentTypeFromPath(path: string): string {
+  const normalized = path.toLowerCase();
+  if (normalized.endsWith(".html") || normalized.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (normalized.endsWith(".md")) return "text/markdown; charset=utf-8";
+  if (normalized.endsWith(".txt")) return "text/plain; charset=utf-8";
+  if (normalized.endsWith(".json")) return "application/json; charset=utf-8";
+  if (normalized.endsWith(".pdf")) return "application/pdf";
+  if (normalized.endsWith(".png")) return "image/png";
+  if (normalized.endsWith(".jpg") || normalized.endsWith(".jpeg")) return "image/jpeg";
+  if (normalized.endsWith(".gif")) return "image/gif";
+  if (normalized.endsWith(".webp")) return "image/webp";
+  if (normalized.endsWith(".svg")) return "image/svg+xml";
+  if (normalized.endsWith(".wav")) return "audio/wav";
+  if (normalized.endsWith(".mp3")) return "audio/mpeg";
+  if (normalized.endsWith(".m4a")) return "audio/mp4";
+  if (normalized.endsWith(".ogg")) return "audio/ogg";
+  if (normalized.endsWith(".webm")) return "audio/webm";
+  return "application/octet-stream";
+}
+
+function inferPreviewMode(contentType: string): ChatAttachment["previewMode"] {
+  if (contentType.startsWith("image/")) return "image";
+  if (contentType.startsWith("audio/")) return "audio";
+  if (contentType.startsWith("text/html")) return "html";
+  if (contentType.startsWith("application/pdf")) return "pdf";
+  if (contentType.startsWith("application/json")) return "json";
+  if (contentType.startsWith("text/")) return "text";
+  return "download";
+}
+
+function filenameFromRelativePath(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
 
 function extractToolAttachments(name: string, metadata: unknown): ChatAttachment[] {
-  if (name !== "generate_image" || !metadata || typeof metadata !== "object") {
+  if (!metadata || typeof metadata !== "object") {
     return [];
   }
 
   const value = metadata as Record<string, unknown>;
-  const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : "";
-  if (!dataUrl.startsWith("data:image/")) {
+  const outputPath = typeof value["outputPath"] === "string" ? value["outputPath"] : "";
+  const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : undefined;
+  const filename = typeof value["filename"] === "string"
+    ? value["filename"]
+    : outputPath
+      ? filenameFromRelativePath(outputPath)
+      : dataUrl
+        ? "generated-image.png"
+        : "artifact";
+  const contentType = typeof value["contentType"] === "string"
+    ? value["contentType"]
+    : outputPath
+      ? inferContentTypeFromPath(outputPath)
+      : dataUrl?.startsWith("data:")
+        ? dataUrl.slice(5, dataUrl.indexOf(";"))
+        : "application/octet-stream";
+  const previewMode = typeof value["previewMode"] === "string"
+    ? value["previewMode"] as ChatAttachment["previewMode"]
+    : inferPreviewMode(contentType);
+  const size = typeof value["bytes"] === "number"
+    ? value["bytes"]
+    : typeof value["size"] === "number"
+      ? value["size"]
+      : undefined;
+
+  if (!outputPath && !dataUrl) {
     return [];
   }
 
-  const filename = typeof value["filename"] === "string"
-    ? value["filename"]
-    : typeof value["outputPath"] === "string"
-      ? String(value["outputPath"]).split(/[\\/]/).pop() || "generated-image.png"
-      : "generated-image.png";
+  if (name === "generate_image" && dataUrl?.startsWith("data:image/")) {
+    return [{
+      filename,
+      dataUrl,
+      relativePath: outputPath || undefined,
+      contentType,
+      previewMode: "image",
+      size,
+      title: typeof value["title"] === "string" ? value["title"] : undefined,
+      sourceTool: name,
+    }];
+  }
 
-  return [{ filename, dataUrl }];
+  return [{
+    filename,
+    dataUrl,
+    relativePath: outputPath || undefined,
+    contentType,
+    previewMode,
+    size,
+    isDirectory: value["isDirectory"] === true,
+    title: typeof value["title"] === "string" ? value["title"] : undefined,
+    sourceTool: name,
+  }];
 }
 
 function extractCompletedThinkingBlocks(text: string): string {
   return (text.match(THINKING_BLOCK_RE) ?? []).join("\n\n").trim();
 }
 
-function mergeFinalAssistantContent(response: unknown, streamedText: string): string {
+function mergeFinalAssistantContent(response: unknown, streamedText: string, toolCalls?: ChatMessage["toolCalls"]): string {
   const finalResponse = String(response ?? "").trim();
   if (/<(thinking|think)>/i.test(finalResponse)) {
     return finalResponse;
@@ -191,10 +427,11 @@ function mergeFinalAssistantContent(response: unknown, streamedText: string): st
 
   const completedThinking = extractCompletedThinkingBlocks(streamedText);
   if (!completedThinking) {
-    return finalResponse;
+    return sanitizeAssistantMessageContent(finalResponse, toolCalls) || finalResponse;
   }
 
-  return [completedThinking, finalResponse].filter(Boolean).join("\n\n");
+  const merged = [completedThinking, finalResponse].filter(Boolean).join("\n\n");
+  return sanitizeAssistantMessageContent(merged, toolCalls) || merged;
 }
 
 function buildAcceptedStatusMessage(data: Record<string, unknown>): string | null {
@@ -226,9 +463,12 @@ function buildAcceptedStatusMessage(data: Record<string, unknown>): string | nul
 
 export const useGatewayStore = defineStore("gateway", () => {
   const audit = useAuditStore();
+  const notifications = useNotificationStore();
   const token = useStorage<string>("gc_token", "");
-  const wsUrl = useStorage<string>("gc_ws_url", "ws://localhost:8765/ws");
+  const wsUrl = useStorage<string>("gc_ws_url", defaultGatewayWsUrl());
   const swarmRunsBySession = useStorage<Record<string, SwarmRunRecord[]>>("gc_swarm_runs", {});
+
+  wsUrl.value = normalizeGatewayWsUrl(wsUrl.value);
 
   const connected = ref(false);
   const connecting = ref(false);
@@ -261,6 +501,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     args: Record<string, unknown>;
   }
   const pendingApproval = ref<PendingApproval | null>(null);
+  const notificationsSubscribed = ref(false);
 
   let ws: WebSocket | null = null;
   const pendingRpcs = new Map<string, PendingRpc>();
@@ -269,6 +510,9 @@ export const useGatewayStore = defineStore("gateway", () => {
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let heartbeatInFlight = false;
   let lifecycleHooksInstalled = false;
+  let consecutiveReconnects = 0;
+  const MAX_RECONNECT_ATTEMPTS = 12;
+  const MAX_RECONNECT_DELAY_MS = 30_000;
 
   function clearReconnectTimer(): void {
     if (reconnectTimer) {
@@ -303,13 +547,22 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
-  function scheduleReconnect(delayMs = RECONNECT_DELAY_MS): void {
+  function scheduleReconnect(delayMs?: number): void {
     if (reconnectTimer || !token.value || authFailed.value) return;
+    if (consecutiveReconnects >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[gateway] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+      return;
+    }
+    const backoff = delayMs ?? Math.min(
+      RECONNECT_DELAY_MS * Math.pow(1.5, consecutiveReconnects),
+      MAX_RECONNECT_DELAY_MS,
+    );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!token.value || authFailed.value || connected.value || connecting.value) return;
+      consecutiveReconnects++;
       connect();
-    }, delayMs);
+    }, backoff);
   }
 
   function installLifecycleHooks(): void {
@@ -340,7 +593,12 @@ export const useGatewayStore = defineStore("gateway", () => {
       try {
         await rpc("gateway.status", undefined, HEARTBEAT_RPC_TIMEOUT_MS);
       } catch {
+        stopHeartbeat();
         closeActiveSocket("Heartbeat timeout");
+        connected.value = false;
+        connecting.value = false;
+        rejectPendingRpcs("Heartbeat timeout");
+        scheduleReconnect();
       } finally {
         heartbeatInFlight = false;
       }
@@ -378,8 +636,29 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
+  function parseContentDispositionFilename(headerValue: string | null): string | null {
+    if (!headerValue) return null;
+
+    const utf8Match = headerValue.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match?.[1]) {
+      try {
+        return decodeURIComponent(utf8Match[1]);
+      } catch {
+        return utf8Match[1];
+      }
+    }
+
+    const plainMatch = headerValue.match(/filename="?([^";]+)"?/i);
+    return plainMatch?.[1] ?? null;
+  }
+
   function restBaseUrl(): string {
-    return (wsUrl.value ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    const parsed = new URL(normalizeGatewayWsUrl(wsUrl.value));
+    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
+    parsed.pathname = parsed.pathname.replace(/\/ws$/, "");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
   }
 
   async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -492,13 +771,16 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function mapTranscriptMessages(transcript: GatewaySessionTranscriptMessage[]): ChatMessage[] {
-    return transcript.map((message) => ({
+    return normalizeHydratedMessages(transcript.map((message) => ({
       id: message.id,
       role: message.role,
-      content: message.content,
+      content: message.role === "assistant"
+        ? sanitizeAssistantMessageContent(message.content, message.toolCalls)
+        : message.content,
       timestamp: new Date(message.timestamp),
       toolCalls: message.toolCalls,
-    }));
+      attachments: (message.toolCalls ?? []).flatMap((toolCall) => extractToolAttachments(toolCall.name, toolCall.metadata)),
+    })));
   }
 
   function hydrateTranscript(transcript: GatewaySessionTranscriptMessage[]) {
@@ -537,6 +819,18 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function refreshSessions(): Promise<GatewaySession[]> {
     const result = await rpc("session.list") as GatewaySession[];
     sessions.value = result;
+
+    // Prune swarmRunsBySession for sessions the server no longer knows about
+    const knownIds = new Set(result.map(s => s.id));
+    const storedKeys = Object.keys(swarmRunsBySession.value);
+    if (storedKeys.length > knownIds.size + 10) {
+      const pruned: Record<string, SwarmRunRecord[]> = {};
+      for (const key of storedKeys) {
+        if (knownIds.has(key)) pruned[key] = swarmRunsBySession.value[key];
+      }
+      swarmRunsBySession.value = pruned;
+    }
+
     return result;
   }
 
@@ -555,6 +849,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     currentSessionTranscriptLoading.value = true;
     try {
       const result = await getSessionTranscript(sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
+      // Guard: if the user switched sessions while we were loading, discard.
+      if (currentSessionId.value !== null && currentSessionId.value !== sessionId) return;
       if (!allowArchived && result.session.archivedAt) {
         throw new Error("Archived sessions cannot be resumed");
       }
@@ -592,7 +888,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       const existingIds = new Set(messages.value.map((message) => message.id));
       const olderMessages = mapTranscriptMessages(result.transcript)
         .filter((message) => !existingIds.has(message.id));
-      messages.value = [...olderMessages, ...messages.value];
+      messages.value = normalizeHydratedMessages([...olderMessages, ...messages.value]);
       currentSessionTranscriptTotalMessages.value = result.totalMessages;
       currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
     } finally {
@@ -608,7 +904,10 @@ export const useGatewayStore = defineStore("gateway", () => {
     connecting.value = true;
     authFailed.value = false;
 
-    const url = `${wsUrl.value}?token=${encodeURIComponent(token.value)}`;
+    const normalizedWsUrl = normalizeGatewayWsUrl(wsUrl.value);
+    wsUrl.value = normalizedWsUrl;
+    const url = new URL(normalizedWsUrl);
+    url.searchParams.set("token", token.value);
     const socket = new WebSocket(url);
     ws = socket;
     connectTimeoutTimer = setTimeout(() => {
@@ -626,6 +925,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       ws = null;
       connected.value = false;
       connecting.value = false;
+      notificationsSubscribed.value = false;
       clearConnectTimeout();
       stopHeartbeat();
       rejectPendingRpcs("Connection closed");
@@ -659,6 +959,16 @@ export const useGatewayStore = defineStore("gateway", () => {
     };
   }
 
+  async function ensureNotificationSubscription(): Promise<void> {
+    if (!connected.value || notificationsSubscribed.value) return;
+    try {
+      await rpc("notifications.subscribe");
+      notificationsSubscribed.value = true;
+    } catch {
+      notificationsSubscribed.value = false;
+    }
+  }
+
   function disconnect() {
     clearReconnectTimer();
     clearConnectTimeout();
@@ -669,6 +979,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     old?.close();
     connected.value = false;
     connecting.value = false;
+    // Clear stale UI state so reconnect starts clean
+    pendingApproval.value = null;
+    pendingIntervention.value = null;
+    notificationsSubscribed.value = false;
+    liveSwarmState.value = null;
+    isStreaming.value = false;
   }
 
   function handleServerMessage(msg: Record<string, unknown>) {
@@ -678,6 +994,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearConnectTimeout();
       connected.value = true;
       connecting.value = false;
+      consecutiveReconnects = 0;
       startHeartbeat();
       const data = msg["data"] as Record<string, unknown>;
       sessions.value = (data["sessions"] as GatewaySession[]) ?? [];
@@ -690,6 +1007,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         currentSessionId.value = null;
         resetLocalSessionState();
       }
+      void ensureNotificationSubscription();
       return;
     }
 
@@ -713,6 +1031,25 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    if (type === "notification.event") {
+      const data = msg["data"] as Record<string, unknown> | undefined;
+      if (data) {
+        notifications.pushServerNotification({
+          id: typeof data["id"] === "string" ? data["id"] : undefined,
+          title: String(data["title"] ?? "Notification"),
+          message: String(data["message"] ?? ""),
+          level: (data["level"] as "info" | "success" | "warn" | "error" | undefined) ?? "info",
+          createdAt: typeof data["createdAt"] === "string" ? data["createdAt"] : undefined,
+          category: typeof data["category"] === "string" ? data["category"] : undefined,
+          sessionId: typeof data["sessionId"] === "string" ? data["sessionId"] : undefined,
+          jobId: typeof data["jobId"] === "string" ? data["jobId"] : undefined,
+          targetPath: typeof data["targetPath"] === "string" ? data["targetPath"] : undefined,
+          sticky: data["sticky"] === true,
+        });
+      }
+      return;
+    }
+
     if (type === "agent.chunk") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
@@ -728,6 +1065,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         const streamingMessage = getStreamingMessage();
         if (streamingMessage) {
           streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
+            id: typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
             name: String(data["name"]),
             args: data["args"] as Record<string, unknown>,
           }];
@@ -751,12 +1089,21 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.approval_needed") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        const approvalId = String(data["approvalId"]);
         pendingApproval.value = {
-          approvalId: String(data["approvalId"]),
+          approvalId,
           requestId: String(data["requestId"]),
           toolName: String(data["toolName"]),
           args: (data["args"] ?? {}) as Record<string, unknown>,
         };
+        notifications.pushLocalNotification({
+          id: `approval:${approvalId}`,
+          title: "Approval required",
+          message: `The agent is waiting for approval to run ${String(data["toolName"])}.`,
+          level: "warn",
+          category: "approval",
+          sticky: true,
+        });
       }
       return;
     }
@@ -765,6 +1112,15 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
         pendingIntervention.value = data["notice"] as InterventionNotice;
+        const notice = data["notice"] as InterventionNotice;
+        notifications.pushLocalNotification({
+          id: `intervention:${String(data["requestId"])}:${notice.reasonCode}`,
+          title: "Operator action suggested",
+          message: notice.summary,
+          level: notice.severity,
+          category: "intervention",
+          sticky: notice.severity === "error",
+        });
       }
       return;
     }
@@ -781,8 +1137,14 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (data["requestId"] === pendingRequestId.value) {
         const streamingMessage = getStreamingMessage();
         if (streamingMessage?.toolCalls) {
-          const tc = streamingMessage.toolCalls.find(t => t.name === String(data["name"]));
+          const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
+          const tc = toolCallId
+            ? streamingMessage.toolCalls.find((toolCall) => toolCall.id === toolCallId)
+            : streamingMessage.toolCalls.find((toolCall) => toolCall.name === String(data["name"]) && toolCall.result === undefined);
           if (tc) tc.result = String(data["result"] ?? "");
+          if (tc && data["metadata"] && typeof data["metadata"] === "object") {
+            tc.metadata = data["metadata"] as Record<string, unknown>;
+          }
         }
         if (streamingMessage) {
           const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
@@ -818,7 +1180,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         const finalMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: mergeFinalAssistantContent(data["response"], streamingText.value),
+          content: mergeFinalAssistantContent(data["response"], streamingText.value, streamingMessage?.toolCalls),
           timestamp: new Date(),
           guardrailEvents: data["guardrailEvents"] as ChatMessage["guardrailEvents"],
           toolCalls: streamingMessage?.toolCalls,
@@ -1066,6 +1428,33 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { workspacePath: string; relativePath: string; filename: string };
   }
 
+  async function fetchWorkspaceArtifactBlob(path: string, options: { archive?: boolean; disposition?: "inline" | "attachment" } = {}): Promise<{ blob: Blob; filename: string; contentType: string }> {
+    const archive = options.archive ?? false;
+    const disposition = options.disposition ?? "inline";
+    const search = new URLSearchParams({ path });
+    if (!archive) search.set("disposition", disposition);
+
+    const response = await authorizedFetch(`${archive ? "/api/workspace/archive" : "/api/workspace/file"}?${search.toString()}`);
+    const blob = await response.blob();
+    const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
+      ?? (archive ? `${filenameFromRelativePath(path)}.zip` : filenameFromRelativePath(path));
+    const contentType = response.headers.get("content-type") ?? blob.type ?? inferContentTypeFromPath(filename);
+    return { blob, filename, contentType };
+  }
+
+  async function downloadWorkspaceArtifact(path: string, options: { archive?: boolean; suggestedFilename?: string } = {}): Promise<void> {
+    const artifact = await fetchWorkspaceArtifactBlob(path, {
+      archive: options.archive,
+      disposition: "attachment",
+    });
+    const url = URL.createObjectURL(artifact.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = options.suggestedFilename ?? artifact.filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function summarizeForSpeech(input: {
     text: string;
     maxSentences?: number;
@@ -1164,6 +1553,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     summarizeForSpeech,
     analyzeImageFile,
     uploadToWorkspace,
+    fetchWorkspaceArtifactBlob,
+    downloadWorkspaceArtifact,
     respondApproval,
     dismissIntervention,
     cancelTurn,

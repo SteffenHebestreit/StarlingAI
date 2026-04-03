@@ -256,8 +256,9 @@ export class RdpComputerAdapter implements ComputerAdapter {
           output = `RDP action '${action.type}' — use xdotool for basic input or VNC adapter for full support.`;
       }
 
-      // Auto-screenshot after action
-      await sleep(350);
+      // Auto-screenshot after action — give the display time to render
+      const { POST_ACTION_SETTLE_MS: settleMs } = await import("./constants.js");
+      await sleep(settleMs);
       let snapshot: ComputerSessionSnapshot | undefined;
       try {
         snapshot = await this.captureSnapshot();

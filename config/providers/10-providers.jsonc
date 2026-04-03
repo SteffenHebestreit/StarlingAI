@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "lmstudio": {
+      "baseUrl": "http://10.10.0.2:1234/v1",
+      "apiKey": "lm-studio",
+      "timeoutMs": 30000,
+      "maxRetries": 3
+    }
+  }
+}

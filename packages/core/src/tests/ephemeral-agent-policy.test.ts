@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
-const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; task: string }) => {
+const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) => {
   if (agentName === "agent_architect") {
     return JSON.stringify({
       agentName: "investor_memo_writer",
@@ -25,10 +26,10 @@ const runSubAgentMock = vi.fn(async ({ agentName, task }: { agentName: string; t
   return `${agentName}:${task}`;
 });
 
-const collectTaskBidsMock = vi.fn(async () => []);
+const collectTaskBidsMock = vi.fn(async (): Promise<Array<Record<string, unknown>>> => []);
 const clearTaskBidsMock = vi.fn();
 const isAutonomousBiddingStartedMock = vi.fn(() => true);
-const runSubAgentWithStatsMock = vi.hoisted(() => vi.fn(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+const runSubAgentWithStatsMock = vi.hoisted(() => vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
   output: await runSubAgentMock(args),
   stats: {
     agentName: args.agentName,
@@ -42,7 +43,7 @@ const runSubAgentWithStatsMock = vi.hoisted(() => vi.fn(async (args: Parameters<
     maxIterations: 5,
     model: "mock",
     capabilities: [],
-    terminalState: "completed" as const,
+    terminalState: "completed",
   },
 })));
 
@@ -66,7 +67,7 @@ describe("create_ephemeral_agent policy", () => {
     vi.resetModules();
     runSubAgentMock.mockClear();
     runSubAgentWithStatsMock.mockClear();
-    runSubAgentWithStatsMock.mockImplementation(async (args: Parameters<typeof runSubAgentMock>[0]) => ({
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
       output: await runSubAgentMock(args),
       stats: {
         agentName: args.agentName,
@@ -80,7 +81,7 @@ describe("create_ephemeral_agent policy", () => {
         maxIterations: 5,
         model: "mock",
         capabilities: [],
-        terminalState: "completed" as const,
+        terminalState: "completed",
       },
     }));
     collectTaskBidsMock.mockReset();
@@ -253,7 +254,7 @@ describe("create_ephemeral_agent policy", () => {
       },
     ]);
 
-    runSubAgentWithStatsMock.mockImplementation(async (args: Parameters<typeof runSubAgentMock>[0]) => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       if (String(args.agentName).startsWith("ephemeral:")) {
         return {
           output: "Let me try with an empty string or null for the sessionId:",
@@ -269,7 +270,7 @@ describe("create_ephemeral_agent policy", () => {
             maxIterations: 6,
             model: "mock",
             capabilities: [],
-            terminalState: "max_iterations" as const,
+            terminalState: "max_iterations",
           },
         };
       }
@@ -288,7 +289,7 @@ describe("create_ephemeral_agent policy", () => {
           maxIterations: 5,
           model: "mock",
           capabilities: [],
-          terminalState: "completed" as const,
+          terminalState: "completed",
         },
       };
     });
@@ -348,7 +349,7 @@ describe("create_ephemeral_agent policy", () => {
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
 
     // Architect returns a computer-use ephemeral agent with maxIterations=5
-    runSubAgentMock.mockImplementation(async ({ agentName }: { agentName: string }) => {
+    runSubAgentMock.mockImplementation(async ({ agentName }: SubAgentRunOptions) => {
       if (agentName === "agent_architect") {
         return JSON.stringify({
           agentName: "desktop_clicker",
@@ -366,7 +367,7 @@ describe("create_ephemeral_agent policy", () => {
 
     // Mock runSubAgentWithStats to capture the inlineConfig maxIterations
     let capturedMaxIterations: number | undefined;
-    runSubAgentWithStatsMock.mockImplementation(async (args: any) => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       if (String(args.agentName).startsWith("ephemeral:")) {
         capturedMaxIterations = args.inlineConfig?.maxIterations;
       }
@@ -384,7 +385,7 @@ describe("create_ephemeral_agent policy", () => {
           maxIterations: 20,
           model: "mock",
           capabilities: [],
-          terminalState: "completed" as const,
+          terminalState: "completed",
         },
       };
     });

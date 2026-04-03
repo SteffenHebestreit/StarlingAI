@@ -1,0 +1,44 @@
+{
+  "accounts": [
+    {
+      "id": "work",
+      "address": "bundeswehr@steffen-hebestreit.com",
+      "displayName": "Work",
+      "imap": {
+        "host": "imap.strato.com",
+        "port": 993,
+        "secure": true,
+        "user": "$MAIL_WORK_USER",
+        "pass": "$MAIL_WORK_PASS"
+      },
+      "smtp": {
+        "host": "smtp.strato.com",
+        "port": 465,
+        "secure": true,
+        "user": "$MAIL_WORK_USER",
+        "pass": "$MAIL_WORK_PASS",
+        "from": "OTL Hebestreit <bundeswehr@steffen-hebestreit.com>"
+      }
+    },
+    // {
+    //   "id": "personal",
+    //   "address": "me@example.com",
+    //   "displayName": "Personal",
+    //   "imap": {
+    //     "host": "imap.example.com",
+    //     "port": 993,
+    //     "secure": true,
+    //     "user": "$MAIL_PERSONAL_USER",
+    //     "pass": "$MAIL_PERSONAL_PASS"
+    //   },
+    //   "smtp": {
+    //     "host": "smtp.example.com",
+    //     "port": 587,
+    //     "secure": false,
+    //     "user": "$MAIL_PERSONAL_USER",
+    //     "pass": "$MAIL_PERSONAL_PASS",
+    //     "from": "Me <me@example.com>"
+    //   }
+    // }
+  ]
+}

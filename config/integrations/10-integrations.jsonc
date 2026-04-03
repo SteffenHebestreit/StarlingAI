@@ -1,0 +1,44 @@
+{
+  "integrations": {
+    "n8n": {
+      "baseUrl": "http://host.docker.internal:5678",
+      "apiKey": "$N8N_API_KEY",
+      "leadsWebhookUrl": "http://host.docker.internal:5678/webhook/starlingai-leads",
+      "markAppliedWebhookUrl": "http://host.docker.internal:5678/webhook/starlingai-apply"
+    }
+  },
+  "webhooks": {
+    "notify_ops": {
+      "description": "Notify an internal webhook about important runtime events.",
+      "url": "https://example.com/hooks/starlingai",
+      "method": "POST",
+      "headers": {
+        "Authorization": "$OPS_WEBHOOK_TOKEN"
+      }
+    }
+  },
+  "sites": {
+    "github.com": {
+      "username": "your-username",
+      "password": "$GITHUB_PASSWORD",
+      "loginUrl": "https://github.com/login"
+    },
+    "app.example.com": {
+      "username": "ops@example.com",
+      "password": "secret:app_example_password",
+      "loginUrl": "https://app.example.com/login",
+      "urls": {
+        "dashboard": "https://app.example.com/dashboard"
+      },
+      "notes": "Use the local account rather than SSO."
+    }
+  },
+  "approvalChannels": {
+    "slack-approvals": {
+      "type": "slack",
+      "webhookUrl": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK_URL",
+      "timeoutMs": 600000
+    }
+  },
+  "workspacePath": "/workspace"
+}

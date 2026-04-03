@@ -55,7 +55,7 @@
         <h1>Setup Guide</h1>
         <p class="tagline">Get your general-purpose AI agent swarm running in 20 minutes.</p>
         <div class="badge-row">
-          <span class="tag tag-blue">v1.0</span>
+          <span class="tag tag-blue">v0.3.0</span>
           <span class="tag tag-green">Self-hosted</span>
           <span class="tag tag-yellow">20 min setup</span>
         </div>
@@ -224,14 +224,12 @@
             <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI</td></tr>
             <tr><td><code>postgres</code></td><td>internal</td><td>Audit logs, session store</td></tr>
             <tr><td><code>redis</code></td><td>internal</td><td>Rate limiting, pub/sub</td></tr>
-            <tr><td><code>qwen3-asr-service</code></td><td>internal</td><td>Speech-to-text (Qwen3-ASR)</td></tr>
-            <tr><td><code>qwen3-tts-service</code></td><td>internal</td><td>Text-to-speech with voice cloning (Qwen3-TTS)</td></tr>
             <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP)</td></tr>
             <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
-            <tr><td><code>kali-pentest</code> <em>(optional)</em></td><td>internal</td><td>Kali Linux pentest toolchain — start with <code>./extras.sh pentest on</code></td></tr>
-            <tr><td><code>image-generation-service</code> <em>(optional)</em></td><td>internal</td><td>FLUX image generation — start with <code>./extras.sh image on</code></td></tr>
+            <tr><td><code>kali-pentest</code> <em>(optional)</em></td><td>internal</td><td>Kali Linux pentest toolchain — include it with <code>pnpm sai start --pentest</code></td></tr>
           </tbody>
         </table>
+        <p style="color:var(--muted);margin-top:1rem;">Speech-to-text, text-to-speech, and image generation are configured as external endpoints in the dashboard settings or <code>config/multimodal/10-multimodal.jsonc</code>.</p>
       </div>
 
       <!-- Footer -->

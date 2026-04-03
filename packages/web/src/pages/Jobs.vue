@@ -3,7 +3,7 @@
     <div class="jobs-page__header">
       <div>
         <h2 class="jobs-page__title">Jobs</h2>
-        <p class="jobs-page__subtitle">Monitor queued and background scene runs, cancel active work, and jump back into related sessions.</p>
+        <p class="jobs-page__subtitle">Monitor queued scene and job runs, cancel active work, and jump back into related sessions.</p>
       </div>
       <div class="jobs-page__actions">
         <button @click="refreshJobs" class="jobs-page__button">Refresh</button>
@@ -32,6 +32,7 @@
           <div>
             <div class="job-card__title-row">
               <h3 class="job-card__title">{{ formatSceneName(job.sceneName) }}</h3>
+              <span class="badge-store">{{ job.definitionType === 'job' ? 'job' : 'scene' }}</span>
               <span :class="jobBadgeClass(job.status)">{{ job.status }}</span>
             </div>
             <div class="job-card__meta">Job {{ shortJobId(job.id) }} · Session {{ shortJobId(job.sessionId) }}</div>
@@ -54,6 +55,10 @@
         </div>
 
         <p class="job-card__message">{{ job.progress.message ?? 'Waiting for worker updates' }}</p>
+        <div v-if="job.progress.totalSteps" class="job-card__detail-row">
+          <span>Steps: {{ job.progress.completedSteps ?? 0 }} / {{ job.progress.totalSteps }}</span>
+          <span v-if="job.progress.currentStep">Current step: {{ job.progress.currentStep }}</span>
+        </div>
 
         <div class="job-card__stats">
           <div class="job-card__stat">

@@ -24,6 +24,7 @@ import { childLogger } from "../logger.js";
 import type { SubAgentRunOptions } from "./sub-agent.js";
 import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
+import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
 
 const log = childLogger("agent:container-runner");
 
@@ -133,7 +134,7 @@ export async function runSubAgentInContainer(
     "--cap-drop", "ALL",
     "--network", network,
     // Mount workspace volume so tools can read/write files
-    "-v", `gc-workspace:${opts.workspacePath}`,
+    "-v", `${resolveDockerWorkspaceMountSource(opts.workspacePath)}:${opts.workspacePath}`,
     "--interactive",
     image,
   ];

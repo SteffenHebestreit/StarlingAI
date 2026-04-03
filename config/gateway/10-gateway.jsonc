@@ -1,0 +1,13 @@
+{
+  "gateway": {
+    "port": 8765,
+    "restPort": 8766,
+    "bindHost": "loopback",
+    "sessionTtlMs": 3600000,
+    "turnTimeoutMs": 900000,
+    "publicUrl": "https://starlingai.example.com",
+    "corsAllowedOrigins": [
+      "https://chat.starlingai.example.com"
+    ]
+  }
+}

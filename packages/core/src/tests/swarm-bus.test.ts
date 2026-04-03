@@ -85,12 +85,15 @@ describe("Swarm Bus — event types", () => {
     emitSwarmEvent("task_failed", {});
     emitSwarmEvent("task_requeued", {});
     emitSwarmEvent("agent_promoted", {});
+    emitSwarmEvent("agent_message", {});
+    emitSwarmEvent("agent_broadcast", {});
+    emitSwarmEvent("agent_capability_announce", {});
 
     unsub();
 
     expect(types).toEqual([
       "task_announced", "task_bid", "task_claimed", "task_completed",
-      "task_failed", "task_requeued", "agent_promoted",
+      "task_failed", "task_requeued", "agent_promoted", "agent_message", "agent_broadcast", "agent_capability_announce",
     ]);
   });
 });

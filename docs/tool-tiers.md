@@ -8,7 +8,7 @@ StarlingAI enforces a five-tier tool classification system on every tool call. T
 
 This classification system is domain-agnostic. Whether the swarm is analyzing data, writing code, automating browsers, or sending emails, the same tier checks apply to every tool invocation.
 
-See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
+See also: [Security Model](security.md) · [Architecture & Design](architecture.md)
 
 ---
 
@@ -24,6 +24,8 @@ See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
 
 **Philosophy:** Tier 0 tools can never cause harm — they only read information the agent already has access to. Each tier above adds a capability (network egress, filesystem writes, process execution, external service calls) and a corresponding control. Tier 4 tools represent actions that would give an agent uncontained access to the host environment; they are removed from the tool registry entirely.
 
+This tier model is also the hard boundary for self-improvement. The swarm may refine prompts, memory, agent definitions, and approved tool assignments for specialists, but it may not use self-improvement to reclassify tools, weaken approvals, expose secrets, or bypass the guarded contract. Credential-bearing actions remain secret-safe tool calls, never plain-text reads into model context.
+
 ---
 
 ## Full Tool Registry
@@ -36,6 +38,7 @@ See also: [Security Model](security.md) · [Sub-Agent Reference](agents.md)
 | `search_agents` | Score agents against a query using hybrid routing |
 | `read_file` | Read a file from the workspace |
 | `list_files` | List files in a workspace directory |
+| `export_workspace_artifact` | Surface an existing workspace file or folder as a downloadable chat artifact |
 | `web_search` | Search via the configured web-search backend (SearXNG or DuckDuckGo fallback) |
 | `web_fetch` | Fetch a URL and return text content |
 | `workspace_search` | Full-text search across workspace files |
@@ -55,6 +58,9 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `delete_file` | Delete a file from the workspace | None |
 | `memory_store` | Write a key/value entry to the memory store | None |
 | `record_lesson` | Append a lesson-learned entry to memory | None |
+| `generate_document` | Save generated content as Markdown, text, HTML, or JSON in the workspace | None |
+| `generate_chart_html` | Save an HTML chart report with embedded visualization data in the workspace | None |
+| `generate_pdf` | Save a simple PDF document in the workspace | None |
 | `n8n_fetch_leads` | Fetch lead data from an n8n workflow | None |
 | `n8n_mark_applied` | Mark a lead as applied in n8n | None |
 | `webhook__<name>` | Any auto-registered webhook tool | None (auto-classified Tier 1) |

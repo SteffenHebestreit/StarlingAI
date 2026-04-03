@@ -7,17 +7,28 @@ import type { AuditEvent, AuditEventType } from "./schema.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("audit");
-const AUDIT_LOG_PATH = resolveAuditLogPath();
-
-// Ensure directory exists (sync at startup is fine)
-try {
-  const { mkdirSync } = await import("node:fs");
-  mkdirSync(dirname(AUDIT_LOG_PATH), { recursive: true });
-} catch { /* ignore */ }
 
 // In-memory subscribers for real-time streaming to web dashboard
 type AuditSubscriber = (event: AuditEvent) => void;
 const subscribers = new Set<AuditSubscriber>();
+
+// Serialized write queue — prevents interleaved writes and allows shutdown flush
+let _writeChain: Promise<void> = Promise.resolve();
+
+function enqueueWrite(line: string): void {
+  _writeChain = _writeChain
+    .then(async () => {
+      const auditLogPath = resolveAuditLogPath();
+      await mkdir(dirname(auditLogPath), { recursive: true });
+      await appendFile(auditLogPath, line, "utf-8");
+    })
+    .catch(err => log.error({ err }, "Failed to write audit log"));
+}
+
+/** Flush any pending audit writes.  Call during graceful shutdown. */
+export function flushAuditLog(): Promise<void> {
+  return _writeChain;
+}
 
 export function subscribeToAudit(fn: AuditSubscriber): () => void {
   subscribers.add(fn);
@@ -45,9 +56,8 @@ export function logAudit(
     severity: opts?.severity ?? "info",
   };
 
-  // Write to JSONL file (non-blocking)
-  appendFile(AUDIT_LOG_PATH, JSON.stringify(event) + "\n", "utf-8")
-    .catch(err => log.error({ err }, "Failed to write audit log"));
+  // Enqueue serialized write to JSONL file
+  enqueueWrite(JSON.stringify(event) + "\n");
 
   // Broadcast to real-time subscribers (web dashboard)
   for (const sub of subscribers) {

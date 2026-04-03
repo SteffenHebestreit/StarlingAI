@@ -173,11 +173,45 @@ export const useComputerStore = defineStore("computer", () => {
     };
   }
 
+  function evictStaleSessions() {
+    const MAX_CACHED_SESSIONS = 20;
+    const allKeys = Object.keys(screenshotsBySession.value);
+    if (allKeys.length <= MAX_CACHED_SESSIONS) return;
+
+    const activeIds = new Set(activeSessions.value.map(s => s.id));
+    const staleKeys = allKeys
+      .filter(k => !activeIds.has(k))
+      .sort((a, b) => (screenshotsBySession.value[a]?.timestamp ?? 0) - (screenshotsBySession.value[b]?.timestamp ?? 0));
+
+    const toRemove = allKeys.length - MAX_CACHED_SESSIONS;
+    const keysToEvict = staleKeys.slice(0, toRemove);
+    if (keysToEvict.length === 0) return;
+
+    const evictSet = new Set(keysToEvict);
+    const nextScreenshots: Record<string, ComputerScreenshot> = {};
+    const nextActions: Record<string, ComputerAction[]> = {};
+    for (const key of allKeys) {
+      if (!evictSet.has(key)) {
+        if (screenshotsBySession.value[key]) nextScreenshots[key] = screenshotsBySession.value[key];
+        if (actionsBySession.value[key]) nextActions[key] = actionsBySession.value[key];
+      }
+    }
+    // Preserve action-only sessions not in screenshot keys
+    for (const key of Object.keys(actionsBySession.value)) {
+      if (!evictSet.has(key) && !(key in nextActions)) {
+        nextActions[key] = actionsBySession.value[key];
+      }
+    }
+    screenshotsBySession.value = nextScreenshots;
+    actionsBySession.value = nextActions;
+  }
+
   function rememberScreenshot(screenshot: ComputerScreenshot) {
     screenshotsBySession.value = {
       ...screenshotsBySession.value,
       [screenshot.computerSessionId]: screenshot,
     };
+    evictStaleSessions();
   }
 
   // ── WebSocket event handlers ────────────────────────────────────────────

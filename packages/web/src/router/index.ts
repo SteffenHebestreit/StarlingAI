@@ -7,7 +7,11 @@ const router = createRouter({
     { path: "/audit", component: () => import("@/pages/AuditLog.vue") },
     { path: "/jobs", component: () => import("@/pages/Jobs.vue") },
     { path: "/sessions", component: () => import("@/pages/Sessions.vue") },
+    { path: "/agents", component: () => import("@/pages/Settings.vue") },
     { path: "/settings", component: () => import("@/pages/Settings.vue") },
+    { path: "/definitions", redirect: "/agents" },
+    { path: "/config-assistant", redirect: "/agents" },
+    { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });
 

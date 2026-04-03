@@ -39,8 +39,7 @@ import { randomUUID } from "node:crypto";
 
 const log = childLogger("agent:computer-adapter:vnc");
 
-/** Time to wait after an input action for the screen to update (ms). */
-const POST_ACTION_SETTLE_MS = 350;
+import { POST_ACTION_SETTLE_MS } from "./constants.js";
 
 /** Time between pointer-down and pointer-up for a click (ms). */
 const CLICK_HOLD_MS = 50;

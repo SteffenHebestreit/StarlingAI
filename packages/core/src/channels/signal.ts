@@ -13,6 +13,7 @@ import {
   runChannelTurn,
 } from "./base.js";
 import { deliverWithRetry } from "./delivery.js";
+import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { childLogger } from "../logger.js";
 import { setChannelHealthCheck } from "./registry.js";
 
@@ -159,6 +160,14 @@ async function handleSignalMessage(
   if (message.text === "/reset") {
     deleteChannelSession(`signal:${message.senderId}`);
     await sendSignalMessage(signalCliPath, account, message.senderId, "Session reset.");
+    return;
+  }
+
+  const triggeredJob = await dispatchChannelTriggeredJob({ channel: "signal", senderId: message.senderId, text: message.text });
+  if (triggeredJob.matched) {
+    if (triggeredJob.responseText) {
+      await sendSignalMessage(signalCliPath, account, message.senderId, triggeredJob.responseText);
+    }
     return;
   }
 

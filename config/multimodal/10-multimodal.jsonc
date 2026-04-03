@@ -1,0 +1,50 @@
+{
+  "multimodal": {
+    "maxUploadBytes": 20971520,
+    "files": {
+      "baseUrl": "http://fastapi-mcp-template:8000",
+      "toolName": "file_to_markdown",
+      "timeoutMs": 60000
+    },
+    "stt": {
+      "baseUrl": "",
+      "api": "auto",
+      "model": "whisper-1",
+      "timeoutMs": 60000
+    },
+    "tts": {
+      "baseUrl": "",
+      "api": "openai-compatible",
+      "model": "tts-1",
+      "defaultLanguage": "English",
+      "defaultSpeaker": "alloy",
+      "defaultQuality": "medium",
+      "timeoutMs": 60000
+    },
+    "imageGeneration": {
+      "baseUrl": "",
+      "api": "automatic1111-compatible",
+      "timeoutMs": 120000,
+      "defaultWidth": 1024,
+      "defaultHeight": 1024,
+      "defaultSteps": 28,
+      "defaultGuidanceScale": 7
+    },
+    "wakeWord": {
+      "enabled": false,
+      "language": "en-US",
+      "keywords": [
+        "Hey Guarded",
+        "Okay Guarded",
+        "Luna"
+      ],
+      "stopPhrases": [
+        "stop recording",
+        "end recording",
+        "stop listening",
+        "luna stop"
+      ],
+      "silenceTimeoutMs": 4000
+    }
+  }
+}

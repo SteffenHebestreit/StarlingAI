@@ -10,11 +10,12 @@ import {
   scoreAgentKeywordMatch,
   searchByEmbedding,
 } from "../providers/embeddings.js";
-import { isCircuitOpen } from "../tools/sub-agent.js";
+import { computeHybridRoutingScore, isCircuitOpen } from "../tools/sub-agent.js";
 import type { OutcomeEntry } from "../agent/outcomes.js";
 
 describe("agent search helpers", () => {
   afterEach(() => {
+    vi.useRealTimers();
     resetEmbeddingSearchStateForTests();
   });
 
@@ -137,6 +138,50 @@ describe("agent search helpers", () => {
     await searchByEmbedding("login forms", provider, 5);
 
     expect(embedMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("leans on semantic scores when embeddings are available", () => {
+    expect(computeHybridRoutingScore(0.9, 0.3, true)).toBeCloseTo(0.45, 5);
+    expect(computeHybridRoutingScore(0.8, 0, true)).toBeCloseTo(0.52, 5);
+    expect(computeHybridRoutingScore(0.8, 0, false)).toBeCloseTo(0.8, 5);
+    expect(computeHybridRoutingScore(0.2, 0.9, true)).toBeCloseTo(0.725, 5);
+  });
+
+  it("retries embedding index build after initial model unavailability", async () => {
+    vi.useFakeTimers();
+
+    let buildAttempts = 0;
+    const provider = {
+      embed: vi.fn(async (texts: string[]) => {
+        if (texts.every((text) => text.startsWith("Agent:"))) {
+          buildAttempts += 1;
+          if (buildAttempts === 1) {
+            throw new Error("No models loaded");
+          }
+          return [new Float32Array([1, 0])];
+        }
+
+        return [new Float32Array([1, 0])];
+      }),
+    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
+
+    const agents = {
+      mail_agent: {
+        description: "Handles inbox organization tasks.",
+        capabilities: ["mail triage"],
+        tags: ["mail"],
+        tools: ["mail_list_accounts"],
+        maxIterations: 4,
+      },
+    };
+
+    await buildAgentIndex(agents, provider, "lmstudio/qwen-embed");
+    expect(await searchByEmbedding("organize inbox", provider, 5)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const recovered = await searchByEmbedding("organize inbox", provider, 5);
+    expect(recovered[0]?.agentName).toBe("mail_agent");
   });
 });
 
@@ -266,6 +311,101 @@ describe("search_agents tool", () => {
       const resolution = await resolveAgentRouting("Find official MCP specification and A2A design principles", { minConfidence: "medium" });
       expect(resolution.results[0]?.name).toBe("researcher");
       expect(resolution.results.find((candidate) => candidate.name === "email_drafter")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes inbox and recent-email requests to mail_agent", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        mail_agent: {
+          description: "Mailbox triage and drafting specialist for multiple mail accounts with approval-gated sending.",
+          capabilities: ["mail triage", "mail search", "reply drafting", "multi-account mailbox operations"],
+          tags: ["mail", "email", "inbox", "drafts", "communications"],
+          tools: ["mail_search", "mail_read", "mail_list_unread", "mail_prepare_draft", "mail_send_draft"],
+          maxIterations: 8,
+        },
+        notification_agent: {
+          description: "Cross-channel notification specialist for sending messages via Slack, Discord, Telegram, and email.",
+          capabilities: ["email sending", "multi-channel notifications", "alert routing"],
+          tags: ["notifications", "messaging", "email", "alerts"],
+          tools: ["send_email", "send_slack", "send_discord", "send_telegram"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("Kannst du mir meine letzten 3 emails zeigen?", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("mail_agent");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes reminder and timer requests to productivity_agent", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        productivity_agent: {
+          description: "Personal productivity specialist for notes, reminders, timers, and lightweight follow-up tracking.",
+          capabilities: ["note taking", "workspace memory", "reminder scheduling", "timer management"],
+          tags: ["productivity", "notes", "reminder", "timer", "alarm", "todo"],
+          tools: ["memory_store", "memory_search", "reminder_create", "reminder_list", "timer_start", "timer_list", "timer_cancel"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("Please remind me tomorrow at 9 and start a 5 minute timer", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("productivity_agent");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
