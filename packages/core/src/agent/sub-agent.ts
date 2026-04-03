@@ -58,6 +58,14 @@ const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
   "computer_wait_for",
 ]);
 
+const MAIL_READ_ONLY_TOOLS = new Set<string>([
+  "mail_list_accounts",
+  "mail_list_mailboxes",
+  "mail_search",
+  "mail_read",
+  "mail_list_unread",
+]);
+
 function isComputerObservationOnlyTask(task: string): boolean {
   const normalized = task.toLowerCase();
   if (!normalized.trim()) return false;
@@ -69,9 +77,26 @@ function isComputerObservationOnlyTask(task: string): boolean {
   return !explicitInteraction;
 }
 
-function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, task: string): string[] | undefined {
+function isMailInboxReadTask(task: string): boolean {
+  const normalized = task.toLowerCase();
+  if (!normalized.trim()) return false;
+
+  const mailIntent = /(email|emails|mail|inbox|mailbox|posteingang|nachricht|nachrichten|unread|neu(?:e)? e-?mails?)/i.test(normalized);
+  if (!mailIntent) return false;
+
+  const readIntent = /(check|read|list|show|summari[sz]e|scan|look for|look up|prüf|lies|liste|fass|zusammen|zeige|check mal)/i.test(normalized);
+  if (!readIntent) return false;
+
+  const writeIntent = /(draft|reply|respond|send|compose|write back|antwort|senden|entwurf|verfassen)/i.test(normalized);
+  return !writeIntent;
+}
+
+export function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, task: string): string[] | undefined {
   if (!configuredTools) return configuredTools;
   if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
+    if (agentName === "mail_agent" && isMailInboxReadTask(task)) {
+      return configuredTools.filter((toolName) => MAIL_READ_ONLY_TOOLS.has(toolName));
+    }
     return configuredTools;
   }
   return configuredTools.filter((toolName) => COMPUTER_OBSERVATION_ONLY_TOOLS.has(toolName));
@@ -79,6 +104,15 @@ function getEffectiveToolNames(agentName: string, configuredTools: string[] | un
 
 function buildTaskModeGuidance(agentName: string, task: string): string {
   if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
+    if (agentName === "mail_agent" && isMailInboxReadTask(task)) {
+      return [
+        "TASK MODE - QUICK INBOX CHECK.",
+        "For this task, call a mail_* read tool immediately before writing any narrative.",
+        "If the account is unspecified, call mail_list_accounts first.",
+        "Then prefer mail_list_unread or mail_search, and call mail_read only for the few messages you summarize.",
+        "Do not draft, update, send, categorize, or delegate for this task.",
+      ].join("\n");
+    }
     return "";
   }
 
@@ -89,6 +123,24 @@ function buildTaskModeGuidance(agentName: string, task: string): string {
     "Prefer additional computer_snapshot or computer_capture_region calls over any interaction.",
     "Do NOT click, type, use hotkeys, scroll, drag, open apps, or launch dialogs for this task.",
     "If the current desktop does not already show the requested evidence, report that limitation explicitly instead of probing blindly.",
+  ].join("\n");
+}
+
+function buildModelExecutionGuidance(modelId: string, enableThinking: boolean | undefined): string {
+  if (!modelId.toLowerCase().includes("gemma-4-e4b-it")) {
+    return "";
+  }
+
+  return [
+    "MODEL FIT — COMPACT SPECIALIST EXECUTION.",
+    "Keep the plan short and implicit. Do not write long preambles before acting.",
+    "Prefer one decisive tool call at a time unless the current agent is explicitly coordinating parallel work.",
+    "After each tool result, either make the next needed tool call immediately or stop and summarize. Do not narrate future actions.",
+    "Stop as soon as the task can be completed from the current evidence. Do not keep searching for marginal improvements.",
+    "If two consecutive steps fail or return no materially new evidence, report the blocker instead of looping.",
+    enableThinking
+      ? "Use deeper reasoning only when reconciling conflicting evidence, extracting exact conclusions from dense output, or choosing between multiple plausible next steps."
+      : "Keep reasoning lightweight. Favor direct evidence extraction and deterministic tool sequences over speculative exploration.",
   ].join("\n");
 }
 
@@ -199,6 +251,12 @@ function stripHallucinatedToolTags(text: string): string {
     .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
     .replace(/<\/tool_call>/g, "")
     .trim();
+}
+
+function summarizeMailBody(text: string, maxLength = 220): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "No body preview available.";
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}...`;
 }
 
 export interface SubAgentRunOptions {
@@ -383,8 +441,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
     });
     const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
+    const modelExecutionGuidance = buildModelExecutionGuidance(modelConfig.primary, modelConfig.enableThinking);
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
       : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent
@@ -433,6 +492,180 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       capabilities: agentCfg.capabilities ?? [],
       terminalState,
     });
+
+    if (opts.agentName === "mail_agent" && isMailInboxReadTask(sanitizedTask)) {
+      const executeTrackedMailTool = async (toolName: string, args: Record<string, unknown>): Promise<import("../tools/registry.js").ToolResult> => {
+        toolCount += 1;
+        toolNames.push(toolName);
+        logAudit(
+          "sub_agent_tool_call",
+          { agentName: opts.agentName, tool: toolName, deterministic: true },
+          { sessionId: subSessionId },
+        );
+        return executeTool(toolName, args, toolContext);
+      };
+
+      const accountsResult = await executeTrackedMailTool("mail_list_accounts", {});
+      if (!accountsResult.success) {
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: "failure",
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          error: accountsResult.error ?? "mail_list_accounts failed",
+        });
+        return {
+          output: `Sub-agent error: ${accountsResult.error ?? "mail_list_accounts failed"}`,
+          stats: buildStats("error"),
+        };
+      }
+
+      const accounts = Array.isArray(accountsResult.metadata?.["accounts"])
+        ? accountsResult.metadata["accounts"] as Array<Record<string, unknown>>
+        : [];
+      const accountIds = accounts
+        .map((account) => String(account["id"] ?? "").trim())
+        .filter((accountId) => accountId.length > 0);
+
+      if (accountIds.length === 0) {
+        const result = "No mail accounts are configured.";
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: "success",
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+        });
+        logAudit(
+          "sub_agent_completed",
+          {
+            agentName: opts.agentName,
+            iterations,
+            resultLength: result.length,
+            promptChars: systemPrompt.length,
+            userContentChars: userContent.length,
+            toolCount,
+            usage,
+            model: modelConfig.primary,
+            durationMs: Date.now() - runStartedAt,
+            deterministicMailCheck: true,
+          },
+          { sessionId: subSessionId },
+        );
+        return { output: result, stats: buildStats("completed") };
+      }
+
+      const unreadResult = await executeTrackedMailTool("mail_list_unread", { accountIds, limit: 5 });
+      if (!unreadResult.success) {
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: "failure",
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          error: unreadResult.error ?? "mail_list_unread failed",
+        });
+        return {
+          output: `Sub-agent error: ${unreadResult.error ?? "mail_list_unread failed"}`,
+          stats: buildStats("error"),
+        };
+      }
+
+      const unreadMessages = Array.isArray(unreadResult.metadata?.["messages"])
+        ? unreadResult.metadata["messages"] as Array<Record<string, unknown>>
+        : [];
+
+      let result: string;
+      if (unreadMessages.length === 0) {
+        result = `No unread messages found across configured accounts (${accountIds.join(", ")}).`;
+      } else {
+        const detailedSummaries: string[] = [];
+        for (const message of unreadMessages.slice(0, 3)) {
+          const accountId = String(message["accountId"] ?? "").trim();
+          const mailbox = String(message["mailbox"] ?? "").trim();
+          const uid = Number(message["uid"] ?? 0);
+          const subject = String(message["subject"] ?? "(no subject)");
+          const from = String(message["from"] ?? "unknown sender");
+          const date = String(message["date"] ?? "unknown date");
+
+          let preview = "No body preview available.";
+          if (accountId && mailbox && Number.isFinite(uid) && uid > 0) {
+            const readResult = await executeTrackedMailTool("mail_read", { accountId, mailbox, uid });
+            if (readResult.success) {
+              const fullMessage = (readResult.metadata?.["message"] as Record<string, unknown> | undefined) ?? message;
+              preview = summarizeMailBody(String(fullMessage["textBody"] ?? ""));
+            }
+          }
+
+          detailedSummaries.push(`- [${accountId}] ${mailbox}#${uid} | ${subject} | from ${from} | ${date} | ${preview}`);
+        }
+
+        const accountList = accounts
+          .map((account) => {
+            const id = String(account["id"] ?? "").trim();
+            const address = String(account["address"] ?? "").trim();
+            return address ? `${id} <${address}>` : id;
+          })
+          .filter(Boolean)
+          .join(", ");
+
+        result = [
+          `Unread messages found: ${unreadMessages.length}.`,
+          accountList ? `Checked accounts: ${accountList}.` : "",
+          "Most recent unread messages:",
+          ...detailedSummaries,
+        ].filter(Boolean).join("\n");
+      }
+
+      const outputScan = scanOutput(result);
+      if (!outputScan.safe && outputScan.redacted) {
+        logAudit(
+          "output_redacted",
+          { agentName: opts.agentName, types: outputScan.detectedTypes },
+          { sessionId: subSessionId, severity: "warn" },
+        );
+        result = outputScan.redacted;
+      }
+
+      appendOutcome(opts.workspacePath, {
+        ts: new Date().toISOString(),
+        agent: opts.agentName,
+        task: opts.task.slice(0, 200),
+        outcome: "success",
+        iterations,
+        totalTokens: usage.totalTokens,
+        durationMs: Date.now() - runStartedAt,
+        timeoutMs: turnTimeoutMs,
+      });
+      logAudit(
+        "sub_agent_completed",
+        {
+          agentName: opts.agentName,
+          iterations,
+          resultLength: result.length,
+          promptChars: systemPrompt.length,
+          userContentChars: userContent.length,
+          toolCount,
+          usage,
+          model: modelConfig.primary,
+          durationMs: Date.now() - runStartedAt,
+          deterministicMailCheck: true,
+        },
+        { sessionId: subSessionId },
+      );
+      log.info({ agentName: opts.agentName, toolCount }, "Sub-agent completed via deterministic inbox check");
+      return { output: result, stats: buildStats("completed") };
+    }
 
     while (iterations < maxIterations) {
       if (signal?.aborted) {

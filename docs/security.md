@@ -177,8 +177,10 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 - [ ] Set `SAI_MASTER_KEY` to a randomly generated ≥32-character string (not the default from `setup.mjs`)
 - [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production
 - [ ] Set `gateway.publicUrl` in `starlingai.json` — required for channel webhook verification
+- [ ] If the dashboard calls the gateway across origins, add the dashboard origin to `gateway.corsAllowedOrigins`
 - [ ] Use `dmPolicy: "pairing"` or `"allowlist"` on all channels — never leave channels `"open"` in production
 - [ ] Mount `/data` as a named Docker volume with restricted host permissions
 - [ ] Do not expose ports 8765 or 5432 to the public internet — reverse proxy with TLS
+- [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals

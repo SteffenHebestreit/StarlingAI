@@ -245,6 +245,7 @@ function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, un
       restPort: config.gateway.restPort,
       bindHost: config.gateway.bindHost,
       publicUrl: config.gateway.publicUrl,
+      corsAllowedOrigins: config.gateway.corsAllowedOrigins,
     },
     providers: {
       lmstudio: config.providers.lmstudio

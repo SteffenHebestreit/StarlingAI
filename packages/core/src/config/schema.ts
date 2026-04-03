@@ -58,10 +58,12 @@ export const ModelConfigSchema = z.object({
   embeddingBaseUrl: z.string().url().optional(),
   /** Optional API key for the dedicated embedding endpoint. */
   embeddingApiKey: z.string().optional(),
-  /** Enable or disable extended chain-of-thought reasoning for Qwen3.5 models.
-   *  true  → sends chat_template_kwargs: { enable_thinking: true }  (temp 0.6 / top_p 0.95 auto-applied unless overridden)
-   *  false → sends chat_template_kwargs: { enable_thinking: false } (temp 0.7 / top_p 0.8  auto-applied unless overridden)
-   *  undefined → no thinking parameter sent (model default) */
+  /** Enable or disable extended reasoning for LM Studio chat models that support
+   *  chat_template_kwargs.enable_thinking (for example Qwen3.5 and Gemma 4).
+   *  true / false → sends chat_template_kwargs: { enable_thinking: <value> }
+   *  undefined → no thinking parameter sent (model default).
+   *  Qwen keeps its special sampling auto-tuning unless explicitly overridden;
+   *  other models retain their configured sampling values. */
   enableThinking: z.boolean().optional(),
 });
 
@@ -73,7 +75,7 @@ export const RateLimitSchema = z.object({
 });
 
 export const MainAssistantConfigSchema = z.object({
-  toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("hybrid"),
+  toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
   customInstructions: z.string().trim().min(1).max(6000).optional(),
 });
 
@@ -182,6 +184,8 @@ export const GatewaySchema = z.object({
   maxBodyBytes: z.number().int().min(1024).max(52_428_800).default(1_048_576), // 1 MB
   /** Publicly reachable base URL, used to construct approval callback URLs sent to external systems */
   publicUrl: z.string().url().optional(),
+  /** Additional browser origins allowed to call the gateway directly when the dashboard runs on a separate host */
+  corsAllowedOrigins: z.array(z.string().url()).default([]),
 });
 
 export const MultimodalServiceSchema = z.object({
@@ -658,6 +662,39 @@ export type JobConfig = z.infer<typeof JobConfigSchema>;
 export type JobTriggerConfig = z.infer<typeof JobTriggerSchema>;
 export type JobStepConfig = z.infer<typeof JobStepSchema>;
 
+// ─── Tool Development & Self-Improvement ────────────────────────────────────
+
+export const ToolDevelopmentSchema = z.object({
+  /** Enable the tool development sandbox pipeline */
+  enabled: z.boolean().default(false),
+  /** Maximum wall-clock duration for a single dev session (ms). Default 30 min. */
+  maxSessionDurationMs: z.number().int().min(60_000).max(7_200_000).default(1_800_000),
+  /** Max idle time before a dev session is marked stuck (ms). Default 5 min. */
+  maxIdleMs: z.number().int().min(30_000).max(1_800_000).default(300_000),
+  /** Max concurrent tool development sessions. */
+  maxConcurrentSessions: z.number().int().min(1).max(5).default(2),
+  /** Require human approval before deploying developed tools. */
+  requireApproval: z.boolean().default(true),
+  /** Named approval channel for tool submissions (from approvalChannels config). */
+  approvalChannel: z.string().optional(),
+  /** Approval timeout for tool submissions (ms). Default 60 min. */
+  approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).default(3_600_000),
+});
+
+export const SelfImprovementSchema = z.object({
+  /** Enable autonomous self-improvement loop. */
+  enabled: z.boolean().default(false),
+  /** Minimum repeated failures before proposing a new tool. */
+  minFailuresBeforeProposal: z.number().int().min(1).max(20).default(3),
+  /** Max concurrent tool proposals in flight. */
+  maxConcurrentProposals: z.number().int().min(1).max(3).default(1),
+  /** If true, skip initial capability-gap approval and start dev session directly. */
+  autoStartDevSession: z.boolean().default(false),
+});
+
+export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
+export type SelfImprovementConfig = z.infer<typeof SelfImprovementSchema>;
+
 export const ConfigSchema = z.object({
   providers: ProvidersSchema.default({}),
   agents: z.object({
@@ -698,6 +735,8 @@ export const ConfigSchema = z.object({
   infrastructure: InfrastructureSchema.default({}),
   pentest: PentestSchema.default({}),
   mail: MailServiceSchema.default({}),
+  toolDevelopment: ToolDevelopmentSchema.default({}),
+  selfImprovement: SelfImprovementSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),

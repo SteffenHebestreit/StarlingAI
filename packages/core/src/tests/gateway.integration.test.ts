@@ -124,6 +124,56 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("allows configured browser origins for direct gateway access", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-cors-"));
+    const port = 18100 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const allowedOrigin = "https://chat.internal.example";
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "k".repeat(32),
+        publicUrl: "https://gateway.internal.example",
+        corsAllowedOrigins: [allowedOrigin],
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const { createGateway } = await import("../gateway/index.js");
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+
+      const response = await fetch(`${baseUrl}/healthz`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: allowedOrigin,
+          "Access-Control-Request-Method": "GET",
+        },
+      });
+
+      expect(response.ok).toBe(true);
+      expect(response.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+    } finally {
+      await gateway.stop();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("rejects dashboard writes to config-owned resources and preserves stored site passwords", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-settings-"));
     const port = 19000 + Math.floor(Math.random() * 1000);

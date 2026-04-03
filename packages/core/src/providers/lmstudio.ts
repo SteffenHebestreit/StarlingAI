@@ -78,6 +78,58 @@ export interface StreamChunk {
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
+const GEMMA_INSTRUCTION_PREAMBLE = "Follow these instructions for the entire conversation.";
+
+function isGemmaModelId(modelId: string): boolean {
+  return modelId.toLowerCase().includes("gemma");
+}
+
+function isQwenModelId(modelId: string): boolean {
+  return modelId.toLowerCase().includes("qwen");
+}
+
+function supportsThinkingToggle(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+  return normalized.includes("qwen") || normalized.includes("gemma-4");
+}
+
+export function normalizeMessagesForModel(
+  messages: readonly LLMMessage[],
+  providerModel: string,
+): ChatCompletionMessageParam[] {
+  const cloned = messages.map((message) => ({ ...message })) as ChatCompletionMessageParam[];
+  if (!isGemmaModelId(providerModel)) return cloned;
+
+  const leadingSystemPrompts: string[] = [];
+  let leadingSystemCount = 0;
+  for (const message of messages) {
+    if (message.role !== "system") break;
+    leadingSystemCount += 1;
+    const content = typeof message.content === "string" ? message.content.trim() : "";
+    if (content) leadingSystemPrompts.push(content);
+  }
+
+  if (leadingSystemCount === 0 || leadingSystemPrompts.length === 0) return cloned;
+
+  const normalized = cloned.slice(leadingSystemCount);
+  const instructionBlock = `${GEMMA_INSTRUCTION_PREAMBLE}\n\n${leadingSystemPrompts.join("\n\n")}`;
+  const firstUserIndex = normalized.findIndex((message) => message.role === "user" && typeof message.content === "string");
+
+  if (firstUserIndex >= 0) {
+    const firstUser = normalized[firstUserIndex]!;
+    const currentContent = typeof firstUser.content === "string" ? firstUser.content.trim() : "";
+    normalized[firstUserIndex] = {
+      ...firstUser,
+      content: currentContent
+        ? `${instructionBlock}\n\nCurrent request or continuation:\n${currentContent}`
+        : instructionBlock,
+    } as ChatCompletionMessageParam;
+    return normalized;
+  }
+
+  return [{ role: "user", content: instructionBlock }, ...normalized];
+}
+
 export interface ChatProvider {
   checkHealth(): Promise<{ healthy: boolean; loadedModel?: string; error?: string }>;
   verifyToolCallSupport(modelId: string): Promise<boolean>;
@@ -242,7 +294,7 @@ export class LMStudioProvider {
     signal?: AbortSignal
   ): Promise<LLMResponse> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = messages as ChatCompletionMessageParam[];
+    const openAIMessages = normalizeMessagesForModel(messages, modelId);
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -256,7 +308,7 @@ export class LMStudioProvider {
     // and the user has not explicitly overridden topP. Explicit topP always wins.
     let effectiveTemp = this.modelConfig.temperature;
     let effectiveTopP = this.modelConfig.topP;
-    if (this.modelConfig.enableThinking !== undefined && effectiveTopP === undefined) {
+    if (isQwenModelId(modelId) && this.modelConfig.enableThinking !== undefined && effectiveTopP === undefined) {
       if (this.modelConfig.enableThinking) {
         effectiveTemp = 0.6;
         effectiveTopP = 0.95;
@@ -284,7 +336,7 @@ export class LMStudioProvider {
             ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
             // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
             // The outer `as Parameters<...>[0]` cast suppresses the unknown-property error.
-            ...(this.modelConfig.enableThinking !== undefined && {
+            ...(supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined && {
               extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
             }),
           } as Parameters<typeof this.client.chat.completions.create>[0],
@@ -340,7 +392,7 @@ export class LMStudioProvider {
     signal?: AbortSignal
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = messages as ChatCompletionMessageParam[];
+    const openAIMessages = normalizeMessagesForModel(messages, modelId);
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -349,7 +401,7 @@ export class LMStudioProvider {
     // Qwen3.5 thinking-mode: same auto-sampling logic as complete()
     let streamEffectiveTemp = this.modelConfig.temperature;
     let streamEffectiveTopP = this.modelConfig.topP;
-    if (this.modelConfig.enableThinking !== undefined && streamEffectiveTopP === undefined) {
+    if (isQwenModelId(modelId) && this.modelConfig.enableThinking !== undefined && streamEffectiveTopP === undefined) {
       if (this.modelConfig.enableThinking) {
         streamEffectiveTemp = 0.6;
         streamEffectiveTopP = 0.95;
@@ -373,7 +425,7 @@ export class LMStudioProvider {
         ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
         // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
-        ...(this.modelConfig.enableThinking !== undefined && {
+        ...(supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined && {
           extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
         }),
         stream: true,
@@ -438,7 +490,8 @@ export class LMStudioProvider {
   }
 
   async embed(texts: string[], model: string): Promise<Float32Array[]> {
-    const response = await this.client.embeddings.create({ model, input: texts });
+    const modelId = this.parseModelId(model);
+    const response = await this.client.embeddings.create({ model: modelId, input: texts });
     return response.data.map(d => new Float32Array(d.embedding));
   }
 

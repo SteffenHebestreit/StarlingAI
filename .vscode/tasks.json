@@ -110,6 +110,293 @@
 			"type": "shell",
 			"command": "pnpm --filter @starlingai/core test",
 			"isBackground": false
+		},
+		{
+			"label": "gateway inspect debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"inspect",
+				"--format",
+				"{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}",
+				"starlingai-gateway-1"
+			],
+			"windows": {
+				"command": "docker",
+				"args": [
+					"inspect",
+					"--format",
+					"{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}",
+					"starlingai-gateway-1"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "gateway logs debug cmd",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"docker logs starlingai-gateway-1 --tail 200"
+			],
+			"windows": {
+				"command": "cmd.exe",
+				"args": [
+					"/d",
+					"/c",
+					"docker logs starlingai-gateway-1 --tail 200"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "gateway logs debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"logs",
+				"gateway",
+				"--tail",
+				"200"
+			],
+			"windows": {
+				"command": "docker",
+				"args": [
+					"compose",
+					"logs",
+					"gateway",
+					"--tail",
+					"200"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "gateway redeploy debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"up",
+				"-d",
+				"--build",
+				"gateway",
+				"mail-service"
+			],
+			"windows": {
+				"command": "docker",
+				"args": [
+					"compose",
+					"up",
+					"-d",
+					"--build",
+					"gateway",
+					"mail-service"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "lmstudio models debug",
+			"type": "shell",
+			"command": "curl",
+			"args": [
+				"-sS",
+				"http://10.10.0.2:1234/v1/models"
+			],
+			"windows": {
+				"command": "curl.exe",
+				"args": [
+					"-sS",
+					"http://10.10.0.2:1234/v1/models"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "gateway restart debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"restart",
+				"gateway"
+			],
+			"windows": {
+				"command": "docker",
+		},
+		{
+			"label": "gateway mail env debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"exec",
+				"starlingai-gateway-1",
+				"sh",
+				"-lc",
+				"printenv | grep '^SAI_MAIL'"
+			],
+			"windows": {
+				"command": "docker",
+				"args": [
+					"exec",
+					"starlingai-gateway-1",
+					"sh",
+					"-lc",
+					"printenv | grep '^SAI_MAIL'"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "mail service env debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"exec",
+				"starlingai-mail-service-1",
+				"sh",
+				"-lc",
+				"printenv | grep '^SAI_MAIL'"
+			],
+			"windows": {
+			"isBackground": false
+		},
+		{
+			"label": "mail smoke live debug",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"scripts\\mail-smoke.ps1"
+			],
+			"windows": {
+				"command": "powershell.exe",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-File",
+					"scripts\\mail-smoke.ps1"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+				"command": "docker",
+				"args": [
+					"exec",
+					"starlingai-mail-service-1",
+					"sh",
+					"-lc",
+					"printenv | grep '^SAI_MAIL'"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+				"args": [
+					"compose",
+					"restart",
+					"gateway"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
+		},
+		{
+			"label": "gateway mail env debug",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"exec",
+				"starlingai-gateway-1",
+				"sh",
+				"-lc",
+				"printenv | grep '^SAI_MAIL'"
+			],
+			"isBackground": false
 		}
 	]
 }

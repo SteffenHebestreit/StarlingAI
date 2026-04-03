@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const streamMock = vi.hoisted(() => vi.fn());
@@ -49,6 +51,7 @@ vi.mock("../audit/logger.js", () => ({
 
 import { AgentSession, resetSessionsForTests } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
+import { resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 
 interface DelegationLoopFixtures {
@@ -67,6 +70,36 @@ interface DelegationLoopFixtures {
 const fixtures = JSON.parse(
   readFileSync(new URL("./fixtures/runtime-delegation-loop.json", import.meta.url), "utf8"),
 ) as DelegationLoopFixtures;
+const tempConfigDirs: string[] = [];
+
+async function loadFreshRuntimeForToolMode(toolMode: "hybrid" | "orchestration_only") {
+  const tempDir = mkdtempSync(join(tmpdir(), "starlingai-runtime-toolmode-"));
+  tempConfigDirs.push(tempDir);
+  const configPath = join(tempDir, "starlingai.json");
+  writeFileSync(configPath, JSON.stringify({
+    agents: {
+      mainAssistant: {
+        toolMode,
+      },
+    },
+  }), "utf8");
+  process.env["SAI_CONFIG_PATH"] = configPath;
+  vi.resetModules();
+
+  const [{ AgentSession: FreshAgentSession, resetSessionsForTests: freshResetSessionsForTests }, { runTurn: freshRunTurn }, registryModule] = await Promise.all([
+    import("../agent/session.js"),
+    import("../agent/runtime.js"),
+    import("../tools/registry.js"),
+  ]);
+
+  return {
+    AgentSession: FreshAgentSession,
+    resetSessionsForTests: freshResetSessionsForTests,
+    runTurn: freshRunTurn,
+    registerTool: registryModule.registerTool,
+    unregisterTool: registryModule.unregisterTool,
+  };
+}
 
 function createDelegateToolCallStream(callId: string, args: Record<string, unknown>) {
   return (async function* () {
@@ -92,6 +125,20 @@ function createToolCallStream(callId: string, toolName: string, args: Record<str
   })();
 }
 
+function createMultiToolCallStream(calls: Array<{ id: string; toolName: string; args: Record<string, unknown> }>) {
+  return (async function* () {
+    for (const call of calls) {
+      yield { type: "tool_call_start", toolCallId: call.id, toolName: call.toolName };
+      yield { type: "tool_call_delta", toolCallId: call.id, argumentsDelta: JSON.stringify(call.args) };
+    }
+    yield {
+      type: "done",
+      finishReason: "tool_calls",
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    };
+  })();
+}
+
 function createTextStream(text: string) {
   return (async function* () {
     yield { type: "text_delta", content: text };
@@ -104,7 +151,13 @@ function createTextStream(text: string) {
 }
 
 afterEach(() => {
+  for (const dir of tempConfigDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  delete process.env["SAI_CONFIG_PATH"];
+  resetConfigForTests();
   unregisterTool("delegate_to_agent");
+  unregisterTool("search_agents");
   streamMock.mockReset();
   completeMock.mockClear();
   resetSessionsForTests();
@@ -315,6 +368,8 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("returns a cached result instead of re-executing an identical tool call across iterations", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -333,21 +388,21 @@ describe("runtime delegated-loop regressions", () => {
       metadata: { path: "workspace/agents/30-subagents-pentest.jsonc" },
     }));
 
-    registerTool({
+    freshRuntime.registerTool({
       name: "read_file",
       description: "Read a workspace file.",
       parameters: { type: "object", properties: {} },
       execute: readFileMock,
     });
 
-    const session = new AgentSession({
+    const session = new freshRuntime.AgentSession({
       channel: "test",
       workspacePath: "/workspace",
       systemPrompt: "You are a test agent.",
     });
 
     const observedToolResults: string[] = [];
-    const result = await runTurn({
+    const result = await freshRuntime.runTurn({
       session,
       userMessage: "Review the pentest workflow file.",
       onToolResult: (_toolCallId, _name, toolResult) => observedToolResults.push(toolResult),
@@ -362,5 +417,130 @@ describe("runtime delegated-loop regressions", () => {
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(2);
     expect(toolMessages[1]?.content).toContain("already called 'read_file' with identical arguments");
+  });
+
+  it("collapses duplicate tool calls within a single model response before executing them", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createMultiToolCallStream([
+          { id: "search_1", toolName: "web_search", args: { query: "Out of the Blue hotel Crete near Heraklion location" } },
+          { id: "search_2", toolName: "web_search", args: { query: "distance Heraklion Airport to Out of the Blue Agia Pelagia" } },
+          { id: "search_3", toolName: "web_search", args: { query: "driving time Heraklion Airport to Out of the Blue Agia Pelagia Crete" } },
+          { id: "search_4", toolName: "web_search", args: { query: "Out of the Blue hotel Crete near Heraklion location" } },
+          { id: "search_5", toolName: "web_search", args: { query: "distance Heraklion Airport to Out of the Blue Agia Pelagia" } },
+          { id: "search_6", toolName: "web_search", args: { query: "driving time Heraklion Airport to Out of the Blue Agia Pelagia Crete" } },
+        ]);
+      }
+      return createTextStream("The hotel is about 25 km from Heraklion Airport and the drive takes roughly 24 minutes.");
+    });
+
+    const webSearchMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: `result for ${String(args.query ?? "")}`,
+      metadata: { query: String(args.query ?? "") },
+    }));
+
+    freshRuntime.registerTool({
+      name: "web_search",
+      description: "Search the web.",
+      parameters: { type: "object", properties: {} },
+      execute: webSearchMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "How far is Out of the Blue from Heraklion Airport?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("25 km");
+    expect(webSearchMock).toHaveBeenCalledTimes(3);
+
+    const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
+    expect(assistantWithTools?.tool_calls).toHaveLength(3);
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(3);
+  });
+
+  it("forces specialist-agent orchestration for explicit online lookup requests instead of allowing direct web tool calls", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation((_messages, tools) => {
+      llmCallCount += 1;
+      const toolNames = tools.map((tool) => tool.name);
+      expect(toolNames).toContain("delegate_to_agent");
+      expect(toolNames).toContain("search_agents");
+      expect(toolNames).not.toContain("web_search");
+      expect(toolNames).not.toContain("web_fetch");
+
+      if (llmCallCount === 1) {
+        return createTextStream("Die Entfernung betraegt etwa 25,5 km und die Fahrzeit 24 Minuten.");
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_1", {
+          agentName: "researcher",
+          task: "Suche online nach der genauen Entfernung und Fahrzeit vom Flughafen Heraklion zum Hotel Out of the Blue in Agia Pelagia.",
+        });
+      }
+      return createTextStream("Online gefunden: Das Out of the Blue Resort & Spa liegt rund 25,5 km vom Flughafen Heraklion entfernt; die Fahrzeit betraegt etwa 24 Minuten.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Out of the Blue Resort & Spa in Agia Pelagia is about 25.5 km from Heraklion Airport and the drive takes about 24 minutes.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        routingReason: { confidence: "high" },
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({
+        success: true,
+        output: "researcher",
+      }),
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Suche online nach der genauen Entfernung und Zeit vom Flughafen Heraklion zum Hotel Out of the Blue.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("25,5 km");
+    expect(result.response).toContain("24 Minuten");
+    expect(llmCallCount).toBe(3);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+
+    const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
+    expect(assistantWithTools?.tool_calls).toHaveLength(1);
+    expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
   });
 });

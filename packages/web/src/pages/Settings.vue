@@ -1,13 +1,20 @@
 <template>
   <div class="settings-page">
 
+    <div class="glass-card p-5 mb-5">
+      <div>
+        <div class="section-title mb-1">{{ pageTitle }}</div>
+        <div class="text-sm text-gray-400 max-w-3xl">{{ pageDescription }}</div>
+      </div>
+    </div>
+
     <div class="settings-grid">
 
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
       <div class="space-y-5">
 
         <!-- ── Gateway Connection ─────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <h3 class="section-title">Gateway Connection</h3>
           <div class="space-y-4">
             <div>
@@ -26,7 +33,7 @@
         </div>
 
         <!-- ── Status ─────────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <h3 class="section-title">Status</h3>
           <div class="space-y-3 text-sm">
             <div class="flex justify-between items-center">
@@ -66,32 +73,10 @@
                 <span :class="component.healthy ? 'text-green-400' : 'text-amber-400'">{{ component.healthy ? 'ok' : 'degraded' }}</span>
               </div>
             </div>
-            <div class="border-t border-purple-500/10" />
-            <div class="flex justify-between items-center">
-              <span class="text-gray-400">Model Endpoints</span>
-              <div class="flex items-center gap-2">
-                <span :class="['status-dot', runtime.modelEndpoints?.healthy ? 'status-dot--on' : 'status-dot--off']" />
-                <span :class="runtime.modelEndpoints?.healthy ? 'text-green-400' : 'text-amber-400'">
-                  {{ runtime.modelEndpoints?.healthy ? 'Healthy' : 'Needs Attention' }}
-                </span>
-              </div>
-            </div>
-            <div v-if="runtime.modelEndpointError" class="text-xs text-red-400">{{ runtime.modelEndpointError }}</div>
-            <div v-else-if="runtime.modelEndpoints?.endpoints?.length" class="space-y-2 pt-1">
-              <div v-for="endpoint in runtime.modelEndpoints.endpoints" :key="`${endpoint.role}-${endpoint.baseUrl}-${endpoint.model}`" class="model-endpoint-row">
-                <div class="min-w-0">
-                  <div class="text-gray-300 text-xs">{{ formatModelEndpointRole(endpoint.role) }}</div>
-                  <div class="text-[11px] text-gray-500 font-mono truncate" :title="endpoint.model">{{ endpoint.model }}</div>
-                  <div class="text-[11px] text-gray-600 font-mono truncate" :title="endpoint.baseUrl">{{ endpoint.baseUrl }}</div>
-                  <div v-if="endpoint.error" class="text-[11px] text-red-400 truncate" :title="endpoint.error">{{ endpoint.error }}</div>
-                </div>
-                <span :class="endpoint.ok ? 'text-green-400' : 'text-amber-400'" class="text-xs shrink-0">{{ endpoint.ok ? 'ok' : 'down' }}</span>
-              </div>
-            </div>
           </div>
         </div>
 
-        <div class="glass-card p-5">
+        <div v-if="isAgentsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <div>
               <h3 class="section-title mb-0">Main AI Personality</h3>
@@ -165,7 +150,34 @@
           </div>
         </div>
 
-        <div class="glass-card p-5">
+        <div v-if="isAgentsPage" class="glass-card p-5">
+          <h3 class="section-title">Model Endpoints</h3>
+          <div class="space-y-3 text-sm">
+            <div class="flex justify-between items-center">
+              <span class="text-gray-400">Endpoint Health</span>
+              <div class="flex items-center gap-2">
+                <span :class="['status-dot', runtime.modelEndpoints?.healthy ? 'status-dot--on' : 'status-dot--off']" />
+                <span :class="runtime.modelEndpoints?.healthy ? 'text-green-400' : 'text-amber-400'">
+                  {{ runtime.modelEndpoints?.healthy ? 'Healthy' : 'Needs Attention' }}
+                </span>
+              </div>
+            </div>
+            <div v-if="runtime.modelEndpointError" class="text-xs text-red-400">{{ runtime.modelEndpointError }}</div>
+            <div v-else-if="runtime.modelEndpoints?.endpoints?.length" class="space-y-2 pt-1">
+              <div v-for="endpoint in runtime.modelEndpoints.endpoints" :key="`${endpoint.role}-${endpoint.baseUrl}-${endpoint.model}`" class="model-endpoint-row">
+                <div class="min-w-0">
+                  <div class="text-gray-300 text-xs">{{ formatModelEndpointRole(endpoint.role) }}</div>
+                  <div class="text-[11px] text-gray-500 font-mono truncate" :title="endpoint.model">{{ endpoint.model }}</div>
+                  <div class="text-[11px] text-gray-600 font-mono truncate" :title="endpoint.baseUrl">{{ endpoint.baseUrl }}</div>
+                  <div v-if="endpoint.error" class="text-[11px] text-red-400 truncate" :title="endpoint.error">{{ endpoint.error }}</div>
+                </div>
+                <span :class="endpoint.ok ? 'text-green-400' : 'text-amber-400'" class="text-xs shrink-0">{{ endpoint.ok ? 'ok' : 'down' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3">
             <div>
               <h3 class="section-title mb-0">Multimodal</h3>
@@ -523,8 +535,23 @@
           </div>
         </div>
 
+        <!-- ── About ──────────────────────────────────────────────────────── -->
+        <div v-if="isSettingsPage" class="glass-card p-5">
+          <h3 class="section-title">About StarlingAI</h3>
+          <div class="text-sm text-gray-500 space-y-1">
+            <p>Version: <span class="text-gray-300">0.3.1</span></p>
+            <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
+            <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ══ RIGHT COLUMN ═════════════════════════════════════════════════════ -->
+      <div class="space-y-5">
+
         <!-- ── Guardrails ──────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Guardrails</h3>
             <div class="flex items-center gap-2">
@@ -586,23 +613,8 @@
           </div>
         </div>
 
-        <!-- ── About ──────────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
-          <h3 class="section-title">About StarlingAI</h3>
-          <div class="text-sm text-gray-500 space-y-1">
-            <p>Version: <span class="text-gray-300">0.3.0</span></p>
-            <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
-            <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- ══ RIGHT COLUMN ═════════════════════════════════════════════════════ -->
-      <div class="space-y-5">
-
         <!-- ── Site Credentials ───────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Site Credentials</h3>
             <div class="flex gap-2">
@@ -646,7 +658,7 @@
         </div>
 
         <!-- ── Scenes ─────────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Scenes</h3>
             <div class="flex gap-2">
@@ -687,7 +699,7 @@
           <div v-else class="empty-state">No scenes configured.</div>
         </div>
 
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Jobs</h3>
             <div class="flex gap-2">
@@ -728,8 +740,337 @@
           <div v-else class="empty-state">No jobs configured.</div>
         </div>
 
+          <div v-if="isAgentsPage" class="glass-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3">
+              <div>
+                <h3 class="section-title mb-0">Config Assistant</h3>
+                <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. StarlingAI drafts the changes, you review them, and nothing applies until you approve it.</div>
+              </div>
+              <button
+                v-if="gateway.connected"
+                @click="reloadConfigAssistant"
+                :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
+                class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+              >Reload</button>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to generate conversational configuration proposals.</div>
+            <div v-else class="space-y-4">
+              <div class="config-assistant-intro">
+                <div>
+                  <div class="text-sm text-gray-100">Conversation-driven configuration</div>
+                  <div class="text-xs text-gray-500 mt-1">Drafts are stored as proposals, prompt changes are consent-gated, and your feedback becomes reusable flow memory.</div>
+                </div>
+                <div class="text-right text-xs text-gray-500">
+                  <div>{{ configAssistant.pendingProposals.length }} pending</div>
+                  <div class="text-cyan-200 mt-1">{{ configAssistant.flowEntries.length }} flow memories</div>
+                </div>
+              </div>
+
+              <div class="space-y-3 rounded-2xl border border-cyan-500/15 bg-cyan-500/5 p-4">
+                <div class="config-assistant-grid">
+                  <div>
+                    <label class="field-label">Mode</label>
+                    <select v-model="configAssistantForm.mode" class="input-box">
+                      <option value="setup">Initial setup</option>
+                      <option value="enhancement">Enhancement</option>
+                      <option value="prompt">Prompt improvement</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="field-label">Target Agent <span class="text-gray-600 font-normal">optional</span></label>
+                    <select v-model="configAssistantForm.targetAgent" class="input-box">
+                      <option value="">General runtime</option>
+                      <option value="main_assistant">Main Assistant</option>
+                      <option v-for="agent in agentsStore.agents" :key="agent.name" :value="agent.name">{{ agent.name }}</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="field-label">Request</label>
+                  <textarea
+                    v-model="configAssistantForm.request"
+                    rows="5"
+                    class="input-box config-assistant-textarea"
+                    placeholder="Example: Improve browser_agent so it stops looping on stable pages, hands visible evidence to vision_browser_analyst, and records the lesson if the handoff works."
+                  />
+                </div>
+
+                <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ configAssistant.proposeError }}</div>
+
+                <div class="flex justify-end gap-2">
+                  <button @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
+                  <button @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
+                    {{ configAssistant.proposing ? 'Drafting…' : 'Generate Proposal' }}
+                  </button>
+                </div>
+              </div>
+
+              <div v-if="configAssistant.flowError" class="text-sm text-red-400">{{ configAssistant.flowError }}</div>
+              <div v-else-if="configAssistant.recentLearnings.length" class="space-y-2">
+                <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Recent Learnings</div>
+                <div class="space-y-2">
+                  <div v-for="entry in configAssistant.recentLearnings" :key="entry.id" class="flow-memory-card">
+                    <div class="flex items-start justify-between gap-3">
+                      <div>
+                        <div class="text-sm text-gray-100">{{ entry.summary }}</div>
+                        <div class="text-[11px] text-gray-500 mt-1">
+                          {{ formatConfigAssistantScope(entry.scope) }}<span v-if="entry.targetAgent"> • {{ entry.targetAgent }}</span> • {{ formatTimestamp(entry.ts) }}
+                        </div>
+                      </div>
+                      <span :class="flowBadgeClass(entry.outcome)">{{ formatConfigAssistantOutcome(entry.outcome) }}</span>
+                    </div>
+                    <div v-if="entry.lesson" class="text-xs text-cyan-100/80 mt-2">{{ entry.lesson }}</div>
+                    <div v-if="entry.actions.length" class="routing-chip-row mt-2">
+                      <span v-for="action in entry.actions" :key="`${entry.id}-${action}`" class="routing-chip">{{ action }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="configAssistant.mutationError" class="text-sm text-red-400">{{ configAssistant.mutationError }}</div>
+              <div v-if="configAssistant.error" class="text-sm text-red-400">{{ configAssistant.error }}</div>
+
+              <div v-if="configAssistant.loading && !configAssistant.proposals.length" class="empty-state">Loading proposals…</div>
+              <div v-else-if="configAssistant.proposals.length" class="space-y-3">
+                <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Proposals</div>
+                <details v-for="proposal in configAssistant.proposals" :key="proposal.id" class="config-proposal-card" :open="proposal.status === 'pending'">
+                  <summary class="config-proposal-summary">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-sm font-medium text-gray-100">{{ proposal.summary }}</span>
+                        <span :class="proposalBadgeClass(proposal.status)">{{ proposal.status }}</span>
+                        <span class="routing-chip">{{ formatConfigAssistantScope(proposal.mode) }}</span>
+                      </div>
+                      <div class="text-[11px] text-gray-500 mt-1">
+                        {{ proposal.assistantAgent }}<span v-if="proposal.targetAgent"> → {{ proposal.targetAgent }}</span> • {{ formatTimestamp(proposal.ts) }}
+                      </div>
+                    </div>
+                    <span class="text-xs text-gray-600 shrink-0">Details ▾</span>
+                  </summary>
+
+                  <div class="mt-3 space-y-3 pl-1">
+                    <div class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
+
+                    <div v-if="proposal.validations.length" class="space-y-1.5">
+                      <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Checks</div>
+                      <ul class="config-proposal-list">
+                        <li v-for="validation in proposal.validations" :key="validation">{{ validation }}</li>
+                      </ul>
+                    </div>
+
+                    <div v-if="proposal.configChanges.length" class="space-y-2">
+                      <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Config Changes</div>
+                      <div v-for="change in proposal.configChanges" :key="`${proposal.id}-${change.path}`" class="config-change-card">
+                        <div class="text-xs font-mono text-cyan-200">{{ change.path }}</div>
+                        <div class="text-[11px] text-gray-500 mt-1">{{ change.reason }}</div>
+                        <pre class="config-change-preview">{{ stringifyPreview(change.value) }}</pre>
+                      </div>
+                    </div>
+
+                    <div v-if="proposal.promptChanges.length" class="space-y-2">
+                      <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Prompt Proposals</div>
+                      <div v-for="change in proposal.promptChanges" :key="`${proposal.id}-${change.agentName}`" class="config-change-card">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class="text-xs font-mono text-cyan-200">{{ change.agentName }}</span>
+                          <span class="routing-chip">{{ change.strategy }}</span>
+                        </div>
+                        <div class="text-[11px] text-gray-500 mt-1">{{ change.rationale }}</div>
+                        <pre class="config-change-preview">{{ change.prompt }}</pre>
+                      </div>
+                    </div>
+
+                    <div v-if="proposal.feedbackHistory.length" class="space-y-2">
+                      <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Feedback History</div>
+                      <div v-for="feedback in proposal.feedbackHistory.slice().reverse()" :key="`${proposal.id}-${feedback.ts}-${feedback.outcome}`" class="flow-memory-card">
+                        <div class="flex items-center justify-between gap-3">
+                          <span :class="flowBadgeClass(feedback.outcome)">{{ formatConfigAssistantOutcome(feedback.outcome) }}</span>
+                          <span class="text-[11px] text-gray-500">{{ formatTimestamp(feedback.ts) }}</span>
+                        </div>
+                        <div v-if="feedback.lesson" class="text-xs text-cyan-100/80 mt-2">{{ feedback.lesson }}</div>
+                        <div v-if="feedback.notes" class="text-xs text-gray-500 mt-1">{{ feedback.notes }}</div>
+                      </div>
+                    </div>
+
+                    <div class="flex flex-wrap justify-end gap-2 pt-1">
+                      <button
+                        v-if="proposal.status === 'pending'"
+                        @click="applyConfigProposal(proposal.id)"
+                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        class="btn-grad px-3 py-1.5 rounded-lg text-xs"
+                      >{{ configAssistant.activeProposalId === proposal.id ? 'Applying…' : 'Apply With Consent' }}</button>
+                      <button
+                        v-if="proposal.status === 'pending'"
+                        @click="sendProposalFeedback(proposal.id, 'rejected')"
+                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                      >Reject</button>
+                      <button
+                        v-if="proposal.status === 'applied'"
+                        @click="sendProposalFeedback(proposal.id, 'success')"
+                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                      >Worked</button>
+                      <button
+                        v-if="proposal.status === 'applied'"
+                        @click="sendProposalFeedback(proposal.id, 'partial')"
+                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                      >Partial</button>
+                      <button
+                        v-if="proposal.status === 'applied'"
+                        @click="sendProposalFeedback(proposal.id, 'failure')"
+                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                      >Did Not Work</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div v-else class="empty-state">No conversational proposals yet.</div>
+            </div>
+          </div>
+
+        <div v-if="isAgentsPage" class="glass-card p-5">
+          <div class="flex items-center justify-between mb-4 gap-3">
+            <div>
+              <h3 class="section-title mb-0">Model Routing</h3>
+              <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+            </div>
+          </div>
+
+          <div v-if="!gateway.connected" class="empty-state">Connect to edit model routing.</div>
+          <div v-else-if="modelEndpointForm.loading && !modelEndpointForm.loaded" class="empty-state">Loading…</div>
+          <div v-else class="space-y-4">
+            <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+              Changes here write the same mutable config used by runtime hot-reload and the model-endpoint health checker.
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Orchestrator</div>
+                <span v-if="getModelEndpointStatus('orchestrator')" :class="getModelEndpointStatus('orchestrator')?.ok ? 'badge-running' : 'badge-health-bad'">
+                  {{ getModelEndpointStatus('orchestrator')?.ok ? 'healthy' : 'mismatch' }}
+                </span>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Primary Model</label>
+                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-35b-a3b" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Endpoint Override <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.orchestratorBaseUrl" type="text" class="input-box font-mono" placeholder="uses provider default when empty" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.orchestratorApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses provider default when empty" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('orchestrator')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('orchestrator')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Embeddings</div>
+                <span v-if="getModelEndpointStatus('embeddings')" :class="getModelEndpointStatus('embeddings')?.ok ? 'badge-running' : 'badge-health-bad'">
+                  {{ getModelEndpointStatus('embeddings')?.ok ? 'healthy' : 'mismatch' }}
+                </span>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding Model <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.embeddingModel" type="text" class="input-box font-mono" placeholder="leave empty to disable semantic embeddings" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding Endpoint <span class="text-gray-600 font-normal">optional override</span></label>
+                  <input v-model="modelEndpointForm.embeddingBaseUrl" type="text" class="input-box font-mono" placeholder="uses orchestrator/provider endpoint when empty" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Embedding API Key <span class="text-gray-600 font-normal">optional</span></label>
+                  <input v-model="modelEndpointForm.embeddingApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses orchestrator/provider key when empty" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('embeddings')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('embeddings')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Reranker</div>
+                  <div class="text-xs text-gray-500 mt-1">Optional retrieval reranking endpoint.</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="getModelEndpointStatus('reranker')" :class="getModelEndpointStatus('reranker')?.ok ? 'badge-running' : 'badge-health-bad'">
+                    {{ getModelEndpointStatus('reranker')?.ok ? 'healthy' : 'mismatch' }}
+                  </span>
+                  <toggle-switch :value="modelEndpointForm.rerankerEnabled" @change="modelEndpointForm.rerankerEnabled = $event" />
+                </div>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker Model</label>
+                  <input v-model="modelEndpointForm.rerankerModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3-Reranker-4B" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker Endpoint</label>
+                  <input v-model="modelEndpointForm.rerankerBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Reranker API Key</label>
+                  <input v-model="modelEndpointForm.rerankerApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('reranker')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('reranker')?.error }}</div>
+            </div>
+
+            <div class="border-t border-purple-500/10 pt-3 space-y-3">
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Guard Moderation</div>
+                  <div class="text-xs text-gray-500 mt-1">Optional moderation model used before input/tool content reaches the assistant.</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="getModelEndpointStatus('guard')" :class="getModelEndpointStatus('guard')?.ok ? 'badge-running' : 'badge-health-bad'">
+                    {{ getModelEndpointStatus('guard')?.ok ? 'healthy' : 'mismatch' }}
+                  </span>
+                  <toggle-switch :value="modelEndpointForm.guardEnabled" @change="modelEndpointForm.guardEnabled = $event" />
+                </div>
+              </div>
+              <div class="multimodal-grid">
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard Model</label>
+                  <input v-model="modelEndpointForm.guardModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3Guard-Gen-4B" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard Endpoint</label>
+                  <input v-model="modelEndpointForm.guardBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="field-label">Guard API Key</label>
+                  <input v-model="modelEndpointForm.guardApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
+                </div>
+              </div>
+              <div v-if="getModelEndpointStatus('guard')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('guard')?.error }}</div>
+            </div>
+
+            <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ modelEndpointForm.error }}</div>
+
+            <div class="flex justify-end">
+              <button @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                {{ modelEndpointForm.saving ? 'Saving…' : 'Save Model Routing' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- ── Sub-Agents ─────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isAgentsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Sub-Agents</h3>
             <button v-if="gateway.connected" @click="agentsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
@@ -938,337 +1279,8 @@
           <div v-else class="empty-state">No agents found.</div>
         </div>
 
-        <div class="glass-card p-5">
-          <div class="flex items-center justify-between mb-4 gap-3">
-            <div>
-              <h3 class="section-title mb-0">Model Routing</h3>
-              <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
-            </div>
-            <div class="flex items-center gap-2">
-              <button v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
-            </div>
-          </div>
-
-          <div v-if="!gateway.connected" class="empty-state">Connect to edit model routing.</div>
-          <div v-else-if="modelEndpointForm.loading && !modelEndpointForm.loaded" class="empty-state">Loading…</div>
-          <div v-else class="space-y-4">
-            <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-              Changes here write the same mutable config used by runtime hot-reload and the model-endpoint health checker.
-            </div>
-
-            <div class="border-t border-purple-500/10 pt-3 space-y-3">
-              <div class="flex items-center justify-between gap-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Orchestrator</div>
-                <span v-if="getModelEndpointStatus('orchestrator')" :class="getModelEndpointStatus('orchestrator')?.ok ? 'badge-running' : 'badge-health-bad'">
-                  {{ getModelEndpointStatus('orchestrator')?.ok ? 'healthy' : 'mismatch' }}
-                </span>
-              </div>
-              <div class="multimodal-grid">
-                <div class="md:col-span-2">
-                  <label class="field-label">Primary Model</label>
-                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-35b-a3b" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Endpoint Override <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="modelEndpointForm.orchestratorBaseUrl" type="text" class="input-box font-mono" placeholder="uses provider default when empty" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="modelEndpointForm.orchestratorApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses provider default when empty" />
-                </div>
-              </div>
-              <div v-if="getModelEndpointStatus('orchestrator')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('orchestrator')?.error }}</div>
-            </div>
-
-            <div class="border-t border-purple-500/10 pt-3 space-y-3">
-              <div class="flex items-center justify-between gap-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Embeddings</div>
-                <span v-if="getModelEndpointStatus('embeddings')" :class="getModelEndpointStatus('embeddings')?.ok ? 'badge-running' : 'badge-health-bad'">
-                  {{ getModelEndpointStatus('embeddings')?.ok ? 'healthy' : 'mismatch' }}
-                </span>
-              </div>
-              <div class="multimodal-grid">
-                <div class="md:col-span-2">
-                  <label class="field-label">Embedding Model <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="modelEndpointForm.embeddingModel" type="text" class="input-box font-mono" placeholder="leave empty to disable semantic embeddings" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Embedding Endpoint <span class="text-gray-600 font-normal">optional override</span></label>
-                  <input v-model="modelEndpointForm.embeddingBaseUrl" type="text" class="input-box font-mono" placeholder="uses orchestrator/provider endpoint when empty" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Embedding API Key <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="modelEndpointForm.embeddingApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses orchestrator/provider key when empty" />
-                </div>
-              </div>
-              <div v-if="getModelEndpointStatus('embeddings')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('embeddings')?.error }}</div>
-            </div>
-
-            <div class="border-t border-purple-500/10 pt-3 space-y-3">
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Reranker</div>
-                  <div class="text-xs text-gray-500 mt-1">Optional retrieval reranking endpoint.</div>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span v-if="getModelEndpointStatus('reranker')" :class="getModelEndpointStatus('reranker')?.ok ? 'badge-running' : 'badge-health-bad'">
-                    {{ getModelEndpointStatus('reranker')?.ok ? 'healthy' : 'mismatch' }}
-                  </span>
-                  <toggle-switch :value="modelEndpointForm.rerankerEnabled" @change="modelEndpointForm.rerankerEnabled = $event" />
-                </div>
-              </div>
-              <div class="multimodal-grid">
-                <div class="md:col-span-2">
-                  <label class="field-label">Reranker Model</label>
-                  <input v-model="modelEndpointForm.rerankerModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3-Reranker-4B" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Reranker Endpoint</label>
-                  <input v-model="modelEndpointForm.rerankerBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Reranker API Key</label>
-                  <input v-model="modelEndpointForm.rerankerApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
-                </div>
-              </div>
-              <div v-if="getModelEndpointStatus('reranker')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('reranker')?.error }}</div>
-            </div>
-
-            <div class="border-t border-purple-500/10 pt-3 space-y-3">
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Guard Moderation</div>
-                  <div class="text-xs text-gray-500 mt-1">Optional moderation model used before input/tool content reaches the assistant.</div>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span v-if="getModelEndpointStatus('guard')" :class="getModelEndpointStatus('guard')?.ok ? 'badge-running' : 'badge-health-bad'">
-                    {{ getModelEndpointStatus('guard')?.ok ? 'healthy' : 'mismatch' }}
-                  </span>
-                  <toggle-switch :value="modelEndpointForm.guardEnabled" @change="modelEndpointForm.guardEnabled = $event" />
-                </div>
-              </div>
-              <div class="multimodal-grid">
-                <div class="md:col-span-2">
-                  <label class="field-label">Guard Model</label>
-                  <input v-model="modelEndpointForm.guardModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3Guard-Gen-4B" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Guard Endpoint</label>
-                  <input v-model="modelEndpointForm.guardBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
-                </div>
-                <div class="md:col-span-2">
-                  <label class="field-label">Guard API Key</label>
-                  <input v-model="modelEndpointForm.guardApiKey" type="password" class="input-box" autocomplete="off" placeholder="lm-studio" />
-                </div>
-              </div>
-              <div v-if="getModelEndpointStatus('guard')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('guard')?.error }}</div>
-            </div>
-
-            <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ modelEndpointForm.error }}</div>
-
-            <div class="flex justify-end">
-              <button @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
-                {{ modelEndpointForm.saving ? 'Saving…' : 'Save Model Routing' }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="glass-card p-5">
-          <div class="flex items-center justify-between mb-4 gap-3">
-            <div>
-              <h3 class="section-title mb-0">Config Assistant</h3>
-              <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. StarlingAI drafts the changes, you review them, and nothing applies until you approve it.</div>
-            </div>
-            <button
-              v-if="gateway.connected"
-              @click="reloadConfigAssistant"
-              :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
-              class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-            >Reload</button>
-          </div>
-
-          <div v-if="!gateway.connected" class="empty-state">Connect to generate conversational configuration proposals.</div>
-          <div v-else class="space-y-4">
-            <div class="config-assistant-intro">
-              <div>
-                <div class="text-sm text-gray-100">Conversation-driven configuration</div>
-                <div class="text-xs text-gray-500 mt-1">Drafts are stored as proposals, prompt changes are consent-gated, and your feedback becomes reusable flow memory.</div>
-              </div>
-              <div class="text-right text-xs text-gray-500">
-                <div>{{ configAssistant.pendingProposals.length }} pending</div>
-                <div class="text-cyan-200 mt-1">{{ configAssistant.flowEntries.length }} flow memories</div>
-              </div>
-            </div>
-
-            <div class="space-y-3 rounded-2xl border border-cyan-500/15 bg-cyan-500/5 p-4">
-              <div class="config-assistant-grid">
-                <div>
-                  <label class="field-label">Mode</label>
-                  <select v-model="configAssistantForm.mode" class="input-box">
-                    <option value="setup">Initial setup</option>
-                    <option value="enhancement">Enhancement</option>
-                    <option value="prompt">Prompt improvement</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="field-label">Target Agent <span class="text-gray-600 font-normal">optional</span></label>
-                  <select v-model="configAssistantForm.targetAgent" class="input-box">
-                    <option value="">General runtime</option>
-                    <option value="main_assistant">Main Assistant</option>
-                    <option v-for="agent in agentsStore.agents" :key="agent.name" :value="agent.name">{{ agent.name }}</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label class="field-label">Request</label>
-                <textarea
-                  v-model="configAssistantForm.request"
-                  rows="5"
-                  class="input-box config-assistant-textarea"
-                  placeholder="Example: Improve browser_agent so it stops looping on stable pages, hands visible evidence to vision_browser_analyst, and records the lesson if the handoff works."
-                />
-              </div>
-
-              <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ configAssistant.proposeError }}</div>
-
-              <div class="flex justify-end gap-2">
-                <button @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
-                <button @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
-                  {{ configAssistant.proposing ? 'Drafting…' : 'Generate Proposal' }}
-                </button>
-              </div>
-            </div>
-
-            <div v-if="configAssistant.flowError" class="text-sm text-red-400">{{ configAssistant.flowError }}</div>
-            <div v-else-if="configAssistant.recentLearnings.length" class="space-y-2">
-              <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Recent Learnings</div>
-              <div class="space-y-2">
-                <div v-for="entry in configAssistant.recentLearnings" :key="entry.id" class="flow-memory-card">
-                  <div class="flex items-start justify-between gap-3">
-                    <div>
-                      <div class="text-sm text-gray-100">{{ entry.summary }}</div>
-                      <div class="text-[11px] text-gray-500 mt-1">
-                        {{ formatConfigAssistantScope(entry.scope) }}<span v-if="entry.targetAgent"> • {{ entry.targetAgent }}</span> • {{ formatTimestamp(entry.ts) }}
-                      </div>
-                    </div>
-                    <span :class="flowBadgeClass(entry.outcome)">{{ formatConfigAssistantOutcome(entry.outcome) }}</span>
-                  </div>
-                  <div v-if="entry.lesson" class="text-xs text-cyan-100/80 mt-2">{{ entry.lesson }}</div>
-                  <div v-if="entry.actions.length" class="routing-chip-row mt-2">
-                    <span v-for="action in entry.actions" :key="`${entry.id}-${action}`" class="routing-chip">{{ action }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="configAssistant.mutationError" class="text-sm text-red-400">{{ configAssistant.mutationError }}</div>
-            <div v-if="configAssistant.error" class="text-sm text-red-400">{{ configAssistant.error }}</div>
-
-            <div v-if="configAssistant.loading && !configAssistant.proposals.length" class="empty-state">Loading proposals…</div>
-            <div v-else-if="configAssistant.proposals.length" class="space-y-3">
-              <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Proposals</div>
-              <details v-for="proposal in configAssistant.proposals" :key="proposal.id" class="config-proposal-card" :open="proposal.status === 'pending'">
-                <summary class="config-proposal-summary">
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-2 flex-wrap">
-                      <span class="text-sm font-medium text-gray-100">{{ proposal.summary }}</span>
-                      <span :class="proposalBadgeClass(proposal.status)">{{ proposal.status }}</span>
-                      <span class="routing-chip">{{ formatConfigAssistantScope(proposal.mode) }}</span>
-                    </div>
-                    <div class="text-[11px] text-gray-500 mt-1">
-                      {{ proposal.assistantAgent }}<span v-if="proposal.targetAgent"> → {{ proposal.targetAgent }}</span> • {{ formatTimestamp(proposal.ts) }}
-                    </div>
-                  </div>
-                  <span class="text-xs text-gray-600 shrink-0">Details ▾</span>
-                </summary>
-
-                <div class="mt-3 space-y-3 pl-1">
-                  <div class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
-
-                  <div v-if="proposal.validations.length" class="space-y-1.5">
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Checks</div>
-                    <ul class="config-proposal-list">
-                      <li v-for="validation in proposal.validations" :key="validation">{{ validation }}</li>
-                    </ul>
-                  </div>
-
-                  <div v-if="proposal.configChanges.length" class="space-y-2">
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Config Changes</div>
-                    <div v-for="change in proposal.configChanges" :key="`${proposal.id}-${change.path}`" class="config-change-card">
-                      <div class="text-xs font-mono text-cyan-200">{{ change.path }}</div>
-                      <div class="text-[11px] text-gray-500 mt-1">{{ change.reason }}</div>
-                      <pre class="config-change-preview">{{ stringifyPreview(change.value) }}</pre>
-                    </div>
-                  </div>
-
-                  <div v-if="proposal.promptChanges.length" class="space-y-2">
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Prompt Proposals</div>
-                    <div v-for="change in proposal.promptChanges" :key="`${proposal.id}-${change.agentName}`" class="config-change-card">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <span class="text-xs font-mono text-cyan-200">{{ change.agentName }}</span>
-                        <span class="routing-chip">{{ change.strategy }}</span>
-                      </div>
-                      <div class="text-[11px] text-gray-500 mt-1">{{ change.rationale }}</div>
-                      <pre class="config-change-preview">{{ change.prompt }}</pre>
-                    </div>
-                  </div>
-
-                  <div v-if="proposal.feedbackHistory.length" class="space-y-2">
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Feedback History</div>
-                    <div v-for="feedback in proposal.feedbackHistory.slice().reverse()" :key="`${proposal.id}-${feedback.ts}-${feedback.outcome}`" class="flow-memory-card">
-                      <div class="flex items-center justify-between gap-3">
-                        <span :class="flowBadgeClass(feedback.outcome)">{{ formatConfigAssistantOutcome(feedback.outcome) }}</span>
-                        <span class="text-[11px] text-gray-500">{{ formatTimestamp(feedback.ts) }}</span>
-                      </div>
-                      <div v-if="feedback.lesson" class="text-xs text-cyan-100/80 mt-2">{{ feedback.lesson }}</div>
-                      <div v-if="feedback.notes" class="text-xs text-gray-500 mt-1">{{ feedback.notes }}</div>
-                    </div>
-                  </div>
-
-                  <div class="flex flex-wrap justify-end gap-2 pt-1">
-                    <button
-                      v-if="proposal.status === 'pending'"
-                      @click="applyConfigProposal(proposal.id)"
-                      :disabled="configAssistant.activeProposalId === proposal.id"
-                      class="btn-grad px-3 py-1.5 rounded-lg text-xs"
-                    >{{ configAssistant.activeProposalId === proposal.id ? 'Applying…' : 'Apply With Consent' }}</button>
-                    <button
-                      v-if="proposal.status === 'pending'"
-                      @click="sendProposalFeedback(proposal.id, 'rejected')"
-                      :disabled="configAssistant.activeProposalId === proposal.id"
-                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-                    >Reject</button>
-                    <button
-                      v-if="proposal.status === 'applied'"
-                      @click="sendProposalFeedback(proposal.id, 'success')"
-                      :disabled="configAssistant.activeProposalId === proposal.id"
-                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-                    >Worked</button>
-                    <button
-                      v-if="proposal.status === 'applied'"
-                      @click="sendProposalFeedback(proposal.id, 'partial')"
-                      :disabled="configAssistant.activeProposalId === proposal.id"
-                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-                    >Partial</button>
-                    <button
-                      v-if="proposal.status === 'applied'"
-                      @click="sendProposalFeedback(proposal.id, 'failure')"
-                      :disabled="configAssistant.activeProposalId === proposal.id"
-                      class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-                    >Did Not Work</button>
-                  </div>
-                </div>
-              </details>
-            </div>
-            <div v-else class="empty-state">No conversational proposals yet.</div>
-          </div>
-        </div>
-
         <!-- ── Channels ───────────────────────────────────────────────────── -->
-        <div class="glass-card p-5">
+        <div v-if="isSettingsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <div class="flex items-center gap-3">
               <h3 class="section-title mb-0">Channels</h3>
@@ -1735,6 +1747,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, watch } from "vue";
+import { useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
 import { usePersonalityStore, type AssistantPersonalityProfile } from "@/stores/personality";
@@ -1749,6 +1762,7 @@ import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type Conf
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
 
+const route = useRoute();
 const gateway = useGatewayStore();
 const guardrails = useGuardrailsStore();
 const personalityStore = usePersonalityStore();
@@ -1760,6 +1774,23 @@ const runtime = useRuntimeStore();
 const agentsStore = useAgentsStore();
 const multimodalStore = useMultimodalStore();
 const configAssistant = useConfigAssistantStore();
+
+const pageMode = computed<"settings" | "agents">(() => {
+  if (route.path === "/agents") return "agents";
+  return "settings";
+});
+const isSettingsPage = computed(() => pageMode.value === "settings");
+const isAgentsPage = computed(() => pageMode.value === "agents");
+const pageTitle = computed(() => {
+  if (isAgentsPage.value) return "Agents & Models";
+  return "Runtime Settings";
+});
+const pageDescription = computed(() => {
+  if (isAgentsPage.value) {
+    return "Agent personality, sub-agent routing, model endpoint health, model routing, and configuration proposals live here.";
+  }
+  return "Connection, runtime health, multimodal services, guardrails, channels, sites, scenes, and jobs live here.";
+});
 
 const routingLab = reactive({
   query: "",
@@ -2739,24 +2770,35 @@ function flowBadgeClass(outcome: FlowMemoryOutcome): string {
   return "badge-config";
 }
 
+function loadRuntimeSettingsData() {
+  if (!guardrails.state) void guardrails.fetch();
+  void sites.fetch();
+  void scenesStore.fetch();
+  void jobsStore.fetch();
+  void channelsStore.fetch();
+  void channelsStore.fetchDeadLetterCount();
+  void runtime.fetch();
+  void multimodalStore.fetch();
+}
+
+function loadDefinitionsData() {
+  void personalityStore.fetch();
+  void agentsStore.fetch();
+  void fetchModelEndpointConfig();
+  void configAssistant.fetchProposals();
+  void configAssistant.fetchFlowMemory();
+  void runtime.fetch();
+}
+
 // ── Auto-load when connected ─────────────────────────────────────────────────
 
-watch(() => gateway.connected, (connected) => {
-  if (connected) {
-    if (!guardrails.state) guardrails.fetch();
-    personalityStore.fetch();
-    sites.fetch();
-    scenesStore.fetch();
-    jobsStore.fetch();
-    channelsStore.fetch();
-    channelsStore.fetchDeadLetterCount();
-    runtime.fetch();
-    agentsStore.fetch();
-    multimodalStore.fetch();
-    fetchModelEndpointConfig();
-    configAssistant.fetchProposals();
-    configAssistant.fetchFlowMemory();
+watch([() => gateway.connected, () => pageMode.value], ([connected, mode]) => {
+  if (!connected) return;
+  if (mode === "agents") {
+    loadDefinitionsData();
+    return;
   }
+  loadRuntimeSettingsData();
 }, { immediate: true });
 
 watch(() => personalityStore.profile, (profile) => {

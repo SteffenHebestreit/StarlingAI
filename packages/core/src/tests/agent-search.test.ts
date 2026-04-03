@@ -10,11 +10,12 @@ import {
   scoreAgentKeywordMatch,
   searchByEmbedding,
 } from "../providers/embeddings.js";
-import { isCircuitOpen } from "../tools/sub-agent.js";
+import { computeHybridRoutingScore, isCircuitOpen } from "../tools/sub-agent.js";
 import type { OutcomeEntry } from "../agent/outcomes.js";
 
 describe("agent search helpers", () => {
   afterEach(() => {
+    vi.useRealTimers();
     resetEmbeddingSearchStateForTests();
   });
 
@@ -137,6 +138,50 @@ describe("agent search helpers", () => {
     await searchByEmbedding("login forms", provider, 5);
 
     expect(embedMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("leans on semantic scores when embeddings are available", () => {
+    expect(computeHybridRoutingScore(0.9, 0.3, true)).toBeCloseTo(0.45, 5);
+    expect(computeHybridRoutingScore(0.8, 0, true)).toBeCloseTo(0.52, 5);
+    expect(computeHybridRoutingScore(0.8, 0, false)).toBeCloseTo(0.8, 5);
+    expect(computeHybridRoutingScore(0.2, 0.9, true)).toBeCloseTo(0.725, 5);
+  });
+
+  it("retries embedding index build after initial model unavailability", async () => {
+    vi.useFakeTimers();
+
+    let buildAttempts = 0;
+    const provider = {
+      embed: vi.fn(async (texts: string[]) => {
+        if (texts.every((text) => text.startsWith("Agent:"))) {
+          buildAttempts += 1;
+          if (buildAttempts === 1) {
+            throw new Error("No models loaded");
+          }
+          return [new Float32Array([1, 0])];
+        }
+
+        return [new Float32Array([1, 0])];
+      }),
+    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
+
+    const agents = {
+      mail_agent: {
+        description: "Handles inbox organization tasks.",
+        capabilities: ["mail triage"],
+        tags: ["mail"],
+        tools: ["mail_list_accounts"],
+        maxIterations: 4,
+      },
+    };
+
+    await buildAgentIndex(agents, provider, "lmstudio/qwen-embed");
+    expect(await searchByEmbedding("organize inbox", provider, 5)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const recovered = await searchByEmbedding("organize inbox", provider, 5);
+    expect(recovered[0]?.agentName).toBe("mail_agent");
   });
 });
 
@@ -295,6 +340,13 @@ describe("search_agents tool", () => {
           tags: ["mail", "email", "inbox", "drafts", "communications"],
           tools: ["mail_search", "mail_read", "mail_list_unread", "mail_prepare_draft", "mail_send_draft"],
           maxIterations: 8,
+        },
+        notification_agent: {
+          description: "Cross-channel notification specialist for sending messages via Slack, Discord, Telegram, and email.",
+          capabilities: ["email sending", "multi-channel notifications", "alert routing"],
+          tags: ["notifications", "messaging", "email", "alerts"],
+          tools: ["send_email", "send_slack", "send_discord", "send_telegram"],
+          maxIterations: 6,
         },
       },
     }), "utf8");

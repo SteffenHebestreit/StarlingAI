@@ -10,6 +10,21 @@ interface MailboxInfo {
   delimiter: string;
 }
 
+interface MoveResult {
+  destination: string;
+}
+
+interface DeleteResult {
+  deleted: boolean;
+  movedToTrash: boolean;
+  destination?: string;
+}
+
+interface MailboxDeleteResult {
+  deleted: boolean;
+  path: string;
+}
+
 export class MailAccountClient {
   private client: ImapFlow | null = null;
   private mailboxList: Array<{ path: string; name: string; specialUse?: string | null; delimiter: string }> = [];
@@ -94,6 +109,86 @@ export class MailAccountClient {
     }
   }
 
+  async createMailbox(path: string): Promise<MailboxInfo> {
+    await this.connect();
+    try {
+      const existing = this.findMailbox(path);
+      if (existing) {
+        return {
+          path: existing.path,
+          name: existing.name,
+          specialUse: existing.specialUse ?? null,
+          delimiter: existing.delimiter,
+        };
+      }
+
+      const created = await this.client!.mailboxCreate(path);
+      this.mailboxList = await this.client!.list();
+      const mailbox = this.findMailbox(created.path) ?? this.findMailbox(path);
+      return {
+        path: mailbox?.path ?? created.path,
+        name: mailbox?.name ?? created.path.split(mailbox?.delimiter ?? "/").pop() ?? created.path,
+        specialUse: mailbox?.specialUse ?? null,
+        delimiter: mailbox?.delimiter ?? "/",
+      };
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  async deleteMailbox(path: string): Promise<MailboxDeleteResult> {
+    await this.connect();
+    try {
+      const deleted = await this.client!.mailboxDelete(path);
+      return {
+        deleted: true,
+        path: deleted.path,
+      };
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  async moveMessage(mailbox: string, uid: number, destinationMailbox: string): Promise<MoveResult> {
+    await this.connect();
+    try {
+      const lock = await this.client!.getMailboxLock(mailbox);
+      try {
+        const result = await this.client!.messageMove([uid], destinationMailbox, { uid: true });
+        return { destination: result && typeof result === "object" && "path" in result ? String(result.path) : destinationMailbox };
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  async deleteMessage(mailbox: string, uid: number, permanent = false): Promise<DeleteResult> {
+    await this.connect();
+    try {
+      const lock = await this.client!.getMailboxLock(mailbox);
+      try {
+        const trashMailbox = permanent ? null : this.findMailboxByRole("trash");
+        if (trashMailbox && trashMailbox !== mailbox) {
+          const result = await this.client!.messageMove([uid], trashMailbox, { uid: true });
+          return {
+            deleted: true,
+            movedToTrash: true,
+            destination: result && typeof result === "object" && "path" in result ? String(result.path) : trashMailbox,
+          };
+        }
+
+        await this.client!.messageDelete([uid], { uid: true });
+        return { deleted: true, movedToTrash: false };
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await this.disconnect();
+    }
+  }
+
   private async connect(): Promise<void> {
     if (this.client) return;
     this.client = new ImapFlow({
@@ -121,6 +216,11 @@ export class MailAccountClient {
     return hints
       .map((hint) => this.findMailboxByRole(hint) ?? hint)
       .filter((value, index, array) => array.indexOf(value) === index);
+  }
+
+  private findMailbox(path: string): { path: string; name: string; specialUse?: string | null; delimiter: string } | null {
+    const normalized = path.toLowerCase();
+    return this.mailboxList.find((entry) => entry.path.toLowerCase() === normalized || entry.name.toLowerCase() === normalized) ?? null;
   }
 
   private findMailboxByRole(role: string): string | null {

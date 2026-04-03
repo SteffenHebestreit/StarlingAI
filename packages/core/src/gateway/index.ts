@@ -89,6 +89,15 @@ function resolveWebhookSecret(secret: string | undefined): string {
   return secret.startsWith("$") ? (process.env[secret.slice(1)] ?? "") : secret;
 }
 
+function originFromUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function createGateway() {
   const config = getConfig();
   const app = new Hono();
@@ -157,12 +166,16 @@ export function createGateway() {
   });
 
   app.use("*", cors({
-    origin: [
+    origin: Array.from(new Set([
       `http://localhost:${config.channels.webchat.port}`,
+      `http://127.0.0.1:${config.channels.webchat.port}`,
+      `http://host.docker.internal:${config.channels.webchat.port}`,
       "http://localhost:3001",   // Vite dev server
       "http://127.0.0.1:3001",
       "http://host.docker.internal:3001",
-    ],
+      originFromUrl(config.gateway.publicUrl),
+      ...(config.gateway.corsAllowedOrigins ?? []).map((entry) => originFromUrl(entry)),
+    ].filter((origin): origin is string => Boolean(origin)))),
     credentials: true,
   }));
 

@@ -138,6 +138,7 @@ const navLinks = [
   { to: "/audit", label: "Audit" },
   { to: "/jobs", label: "Jobs" },
   { to: "/sessions", label: "Sessions" },
+  { to: "/agents", label: "Agents" },
   { to: "/settings", label: "Settings" },
 ];
 

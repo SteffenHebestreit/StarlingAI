@@ -35,6 +35,7 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { buildWardenIntervention, type InterventionNotice } from "./interventions.js";
 import { computerSessionManager } from "./computer-session.js";
+import { startToolDevWarden, stopToolDevWarden } from "./tool-dev-warden.js";
 
 const log = childLogger("agent:warden");
 
@@ -123,11 +124,11 @@ let _unsubscribeAudit: (() => void) | null = null;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway";
   severity: "warn" | "error";
   subject: string;
   detail: string;
-  action: "logged" | "circuit_tripped" | "session_emergency_stopped" | "lease_auto_revoked" | "message_suppressed";
+  action: "logged" | "circuit_tripped" | "session_emergency_stopped" | "lease_auto_revoked" | "message_suppressed" | "dev_session_stuck" | "dev_session_terminated";
   intervention?: InterventionNotice;
 }
 
@@ -326,10 +327,14 @@ export function startWarden(): void {
   _wardenInterval = setInterval(sweepAnomalies, 30_000);
   _wardenInterval.unref();
 
-  log.info("Warden started — monitoring for anomalies");
+  // Start the specialized tool-development session warden
+  startToolDevWarden();
+
+  log.info("Warden started — monitoring for anomalies (incl. tool-dev sessions)");
 }
 
 export function stopWarden(): void {
+  stopToolDevWarden();
   if (_wardenInterval) {
     clearInterval(_wardenInterval);
     _wardenInterval = null;

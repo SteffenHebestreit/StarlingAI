@@ -33,6 +33,50 @@ function confidenceThreshold(label: "high" | "medium" | "low"): number {
   return 0;
 }
 
+interface HeuristicRoutingSignals {
+  looksBroad: boolean;
+  looksFresh: boolean;
+  looksSourceHeavy: boolean;
+  looksWebTask: boolean;
+}
+
+function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
+  const normalized = query.trim().toLowerCase();
+  return {
+    looksBroad: /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized),
+    looksFresh: /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now)\b/i.test(normalized),
+    looksSourceHeavy: /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized),
+    looksWebTask: /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized),
+  };
+}
+
+function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    "web",
+    "research",
+    ...(signals.looksBroad ? ["guide"] : []),
+    ...(signals.looksFresh ? ["current"] : []),
+    ...(signals.looksSourceHeavy ? ["sources"] : []),
+  ];
+}
+
+function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
+  const signals = analyzeHeuristicRoutingQuery(query);
+  if (!signals.looksWebTask || !(signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
+    return false;
+  }
+
+  if (exclude.includes("web_task_coordinator")) {
+    return false;
+  }
+
+  if (ctx.allowedAgents && !ctx.allowedAgents.includes("web_task_coordinator")) {
+    return false;
+  }
+
+  return Boolean(getConfig().subAgents["web_task_coordinator"]);
+}
+
 export interface AgentRoutingCandidate {
   name: string;
   description: string;
@@ -65,6 +109,23 @@ interface RoutingSelectionReason {
   score: number;
 }
 
+export function computeHybridRoutingScore(
+  keywordScore: number,
+  semanticScore: number,
+  semanticSearchAvailable: boolean,
+): number {
+  if (keywordScore > 0 && semanticScore > 0) {
+    return keywordScore * 0.25 + semanticScore * 0.75;
+  }
+  if (semanticScore > 0) {
+    return semanticScore;
+  }
+  if (semanticSearchAvailable && keywordScore > 0) {
+    return keywordScore * 0.65;
+  }
+  return keywordScore;
+}
+
 function toCandidate(
   name: string,
   cfg: NonNullable<ReturnType<typeof getConfig>["subAgents"][string]>,
@@ -84,6 +145,19 @@ function toCandidate(
     tags: cfg.tags ?? [],
     costProfile: computeAgentCostProfile(name, workspacePath) ?? undefined,
   };
+}
+
+function compareRoutingResults(
+  left: { combinedScore: number; matchedTerms: string[]; name: string },
+  right: { combinedScore: number; matchedTerms: string[]; name: string },
+): number {
+  if (right.combinedScore !== left.combinedScore) {
+    return right.combinedScore - left.combinedScore;
+  }
+  if (right.matchedTerms.length !== left.matchedTerms.length) {
+    return right.matchedTerms.length - left.matchedTerms.length;
+  }
+  return left.name.localeCompare(right.name);
 }
 
 // Circuit breaker: if an agent fails ≥60% of its last 10 calls (min 3 samples),
@@ -167,13 +241,7 @@ export async function resolveAgentRouting(
     .map(([name, cfg]) => {
       const keywordMatch = scoreAgentKeywordMatch(raw, name, cfg);
       const semanticScore = semanticScores.get(name) ?? 0;
-      // When both signals are present, blend with semantic-biased weights (handles non-English queries).
-      // When only one signal is non-zero, use it directly to avoid the other signal zeroing it out.
-      const combinedScore = keywordMatch.score > 0 && semanticScore > 0
-        ? keywordMatch.score * 0.4 + semanticScore * 0.6
-        : keywordMatch.score > 0
-          ? keywordMatch.score
-          : semanticScore;
+      const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
       const outcomeBoost = computeOutcomeBoost(name, config.workspacePath);
       const intentAdjustment = computeAgentIntentAdjustment(raw, cfg, [
@@ -190,7 +258,7 @@ export async function resolveAgentRouting(
       };
     })
     .filter((result) => result.combinedScore > 0)
-    .sort((left, right) => right.combinedScore - left.combinedScore)
+    .sort(compareRoutingResults)
     .slice(0, 5);
 
   const rerankScores = await rerankCandidates(
@@ -217,7 +285,7 @@ export async function resolveAgentRouting(
           combinedScore: Math.max(0, Math.min(1, result.combinedScore * 0.7 + rerankScore * 0.3)),
         };
       })
-      .sort((left, right) => right.combinedScore - left.combinedScore);
+      .sort(compareRoutingResults);
   }
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
@@ -599,7 +667,24 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
     return true;
   });
 
-  return [...routed, ...buildHeuristicRoutingCandidates(query, ctx, excluded, seen)];
+  const heuristicCandidates = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
+  const mergedCandidates = [...routed, ...heuristicCandidates]
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      if (right.matchedTerms.length !== left.matchedTerms.length) {
+        return right.matchedTerms.length - left.matchedTerms.length;
+      }
+      return left.name.localeCompare(right.name);
+    });
+
+  const coordinatorCandidate = heuristicCandidates.find((candidate) => candidate.name === "web_task_coordinator");
+  if (coordinatorCandidate) {
+    return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
+  }
+
+  return mergedCandidates;
 }
 
 function buildHeuristicRoutingCandidates(
@@ -614,10 +699,7 @@ function buildHeuristicRoutingCandidates(
   const config = getConfig();
   const defaultModel = config.agents.defaults.model.primary;
   const heuristicCandidates: AgentRoutingCandidate[] = [];
-  const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
-  const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now)\b/i.test(normalized);
-  const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
-  const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
+  const signals = analyzeHeuristicRoutingQuery(normalized);
 
   const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
     if (excluded.has(name) || seen.has(name)) return;
@@ -628,11 +710,11 @@ function buildHeuristicRoutingCandidates(
     heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
   };
 
-  if (looksWebTask && (looksBroad || looksFresh || looksSourceHeavy)) {
-    maybeAdd("web_task_coordinator", 0.62, ["web", "research", ...(looksBroad ? ["guide"] : []), ...(looksFresh ? ["current"] : []), ...(looksSourceHeavy ? ["sources"] : [])]);
+  if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
+    maybeAdd("web_task_coordinator", 0.62, buildCoordinatorMatchedTerms(signals));
   }
 
-  if (looksSourceHeavy || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
+  if (signals.looksSourceHeavy || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
     maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
   }
 
@@ -914,6 +996,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           });
         }
         candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
+        }
+      }
+
+      if (candidateQueue.length === 0) {
+        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
+          routingCandidateMap.set("web_task_coordinator", {
+            confidence: "medium",
+            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
+            score: 0.62,
+          });
+          candidateQueue.push("web_task_coordinator");
         }
       }
 

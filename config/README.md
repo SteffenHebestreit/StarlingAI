@@ -21,3 +21,7 @@ The config loader reads `.json` and `.jsonc` files recursively in **lexicographi
 After loading `config/`, the loader merges in `workspace/` (agent-mutable zone) on top, then applies `workspace/runtime/runtime.overrides.json` as the final overlay.
 
 Run `pnpm sai config build` to compile everything into the root `starlingai.json` artifact that Docker mounts.
+
+## Gateway Reverse Proxy Note
+
+When the dashboard calls the gateway from a different browser origin, add that dashboard origin under `gateway.corsAllowedOrigins` in `config/gateway/*.jsonc`. The origin from `gateway.publicUrl` is also accepted automatically.
