@@ -73,6 +73,11 @@ export interface ToolContext {
    * Internal — populated automatically on first delegation.
    */
   _turnAgentCounts?: Map<string, number>;
+  /**
+   * When set, this turn is a tool development session.
+   * Iteration limits are lifted and the tool-dev-warden provides oversight instead.
+   */
+  _toolDevSessionId?: string;
 }
 
 export interface ToolResult {

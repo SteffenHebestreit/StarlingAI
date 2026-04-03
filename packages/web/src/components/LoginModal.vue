@@ -24,8 +24,9 @@
             v-model="wsUrl"
             type="text"
             class="input-line"
-            placeholder="ws://localhost:8765/ws"
+            :placeholder="defaultWsUrl"
           />
+          <p class="mt-2 text-xs text-gray-500">Leave the default to use the current page origin via <code class="font-mono">/ws</code>.</p>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Token</label>
@@ -55,11 +56,12 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
 const tokenInput = ref(gateway.authFailed ? "" : gateway.token);
 const wsUrl = ref(gateway.wsUrl);
+const defaultWsUrl = defaultGatewayWsUrl();
 
 function connect() {
   gateway.disconnect();          // tear down any lingering socket / reconnect timer

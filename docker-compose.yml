@@ -20,6 +20,7 @@ services:
       - SAI_MULTIMODAL_TTS_URL=${SAI_MULTIMODAL_TTS_URL:-http://host.docker.internal:5004}
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
       - REDIS_URL=redis://redis:6379
+      - MONGODB_URL=mongodb://mongo:27017/starlingai
       - SAI_AUDIT_LOG=/data/audit.jsonl
       - SAI_CRED_STORE=/data/credentials.enc
       - SAI_CONFIG_PATH=/config/starlingai.json
@@ -50,6 +51,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
       fastapi-mcp-template:
         condition: service_healthy
@@ -310,9 +313,25 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── MongoDB (ephemeral agent data store) ────────────────────────────────────
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - gc-mongo-data:/data/db
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   gc-postgres-data:
   gc-redis-data:
+  gc-mongo-data:
   gc-data:
   gc-mail-data:
   gc-workspace:

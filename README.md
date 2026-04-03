@@ -105,6 +105,23 @@ Repo-local launchers are available too: use `./sai ...` in Bash/WSL or `./sai ..
 
 Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup tutorials. The gateway listens on `http://localhost:8765`.
 
+### Internal Domain / HAProxy
+
+For an internal domain behind HAProxy or another reverse proxy, publish the web entrypoint on port `3001` and route the domain to that service. The bundled Nginx layer already forwards `/api` and `/ws` to the gateway, so the browser can stay same-origin and the dashboard will auto-use the current host for WebSocket and REST calls.
+
+```haproxy
+frontend starling_https
+  bind *:443 ssl crt /etc/haproxy/certs/starlingai.pem
+  acl host_starling hdr(host) -i ai.internal.example
+  use_backend starling_web if host_starling
+
+backend starling_web
+  option http-server-close
+  server starling 127.0.0.1:3001 check
+```
+
+If you expose the gateway directly on a separate origin instead of going through the web entrypoint, update the gateway CORS allowlist first.
+
 ### Optional services
 
 ```bash

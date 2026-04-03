@@ -73,8 +73,11 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).not.toContain("## Available Sub-Agents");
 
     if (usesDelegateMode) {
-      expect(prompt).toContain("Use delegate_to_agent for every non-trivial action");
       expect(prompt).toContain("Complex work should flow through cooperating specialists that exchange facts via shared session memory");
+      expect(
+        prompt.includes("Use delegate_to_agent for every non-trivial action")
+        || prompt.includes("Use orchestration tools to route every non-trivial action to specialists"),
+      ).toBe(true);
     }
   });
 
@@ -98,7 +101,7 @@ describe("AgentSession collapsed history", () => {
     const session = new AgentSession({
       channel: "test",
       workspacePath: "/workspace",
-      systemPrompt: "You are StarlingAI, a pragmatic AI assistant that can work directly with built-in tools and coordinate specialized sub-agents when needed.\n\nToday's date: Friday, March 21, 2025",
+      systemPrompt: "You are StarlingAI, a pragmatic AI assistant whose primary role is planning, orchestration, and synthesis across specialized sub-agents.\n\nToday's date: Friday, March 21, 2025",
     });
 
     const prompt = session.getSystemPrompt();
@@ -107,6 +110,8 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).toContain("prefer delegate_to_agent(agentName: \"computer_use_agent\", task: \"...\") first");
     expect(prompt).toContain("Requests asking how the pentest swarm works");
     expect(prompt).toContain("Do not ask for authorization or scope unless the user explicitly switches to running a real assessment");
+    expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");
+    expect(prompt).toContain("provide a concise user-facing progress update before triggering the next wave of actions");
   });
 
   it("includes configured main assistant custom instructions in the managed default prompt", async () => {

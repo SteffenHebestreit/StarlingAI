@@ -173,6 +173,60 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresSandbox: false,
   },
 
+  // ─── Tier 0/1: Agent data store ─────────────────────────────────────────
+  agent_store_read: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read temporary data from the agent data store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  agent_store_write: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write temporary data to the agent data store (24h TTL)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  agent_store_delete: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete temporary data from the agent data store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0/2/3: Tool development ────────────────────────────────────────
+  tool_dev_start: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Start a tool development session in the Docker sandbox",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  tool_dev_test: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Run tests against tool code in the Docker sandbox",
+    requiresPerCallApproval: false,
+    requiresSandbox: true,
+  },
+  tool_dev_submit: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Submit a tested tool for human approval and deployment",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0/1: Self-improvement ──────────────────────────────────────────
+  request_new_capability: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Request development of a new tool to fill a capability gap",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  list_capability_gaps: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List detected capability gaps and their status",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
   // ─── Tier 1: Write (workspace-scoped) ───────────────────────────────────
   write_file: {
     tier: ToolTier.ONE_WRITE,
@@ -570,6 +624,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  mail_create_mailbox: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a mailbox or folder for a configured mail account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_delete_mailbox: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete an empty mailbox or folder for a configured mail account",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  mail_move: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Move one or more mail messages into another mailbox or folder",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  mail_delete: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete or trash one or more mail messages from a configured mail account",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
   mail_send_draft: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Send a prepared mail draft through the configured mail account",
@@ -831,6 +909,16 @@ export function getToolTier(toolName: string): ToolTierDef {
       description: `MCP bridge: ${toolName}`,
       requiresPerCallApproval: true,
       requiresSandbox: false,
+    };
+  }
+
+  // Self-developed dynamic tools: selfdev__<name> → Tier 2, sandboxed, per-call approval
+  if (/^selfdev__[a-z0-9_]+$/i.test(toolName)) {
+    return {
+      tier: ToolTier.TWO_EXECUTE,
+      description: `Self-developed tool: ${toolName}`,
+      requiresPerCallApproval: true,
+      requiresSandbox: true,
     };
   }
 

@@ -22,14 +22,17 @@
 
   "agents": {
     "mainAssistant": {
-      "toolMode": "hybrid"
+      "toolMode": "orchestration_only"
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "fallback": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/gemma-4-26b-a4b-it",
+        "fallback": "lmstudio/gemma-4-26b-a4b-it",
+        "enableThinking": true,
         "contextWindow": 32768,
-        "temperature": 0.3,
+        "temperature": 0.2,
+        "topP": 0.9,
+        "repeatPenalty": 1.05,
         "maxTokens": 4096,
         "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b"
       }

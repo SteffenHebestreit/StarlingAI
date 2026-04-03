@@ -134,13 +134,21 @@ function isMailSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean {
   const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
   return (cfg.tools ?? []).some((tool) => tool.startsWith("mail_"))
     || keywords.some((keyword) =>
-      keyword.includes("mail")
-      || keyword.includes("email")
-      || keyword.includes("inbox")
+      keyword.includes("inbox")
       || keyword.includes("mailbox")
+      || keyword.includes("draft")
+      || keyword.includes("reply")
+      || keyword.includes("triage")
       || keyword.includes("posteingang")
     )
-    || /(mail|email|inbox|mailbox|posteingang)/.test(combined);
+    || /(inbox|mailbox|posteingang|draft|reply|triage|categoriz)/.test(combined);
+}
+
+function isNotificationSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.some((tool) => tool.startsWith("send_"))
+    || /(notification|notifications|alert|alerts|slack|discord|telegram|channel)/.test(combined);
 }
 
 function isTtsSpecialist(cfg: SubAgentConfig): boolean {
@@ -216,9 +224,37 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     || hasPhrase(normalizedQuery, [
       /last\s+\d+\s+emails?/,
       /recent\s+emails?/,
+      /latest\s+emails?/,
+      /new\s+emails?/,
+      /unread\s+emails?/,
+      /check.*(?:emails?|inbox|mailbox)/,
+      /summari[sz]e.*(?:emails?|inbox|mailbox)/,
       /letzten?\s+\d+\s+emails?/,
       /zeige.*emails?/,
     ]);
+  const inboundMailboxIntent = hasPhrase(normalizedQuery, [
+    /inbox/,
+    /mailbox/,
+    /posteingang/,
+    /unread/,
+    /recent\s+emails?/,
+    /latest\s+emails?/,
+    /new\s+emails?/,
+    /summari[sz]e.*(?:emails?|inbox|mailbox)/,
+    /check.*(?:emails?|inbox|mailbox)/,
+    /read.*(?:emails?|inbox|mailbox)/,
+  ]);
+  const outboundNotificationIntent = hasPhrase(normalizedQuery, [
+    /send.*slack/,
+    /send.*discord/,
+    /send.*telegram/,
+    /send.*notification/,
+    /send.*alert/,
+    /notify/,
+    /notification/,
+    /alert/,
+    /broadcast/,
+  ]);
 
   // Audio direction intent
   const ttsIntent = hasPhrase(normalizedQuery, TTS_PHRASES);
@@ -234,6 +270,7 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   const writingSpecialist = isWritingSpecialist(cfg, keywords);
   const researchSpecialist = isResearchSpecialist(cfg, keywords);
   const mailSpecialist = isMailSpecialist(cfg, keywords);
+  const notificationSpecialist = isNotificationSpecialist(cfg);
 
   let adjustment = 0;
 
@@ -252,6 +289,16 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (mailIntent) {
     if (mailSpecialist) adjustment += 0.38;
     if (researchSpecialist && !mailSpecialist) adjustment -= 0.12;
+  }
+
+  if (inboundMailboxIntent) {
+    if (mailSpecialist) adjustment += 0.22;
+    if (notificationSpecialist && !mailSpecialist) adjustment -= 0.28;
+  }
+
+  if (outboundNotificationIntent) {
+    if (notificationSpecialist) adjustment += 0.16;
+    if (mailSpecialist && !notificationSpecialist) adjustment -= 0.06;
   }
 
   // ── TTS vs STT ──
@@ -284,9 +331,23 @@ let _index: EmbeddingEntry[] = [];
 let _available = false;
 let _embeddingModel = "";
 let _queryCache = new Map<string, CachedEmbeddingQuery>();
+let _lastProvider: LMStudioProvider | null = null;
+let _lastSubAgents: Record<string, SubAgentConfig> = {};
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
+let _retryDelayMs = 0;
 
 const QUERY_CACHE_TTL_MS = 5 * 60_000;
 const QUERY_CACHE_MAX_ENTRIES = 64;
+const EMBEDDING_RETRY_INITIAL_DELAY_MS = 15_000;
+const EMBEDDING_RETRY_MAX_DELAY_MS = 120_000;
+const SEARCH_STOP_WORDS = new Set<string>([
+  "a", "an", "and", "any", "are", "can", "check", "could", "do", "does", "for", "from",
+  "give", "i", "in", "is", "it", "me", "my", "of", "on", "ones", "our", "please", "show",
+  "tell", "the", "their", "them", "these", "this", "those", "to", "us", "we", "with", "you",
+  "de", "der", "die", "das", "dem", "den", "des", "ein", "eine", "einer", "eines", "und",
+  "für", "fuer", "im", "in", "ist", "kann", "kannst", "meine", "meinen", "meiner", "meines",
+  "mir", "uns", "zeige",
+]);
 
 function normalizeSearchText(value: string): string {
   return value
@@ -298,7 +359,11 @@ function normalizeSearchText(value: string): string {
 }
 
 function tokenizeSearchText(value: string): string[] {
-  return [...new Set(normalizeSearchText(value).split(" ").filter(token => token.length >= 2))];
+  return [...new Set(
+    normalizeSearchText(value)
+      .split(" ")
+      .filter((token) => token.length >= 2 && !SEARCH_STOP_WORDS.has(token))
+  )];
 }
 
 function expandTokenVariants(token: string): string[] {
@@ -435,12 +500,15 @@ export async function buildAgentIndex(
   provider: LMStudioProvider,
   embeddingModel: string
 ): Promise<void> {
+  _lastProvider = provider;
+  _lastSubAgents = { ...subAgents };
   _embeddingModel = embeddingModel;
   clearEmbeddingQueryCache();
   const entries = Object.entries(subAgents);
   if (entries.length === 0) {
     _index = [];
     _available = false;
+    clearEmbeddingRetryTimer();
     return;
   }
 
@@ -454,10 +522,13 @@ export async function buildAgentIndex(
       vector: vectors[i]!,
     }));
     _available = true;
+    _retryDelayMs = 0;
+    clearEmbeddingRetryTimer();
     log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index built");
   } catch (err) {
     _available = false;
     log.warn({ err, model: embeddingModel }, "Failed to build embedding index — semantic search disabled, using keyword fallback");
+    scheduleEmbeddingRetry();
   }
 }
 
@@ -485,6 +556,7 @@ export async function searchByEmbedding(
     return results;
   } catch (err) {
     log.warn({ err }, "Embedding search failed — falling back to keyword");
+    scheduleEmbeddingRetry();
     return [];
   }
 }
@@ -506,7 +578,33 @@ export function resetEmbeddingSearchStateForTests(): void {
   _index = [];
   _available = false;
   _embeddingModel = "";
+  _lastProvider = null;
+  _lastSubAgents = {};
+  _retryDelayMs = 0;
+  clearEmbeddingRetryTimer();
   clearEmbeddingQueryCache();
+}
+
+function clearEmbeddingRetryTimer(): void {
+  if (_retryTimer) {
+    clearTimeout(_retryTimer);
+    _retryTimer = null;
+  }
+}
+
+function scheduleEmbeddingRetry(): void {
+  if (_retryTimer || !_lastProvider || !_embeddingModel || Object.keys(_lastSubAgents).length === 0) {
+    return;
+  }
+
+  const delay = _retryDelayMs > 0 ? _retryDelayMs : EMBEDDING_RETRY_INITIAL_DELAY_MS;
+  _retryDelayMs = Math.min(EMBEDDING_RETRY_MAX_DELAY_MS, delay * 2);
+  _retryTimer = setTimeout(() => {
+    _retryTimer = null;
+    buildAgentIndex(_lastSubAgents, _lastProvider!, _embeddingModel).catch(() => undefined);
+  }, delay);
+  _retryTimer.unref?.();
+  log.info({ model: _embeddingModel, retryInMs: delay }, "Scheduled embedding index rebuild retry");
 }
 
 function buildEmbeddingQueryCacheKey(query: string, topN: number): string {

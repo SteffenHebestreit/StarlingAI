@@ -22,6 +22,12 @@ import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 
+// Ephemeral store + dynamic tools
+import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
+import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
+import { loadPersistedSessions } from "./agent/tool-dev-session.js";
+import { loadPersistedGaps } from "./agent/self-improve.js";
+
 // Import tools to register them (side-effect imports)
 import "./tools/filesystem.js";
 import "./tools/shell.js";
@@ -51,6 +57,9 @@ import "./tools/http-request.js";
 import "./tools/git.js";
 import "./tools/messaging.js";
 import "./tools/mail.js";
+import "./tools/agent-datastore.js";
+import "./tools/tool-develop.js";
+import "./tools/self-improve-tools.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";
@@ -85,6 +94,18 @@ export async function main() {
 
   // Connect configured MCP servers and bridge their tools
   await initMcpServers();
+
+  // Initialize ephemeral data stores (Redis, Postgres, MongoDB)
+  await initEphemeralStore();
+  registerEphemeralCleanupCron();
+
+  // Load self-developed dynamic tools and start hot-deploy watcher
+  loadDynamicTools();
+  watchDynamicToolsDirectory();
+
+  // Recover persisted dev sessions and capability gaps
+  await loadPersistedSessions();
+  await loadPersistedGaps();
 
   // Start gateway (WS + REST)
   const gateway = createGateway();
@@ -164,6 +185,8 @@ export async function main() {
     await gateway.stop();
     await shutdownSceneJobStore();
     await shutdownMcpServers();
+    shutdownDynamicTools();
+    await shutdownEphemeralStore();
     stopAllCronJobs();
     stopAllReminders();
     stopAllTimers();

@@ -351,6 +351,150 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
+  it("reduces mail_agent tools for simple inbox-read tasks", async () => {
+    const { getEffectiveToolNames } = await import("../agent/sub-agent.js");
+
+    const toolNames = getEffectiveToolNames(
+      "mail_agent",
+      [
+        "mail_list_accounts",
+        "mail_list_mailboxes",
+        "mail_search",
+        "mail_read",
+        "mail_list_unread",
+        "mail_prepare_draft",
+        "mail_update_draft",
+        "mail_get_draft",
+        "mail_categorize",
+        "mail_send_draft",
+        "read_shared_facts",
+        "share_finding",
+      ],
+      "Check mal ob ich neue email bekommen habe",
+    );
+
+    expect(toolNames).toEqual([
+      "mail_list_accounts",
+      "mail_list_mailboxes",
+      "mail_search",
+      "mail_read",
+      "mail_list_unread",
+    ]);
+  });
+
+  it("completes simple inbox checks through deterministic mail tools without invoking the LLM", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mail-deterministic-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/gemma-4-26b-a4b-it",
+            temperature: 0.1,
+            maxTokens: 1024,
+          },
+        },
+      },
+      subAgents: {
+        mail_agent: {
+          description: "Mail agent",
+          systemPrompt: "Use mail tools first.",
+          tools: [
+            "mail_list_accounts",
+            "mail_list_unread",
+            "mail_read",
+          ],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+
+    registerTool({
+      name: "mail_list_accounts",
+      description: "List mail accounts",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "- work: user@example.com <user@example.com>",
+          metadata: { accounts: [{ id: "work", address: "user@example.com" }] },
+        };
+      },
+    });
+
+    registerTool({
+      name: "mail_list_unread",
+      description: "List unread messages",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "- [work] Project Update from boss@example.com (INBOX#101 on 2026-04-03)",
+          metadata: {
+            messages: [{
+              accountId: "work",
+              mailbox: "INBOX",
+              uid: 101,
+              subject: "Project Update",
+              from: "boss@example.com",
+              date: "2026-04-03",
+            }],
+          },
+        };
+      },
+    });
+
+    registerTool({
+      name: "mail_read",
+      description: "Read a message",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "Project Update body",
+          metadata: {
+            message: {
+              textBody: "Here is the latest project update with the next milestones and owners.",
+            },
+          },
+        };
+      },
+    });
+
+    completeMock.mockResolvedValue({
+      content: "should not be used",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mail_agent",
+        task: "Check mal ob ich neue email bekommen habe",
+        parentSessionId: "parent-mail-2",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Unread messages found: 1.");
+      expect(result.output).toContain("Project Update");
+      expect(result.stats.toolCount).toBe(3);
+      expect(completeMock).not.toHaveBeenCalled();
+    } finally {
+      unregisterTool("mail_list_accounts");
+      unregisterTool("mail_list_unread");
+      unregisterTool("mail_read");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards computer callbacks into delegated tool execution", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-computer-callbacks-"));
     const configPath = join(tempDir, "starlingai.json");

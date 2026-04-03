@@ -135,6 +135,45 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
+const LEGACY_DIRECT_GATEWAY_WS_URL = "ws://localhost:8765/ws";
+
+export function defaultGatewayWsUrl(): string {
+  if (typeof window === "undefined") {
+    return LEGACY_DIRECT_GATEWAY_WS_URL;
+  }
+
+  const { protocol, host } = window.location;
+  if (!host || protocol === "file:") {
+    return LEGACY_DIRECT_GATEWAY_WS_URL;
+  }
+
+  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProtocol}//${host}/ws`;
+}
+
+function normalizeGatewayWsUrl(raw: string | null | undefined): string {
+  const trimmed = raw?.trim();
+  if (!trimmed || trimmed === LEGACY_DIRECT_GATEWAY_WS_URL) {
+    return defaultGatewayWsUrl();
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    }
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return defaultGatewayWsUrl();
+    }
+    if (!parsed.pathname || parsed.pathname === "/") {
+      parsed.pathname = "/ws";
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
 
 export interface FileToMarkdownResult {
   success: boolean;
@@ -426,8 +465,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   const audit = useAuditStore();
   const notifications = useNotificationStore();
   const token = useStorage<string>("gc_token", "");
-  const wsUrl = useStorage<string>("gc_ws_url", "ws://localhost:8765/ws");
+  const wsUrl = useStorage<string>("gc_ws_url", defaultGatewayWsUrl());
   const swarmRunsBySession = useStorage<Record<string, SwarmRunRecord[]>>("gc_swarm_runs", {});
+
+  wsUrl.value = normalizeGatewayWsUrl(wsUrl.value);
 
   const connected = ref(false);
   const connecting = ref(false);
@@ -612,7 +653,12 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function restBaseUrl(): string {
-    return (wsUrl.value ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    const parsed = new URL(normalizeGatewayWsUrl(wsUrl.value));
+    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
+    parsed.pathname = parsed.pathname.replace(/\/ws$/, "");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
   }
 
   async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -858,7 +904,10 @@ export const useGatewayStore = defineStore("gateway", () => {
     connecting.value = true;
     authFailed.value = false;
 
-    const url = `${wsUrl.value}?token=${encodeURIComponent(token.value)}`;
+    const normalizedWsUrl = normalizeGatewayWsUrl(wsUrl.value);
+    wsUrl.value = normalizedWsUrl;
+    const url = new URL(normalizedWsUrl);
+    url.searchParams.set("token", token.value);
     const socket = new WebSocket(url);
     ws = socket;
     connectTimeoutTimer = setTimeout(() => {

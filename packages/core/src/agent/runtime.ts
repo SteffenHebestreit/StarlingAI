@@ -50,6 +50,11 @@ const SOURCE_HINT_TERMS = [
   "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
   "repo", "repository", "roadmap", "source", "sources", "spec", "specification", "standard",
 ];
+const WEB_LOOKUP_HINT_TERMS = [
+  "suche online", "such online", "suche im internet", "online suchen", "recherchiere online",
+  "recherchiere im internet", "im internet suchen", "search online", "search the web",
+  "web search", "online search", "look it up", "look this up", "find online", "check online",
+];
 const MAIL_HINT_TERMS = [
   "e-mail", "e-mails", "email", "emails", "mail", "mails", "testmail",
   "inbox", "mailbox", "mailboxes", "posteingang", "postfach",
@@ -112,6 +117,8 @@ export interface RunTurnOptions {
   autoApprove?: boolean;
   /** Override sub-agent maxIterations for delegated tasks this turn. */
   maxIterationsOverride?: number;
+  /** When set, this turn is a tool-dev session — iteration limits are lifted. */
+  _toolDevSessionId?: string;
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
@@ -178,6 +185,36 @@ function stableSerialize(value: unknown): string {
     return `{${entries.join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function collapseDuplicateToolCallsInResponse(
+  toolCalls: LLMResponse["tool_calls"],
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): LLMResponse["tool_calls"] {
+  const seenFingerprints = new Set<string>();
+  const filtered: LLMResponse["tool_calls"] = [];
+
+  for (const toolCall of toolCalls) {
+    const fingerprint = `${toolCall.name}|${stableSerialize(toolCall.arguments ?? {})}`;
+    if (seenFingerprints.has(fingerprint)) {
+      logAudit("tool_call_blocked", {
+        tool: toolCall.name,
+        reason: "duplicate_same_response",
+        args: toolCall.arguments,
+      }, {
+        sessionId,
+        severity: "warn",
+      });
+      guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:duplicate_same_response` });
+      continue;
+    }
+
+    seenFingerprints.add(fingerprint);
+    filtered.push(toolCall);
+  }
+
+  return filtered;
 }
 
 export function buildRepeatedOutputFingerprint(toolName: string, args: Record<string, unknown>, resultText: string): string {
@@ -385,7 +422,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (!normalized) return null;
 
   const freshnessSensitive = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
-  const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term));
+  const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
+    || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
@@ -582,10 +620,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     userId: session.userId,
   });
 
-  const initialDynamicGuidance = buildDynamicTurnGuidance(userMessage);
-  const effectiveToolMode: MainAssistantToolMode | undefined = initialDynamicGuidance?.computerAccessSensitive && !initialDynamicGuidance?.pentestSensitive
+  const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
+  const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
-    : undefined;
+    : ((detectedDynamicGuidance?.freshnessSensitive || detectedDynamicGuidance?.sourceSensitive)
+        ? "orchestration_only"
+        : undefined);
+  const initialDynamicGuidance = effectiveToolMode
+    ? (buildDynamicTurnGuidance(userMessage, effectiveToolMode) ?? detectedDynamicGuidance)
+    : detectedDynamicGuidance;
   const allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
   const allowedToolNameSet = new Set(allowedToolNames);
   const tools = getToolsAsLLMDefs(allowedToolNames);
@@ -634,10 +677,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // Consecutive iterations where every tool call was blocked (per-turn limit / not-allowed).
   let _consecutiveFullyBlockedIterations = 0;
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
+  const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
+    && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
+  let delegatedResearchRetryUsed = false;
+  let delegatedResearchEnforcementPrompt = "";
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
-  const maxToolIterations = opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
+  // Tool development sessions have no iteration cap — they use convergence-based completion
+  // and lease/heartbeat oversight via the tool-dev-warden instead.
+  const isToolDevSession = !!opts._toolDevSessionId;
+  const maxToolIterations = isToolDevSession
+    ? Number.MAX_SAFE_INTEGER
+    : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS);
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -687,7 +739,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     const systemPrompt = session.getSystemPrompt();
     const temporalContext = buildTemporalContextPrompt();
-    const dynamicGuidance = iterationCount === 0 ? (initialDynamicGuidance ?? buildDynamicTurnGuidance(userMessage, effectiveToolMode)) : null;
+    const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
     const flowGuidance = iterationCount === 0
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
@@ -704,6 +756,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
+      ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
     ];
@@ -768,12 +821,54 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     totalUsage.completionTokens += llmResponse.usage.completionTokens;
     totalUsage.totalTokens += llmResponse.usage.totalTokens;
 
+    for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
+    llmResponse.tool_calls = collapseDuplicateToolCallsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+
     // ── No tool calls — final response ────────────────────────────────────
     // NOTE: do NOT short-circuit on finishReason === "stop" here — many quantized
     // models (LM Studio, Ollama) return finish_reason:"stop" even when they include
     // tool_calls in the same response.  Only treat the turn as complete when there
     // are literally zero tool calls to process.
     if (llmResponse.tool_calls.length === 0) {
+      if (requiresDelegatedResearch && !session.getHistory().some((message) => message.role === "tool")) {
+        if (!delegatedResearchRetryUsed) {
+          delegatedResearchRetryUsed = true;
+          delegatedResearchEnforcementPrompt = [
+            "COMPLIANCE CORRECTION: This request requires specialist-agent orchestration.",
+            "Do NOT answer directly from memory.",
+            "You MUST call an orchestration tool now instead of writing a natural-language answer.",
+            "For a simple web lookup, prefer delegate_to_agent with researcher or citation_researcher.",
+            "For broader multi-step online research, prefer delegate_to_agent with web_task_coordinator.",
+            "A tool-free answer before delegation is invalid for this turn.",
+          ].join(" ");
+          guardrailEvents.push({ type: "delegation_required", details: "tool_free_research_answer_rejected" });
+          logAudit("guardrail_flagged", {
+            type: "tool_free_research_answer_rejected",
+            freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
+            sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          }, { sessionId: session.id, severity: "warn" });
+          continue;
+        }
+
+        return blocked(
+          "This request required delegation to a specialist agent, but the model tried to answer without using an orchestration tool.",
+          toolContext.swarmState,
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "missing_required_delegation",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
+
       const rawResponse = llmResponse.content ?? "(no response)";
 
       // Output guardrail scan
@@ -846,8 +941,6 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
 
     // ── Process tool calls ────────────────────────────────────────────────
-    // Repair tool names where the model baked arguments into the name field
-    for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
 
     session.addMessage({
       role: "assistant",
@@ -1242,6 +1335,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
         };
         session.addMessage(nudge);
+      }
+
+      if (toolResultMessages.length > 0) {
+        session.addMessage({
+          role: "system",
+          content:
+            "[USER INTERACTION OWNERSHIP] The main assistant owns all user-facing interaction. " +
+            "If the latest delegated results require clarification, authorization, approval, or another user decision, ask the user yourself in one concise message and stop delegating until they respond. " +
+            "If meaningful intermediate results were confirmed and more work still remains, provide a short progress update summarizing what is already known, what remains open, and what you will do next before triggering more orchestration.",
+        });
       }
     }
 

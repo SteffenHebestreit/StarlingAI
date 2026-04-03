@@ -21,6 +21,33 @@ const ReadRequestSchema = z.object({
   uid: z.number().int().positive(),
 });
 
+const MailboxCreateSchema = z.object({
+  accountId: z.string().min(1),
+  path: z.string().min(1),
+});
+
+const MailboxDeleteSchema = z.object({
+  accountId: z.string().min(1),
+  path: z.string().min(1),
+});
+
+const MessageActionItemSchema = z.object({
+  accountId: z.string().min(1),
+  mailbox: z.string().min(1),
+  uid: z.number().int().positive(),
+});
+
+const MessageMoveSchema = z.object({
+  items: z.array(MessageActionItemSchema).min(1),
+  destinationMailbox: z.string().min(1),
+  createDestination: z.boolean().default(false),
+});
+
+const MessageDeleteSchema = z.object({
+  items: z.array(MessageActionItemSchema).min(1),
+  permanent: z.boolean().default(false),
+});
+
 const DraftCreateSchema = z.object({
   accountId: z.string().min(1),
   to: z.array(z.string().email()).min(1),
@@ -103,6 +130,22 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
     return c.json(await client.listMailboxes());
   });
 
+  app.post("/api/mailboxes", async (c) => {
+    const body = MailboxCreateSchema.parse(await c.req.json());
+    const account = getAccount(opts.accounts, body.accountId);
+    const client = new MailAccountClient(account);
+    const mailbox = await client.createMailbox(body.path);
+    return c.json(mailbox, 201);
+  });
+
+  app.delete("/api/mailboxes", async (c) => {
+    const body = MailboxDeleteSchema.parse(await c.req.json());
+    const account = getAccount(opts.accounts, body.accountId);
+    const client = new MailAccountClient(account);
+    const deleted = await client.deleteMailbox(body.path);
+    return c.json(deleted);
+  });
+
   app.post("/api/messages/search", async (c) => {
     const body = SearchRequestSchema.parse(await c.req.json());
     const targetAccounts = body.accountIds?.length
@@ -139,6 +182,57 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
       categories: category ? [category.category] : [],
       note: category?.note,
     });
+  });
+
+  app.post("/api/messages/move", async (c) => {
+    const body = MessageMoveSchema.parse(await c.req.json());
+    const grouped = new Map<string, typeof body.items>();
+    for (const item of body.items) {
+      const items = grouped.get(item.accountId) ?? [];
+      items.push(item);
+      grouped.set(item.accountId, items);
+    }
+
+    const results: Array<Record<string, unknown>> = [];
+    for (const [accountId, items] of grouped.entries()) {
+      const account = getAccount(opts.accounts, accountId);
+      const client = new MailAccountClient(account);
+      if (body.createDestination) {
+        await client.createMailbox(body.destinationMailbox);
+      }
+      for (const item of items) {
+        const moved = await client.moveMessage(item.mailbox, item.uid, body.destinationMailbox);
+        results.push({ ...item, destinationMailbox: moved.destination });
+      }
+    }
+
+    return c.json({ ok: true, count: results.length, destinationMailbox: body.destinationMailbox, results });
+  });
+
+  app.post("/api/messages/delete", async (c) => {
+    const body = MessageDeleteSchema.parse(await c.req.json());
+    const grouped = new Map<string, typeof body.items>();
+    for (const item of body.items) {
+      const items = grouped.get(item.accountId) ?? [];
+      items.push(item);
+      grouped.set(item.accountId, items);
+    }
+
+    const results: Array<Record<string, unknown>> = [];
+    for (const [accountId, items] of grouped.entries()) {
+      const account = getAccount(opts.accounts, accountId);
+      const client = new MailAccountClient(account);
+      for (const item of items) {
+        const deleted = await client.deleteMessage(item.mailbox, item.uid, body.permanent);
+        results.push({
+          ...item,
+          movedToTrash: deleted.movedToTrash,
+          destinationMailbox: deleted.destination ?? null,
+        });
+      }
+    }
+
+    return c.json({ ok: true, count: results.length, permanent: body.permanent, results });
   });
 
   app.post("/api/messages/categorize", async (c) => {

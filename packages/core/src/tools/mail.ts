@@ -109,6 +109,58 @@ registerTool({
 });
 
 registerTool({
+  name: "mail_create_mailbox",
+  description: "Create a mailbox or folder for a configured mail account.",
+  parameters: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "Configured mail account ID." },
+      path: { type: "string", description: "Mailbox path to create, for example 'Projects/Invoices'." },
+    },
+    required: ["accountId", "path"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const accountId = String(args["accountId"] ?? "").trim();
+    const path = String(args["path"] ?? "").trim();
+    if (!accountId || !path) return fail("accountId and path are required");
+    const response = await callMailService<Record<string, unknown>>("/api/mailboxes", {
+      method: "POST",
+      body: JSON.stringify({ accountId, path }),
+    });
+    if (response.status >= 400) {
+      return fail(formatMailServiceError(response));
+    }
+    return ok(`Mailbox '${String(response.body["path"] ?? path)}' is available for account ${accountId}.`, { mailbox: response.body });
+  },
+});
+
+registerTool({
+  name: "mail_delete_mailbox",
+  description: "Delete an empty mailbox or folder for a configured mail account.",
+  parameters: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "Configured mail account ID." },
+      path: { type: "string", description: "Mailbox path to delete." },
+    },
+    required: ["accountId", "path"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const accountId = String(args["accountId"] ?? "").trim();
+    const path = String(args["path"] ?? "").trim();
+    if (!accountId || !path) return fail("accountId and path are required");
+    const response = await callMailService<Record<string, unknown>>("/api/mailboxes", {
+      method: "DELETE",
+      body: JSON.stringify({ accountId, path }),
+    });
+    if (response.status >= 400) {
+      return fail(formatMailServiceError(response));
+    }
+    return ok(`Mailbox '${String(response.body["path"] ?? path)}' deleted for account ${accountId}.`, { mailbox: response.body });
+  },
+});
+
+registerTool({
   name: "mail_search",
   description: "Search messages across one or more configured mail accounts.",
   parameters: {
@@ -370,6 +422,88 @@ registerTool({
       return fail(formatMailServiceError(response));
     }
     return ok(`Categorized ${String(response.body["count"] ?? items.length)} message(s).`, { result: response.body });
+  },
+});
+
+registerTool({
+  name: "mail_move",
+  description: "Move one or more mail messages into another mailbox or folder.",
+  parameters: {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            accountId: { type: "string" },
+            mailbox: { type: "string" },
+            uid: { type: "number" },
+          },
+          required: ["accountId", "mailbox", "uid"],
+        },
+      },
+      destinationMailbox: { type: "string", description: "Mailbox or folder path to move the messages into." },
+      createDestination: { type: "boolean", description: "Create the destination mailbox first if it does not exist.", default: false },
+    },
+    required: ["items", "destinationMailbox"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const items = Array.isArray(args["items"]) ? args["items"] : [];
+    const destinationMailbox = String(args["destinationMailbox"] ?? "").trim();
+    if (items.length === 0 || !destinationMailbox) return fail("items and destinationMailbox are required");
+    const response = await callMailService<Record<string, unknown>>("/api/messages/move", {
+      method: "POST",
+      body: JSON.stringify({
+        items,
+        destinationMailbox,
+        createDestination: Boolean(args["createDestination"] ?? false),
+      }),
+    });
+    if (response.status >= 400) {
+      return fail(formatMailServiceError(response));
+    }
+    return ok(`Moved ${String(response.body["count"] ?? items.length)} message(s) to ${destinationMailbox}.`, { result: response.body });
+  },
+});
+
+registerTool({
+  name: "mail_delete",
+  description: "Delete one or more mail messages. By default this moves them to Trash when the account supports it.",
+  parameters: {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            accountId: { type: "string" },
+            mailbox: { type: "string" },
+            uid: { type: "number" },
+          },
+          required: ["accountId", "mailbox", "uid"],
+        },
+      },
+      permanent: { type: "boolean", description: "If true, permanently delete instead of moving to Trash when possible.", default: false },
+    },
+    required: ["items"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const items = Array.isArray(args["items"]) ? args["items"] : [];
+    if (items.length === 0) return fail("items must be a non-empty array");
+    const response = await callMailService<Record<string, unknown>>("/api/messages/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        items,
+        permanent: Boolean(args["permanent"] ?? false),
+      }),
+    });
+    if (response.status >= 400) {
+      return fail(formatMailServiceError(response));
+    }
+    const permanent = Boolean(response.body["permanent"] ?? false);
+    return ok(`${permanent ? "Deleted" : "Moved to Trash"} ${String(response.body["count"] ?? items.length)} message(s).`, { result: response.body });
   },
 });
 

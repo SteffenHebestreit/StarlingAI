@@ -3,26 +3,35 @@ import { buildDelegationLoopResponse, buildDynamicTurnGuidance, buildModelVisibl
 
 describe("runtime turn guidance", () => {
   it("adds web-search guidance for freshness-sensitive requests", () => {
-    const guidance = buildDynamicTurnGuidance("What are the latest 2026 MCP updates? Cite official sources.");
+    const guidance = buildDynamicTurnGuidance("What are the latest 2026 MCP updates? Cite official sources.", "orchestration_only");
 
     expect(guidance).not.toBeNull();
     expect(guidance?.freshnessSensitive).toBe(true);
     expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Use direct web tools before answering");
-    expect(guidance?.prompt).toContain("Start with web_search");
+    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
+    expect(guidance?.prompt).toContain("Use delegate_to_agent for simple specialist routing");
     expect(guidance?.prompt).toContain("prefer a coordinator-style agent such as web_task_coordinator");
-    expect(guidance?.prompt).toContain("use browser_navigate and then browser_snapshot or browser_wait_for");
-    expect(guidance?.prompt).toContain("Do not claim that a site is unreadable due to JavaScript");
+    expect(guidance?.prompt).toContain("route it through a browser specialist");
+    expect(guidance?.prompt).toContain("Do not stop after a browser snapshot");
     expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
   });
 
   it("adds web-search guidance for German freshness-sensitive requests", () => {
-    const guidance = buildDynamicTurnGuidance("gib mir die aktuellen eurojackpot zahlen");
+    const guidance = buildDynamicTurnGuidance("gib mir die aktuellen eurojackpot zahlen", "orchestration_only");
 
     expect(guidance).not.toBeNull();
     expect(guidance?.freshnessSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Use direct web tools before answering");
+    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
     expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
+  });
+
+  it("treats explicit online-search requests as source-sensitive", () => {
+    const guidance = buildDynamicTurnGuidance("suche online nach der genauen entfernung vom flughafen heraklion zum hotel out of the blue", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
+    expect(guidance?.prompt).toContain("A tool-free answer is invalid");
   });
 
   it("routes owned computer access requests away from pentest tools", () => {
@@ -74,14 +83,14 @@ describe("runtime turn guidance", () => {
   });
 
   it("treats pentest methodology questions as planning requests rather than live engagements", () => {
-    const guidance = buildDynamicTurnGuidance("how would you do pentesting of our system, what plan would you follow?");
+    const guidance = buildDynamicTurnGuidance("how would you do pentesting of our system, what plan would you follow?", "orchestration_only");
 
     expect(guidance).not.toBeNull();
     expect(guidance?.pentestSensitive).toBe(true);
     expect(guidance?.pentestMethodologySensitive).toBe(true);
     expect(guidance?.prompt).toContain("This is NOT a request to start a live pentest engagement");
     expect(guidance?.prompt).toContain("Do NOT ask for authorization, target scope");
-    expect(guidance?.prompt).toContain("Inspect the local pentest definitions and docs first");
+    expect(guidance?.prompt).toContain("Use delegation to inspect or explain the configured pentest workflow");
     expect(guidance?.prompt).toContain("Do not call pentest_set_scope, nmap_scan");
   });
 
