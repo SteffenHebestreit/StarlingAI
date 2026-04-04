@@ -34,6 +34,7 @@ import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
 import { getChannelStatuses } from "../channels/registry.js";
+import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./speech-summary.js";
 import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
 import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
@@ -814,6 +815,70 @@ export function createGateway() {
     };
   }
 
+  async function getQwenTtsCapabilitySnapshot(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }): Promise<{
+    modelId?: string;
+    modelName?: string;
+    capabilities?: string[];
+    voiceCloneSupported?: boolean;
+    customVoiceSupported?: boolean;
+  } | null> {
+    try {
+      const response = await fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/models"),
+        { headers: upstreamHeaders(input.apiKey) },
+        input.timeoutMs,
+      );
+      if (!response.ok) return null;
+
+      const body = await parseUpstreamJsonResponse(response, "TTS model list returned a non-JSON response");
+      const models = body["models"];
+      if (!models || typeof models !== "object") return null;
+
+      const modelMap = models as Record<string, unknown>;
+      const requestedModel = input.requestedModel?.trim();
+      const currentModel = typeof body["current_model"] === "string" ? body["current_model"] : undefined;
+      const modelKey = requestedModel && requestedModel in modelMap
+        ? requestedModel
+        : currentModel && currentModel in modelMap
+          ? currentModel
+          : undefined;
+      if (!modelKey) return null;
+
+      const modelInfo = modelMap[modelKey];
+      if (!modelInfo || typeof modelInfo !== "object") return null;
+
+      const typedModelInfo = modelInfo as Record<string, unknown>;
+      const capabilities = Array.isArray(typedModelInfo["capabilities"])
+        ? (typedModelInfo["capabilities"] as unknown[]).map(String)
+        : [];
+
+      return {
+        modelId: modelKey,
+        modelName: typeof typedModelInfo["name"] === "string" ? typedModelInfo["name"] : modelKey,
+        capabilities,
+        voiceCloneSupported: capabilities.includes("voice_clone"),
+        customVoiceSupported: capabilities.includes("custom_voice"),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function qwenBuiltInSpeakerSupport(snapshot: {
+    voiceCloneSupported?: boolean;
+    customVoiceSupported?: boolean;
+  } | null): boolean | undefined {
+    if (!snapshot) return undefined;
+    if (snapshot.customVoiceSupported) return true;
+    if (snapshot.voiceCloneSupported) return false;
+    return undefined;
+  }
+
   async function sendTtsRequest(input: {
     api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
@@ -827,6 +892,7 @@ export function createGateway() {
     audioExample?: { filename: string; contentType: string; bytes: Uint8Array };
     referenceText?: string;
     saveVoiceAs?: string;
+    allowVoiceCloneFallback?: boolean;
     quality?: string;
     gender?: string;
     speed?: number;
@@ -869,7 +935,24 @@ export function createGateway() {
       if (!loadModelResponse.ok) return loadModelResponse;
     }
 
+    const qwenCapabilitySnapshot = await getQwenTtsCapabilitySnapshot({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      requestedModel: model,
+    });
+
     if (input.savedVoiceId) {
+      if (qwenCapabilitySnapshot?.voiceCloneSupported === false) {
+        const modelName = qwenCapabilitySnapshot.modelName ?? qwenCapabilitySnapshot.modelId ?? "The selected model";
+        return new Response(JSON.stringify({
+          error: `${modelName} does not support saved-voice playback. Switch to a qwen-compatible model with voice_clone capability.`,
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       const formData = new FormData();
       formData.append("text", input.text);
       formData.append("lang", language);
@@ -881,6 +964,44 @@ export function createGateway() {
     }
 
     if (input.audioExample) {
+      const cloneSupported = qwenCapabilitySnapshot?.voiceCloneSupported;
+      if (cloneSupported === false) {
+        if (input.allowVoiceCloneFallback) {
+          const builtInSpeakerSupported = qwenBuiltInSpeakerSupport(qwenCapabilitySnapshot);
+          if (builtInSpeakerSupported === false) {
+            const modelName = qwenCapabilitySnapshot?.modelName ?? qwenCapabilitySnapshot?.modelId ?? "The selected model";
+            return new Response(JSON.stringify({
+              error: `${modelName} does not support either voice cloning or built-in speaker synthesis in this qwen-compatible backend. Switch models or remove the voice sample and configure a saved voice ID instead.`,
+            }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          return fetchWithTimeout(
+            upstreamUrl(input.baseUrl, "/tts"),
+            {
+              method: "POST",
+              headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+              body: JSON.stringify({
+                text: input.text,
+                lang: language,
+                speaker: input.speaker ?? "Vivian",
+                instruct: input.gender ?? input.quality ?? "",
+              }),
+            },
+            input.timeoutMs,
+          );
+        }
+
+        return new Response(JSON.stringify({
+          error: "The selected qwen-compatible TTS model does not support voice cloning. Remove the voice sample or switch to a model with voice_clone capability.",
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       if (input.saveVoiceAs) {
         const saveForm = new FormData();
         saveForm.append("name", input.saveVoiceAs);
@@ -917,6 +1038,16 @@ export function createGateway() {
       );
     }
 
+    if (qwenBuiltInSpeakerSupport(qwenCapabilitySnapshot) === false) {
+      const modelName = qwenCapabilitySnapshot?.modelName ?? qwenCapabilitySnapshot?.modelId ?? "The selected model";
+      return new Response(JSON.stringify({
+        error: `${modelName} does not support built-in speaker synthesis in this qwen-compatible backend. Use a saved voice ID or audio example, or switch to a model with custom_voice capability.`,
+      }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     return fetchWithTimeout(
       upstreamUrl(input.baseUrl, "/tts"),
       {
@@ -931,6 +1062,15 @@ export function createGateway() {
       },
       input.timeoutMs,
     );
+  }
+
+  async function qwenTtsSupportsVoiceClone(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }): Promise<boolean | undefined> {
+    return (await getQwenTtsCapabilitySnapshot(input))?.voiceCloneSupported;
   }
 
   // ── Health endpoints ─────────────────────────────────────────────────────
@@ -1066,6 +1206,14 @@ export function createGateway() {
     const imageGenHealthPromise = multimodalConfig.imageGeneration
       ? checkImageGenerationHealth(multimodalConfig.imageGeneration)
       : Promise.resolve(null);
+    const ttsCapabilityPromise = multimodalConfig.tts.api === "qwen-compatible" && multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
+      ? getQwenTtsCapabilitySnapshot({
+          baseUrl: multimodalConfig.tts.baseUrl,
+          apiKey: multimodalConfig.tts.apiKey,
+          timeoutMs: multimodalConfig.tts.timeoutMs,
+          requestedModel: multimodalConfig.tts.model,
+        })
+      : Promise.resolve(null);
 
     const visionModel = multimodalConfig.files.visionModel;
     const vision = visionModel
@@ -1091,7 +1239,7 @@ export function createGateway() {
         })
       : Promise.resolve(null);
 
-    const [files, stt, tts, imageGeneration, visionHealth] = await Promise.all([
+    const [files, stt, tts, imageGeneration, visionHealth, ttsCapabilitySnapshot] = await Promise.all([
       checkEndpointHealth({
         baseUrl: multimodalConfig.files.baseUrl,
         apiKey: multimodalConfig.files.apiKey,
@@ -1116,13 +1264,17 @@ export function createGateway() {
             }),
       imageGenHealthPromise,
       vision,
+      ttsCapabilityPromise,
     ]);
 
     return c.json({
       files,
       vision: visionHealth,
       stt,
-      tts,
+      tts: {
+        ...tts,
+        ...(ttsCapabilitySnapshot ?? {}),
+      },
       imageGeneration,
       wakeWord: multimodalConfig.wakeWord,
     });
@@ -1391,6 +1543,10 @@ export function createGateway() {
     const language = typeof languageValue === "string" && languageValue.trim()
       ? normalizeTtsLanguage(languageValue.trim(), multimodalConfig.tts.api)
       : normalizeTtsLanguage(multimodalConfig.tts.defaultLanguage, multimodalConfig.tts.api);
+    const referenceTextValue = formData.get("referenceText") ?? formData.get("ref_text");
+    const referenceText = typeof referenceTextValue === "string" && referenceTextValue.trim()
+      ? referenceTextValue.trim()
+      : "";
 
     if (multimodalConfig.tts.api !== "qwen-compatible") {
       return c.json({ error: "Voice sample saving is only supported for qwen-compatible TTS backends." }, 400);
@@ -1415,10 +1571,24 @@ export function createGateway() {
         }
       }
 
+      const qwenCapabilitySnapshot = await getQwenTtsCapabilitySnapshot({
+        baseUrl: multimodalConfig.tts.baseUrl,
+        apiKey: multimodalConfig.tts.apiKey,
+        timeoutMs: multimodalConfig.tts.timeoutMs,
+        requestedModel: multimodalConfig.tts.model,
+      });
+      if (qwenCapabilitySnapshot?.voiceCloneSupported === false) {
+        const modelName = qwenCapabilitySnapshot.modelName ?? qwenCapabilitySnapshot.modelId ?? "The selected model";
+        return c.json({
+          error: `${modelName} does not support saving or replaying cloned voices. Switch to a qwen-compatible Base model with voice_clone capability.`,
+        }, 400);
+      }
+
       const upstreamForm = new FormData();
       upstreamForm.append("name", name);
       upstreamForm.append("lang", language);
       upstreamForm.append("file", uploadedFile, uploadedFile.name);
+      if (referenceText) upstreamForm.append("ref_text", referenceText);
 
       const upstream = await fetchWithTimeout(
         upstreamUrl(multimodalConfig.tts.baseUrl, "/voices/save"),
@@ -1463,8 +1633,17 @@ export function createGateway() {
     if (!text) return c.json({ error: "text is required" }, 400);
 
     try {
-      const audioExamplePath = typeof body["audioExamplePath"] === "string" && body["audioExamplePath"].trim()
+      const explicitAudioExamplePath = typeof body["audioExamplePath"] === "string" && body["audioExamplePath"].trim()
         ? body["audioExamplePath"].trim()
+        : undefined;
+      const explicitReferenceText = typeof body["referenceText"] === "string" && body["referenceText"].trim()
+        ? body["referenceText"].trim()
+        : undefined;
+      const explicitSaveVoiceAs = typeof body["saveVoiceAs"] === "string" && body["saveVoiceAs"].trim()
+        ? body["saveVoiceAs"].trim()
+        : undefined;
+      const audioExamplePath = explicitAudioExamplePath
+        ? explicitAudioExamplePath
         : multimodalConfig.tts.voiceSamplePath;
       const upstream = await sendTtsRequest({
         api: multimodalConfig.tts.api,
@@ -1487,12 +1666,9 @@ export function createGateway() {
             ? body["voice"].trim()
             : multimodalConfig.tts.defaultVoiceId,
         audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath) : undefined,
-        referenceText: typeof body["referenceText"] === "string" && body["referenceText"].trim()
-          ? body["referenceText"].trim()
-          : multimodalConfig.tts.voiceSampleText,
-        saveVoiceAs: typeof body["saveVoiceAs"] === "string" && body["saveVoiceAs"].trim()
-          ? body["saveVoiceAs"].trim()
-          : undefined,
+        referenceText: explicitReferenceText ?? multimodalConfig.tts.voiceSampleText,
+        saveVoiceAs: explicitSaveVoiceAs,
+        allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,
         quality: typeof body["quality"] === "string" ? body["quality"] : multimodalConfig.tts.defaultQuality,
         gender: typeof body["gender"] === "string" ? body["gender"] : undefined,
         speed: typeof body["speed"] === "number" ? body["speed"] : undefined,
@@ -1551,9 +1727,12 @@ export function createGateway() {
         [
           {
             role: "system",
-            content: `You are a concise voice assistant. Summarise the text the user provides into at most ${maxSentences} natural, spoken sentence(s). Use plain language — no markdown, no bullet points, no code blocks. Respond with only the summary.`,
+            content: buildSpeechSummarySystemPrompt(maxSentences, text),
           },
-          { role: "user", content: text },
+          {
+            role: "user",
+            content: buildSpeechSummaryUserPrompt(text),
+          },
         ],
         [],
       );

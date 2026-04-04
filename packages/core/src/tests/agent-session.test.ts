@@ -47,6 +47,58 @@ describe("AgentSession collapsed history", () => {
     expect(collapsed[0]?.content).toContain("**job_finder**");
   });
 
+  it("drops stale transient synthesis system messages before the next user turn", () => {
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "wie lange brauche ich von worbis nach dresden" });
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_nav",
+          type: "function",
+          function: {
+            name: "delegate_to_agent",
+            arguments: JSON.stringify({ agentName: "distance_specialist", task: "Resolve Worbis to Dresden" }),
+          },
+        },
+      ],
+    });
+    session.addMessage({
+      role: "tool",
+      tool_call_id: "call_nav",
+      content: "Delegated result from distance_specialist\nObserved evidence:\nMultiple matches were found.",
+    });
+    session.addMessage({
+      role: "system",
+      content: "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks.",
+    });
+    session.addMessage({
+      role: "system",
+      content: "[USER INTERACTION OWNERSHIP] Ask the user for clarification.",
+    });
+    session.addMessage({
+      role: "assistant",
+      content: "Bitte präzisieren Sie den Start- und Zielort.",
+    });
+    session.addMessage({ role: "user", content: "worbis bei leinefelde und dresden in sachsen" });
+
+    session.pruneTransientTurnSystemMessages();
+
+    const collapsed = session.getCollapsedHistory();
+    const collapsedText = collapsed.map((message) => String(message.content ?? "")).join("\n");
+
+    expect(collapsedText).not.toContain("[SYNTHESIS REQUIRED]");
+    expect(collapsedText).not.toContain("[USER INTERACTION OWNERSHIP]");
+    expect(collapsedText).toContain("Bitte präzisieren Sie den Start- und Zielort.");
+    expect(collapsedText).toContain("worbis bei leinefelde und dresden in sachsen");
+  });
+
   it("includes swarm orchestration guidance in the default system prompt", () => {
     const session = new AgentSession({
       channel: "test",
@@ -106,12 +158,17 @@ describe("AgentSession collapsed history", () => {
 
     const prompt = session.getSystemPrompt();
 
+    expect(prompt).toContain("You are the main assistant inside StarlingAI");
     expect(prompt).toContain("computer-use tasks, not pentest tasks");
     expect(prompt).toContain("prefer delegate_to_agent(agentName: \"computer_use_agent\", task: \"...\") first");
     expect(prompt).toContain("Requests asking how the pentest swarm works");
     expect(prompt).toContain("Do not ask for authorization or scope unless the user explicitly switches to running a real assessment");
+    expect(prompt).toContain("swarm_maintainer");
+    expect(prompt).toContain("do NOT call search_agents or list_agents first");
     expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");
     expect(prompt).toContain("provide a concise user-facing progress update before triggering the next wave of actions");
+    expect(prompt).toContain("Do not waste turns on small talk");
+    expect(prompt).toContain("Do not introduce yourself, your role, or the platform unless the user explicitly asks");
   });
 
   it("includes configured main assistant custom instructions in the managed default prompt", async () => {

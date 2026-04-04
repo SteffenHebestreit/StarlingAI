@@ -410,6 +410,50 @@ describe("search_agents tool", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("finds distance_specialist for short German travel-time queries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        distance_specialist: {
+          description: "Navigation specialist for calculating route distance and travel time between places.",
+          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+          tools: ["geocode_location", "route_distance_time"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("wie lange brauche ich von worbis nach dresden", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("distance_specialist");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
 });
 
 describe("circuit breaker", () => {

@@ -205,8 +205,11 @@ registerTool({
       if (!multimodalServiceConfigured(config.baseUrl)) {
         return fail("TTS is disabled: configure multimodal.tts.baseUrl to enable speech synthesis.");
       }
-      const audioExamplePath = stringArg(args["audioExamplePath"]) ?? config.voiceSamplePath;
-      const referenceText = stringArg(args["referenceText"]) ?? config.voiceSampleText;
+      const explicitAudioExamplePath = stringArg(args["audioExamplePath"]);
+      const explicitReferenceText = stringArg(args["referenceText"]);
+      const explicitSaveVoiceAs = stringArg(args["saveVoiceAs"]);
+      const audioExamplePath = explicitAudioExamplePath ?? config.voiceSamplePath;
+      const referenceText = explicitReferenceText ?? config.voiceSampleText;
       const savedVoiceId = stringArg(args["voiceId"]) ?? stringArg(args["voice"]) ?? config.defaultVoiceId;
       const speaker = stringArg(args["speaker"]) ?? (savedVoiceId ? undefined : config.defaultSpeaker);
       const response = await sendTtsRequest({
@@ -224,7 +227,8 @@ registerTool({
         savedVoiceId,
         audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath, ctx.workspacePath) : undefined,
         referenceText,
-        saveVoiceAs: stringArg(args["saveVoiceAs"]),
+        saveVoiceAs: explicitSaveVoiceAs,
+        allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,
       });
 
       if (!response.ok) {
@@ -976,6 +980,7 @@ async function sendTtsRequest(input: {
   audioExample?: WorkspaceBinaryFile;
   referenceText?: string;
   saveVoiceAs?: string;
+  allowVoiceCloneFallback?: boolean;
 }): Promise<Response> {
   const language = normalizeTtsLanguage(input.language, input.api);
   const model = input.model?.trim();
@@ -1033,6 +1038,38 @@ async function sendTtsRequest(input: {
   }
 
   if (input.audioExample) {
+    const cloneSupported = await qwenTtsSupportsVoiceClone({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      requestedModel: model,
+    });
+    if (cloneSupported === false) {
+      if (input.allowVoiceCloneFallback) {
+        return fetchWithTimeout(
+          upstreamUrl(input.baseUrl, "/tts"),
+          {
+            method: "POST",
+            headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              text: input.text,
+              lang: language,
+              speaker: input.speaker ?? "Vivian",
+              instruct: input.gender ?? input.quality ?? "",
+            }),
+          },
+          input.timeoutMs,
+        );
+      }
+
+      return new Response(JSON.stringify({
+        error: "The selected qwen-compatible TTS model does not support voice cloning. Remove the voice sample or switch to a model with voice_clone capability.",
+      }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     if (input.saveVoiceAs) {
       const saveForm = new FormData();
       saveForm.append("name", input.saveVoiceAs);
@@ -1099,6 +1136,44 @@ async function sendTtsRequest(input: {
     },
     input.timeoutMs,
   );
+}
+
+async function qwenTtsSupportsVoiceClone(input: {
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs: number;
+  requestedModel?: string;
+}): Promise<boolean | undefined> {
+  try {
+    const response = await fetchWithTimeout(
+      upstreamUrl(input.baseUrl, "/models"),
+      { headers: upstreamHeaders(input.apiKey) },
+      input.timeoutMs,
+    );
+    if (!response.ok) return undefined;
+
+    const body = await parseUpstreamJsonResponse(response, "TTS model list returned a non-JSON response");
+    const models = body["models"];
+    if (!models || typeof models !== "object") return undefined;
+
+    const requestedModel = input.requestedModel?.trim();
+    const currentModel = typeof body["current_model"] === "string" ? body["current_model"] : undefined;
+    const modelKey = requestedModel && requestedModel in (models as Record<string, unknown>)
+      ? requestedModel
+      : currentModel && currentModel in (models as Record<string, unknown>)
+        ? currentModel
+        : undefined;
+    if (!modelKey) return undefined;
+
+    const modelInfo = (models as Record<string, unknown>)[modelKey];
+    if (!modelInfo || typeof modelInfo !== "object") return undefined;
+    const capabilities = Array.isArray((modelInfo as Record<string, unknown>)["capabilities"])
+      ? ((modelInfo as Record<string, unknown>)["capabilities"] as unknown[]).map(String)
+      : [];
+    return capabilities.includes("voice_clone");
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizePythonLiteralText(value: string): string {

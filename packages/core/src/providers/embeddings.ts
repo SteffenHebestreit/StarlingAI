@@ -188,6 +188,22 @@ function isWorkflowSpecialist(cfg: SubAgentConfig): boolean {
     || tags.includes("workflow") || tags.includes("automation") || tags.includes("n8n");
 }
 
+function isNavigationSpecialist(cfg: SubAgentConfig): boolean {
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  const tags = (cfg.tags ?? []).join(" ").toLowerCase();
+  return caps.includes("distance calculation")
+    || caps.includes("travel time")
+    || caps.includes("fahrzeit")
+    || caps.includes("entfernung")
+    || caps.includes("route planning")
+    || tags.includes("navigation")
+    || tags.includes("distance")
+    || tags.includes("travel")
+    || tags.includes("fahrzeit")
+    || tags.includes("reisezeit")
+    || tags.includes("route");
+}
+
 function isChannelOpsSpecialist(cfg: SubAgentConfig): boolean {
   const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
   const tags = (cfg.tags ?? []).join(" ").toLowerCase();
@@ -266,11 +282,17 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
 
   // Workflow / automation intent
   const workflowIntent = hasToken(queryTokens, WORKFLOW_AUTOMATION_TOKENS);
+  const navigationIntent = hasPhrase(normalizedQuery, [
+    /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
+    /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
+    /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
+  ]);
 
   const writingSpecialist = isWritingSpecialist(cfg, keywords);
   const researchSpecialist = isResearchSpecialist(cfg, keywords);
   const mailSpecialist = isMailSpecialist(cfg, keywords);
   const notificationSpecialist = isNotificationSpecialist(cfg);
+  const navigationSpecialist = isNavigationSpecialist(cfg);
 
   let adjustment = 0;
 
@@ -322,6 +344,13 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (workflowIntent) {
     if (isWorkflowSpecialist(cfg)) adjustment += 0.1;
     if (isChannelOpsSpecialist(cfg) && !isWorkflowSpecialist(cfg)) adjustment -= 0.08;
+  }
+
+  // ── Navigation / route distance ──
+  if (navigationIntent) {
+    if (navigationSpecialist) adjustment += 0.42;
+    if (researchSpecialist && !navigationSpecialist) adjustment -= 0.12;
+    if (writingSpecialist && !navigationSpecialist) adjustment -= 0.18;
   }
 
   return adjustment;

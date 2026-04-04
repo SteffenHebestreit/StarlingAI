@@ -23,6 +23,7 @@ services:
       - MONGODB_URL=mongodb://mongo:27017/starlingai
       - SAI_AUDIT_LOG=/data/audit.jsonl
       - SAI_CRED_STORE=/data/credentials.enc
+      - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
       - N8N_PASSWORD=${N8N_PASSWORD:-}

@@ -556,6 +556,68 @@ describe("multimodal and browser direct tools", () => {
     expect(result.error).toMatch(/Voice not found/);
   });
 
+  it("falls back to plain qwen TTS when only a configured default voice sample is present but the model lacks voice_clone", async () => {
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    writeFileSync(join(tempDir, "voice-sample.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        tts: {
+          ...realConfig.multimodal.tts,
+          api: "qwen-compatible",
+          baseUrl: "http://tts.local",
+          model: "Qwen/Qwen3-TTS-12Hz-1.7B",
+          defaultSpeaker: "Vivian",
+          voiceSamplePath: "voice-sample.wav",
+          voiceSampleText: "sample voice",
+        },
+      },
+    } as typeof realConfig);
+
+    const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models")) {
+        return new Response(JSON.stringify({
+          models: { "Qwen/Qwen3-TTS-12Hz-1.7B": { capabilities: ["tts"] } },
+          current_model: "Qwen/Qwen3-TTS-12Hz-1.7B",
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/load_model")) {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/tts")) {
+        return new Response(fakeWav, {
+          status: 200,
+          headers: { "Content-Type": "audio/wav" },
+        });
+      }
+      throw new Error(`Unexpected TTS URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("synthesize_speech");
+
+      const result = await tool!.execute({ text: "Hello fallback", outputPath: "fallback.wav" }, {
+        sessionId: "session-tts-fallback",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith("/clone") || String(call[0]).endsWith("/clone-with-ref-text"))).toBe(false);
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith("/tts"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   // ── analyze_image ──────────────────────────────────────────────────────────
 
   it("analyzes a PNG image via the configured vision model", async () => {

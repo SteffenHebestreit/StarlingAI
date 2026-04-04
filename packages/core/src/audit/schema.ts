@@ -57,6 +57,11 @@ export type AuditEventType =
   | "computer_session_emergency_stop"
   | "computer_heartbeat_lost"
   | "tool_loop_detected"
+  // Config proposals & self-improvement
+  | "config_proposal_created"
+  | "config_proposal_applied"
+  | "config_proposal_rejected"
+  | "self_improvement_applied"
   // Tool development & self-improvement
   | "tool_dev_session_started"
   | "tool_dev_session_completed"

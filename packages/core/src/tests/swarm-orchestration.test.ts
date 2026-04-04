@@ -152,6 +152,95 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-maintainer-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        swarm_maintainer: {
+          description: "Maintains the swarm",
+          tools: ["read_file", "write_file"],
+          capabilities: ["maintenance"],
+          tags: ["swarm"],
+        },
+        integration_builder: {
+          description: "Integration specialist",
+          tools: ["read_file", "write_file", "shell_exec"],
+          capabilities: ["integration"],
+          tags: ["integration"],
+        },
+        coder: {
+          description: "Coding specialist",
+          tools: ["read_file", "write_file"],
+          capabilities: ["code"],
+          tags: ["code"],
+        },
+        prompt_optimizer: {
+          description: "Prompt specialist",
+          tools: ["read_file", "write_file"],
+          capabilities: ["prompts"],
+          tags: ["prompts"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
+      if (agentName === "swarm_maintainer") {
+        return `Sub-agent '${agentName}' timed out after 120000ms while working on ${task}`;
+      }
+      return `${agentName}:${task}:ok`;
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Maintain StarlingAI",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "swarm_maintainer",
+      task: "Implement a maintenance change",
+    }, {
+      sessionId: "session-maintenance-fallback",
+      workspacePath,
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("integration_builder");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("swarm_maintainer");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("integration_builder");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
   it("auto-routes to a coordinator fallback when a broad current-source research task stalls", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-routing-"));
     tempDirs.push(workspacePath);

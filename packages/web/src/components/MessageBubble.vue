@@ -28,6 +28,19 @@
         </div>
       </div>
 
+      <div v-if="message.statusText" class="message-progress">
+        <div class="message-progress__current">{{ message.statusText }}</div>
+        <div v-if="progressHistory.length > 1" class="message-progress__history">
+          <div
+            v-for="(entry, index) in progressHistory"
+            :key="`${message.id}-progress-${index}`"
+            class="message-progress__history-item"
+          >
+            {{ entry }}
+          </div>
+        </div>
+      </div>
+
       <!-- Execution steps (prefer delegated sub-agent actions over wrapper tool calls) -->
       <div v-if="executionItems.length" class="tool-status-wrap">
         <div class="tool-status" @click="toolHistoryOpen = !toolHistoryOpen">
@@ -231,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
@@ -285,6 +298,7 @@ const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
+const progressHistory = computed(() => props.message.statusHistory?.slice(-4) ?? []);
 
 // ── Parse thinking blocks out of content ─────────────────────────────────────
 const THINKING_RE = /<(thinking|think)>([\s\S]*?)<\/(thinking|think)>/gi;
@@ -438,6 +452,17 @@ const activeExecutionLabel = computed(() => {
     : `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
 
+watch(
+  () => [props.isStreaming, executionItems.value.some((item) => item.status === "running")],
+  ([isStreamingNow, hasRunningItems]) => {
+    if (isStreamingNow && hasRunningItems) {
+      toolHistoryOpen.value = true;
+      contentCollapsed.value = false;
+    }
+  },
+  { immediate: true },
+);
+
 const imageAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) =>
   Boolean(attachment.dataUrl?.startsWith("data:image/")) || attachment.previewMode === "image" || attachment.contentType?.startsWith("image/")
 ));
@@ -547,6 +572,19 @@ function renderMarkdown(raw: string): string {
   return DOMPurify.sanitize(html);
 }
 
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderStreamingText(raw: string): string {
+  return `<span class="message-streaming-text">${escapeHtml(raw)}</span>`;
+}
+
 const renderedContent = computed(() => {
   const raw = mainContent.value;
   if (!raw) return "";
@@ -556,7 +594,7 @@ const renderedContent = computed(() => {
 const renderedStreamingContent = computed(() => {
   const raw = mainStreamingText.value;
   if (!raw) return "<span class=\"cursor-blink\"></span>";
-  return renderMarkdown(raw) + "<span class=\"cursor-blink\"></span>";
+  return renderStreamingText(raw) + "<span class=\"cursor-blink\"></span>";
 });
 
 // ── Per-message export ────────────────────────────────────────────────────────
@@ -753,6 +791,37 @@ onBeforeUnmount(() => {
   border-radius: 1.2rem;
   overflow: hidden;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.message-progress {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.95rem;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+}
+
+.message-progress__current {
+  color: #dff7ff;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.message-progress__history {
+  display: grid;
+  gap: 0.18rem;
+  color: #9fc6d9;
+  font-size: 0.72rem;
+}
+
+.message-progress__history-item {
+  line-height: 1.35;
+}
+
+.message-streaming-text {
+  white-space: pre-wrap;
 }
 
 .artifact-preview-modal__header {

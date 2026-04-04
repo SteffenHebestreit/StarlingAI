@@ -419,6 +419,130 @@ describe("runtime delegated-loop regressions", () => {
     expect(toolMessages[1]?.content).toContain("already called 'read_file' with identical arguments");
   });
 
+  it("treats maxIterationsOverride=0 as unlimited instead of skipping the turn loop", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("read_once", "read_file", { path: "workspace/README.md" });
+      }
+      return createTextStream("I completed the requested review.");
+    });
+
+    const readFileMock = vi.fn(async () => ({
+      success: true,
+      output: "workspace summary",
+      metadata: { path: "workspace/README.md" },
+    }));
+
+    freshRuntime.registerTool({
+      name: "read_file",
+      description: "Read a workspace file.",
+      parameters: { type: "object", properties: {} },
+      execute: readFileMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Review the workspace README.",
+      maxIterationsOverride: 0,
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("completed the requested review");
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(llmCallCount).toBe(2);
+
+    freshRuntime.unregisterTool("read_file");
+  });
+
+  it("re-delegates after a user clarification instead of carrying stale synthesis nudges into the next turn", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
+      llmCallCount += 1;
+
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("clarify_1", {
+          agentName: "distance_specialist",
+          task: "wie lange brauche ich von worbis nach dresden",
+        });
+      }
+
+      if (llmCallCount === 2) {
+        return createTextStream("Bitte präzisieren Sie den Start- und Zielort.");
+      }
+
+      if (llmCallCount === 3) {
+        const staleSystemLeak = messages.some((message) => message.role === "system"
+          && typeof message.content === "string"
+          && (message.content.startsWith("[SYNTHESIS REQUIRED]") || message.content.startsWith("[USER INTERACTION OWNERSHIP]")));
+        expect(staleSystemLeak).toBe(false);
+        return createDelegateToolCallStream("clarify_2", {
+          agentName: "distance_specialist",
+          task: "worbis bei leinefelde und dresden in sachsen",
+        });
+      }
+
+      return createTextStream("Mode: car\nDistance: 215 km\nEstimated travel time: 2 h 15 min");
+    });
+
+    const delegateExecuteMock = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        output: "[distance_specialist]: Multiple matches were found for Worbis.",
+        metadata: {
+          agentName: "distance_specialist",
+          attemptedAgents: ["distance_specialist"],
+          routingReason: { confidence: "high" },
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        output: "[distance_specialist]: Mode: car\nDistance: 215 km\nEstimated travel time: 2 h 15 min",
+        metadata: {
+          agentName: "distance_specialist",
+          attemptedAgents: ["distance_specialist"],
+          routingReason: { confidence: "high" },
+        },
+      });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const firstTurn = await runTurn({
+      session,
+      userMessage: "wie lange brauche ich von worbis nach dresden",
+    });
+
+    const secondTurn = await runTurn({
+      session,
+      userMessage: "worbis bei leinefelde und dresden in sachsen",
+    });
+
+    expect(firstTurn.response).toContain("Bitte präzisieren Sie den Start- und Zielort");
+    expect(secondTurn.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(2);
+    expect(streamMock).toHaveBeenCalledTimes(4);
+  });
+
   it("collapses duplicate tool calls within a single model response before executing them", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
 
