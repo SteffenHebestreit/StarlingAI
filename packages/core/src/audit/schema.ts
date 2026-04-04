@@ -67,10 +67,18 @@ export type AuditEventType =
   | "tool_dev_session_completed"
   | "tool_dev_session_terminated"
   | "tool_deployed"
+  | "tool_promotion_nominated"
+  | "tool_promoted"
+  | "tool_promotion_rejected"
   | "capability_gap_detected"
   | "capability_gap_proposal"
   | "self_improvement_completed"
   | "ephemeral_cleanup"
+  | "a2a_messages_delivered"
+  | "task_checkpoint_created"
+  | "task_checkpoint_paused"
+  | "task_checkpoint_resumed"
+  | "task_checkpoint_completed"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway";
 

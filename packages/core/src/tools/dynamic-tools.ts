@@ -35,7 +35,33 @@ export interface DynamicToolDefinition {
     testResults: TestRun[];
     devSessionId?: string;
     previousVersion?: number;
+    /** Promotion lifecycle: undefined / "none" = not nominated, "pending" = awaiting operator review */
+    promotionStatus?: "none" | "pending" | "approved" | "rejected";
+    promotionNominatedAt?: string;
 }
+
+// ── Promotion queue ─────────────────────────────────────────────────────────
+
+export interface ToolPromotionCandidate {
+    toolName: string;       // bare name (without selfdev__ prefix)
+    fullName: string;       // selfdev__<toolName>
+    description: string;
+    callCount: number;
+    successCount: number;
+    successRate: number;
+    status: "pending" | "approved" | "rejected";
+    nominatedAt: string;
+    reviewedAt?: string;
+    reviewedBy?: string;
+}
+
+/** Minimum runtime calls before a tool is eligible for promotion nomination. */
+const PROMOTION_MIN_CALLS = 10;
+/** Minimum runtime success rate (0–1) for promotion eligibility. */
+const PROMOTION_MIN_SUCCESS_RATE = 0.8;
+
+interface _CallStats { calls: number; successes: number; }
+const _runtimeStats = new Map<string, _CallStats>(); // keyed by bare tool name
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -178,12 +204,25 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
         unregisterTool(fullName);
     }
 
+    // Ensure runtime stats entry exists (preserve across re-registrations)
+    if (!_runtimeStats.has(def.name)) {
+        _runtimeStats.set(def.name, { calls: 0, successes: 0 });
+    }
+
     const handler: ToolHandler = {
         name: fullName,
         description: `[Self-developed] ${def.description}`,
         parameters: def.parameters,
         async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-            return executeDynamicTool(def.code, args, ctx);
+            const result = await executeDynamicTool(def.code, args, ctx);
+            // Track runtime call stats for promotion eligibility
+            const stats = _runtimeStats.get(def.name) ?? { calls: 0, successes: 0 };
+            stats.calls++;
+            if (result.success) stats.successes++;
+            _runtimeStats.set(def.name, stats);
+            // Auto-nominate if threshold reached and not already nominated
+            maybeNominateForPromotion(def.name);
+            return result;
         },
     };
 
@@ -227,6 +266,146 @@ function syncDynamicTools(): void {
         }
     }
 }
+
+// ── Promotion queue public API ──────────────────────────────────────────────
+
+function maybeNominateForPromotion(bareToolName: string): void {
+    const def = _loadedTools.get(bareToolName);
+    if (!def) return;
+    if (def.promotionStatus && def.promotionStatus !== "none") return; // already nominated
+
+    const stats = _runtimeStats.get(bareToolName);
+    if (!stats) return;
+    if (stats.calls < PROMOTION_MIN_CALLS) return;
+
+    const rate = stats.successes / stats.calls;
+    if (rate < PROMOTION_MIN_SUCCESS_RATE) return;
+
+    def.promotionStatus = "pending";
+    def.promotionNominatedAt = new Date().toISOString();
+
+    // Persist the updated definition
+    try {
+        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+    } catch (err) {
+        log.warn({ err, toolName: bareToolName }, "Failed to persist promotion nomination");
+    }
+
+    emitSwarmEvent("tool_promotion_nominated", {
+        data: { toolName: `${TOOL_NAME_PREFIX}${bareToolName}`, callCount: stats.calls, successRate: rate },
+    });
+    logAudit("tool_promotion_nominated", {
+        toolName: `${TOOL_NAME_PREFIX}${bareToolName}`,
+        callCount: stats.calls,
+        successRate: rate,
+    }, { severity: "info" });
+
+    log.info({ toolName: bareToolName, callCount: stats.calls, successRate: rate },
+        "Dynamic tool nominated for promotion — awaiting operator review");
+}
+
+/** Return all dynamic tools that are candidates for promotion (or have been reviewed). */
+export function listPromotionCandidates(): ToolPromotionCandidate[] {
+    const candidates: ToolPromotionCandidate[] = [];
+    for (const def of _loadedTools.values()) {
+        if (!def.promotionStatus || def.promotionStatus === "none") continue;
+        const stats = _runtimeStats.get(def.name) ?? { calls: 0, successes: 0 };
+        candidates.push({
+            toolName: def.name,
+            fullName: `${TOOL_NAME_PREFIX}${def.name}`,
+            description: def.description,
+            callCount: stats.calls,
+            successCount: stats.successes,
+            successRate: stats.calls > 0 ? stats.successes / stats.calls : 0,
+            status: def.promotionStatus as ToolPromotionCandidate["status"],
+            nominatedAt: def.promotionNominatedAt ?? def.approvedAt,
+            reviewedAt: def.promotionStatus !== "pending" ? (def.promotionNominatedAt ?? undefined) : undefined,
+        });
+    }
+    return candidates;
+}
+
+/**
+ * Approve promotion: the tool is re-registered without the selfdev__ prefix
+ * at Tier 2 (still sandbox-enforced, still requires per-call approval).
+ * The original selfdev__ registration remains as a fallback.
+ */
+export function approvePromotion(bareToolName: string, reviewedBy: string): boolean {
+    const def = _loadedTools.get(bareToolName);
+    if (!def || def.promotionStatus !== "pending") return false;
+
+    def.promotionStatus = "approved";
+    const reviewedAt = new Date().toISOString();
+
+    // Persist updated status
+    try {
+        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+    } catch (err) {
+        log.warn({ err, toolName: bareToolName }, "Failed to persist promotion approval");
+    }
+
+    // Register the promoted (non-prefixed) tool — still uses sandbox executor, still Tier 2
+    const promotedHandler: ToolHandler = {
+        name: bareToolName,                         // no selfdev__ prefix
+        description: `[Promoted] ${def.description}`,
+        parameters: def.parameters,
+        async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+            return executeDynamicTool(def.code, args, ctx);
+        },
+    };
+    try {
+        registerTool(promotedHandler);
+    } catch (err) {
+        log.error({ err, toolName: bareToolName }, "Failed to register promoted tool");
+        return false;
+    }
+
+    emitSwarmEvent("tool_promoted", {
+        data: { toolName: bareToolName, promotedFrom: `${TOOL_NAME_PREFIX}${bareToolName}`, reviewedBy },
+    });
+    logAudit("tool_promoted", { toolName: bareToolName, reviewedBy, reviewedAt }, { severity: "info" });
+
+    log.info({ toolName: bareToolName, reviewedBy }, "Dynamic tool promoted to catalog");
+    return true;
+}
+
+/** Reject promotion: mark as rejected so the tool stays as selfdev__ only. */
+export function rejectPromotion(bareToolName: string, reviewedBy: string): boolean {
+    const def = _loadedTools.get(bareToolName);
+    if (!def || def.promotionStatus !== "pending") return false;
+
+    def.promotionStatus = "rejected";
+
+    try {
+        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+    } catch (err) {
+        log.warn({ err, toolName: bareToolName }, "Failed to persist promotion rejection");
+    }
+
+    logAudit("tool_promotion_rejected", { toolName: `${TOOL_NAME_PREFIX}${bareToolName}`, reviewedBy }, { severity: "info" });
+    log.info({ toolName: bareToolName, reviewedBy }, "Dynamic tool promotion rejected");
+    return true;
+}
+
+/** Return runtime call statistics for all loaded dynamic tools. */
+export function getDynamicToolStats(): Array<{ toolName: string; fullName: string; calls: number; successes: number; successRate: number; promotionStatus?: string }> {
+    return [..._loadedTools.values()].map(def => {
+        const stats = _runtimeStats.get(def.name) ?? { calls: 0, successes: 0 };
+        return {
+            toolName: def.name,
+            fullName: `${TOOL_NAME_PREFIX}${def.name}`,
+            calls: stats.calls,
+            successes: stats.successes,
+            successRate: stats.calls > 0 ? stats.successes / stats.calls : 0,
+            promotionStatus: def.promotionStatus,
+        };
+    });
+}
+
+// ── Definition validation ───────────────────────────────────────────────────
 
 function validateDefinition(def: DynamicToolDefinition): boolean {
     if (!def.name || typeof def.name !== "string") return false;

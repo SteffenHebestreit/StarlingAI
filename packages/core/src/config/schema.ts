@@ -375,6 +375,16 @@ export const SubAgentContainerSchema = z.object({
   timeoutMs: z.number().int().min(5000).max(300000).default(60000),
 });
 
+/** Optional GPU/compute resource requirements for GPU-aware routing (Stage 9). */
+export const AgentComputeProfileSchema = z.object({
+  /** Minimum GPU VRAM required in MB (0 = no GPU required). */
+  minVramMb: z.number().int().min(0).default(0),
+  /** Whether this agent benefits from GPU acceleration (used for routing preference). */
+  gpuPreferred: z.boolean().default(false),
+  /** Named GPU tier required: "none" | "low" | "medium" | "high" | "any" */
+  gpuTier: z.enum(["none", "low", "medium", "high", "any"]).default("none"),
+}).optional();
+
 export const SubAgentConfigSchema = z.object({
   description: z.string(),                          // shown to orchestrator LLM
   capabilities: z.array(z.string()).default([]),   // explicit routing keywords, e.g. ["browser", "forms"]
@@ -388,6 +398,8 @@ export const SubAgentConfigSchema = z.object({
   turnTimeoutMs: z.number().int().min(1_000).max(900_000).optional(), // optional per-agent wall-clock turn timeout
   maxConcurrent: z.number().int().min(1).max(20).optional(), // max simultaneous containers (default: 3)
   container: SubAgentContainerSchema.optional(),    // run in ephemeral Docker container
+  /** GPU/compute resource requirements — used for GPU-aware routing. */
+  compute: AgentComputeProfileSchema,
 });
 
 export const SubAgentsSchema = z.record(SubAgentConfigSchema);

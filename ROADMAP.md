@@ -1,6 +1,6 @@
 # StarlingAI — Roadmap
 
-> **Last updated:** 2026-04-04 · **Current release:** v0.3.2 (Stage 7 complete + Stage 8 gap-closure in progress)
+> **Last updated:** 2026-04-04 · **Current release:** v0.4.0 (Stage 9 shipped)
 
 This roadmap tracks both the completed architecture milestones and the honest gap analysis of where the implementation diverges from the swarm philosophy. It is a living document — the swarm may self-update entries in the `workspace/` area, but the core architecture decisions here are operator-owned.
 
@@ -17,6 +17,8 @@ This roadmap tracks both the completed architecture milestones and the honest ga
 | 5 | Channel hardening (5 channels), delivery guarantees, p50/p95/p99 latency, SLO tracking | ✅ Complete |
 | 6 | Token streaming, turn performance metrics, adaptive timeouts, embedding cache | ✅ Complete |
 | 7 | Multimodal tools (STT/TTS/image/file/browser), human-in-the-loop approvals, intervention diagnostics | ✅ Complete |
+| 8 | Container opt-out model, self-improvement audit trail, Warden config-proposal flood, selfdev__ guard | ✅ Complete (v0.3.2) |
+| 9 | A2A messaging, long-running task checkpoints, tool promotion queue, skill-gap auto-detection, swarm dashboard, GPU routing | ✅ Complete (v0.4.0) |
 
 ---
 
@@ -127,18 +129,18 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
-## Stage 9 — Advanced Swarm Behaviors (Planned, 2026 Q3)
+## Stage 9 — Advanced Swarm Behaviors (In Progress, 2026 Q2)
 
-**Theme:** True peer-to-peer swarm coordination. Today all agent-to-agent communication routes through the orchestrator's tool layer. Stage 9 explores direct agent messaging via the swarm bus without orchestrator mediation.
+**Theme:** True peer-to-peer swarm coordination. Direct agent messaging without orchestrator mediation, resumable long-running tasks, tool promotion pipeline, and GPU-aware routing.
 
-| Feature | Description |
-|---------|-------------|
-| Direct A2A messaging | Agents publish `agent_message` events on the bus; peers subscribe and respond without orchestrator involvement |
-| Swarm-native long-running tasks | Tasks that span multiple turns, with resumability and cross-turn memory |
-| Dynamic tool promotion from `selfdev__` to catalog | Promote battle-tested dynamic tools to Tier 1/2 with human approval and full integration testing |
-| Skill-gap auto-detection | System detects recurring "no suitable agent" routing failures and auto-files a capability gap record with suggested new agent spec |
-| Operator dashboard for swarm health | Dedicated swarm health view: bid success rates, circuit-breaker states, promotion queue, warden alert timeline |
-| GPU-aware agent routing | Route compute-heavy tasks to agents backed by models that have GPU headroom |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Direct A2A messaging | ✅ v0.4.0 | `consumeAgentMessages()` called at sub-agent start; pending mailbox messages injected as context before each run; `a2a_messages_delivered` audit event |
+| Swarm-native long-running tasks | ✅ v0.4.0 | `swarm/checkpoints.ts` — createCheckpoint / pauseCheckpoint / resumeCheckpoint / completeCheckpoint; disk-persistent (24h TTL); REST API at `/api/checkpoints` |
+| Dynamic tool promotion from `selfdev__` to catalog | ✅ v0.4.0 | Runtime call stats tracked per tool; auto-nominated at 10 calls + ≥80% success; operator approve/reject via REST + dashboard; promoted tools re-registered without prefix at Tier 2 |
+| Skill-gap auto-detection | ✅ v0.4.0 | `recordCapabilityGap()` auto-called on zero-result and low-confidence routing failures in both `search_agents` and `delegate_to_agent`; gaps surfaced in dashboard |
+| Operator dashboard for swarm health | ✅ v0.4.0 | `SwarmDashboard.vue` at `/swarm` — warden alert ring (last 200), capability gaps, promotion queue with approve/reject, paused task checkpoints, dynamic tool stats; `/api/swarm/health` endpoint |
+| GPU-aware agent routing | ✅ v0.4.0 | `compute` field on `SubAgentConfigSchema` (gpuPreferred, gpuTier, minVramMb); `computeGpuAffinityAdjustment()` boosts GPU-capable agents for compute-heavy queries; `computeProfile` exposed in routing candidates |
 
 ---
 

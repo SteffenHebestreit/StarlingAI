@@ -20,6 +20,7 @@ import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAut
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
 import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact } from "../swarm/memory.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
+import { recordCapabilityGap } from "../agent/self-improve.js";
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
@@ -88,6 +89,8 @@ export interface AgentRoutingCandidate {
   tags: string[];
   /** Performance and cost profile derived from recent outcome log entries. */
   costProfile?: AgentCostProfile;
+  /** GPU/compute resource requirements declared by the agent (Stage 9). */
+  computeProfile?: { gpuPreferred: boolean; gpuTier: string; minVramMb: number };
 }
 
 export interface AgentRoutingResolution {
@@ -144,6 +147,11 @@ function toCandidate(
     capabilities: cfg.capabilities ?? [],
     tags: cfg.tags ?? [],
     costProfile: computeAgentCostProfile(name, workspacePath) ?? undefined,
+    computeProfile: cfg.compute ? {
+      gpuPreferred: cfg.compute.gpuPreferred ?? false,
+      gpuTier: cfg.compute.gpuTier ?? "none",
+      minVramMb: cfg.compute.minVramMb ?? 0,
+    } : undefined,
   };
 }
 
@@ -188,6 +196,35 @@ function computeOutcomeBoost(agentName: string, workspacePath: string): number {
     relevant.length;
   // Neutral (0.5 win rate) → 0, perfect → +0.125, all failures → -0.125
   return (successRate - 0.5) * 0.25;
+}
+
+/**
+ * Compute a GPU-affinity score adjustment for an agent.
+ *
+ * Rules (Stage 9 GPU-aware routing):
+ *   - If the agent declares gpuTier "none" and the query contains compute-heavy
+ *     terms, it gets a small negative adjustment to yield to GPU-capable peers.
+ *   - If the agent declares gpuPreferred: true and the query looks compute-heavy,
+ *     it gets a small positive boost.
+ *   - If an agent declares a minVramMb > 0, that metadata is surfaced in search
+ *     results so operators know the requirement (routing cannot enforce VRAM at
+ *     runtime without hardware introspection — see ROADMAP Stage 9).
+ */
+const GPU_HEAVY_QUERY_TERMS = [
+  "embed", "embedding", "transcribe", "speech", "audio", "image", "generate image",
+  "vision", "ocr", "stable diffusion", "whisper", "llava", "gpu", "cuda", "vram",
+  "neural", "inference", "model weights", "fine-tune", "fine tune",
+];
+
+function computeGpuAffinityAdjustment(query: string, cfg: { compute?: { gpuPreferred?: boolean; gpuTier?: string } | null }): number {
+  const lq = query.toLowerCase();
+  const isComputeHeavy = GPU_HEAVY_QUERY_TERMS.some(t => lq.includes(t));
+  if (!isComputeHeavy) return 0;
+
+  const gpuTier = cfg.compute?.gpuTier ?? "none";
+  if (cfg.compute?.gpuPreferred && gpuTier !== "none") return 0.06; // prefer GPU-capable agents
+  if (gpuTier === "none") return -0.04; // gently deprioritize non-GPU agents for heavy tasks
+  return 0;
 }
 
 export async function resolveAgentRouting(
@@ -249,7 +286,8 @@ export async function resolveAgentRouting(
         ...(cfg.capabilities ?? []),
         ...(cfg.tags ?? []),
       ]);
-      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentAdjustment));
+      const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg);
+      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentAdjustment + gpuAdjustment));
       return {
         name,
         cfg,
@@ -657,6 +695,15 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       allowedAgents: ctx.allowedAgents,
     });
     candidates = [...low.results, ...low.weakCandidates];
+
+    // Total routing failure — no agent at any confidence. Auto-record for self-improvement.
+    if (candidates.length === 0) {
+      recordCapabilityGap({
+        description: `Delegation failed — no agent found for task: "${query.slice(0, 300)}"`,
+        exampleInput: query.slice(0, 500),
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
+    }
   }
 
   // Deduplicate by name, exclude already-attempted agents
@@ -1725,6 +1772,12 @@ registerTool({
       : "";
 
     if (resolution.results.length === 0 && resolution.weakCandidates.length === 0) {
+      // Complete routing failure — auto-record a capability gap for self-improvement pipeline
+      recordCapabilityGap({
+        description: `No agent found for routing query: "${raw}"`,
+        exampleInput: raw,
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
         output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}`,
@@ -1733,6 +1786,12 @@ registerTool({
 
     if (resolution.results.length === 0) {
       const topCandidates = resolution.weakCandidates.map((candidate) => `- ${candidate.name} (${candidate.confidence})`).join("\n");
+      // Only weak candidates — record gap so the pipeline can design a better specialist
+      recordCapabilityGap({
+        description: `No agent met minimum confidence for routing query: "${raw}" (only low-confidence candidates)`,
+        exampleInput: raw,
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
         output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}\n\nTop weak candidates:\n${topCandidates}`,
