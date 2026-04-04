@@ -49,6 +49,10 @@ import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getAgentMessageBacklogSnapshot } from "../swarm/memory.js";
+import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
+import { listCapabilityGaps } from "../agent/self-improve.js";
+import { getWardenAlerts } from "../agent/warden.js";
+import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { computerSessionManager } from "../agent/computer-session.js";
@@ -639,27 +643,37 @@ export function createGateway() {
     language?: string;
     prompt?: string;
   }): Promise<Response> {
-    if (input.api === "transcribe-only") {
-      const fallbackForm = new FormData();
-      fallbackForm.append("audio", input.audioBlob, input.filename);
-      if (input.language) fallbackForm.append("language", input.language);
-      if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+    const normalizedLanguage = normalizeSttLanguage(input.language);
 
-      return fetchWithTimeout(
-        upstreamUrl(input.baseUrl, "/transcribe"),
-        {
-          method: "POST",
-          headers: upstreamHeaders(input.apiKey),
-          body: fallbackForm,
-        },
-        input.timeoutMs,
-      );
+    if (input.api === "transcribe-only") {
+      const directResponse = await sendDirectTranscribeRequest({
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+        timeoutMs: input.timeoutMs,
+        audioBlob: input.audioBlob,
+        filename: input.filename,
+        language: normalizedLanguage,
+        prompt: input.prompt,
+      });
+
+      if (shouldRetryTranscribeWithoutLanguage(directResponse.status, normalizedLanguage)) {
+        return sendDirectTranscribeRequest({
+          baseUrl: input.baseUrl,
+          apiKey: input.apiKey,
+          timeoutMs: input.timeoutMs,
+          audioBlob: input.audioBlob,
+          filename: input.filename,
+          prompt: input.prompt,
+        });
+      }
+
+      return directResponse;
     }
 
     const openAiForm = new FormData();
     openAiForm.append("file", input.audioBlob, input.filename);
     openAiForm.append("model", input.model);
-    if (input.language) openAiForm.append("language", input.language);
+    if (normalizedLanguage) openAiForm.append("language", normalizedLanguage);
     if (input.prompt) openAiForm.append("prompt", input.prompt);
 
     const openAiResponse = await fetchWithTimeout(
@@ -680,6 +694,71 @@ export function createGateway() {
       return openAiResponse;
     }
 
+    const directFallbackResponse = await sendDirectTranscribeRequest({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      audioBlob: input.audioBlob,
+      filename: input.filename,
+      language: normalizedLanguage,
+      prompt: input.prompt,
+    });
+
+    if (shouldRetryTranscribeWithoutLanguage(directFallbackResponse.status, normalizedLanguage)) {
+      return sendDirectTranscribeRequest({
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+        timeoutMs: input.timeoutMs,
+        audioBlob: input.audioBlob,
+        filename: input.filename,
+        prompt: input.prompt,
+      });
+    }
+
+    return directFallbackResponse;
+  }
+
+  function normalizeSttLanguage(language: string | undefined): string | undefined {
+    if (!language) return undefined;
+    const normalized = language.trim();
+    if (!normalized) return undefined;
+
+    const lower = normalized.toLowerCase().replace(/_/g, "-");
+    const directMap: Record<string, string> = {
+      auto: "auto",
+      german: "de",
+      "de-de": "de",
+      de: "de",
+      english: "en",
+      "en-us": "en",
+      en: "en",
+      polish: "pl",
+      "pl-pl": "pl",
+      pl: "pl",
+    };
+    if (directMap[lower]) return directMap[lower];
+
+    if (/^[a-z]{2,3}(?:-[a-z0-9]{2,8})+$/i.test(lower)) {
+      return lower.split("-")[0];
+    }
+
+    return normalized;
+  }
+
+  function shouldRetryTranscribeWithoutLanguage(status: number, language: string | undefined): boolean {
+    if (!language || language === "auto") return false;
+    return status === 400 || status === 422 || status >= 500;
+  }
+
+  async function sendDirectTranscribeRequest(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    audioBlob: Blob;
+    filename: string;
+    language?: string;
+    prompt?: string;
+  }): Promise<Response> {
     const fallbackForm = new FormData();
     fallbackForm.append("audio", input.audioBlob, input.filename);
     if (input.language) fallbackForm.append("language", input.language);
@@ -1451,6 +1530,9 @@ export function createGateway() {
     const uploadedFile = formData.get("file");
     if (!(uploadedFile instanceof File)) {
       return c.json({ error: "file is required" }, 400);
+    }
+    if (uploadedFile.size <= 0) {
+      return c.json({ error: "Audio upload was empty. Record a little longer and try again." }, 400);
     }
     if (!multimodalServiceConfigured(multimodalConfig.stt.baseUrl)) {
       return disabledServiceResponse("STT is disabled: configure multimodal.stt.baseUrl to enable transcription.");
@@ -2851,6 +2933,103 @@ export function createGateway() {
         peakQueuedWaitMs: concurrency.reduce((max, s) => Math.max(max, s.oldestQueuedMs), 0),
       },
     });
+  });
+
+  // ── Swarm health dashboard — aggregated operator view ────────────────────
+  app.get("/api/swarm/health", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({
+      wardenAlerts: getWardenAlerts(),
+      capabilityGaps: listCapabilityGaps(),
+      promotionCandidates: listPromotionCandidates(),
+      dynamicToolStats: getDynamicToolStats(),
+    });
+  });
+
+  // ── Dynamic tool promotion queue ─────────────────────────────────────────
+  app.get("/api/tools/dynamic", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({ tools: getLoadedDynamicTools(), stats: getDynamicToolStats() });
+  });
+
+  app.get("/api/tools/dynamic/promotion", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({ candidates: listPromotionCandidates() });
+  });
+
+  app.post("/api/tools/dynamic/:name/promote", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const reviewedBy = typeof body["reviewedBy"] === "string" ? body["reviewedBy"] : "operator";
+
+    const ok = approvePromotion(name, reviewedBy);
+    if (!ok) return c.json({ error: "Tool not found or not in pending promotion state" }, 404);
+
+    logAudit("tool_promoted", { toolName: name, reviewedBy }, { severity: "info", channel: "self-improvement" });
+    return c.json({ success: true, toolName: name, reviewedBy });
+  });
+
+  app.post("/api/tools/dynamic/:name/reject-promotion", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const reviewedBy = typeof body["reviewedBy"] === "string" ? body["reviewedBy"] : "operator";
+
+    const ok = rejectPromotion(name, reviewedBy);
+    if (!ok) return c.json({ error: "Tool not found or not in pending promotion state" }, 404);
+
+    return c.json({ success: true, toolName: name, reviewedBy });
+  });
+
+  // ── Capability gaps ───────────────────────────────────────────────────────
+  app.get("/api/capability-gaps", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const status = c.req.query("status");
+    let gaps = listCapabilityGaps();
+    if (status) gaps = gaps.filter(g => g.status === status);
+    return c.json({ gaps });
+  });
+
+  // ── Long-running task checkpoints ─────────────────────────────────────────
+  app.get("/api/checkpoints", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const status = c.req.query("status") as string | undefined;
+    const agentName = c.req.query("agentName") as string | undefined;
+    return c.json({ checkpoints: listCheckpoints({ status: status as Parameters<typeof listCheckpoints>[0]["status"], agentName }) });
+  });
+
+  app.post("/api/checkpoints/:taskId/resume", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const taskId = c.req.param("taskId");
+    const cp = resumeCheckpoint(taskId);
+    if (!cp) return c.json({ error: "Checkpoint not found or not in paused state" }, 404);
+    return c.json({ checkpoint: cp });
+  });
+
+  app.post("/api/checkpoints/:taskId/complete", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const taskId = c.req.param("taskId");
+    completeCheckpoint(taskId);
+    return c.json({ success: true, taskId });
   });
 
   app.get("/api/channels", async (c) => {

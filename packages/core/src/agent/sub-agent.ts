@@ -25,6 +25,7 @@ import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurre
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { consumeAgentMessages } from "../swarm/memory.js";
 
 const log = childLogger("agent:sub-agent");
 
@@ -472,10 +473,32 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       signal,
     };
 
+    // ── A2A: drain any pending messages addressed to this agent ────────────────
+    // Agents can send messages to peers via send_agent_message. Those messages
+    // are queued in swarm/memory.ts and delivered here at the start of the next
+    // run — giving the agent a chance to act on them without the orchestrator
+    // mediating the content.
+    let a2aContext = "";
+    try {
+      const pending = await consumeAgentMessages(subSessionId, opts.agentName);
+      if (pending.length > 0) {
+        a2aContext = `\n\n## Pending messages from peer agents\n${pending
+          .map((m) => `From ${m.fromAgent} [${m.ts}]: ${m.content}`)
+          .join("\n---\n")}`;
+        logAudit("a2a_messages_delivered", {
+          agentName: opts.agentName,
+          count: pending.length,
+          fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
+        }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
+      }
+    } catch {
+      // Non-fatal — swarm bus or Redis may be unavailable
+    }
+
     // Build initial message
     const userContent = opts.context
-      ? `Context:\n${opts.context}\n\nTask: ${sanitizedTask}`
-      : sanitizedTask;
+      ? `Context:\n${opts.context}${a2aContext}\n\nTask: ${sanitizedTask}`
+      : `${sanitizedTask}${a2aContext}`;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 

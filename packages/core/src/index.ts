@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, watchConfig } from "./config/loader.js";
+import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
 import { initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
 import { flushAuditLog } from "./audit/logger.js";
@@ -25,6 +25,7 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 // Ephemeral store + dynamic tools
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
+import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
 import { loadPersistedGaps } from "./agent/self-improve.js";
 
@@ -104,9 +105,10 @@ export async function main() {
   loadDynamicTools();
   watchDynamicToolsDirectory();
 
-  // Recover persisted dev sessions and capability gaps
+  // Recover persisted dev sessions, capability gaps, and task checkpoints
   await loadPersistedSessions();
   await loadPersistedGaps();
+  loadCheckpointsFromDisk(getConfig().workspacePath);
 
   // Start gateway (WS + REST)
   const gateway = createGateway();

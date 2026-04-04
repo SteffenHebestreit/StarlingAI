@@ -128,6 +128,10 @@ let _alertsEmitted = 0;
 let _wardenInterval: ReturnType<typeof setInterval> | null = null;
 let _unsubscribeAudit: (() => void) | null = null;
 
+/** Ring buffer of the last 200 alerts — queryable by the dashboard. */
+const ALERT_RING_SIZE = 200;
+const _alertRing: Array<WardenAlert & { ts: string }> = [];
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
@@ -383,6 +387,7 @@ export function resetWardenForTests(): void {
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
   _configProposalsBySession.clear();
+  _alertRing.length = 0;
   _alertsEmitted = 0;
 }
 
@@ -713,6 +718,9 @@ function makeAlert(
 
 function emitAlert(alert: WardenAlert): void {
   _alertsEmitted++;
+  // Push to ring buffer for dashboard queries
+  _alertRing.push({ ...alert, ts: new Date().toISOString() });
+  if (_alertRing.length > ALERT_RING_SIZE) _alertRing.shift();
   logAudit(
     "warden_alert",
     {
@@ -725,4 +733,9 @@ function emitAlert(alert: WardenAlert): void {
     { severity: alert.severity, channel: "warden" },
   );
   log[alert.severity]({ alertType: alert.type, subject: alert.subject }, `Warden: ${alert.detail}`);
+}
+
+/** Return recent warden alerts (up to last 200) for the operator dashboard. */
+export function getWardenAlerts(): Array<WardenAlert & { ts: string }> {
+  return [..._alertRing];
 }

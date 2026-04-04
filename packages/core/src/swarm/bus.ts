@@ -39,7 +39,13 @@ export type SwarmEventType =
   | "tool_dev_session_stuck"      // a dev session was marked stuck or terminated
   | "tool_deployed"               // a self-developed tool was hot-deployed
   | "tool_undeployed"             // a self-developed tool was rolled back
-  | "capability_gap_detected";    // a new capability gap was recorded
+  | "tool_promotion_nominated"    // a selfdev__ tool reached promotion eligibility threshold
+  | "tool_promoted"               // a selfdev__ tool was approved and promoted to catalog
+  | "capability_gap_detected"     // a new capability gap was recorded
+  // Long-running task checkpoint events
+  | "task_checkpoint_created"     // a long-running task started and registered a checkpoint
+  | "task_checkpoint_paused"      // a task was paused mid-execution (timeout or explicit suspend)
+  | "task_checkpoint_resumed";    // a paused task was resumed
 
 export interface SwarmEvent {
   id: string;
