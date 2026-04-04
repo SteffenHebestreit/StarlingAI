@@ -365,6 +365,10 @@ export type SiteCredential = z.infer<typeof SiteCredentialSchema>;
 
 export const SubAgentContainerSchema = z.object({
   enabled: z.boolean().default(false),
+  /** Set to true to explicitly opt this agent OUT of containerized execution even when
+   *  agents.defaultContainerized is enabled globally. Use only for trusted, read-only
+   *  specialists where in-process execution is acceptable (e.g. memory_search-only agents). */
+  disabled: z.boolean().default(false),
   image: z.string().default("starlingai/agent-worker:dev"),
   memoryMb: z.number().int().min(128).max(4096).default(512),
   cpus: z.number().min(0.1).max(4).default(0.5),
@@ -703,6 +707,11 @@ export const ConfigSchema = z.object({
     }).default({}),
     mainAssistant: MainAssistantConfigSchema.default({}),
     ephemeralGeneration: EphemeralGenerationSchema.default({}),
+    /** When true, ALL sub-agents default to containerized execution (Docker isolation).
+     *  Individual agents can opt out by setting container.disabled: true in their config.
+     *  Defaults to false for backwards compatibility; set true in production for full
+     *  alignment with the "every agent runs in an isolated container" security principle. */
+    defaultContainerized: z.boolean().default(false),
     rateLimit: RateLimitSchema.default({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),

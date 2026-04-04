@@ -2347,6 +2347,15 @@ export function createGateway() {
         tags: proposal.tags,
       });
 
+      // Structured attribution audit trail — creation event (GAP-3)
+      logAudit("config_proposal_created", {
+        proposalId: proposal.id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+        mode: proposal.mode,
+        summary: proposal.summary,
+      }, { severity: "info", channel: "config-assistant" });
+
       return c.json({ proposal, flowMemoryId: flowEntry.id }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
@@ -2393,6 +2402,26 @@ export function createGateway() {
         status: "applied",
         appliedAt: new Date().toISOString(),
       }));
+
+      // Structured attribution audit trail for self-improvement traceability (GAP-3)
+      logAudit("self_improvement_applied", {
+        proposalId: id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+        mode: proposal.mode,
+        configChanges: proposal.configChanges.map((change) => ({ path: change.path, newValue: change.value })),
+        promptChanges: proposal.promptChanges.map((change) => ({
+          agentName: change.agentName === MAIN_ASSISTANT_PROMPT_TARGET ? "main_assistant" : change.agentName,
+          strategy: change.strategy,
+        })),
+        summary: proposal.summary,
+      }, { severity: "info", channel: "config-assistant" });
+
+      logAudit("config_proposal_applied", {
+        proposalId: id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+      }, { severity: "info", channel: "config-assistant" });
 
       appendFlowMemoryEntry(cfg.workspacePath, {
         scope: proposal.mode,

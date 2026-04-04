@@ -95,18 +95,18 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The system has completed **Stage 7** of the swarm vision: full multimodal capability, human-in-the-loop approval gates, and intervention diagnostics, on top of the complete distributed swarm infrastructure from Stages 1–6.
+The system has completed **Stage 7** of the swarm vision (with Stage 8 gap-closure work started in v0.3.2): full multimodal capability, human-in-the-loop approval gates, and intervention diagnostics, on top of the complete distributed swarm infrastructure from Stages 1–6.
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
-| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + container.enabled agents), outcome tracking, audit trail, hot-reload config |
+| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + opt-in/opt-out container model), outcome tracking, audit trail, hot-reload config |
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
 | **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
-| **Warden agent** | 3 | Implemented | Subscribes to live audit stream; detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach |
+| **Warden agent** | 3 | Implemented | Detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach, **config_proposal_flood** (v0.3.2) |
 | **Swarm morphing** | 3 | Implemented | Per-agent concurrency semaphores with FIFO queuing and backpressure events |
 | **Collective memory** | 3 | Implemented | Redis Hash+List shared facts, `write_shared_fact`, `read_shared_facts`, embedding-backed semantic lookup, `share_finding` tool |
 | **Adaptive routing** | 3 | Implemented | Circuit breaker (>60% failure rate), `allLowConfidence` flag, routing rationale output |
@@ -120,8 +120,11 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 | **Browser tools** | 7 | Implemented | `browser_navigate`, `browser_snapshot`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_select_option`, `browser_screenshot` (Playwright MCP wrappers) |
 | **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; one-click HTTP callbacks; WebSocket `approval.respond` RPC |
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
-| **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
+| **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (22 tools incl. navigation) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
+| **Container opt-out model** | 8 | Implemented (v0.3.2) | `agents.defaultContainerized: true` global flag + per-agent `container.disabled: true` escape hatch; 15 trusted read-only agents pre-opted-out (see GAP-1 in ROADMAP) |
+| **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
+| **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
 
 ---
 
