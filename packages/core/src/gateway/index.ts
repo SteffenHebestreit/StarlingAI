@@ -3008,9 +3008,12 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
-    const status = c.req.query("status") as string | undefined;
-    const agentName = c.req.query("agentName") as string | undefined;
-    return c.json({ checkpoints: listCheckpoints({ status: status as Parameters<typeof listCheckpoints>[0]["status"], agentName }) });
+    const statusParam = c.req.query("status");
+    const agentName = c.req.query("agentName");
+    const validStatuses = ["active", "paused", "resumed", "completed", "failed"] as const;
+    type CS = typeof validStatuses[number];
+    const status = validStatuses.includes(statusParam as CS) ? (statusParam as CS) : undefined;
+    return c.json({ checkpoints: listCheckpoints({ status, agentName }) });
   });
 
   app.post("/api/checkpoints/:taskId/resume", async (c) => {

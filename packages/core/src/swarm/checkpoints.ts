@@ -294,11 +294,11 @@ function persistCheckpoint(workspacePath: string, cp: TaskCheckpoint): void {
   }
 }
 
-function loadCheckpointFromDisk(workspacePath: string, taskId: string): TaskCheckpoint | null {
+function loadCheckpointFromDisk(workspacePath: string, taskId: string): TaskCheckpoint | undefined {
   try {
     const raw = readFileSync(checkpointPath(workspacePath, taskId), "utf-8");
     return JSON.parse(raw) as TaskCheckpoint;
   } catch {
-    return null;
+    return undefined;
   }
 }
