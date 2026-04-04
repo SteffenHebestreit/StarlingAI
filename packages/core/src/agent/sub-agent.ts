@@ -271,8 +271,10 @@ export interface SubAgentRunOptions {
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
-  /** Override the agent's configured maxIterations for this invocation. */
+  /** Override the agent's configured maxIterations for this invocation. 0 disables the cap. */
   maxIterationsOverride?: number;
+  /** Override the agent's timeout for this invocation in ms. 0 disables the timeout. */
+  turnTimeoutOverrideMs?: number;
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
   inlineConfig?: import("../config/schema.js").SubAgentConfig;
 }
@@ -330,10 +332,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
   }
 
   const defaultTimeoutMs = agentCfg.turnTimeoutMs ?? config.agents.performance?.subAgentTurnSloMs ?? 60_000;
-  const adaptiveTimeout = agentCfg.turnTimeoutMs === undefined
+  const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentCfg.turnTimeoutMs === undefined
     ? computeAdaptiveSubAgentTimeoutMs(opts.agentName, opts.workspacePath, defaultTimeoutMs)
     : null;
-  const turnTimeoutMs = agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs;
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs;
+  const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const timeoutAbort = turnTimeoutMs ? new AbortController() : undefined;
   const timeoutHandle = timeoutAbort
     ? setTimeout(() => timeoutAbort.abort(), turnTimeoutMs)
@@ -468,7 +471,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
-    const maxIterations = opts.maxIterationsOverride ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const maxIterations = opts.maxIterationsOverride === 0
+      ? Number.MAX_SAFE_INTEGER
+      : (opts.maxIterationsOverride ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
     let iterations = 0;
     let toolCount = 0;
     const toolNames: string[] = [];

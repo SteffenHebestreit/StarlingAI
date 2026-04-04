@@ -247,6 +247,22 @@
         </span>
       </div>
 
+      <div v-if="runningSceneJobs.length > 0" class="chat-job-strip">
+        <div
+          v-for="job in runningSceneJobs"
+          :key="job.id"
+          class="chat-job-strip__item"
+        >
+          <div class="chat-job-strip__title-row">
+            <span class="chat-job-strip__title">{{ formatSceneName(job.sceneName) }}</span>
+            <span class="chat-job-strip__percent">{{ Math.round(job.progress.percent ?? 0) }}%</span>
+          </div>
+          <div class="chat-job-strip__meta">
+            {{ job.progress.currentStep || job.progress.currentTool || job.progress.message || (job.definitionType === 'job' ? 'Running in background' : 'Scene running in background') }}
+          </div>
+        </div>
+      </div>
+
       <div class="hidden">
         <input
           ref="fileInputEl"
@@ -264,10 +280,73 @@
         />
       </div>
 
-      <div v-if="audioPreviewUrl" class="mb-3 rounded-2xl border border-white/10 bg-black/20 px-3 py-3">
-        <audio ref="audioPlayerEl" :src="audioPreviewUrl" controls class="w-full" />
-        <p v-if="lastSpokenSummary" class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">
-          <span class="text-gray-600 not-italic">Spoken summary:</span> {{ lastSpokenSummary }}
+      <div v-if="audioPreviewUrl" class="reply-audio-panel">
+        <audio
+          ref="audioPlayerEl"
+          :src="audioPreviewUrl"
+          class="hidden"
+          preload="metadata"
+          @loadedmetadata="syncAudioPreviewState"
+          @timeupdate="syncAudioPreviewState"
+          @play="syncAudioPreviewState"
+          @pause="syncAudioPreviewState"
+          @ended="handleAudioPreviewEnded"
+        />
+
+        <div class="reply-audio-panel__header">
+          <div class="reply-audio-panel__headline">
+            <div class="reply-audio-panel__eyebrow">Reply Audio</div>
+            <div class="reply-audio-panel__meta">{{ audioPlaying ? 'Playing response' : 'Ready to play' }}</div>
+          </div>
+        </div>
+
+        <div class="reply-audio-panel__transport">
+          <button
+            type="button"
+            class="reply-audio-panel__play"
+            :disabled="audioDuration <= 0"
+            @click="toggleAudioPreviewPlayback"
+          >
+            {{ audioPlaying ? 'Pause' : 'Play' }}
+          </button>
+
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            :value="audioProgressPercent"
+            class="reply-audio-panel__range"
+            aria-label="Reply audio timeline"
+            @input="seekAudioPreview"
+          />
+
+          <div class="reply-audio-panel__time">{{ formatMediaTime(audioCurrentTime) }} / {{ formatMediaTime(audioDuration) }}</div>
+
+          <div class="reply-audio-panel__actions">
+            <button
+              v-if="lastSpokenSummary"
+              type="button"
+              class="reply-audio-panel__summary-toggle"
+              @click="audioSummaryExpanded = !audioSummaryExpanded"
+            >
+              {{ audioSummaryExpanded ? 'Hide text' : 'Show text' }}
+            </button>
+
+            <button
+              type="button"
+              class="reply-audio-panel__restart"
+              :disabled="audioDuration <= 0"
+              @click="restartAudioPreview"
+            >
+              Restart
+            </button>
+          </div>
+        </div>
+
+        <p v-if="lastSpokenSummary && audioSummaryExpanded" class="reply-audio-panel__summary">
+          <span class="reply-audio-panel__summary-label">Spoken summary</span>
+          <span>{{ lastSpokenSummary }}</span>
         </p>
       </div>
 
@@ -633,6 +712,10 @@ const fileInputEl = ref<HTMLInputElement | null>(null);
 const audioInputEl = ref<HTMLInputElement | null>(null);
 const audioPlayerEl = ref<HTMLAudioElement | null>(null);
 const audioPreviewUrl = ref<string | null>(null);
+const audioCurrentTime = ref(0);
+const audioDuration = ref(0);
+const audioPlaying = ref(false);
+const audioSummaryExpanded = ref(false);
 const multimodalBusy = ref(false);
 const recordingState = ref<"idle" | "recording" | "processing">("idle");
 const wakeListening = ref(false);
@@ -644,12 +727,17 @@ const wakeSilenceTimeoutMs = useStorage<number>("gc_wake_silence_ms", 4000);
 const speakReplyEnabled = useStorage<boolean>("sai_speak_reply", false);
 const lastSpokenSummary = ref<string | null>(null);
 const exportingTranscript = ref(false);
-/** Per-message Qwen3.5 thinking toggle: undefined = auto, true = on, false = off */
+/** Per-message thinking toggle for models that support enable_thinking: undefined = auto, true = on, false = off */
 const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
 const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
 const previewModalUrl = ref<string | null>(null);
 const expandedMessageHistory = ref(false);
+
+const audioProgressPercent = computed(() => {
+  if (audioDuration.value <= 0) return 0;
+  return Math.min(100, Math.max(0, (audioCurrentTime.value / audioDuration.value) * 100));
+});
 
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
@@ -754,8 +842,8 @@ function flagChipClass(color: "purple" | "sky" | "amber"): string {
 const analysing = ref(false);
 
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
-const composerMinHeight = computed(() => compactComposer.value ? 72 : 104);
-const composerMaxHeight = computed(() => compactComposer.value ? 168 : 280);
+const composerMinHeight = computed(() => compactComposer.value ? 64 : 92);
+const composerMaxHeight = computed(() => compactComposer.value ? 160 : 248);
 const composerTextareaStyle = computed(() => ({
   minHeight: `${composerMinHeight.value}px`,
   maxHeight: `${composerMaxHeight.value}px`,
@@ -827,6 +915,7 @@ const showOptionsDropdown = computed(() => (
   || configuredJobs.value.length > 0
 ));
 const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+const runningSceneJobs = computed(() => scenesStore.runningJobs.slice(0, 3));
 const VISIBLE_TAIL = 6;
 const visibleMessages = computed(() => {
   if (expandedMessageHistory.value || displayMessages.value.length <= VISIBLE_TAIL) {
@@ -918,9 +1007,64 @@ async function convertLocalTextFileToMarkdown(file: File): Promise<string> {
 }
 
 function revokeAudioPreview() {
+  audioCurrentTime.value = 0;
+  audioDuration.value = 0;
+  audioPlaying.value = false;
+  audioSummaryExpanded.value = false;
   if (!audioPreviewUrl.value) return;
   URL.revokeObjectURL(audioPreviewUrl.value);
   audioPreviewUrl.value = null;
+}
+
+function syncAudioPreviewState() {
+  const player = audioPlayerEl.value;
+  if (!player) return;
+  audioCurrentTime.value = Number.isFinite(player.currentTime) ? player.currentTime : 0;
+  audioDuration.value = Number.isFinite(player.duration) ? player.duration : 0;
+  audioPlaying.value = !player.paused && !player.ended;
+}
+
+function handleAudioPreviewEnded() {
+  syncAudioPreviewState();
+  audioPlaying.value = false;
+  audioCurrentTime.value = audioDuration.value;
+}
+
+async function toggleAudioPreviewPlayback() {
+  const player = audioPlayerEl.value;
+  if (!player) return;
+  if (player.paused || player.ended) {
+    if (player.ended) player.currentTime = 0;
+    await player.play().catch(() => undefined);
+  } else {
+    player.pause();
+  }
+  syncAudioPreviewState();
+}
+
+async function restartAudioPreview() {
+  const player = audioPlayerEl.value;
+  if (!player) return;
+  player.currentTime = 0;
+  await player.play().catch(() => undefined);
+  syncAudioPreviewState();
+}
+
+function seekAudioPreview(event: Event) {
+  const player = audioPlayerEl.value;
+  if (!player || audioDuration.value <= 0) return;
+  const value = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(value)) return;
+  player.currentTime = (value / 100) * audioDuration.value;
+  syncAudioPreviewState();
+}
+
+function formatMediaTime(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0:00";
+  const totalSeconds = Math.max(0, Math.floor(value));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function createSpeechRecognition(): BrowserSpeechRecognition | null {
@@ -1203,6 +1347,7 @@ async function speakLatestAssistant(forceFullText = false) {
         const maxSentences = multimodalStore.config.tts.speakReplySummaryMaxSentences ?? 3;
         spoken = await gateway.summarizeForSpeech({ text, maxSentences });
         lastSpokenSummary.value = spoken;
+        audioSummaryExpanded.value = false;
       } catch {
         // Summarisation failed — fall back to speaking the full text
         spoken = text;
@@ -1227,6 +1372,7 @@ async function speakLatestAssistant(forceFullText = false) {
         window.speechSynthesis.speak(utterance);
       });
       lastSpokenSummary.value = spoken;
+      audioSummaryExpanded.value = false;
       wakeStatus.value = "Reply spoken in browser";
     } else {
       throw new Error("Speech playback is unavailable in this browser");
@@ -1708,6 +1854,156 @@ onUnmounted(() => {
   box-shadow: 0 0 20px rgba(var(--logo-cyan), 0.12);
 }
 
+.reply-audio-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(125, 211, 252, 0.12);
+  background: linear-gradient(180deg, rgba(8, 18, 32, 0.86), rgba(7, 14, 26, 0.68));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.reply-audio-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.45rem;
+}
+
+.reply-audio-panel__headline {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.reply-audio-panel__eyebrow {
+  font-size: 0.64rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(125 211 252);
+}
+
+.reply-audio-panel__meta {
+  margin-top: 0;
+  font-size: 0.72rem;
+  color: rgb(148 163 184);
+}
+
+.reply-audio-panel__transport {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.reply-audio-panel__play,
+.reply-audio-panel__restart,
+.reply-audio-panel__summary-toggle {
+  border-radius: 9999px;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  background: rgba(11, 26, 44, 0.7);
+  color: rgb(224 242 254);
+  font-size: 0.7rem;
+  padding: 0.38rem 0.68rem;
+  line-height: 1;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.reply-audio-panel__play:hover:not(:disabled),
+.reply-audio-panel__restart:hover:not(:disabled),
+.reply-audio-panel__summary-toggle:hover:not(:disabled) {
+  border-color: rgba(125, 211, 252, 0.38);
+  background: rgba(16, 38, 63, 0.8);
+  color: white;
+}
+
+.reply-audio-panel__play:disabled,
+.reply-audio-panel__restart:disabled,
+.reply-audio-panel__summary-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.reply-audio-panel__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.reply-audio-panel__range {
+  width: 100%;
+  appearance: none;
+  min-width: 0;
+  height: 0.22rem;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(34, 211, 238, 0.55));
+  outline: none;
+}
+
+.reply-audio-panel__range::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 9999px;
+  border: 2px solid rgba(7, 14, 26, 0.95);
+  background: rgb(224 242 254);
+  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.18);
+}
+
+.reply-audio-panel__range::-moz-range-thumb {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 9999px;
+  border: 2px solid rgba(7, 14, 26, 0.95);
+  background: rgb(224 242 254);
+  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.18);
+}
+
+.reply-audio-panel__time {
+  min-width: 4.2rem;
+  text-align: right;
+  font-size: 0.7rem;
+  color: rgb(148 163 184);
+  font-variant-numeric: tabular-nums;
+}
+
+.reply-audio-panel__summary {
+  display: grid;
+  gap: 0.12rem;
+  margin: 0;
+  padding-top: 0.2rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: rgb(148 163 184);
+}
+
+.reply-audio-panel__summary-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);
+}
+
+@media (max-width: 640px) {
+  .reply-audio-panel__transport {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .reply-audio-panel__time {
+    grid-column: 1 / 2;
+    text-align: left;
+  }
+
+  .reply-audio-panel__actions {
+    grid-column: 2 / 3;
+    justify-self: end;
+  }
+}
+
 .chat-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1842,10 +2138,10 @@ onUnmounted(() => {
   border-radius: 1.5rem;
   border: 1px solid rgba(168, 85, 247, 0.2);
   background: rgba(31, 41, 55, 0.58);
-  padding: 1rem 1.15rem;
+  padding: 0.78rem 1rem;
   color: rgb(243 244 246);
   font-size: 0.92rem;
-  line-height: 1.6;
+  line-height: 1.42;
   transition: border-color 0.2s ease, background 0.2s ease, padding 0.2s ease, min-height 0.2s ease;
 }
 
@@ -1864,8 +2160,47 @@ onUnmounted(() => {
 }
 
 .chat-composer__textarea--compact {
-  padding-top: 0.8rem;
-  padding-bottom: 0.8rem;
+  padding-top: 0.68rem;
+  padding-bottom: 0.68rem;
+}
+
+.chat-job-strip {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 0.8rem;
+}
+
+.chat-job-strip__item {
+  border-radius: 1rem;
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  background: rgba(8, 23, 38, 0.58);
+  padding: 0.7rem 0.85rem;
+}
+
+.chat-job-strip__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.chat-job-strip__title {
+  color: #dff7ff;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.chat-job-strip__percent {
+  color: #7dd3fc;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-job-strip__meta {
+  margin-top: 0.22rem;
+  color: #9fc6d9;
+  font-size: 0.72rem;
+  line-height: 1.35;
 }
 
 .chat-composer__controls {

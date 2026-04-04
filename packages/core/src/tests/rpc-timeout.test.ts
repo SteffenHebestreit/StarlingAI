@@ -82,6 +82,88 @@ describe("rpc timeout cleanup", () => {
     }
   });
 
+  it("preserves zero-valued inline overrides and disables the websocket timeout for --timeout 0", async () => {
+    vi.useFakeTimers();
+
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-zero-overrides-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        jwtSecret: "t".repeat(32),
+        turnTimeoutMs: 30_000,
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const runTurnMock = vi.fn(() => new Promise(() => {}));
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    try {
+      const [{ RpcConnection }, session] = await Promise.all([
+        import("../gateway/rpc.js"),
+        import("../agent/session.js"),
+      ]);
+
+      const active = session.createSession({ channel: "webchat" });
+      const connection = new RpcConnection(ws as never);
+
+      await connection.handleMessage(JSON.stringify({
+        id: "req-zero-overrides",
+        method: "chat.send",
+        params: {
+          sessionId: active.id,
+          requestId: "turn-zero-overrides",
+          message: "hello --iter 0 --timeout 0",
+        },
+      }));
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock.mock.calls[0]?.[0]).toMatchObject({
+        userMessage: "hello",
+        maxIterationsOverride: 0,
+        turnTimeoutOverrideMs: 0,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(session.getSession(active.id)).toBeDefined();
+      expect(session.getSessionRecord(active.id)?.isArchived()).toBe(false);
+
+      const acceptedEvent = sent.find((event) => {
+        if (event["type"] !== "status") return false;
+        const data = event["data"] as Record<string, unknown> | undefined;
+        return data?.["requestId"] === "turn-zero-overrides" && data?.["status"] === "accepted";
+      });
+
+      expect((acceptedEvent?.["data"] as Record<string, unknown> | undefined)?.["activeFlags"]).toEqual({
+        maxIterations: 0,
+        timeout: 0,
+      });
+
+      const timeoutEvent = sent.find((event) => {
+        if (event["type"] !== "status") return false;
+        const data = event["data"] as Record<string, unknown> | undefined;
+        return data?.["requestId"] === "turn-zero-overrides" && data?.["status"] === "error";
+      });
+
+      expect(timeoutEvent).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns paged transcript slices over RPC", async () => {
     const sent: Array<Record<string, unknown>> = [];
     const ws = {
@@ -141,6 +223,78 @@ describe("rpc timeout cleanup", () => {
     };
     expect(olderPayload.transcript.map((message) => message.content)).toEqual(["one"]);
     expect(olderPayload.nextBeforeMessageId).toBeUndefined();
+  });
+
+  it("keeps an active turn running when the websocket disconnects", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    let resolveTurn: ((value: {
+      response: string;
+      toolCallsExecuted: number;
+      guardrailEvents: unknown[];
+      usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+      performance: { turnDurationMs: number; llmCalls: number; llmTimeMs: number; toolIterations: number; finishReason: string };
+      blocked?: boolean;
+    }) => void) | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ signal }: { signal: AbortSignal }) => {
+        capturedSignal = signal;
+        return new Promise((resolve) => {
+          resolveTurn = resolve;
+        });
+      }),
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-disconnect",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-disconnect",
+        message: "hello",
+      },
+    }));
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    connection.close();
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    resolveTurn?.({
+      response: "done",
+      toolCallsExecuted: 0,
+      guardrailEvents: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      performance: { turnDurationMs: 1, llmCalls: 1, llmTimeMs: 1, toolIterations: 0, finishReason: "stop" },
+      blocked: false,
+    });
+
+    await Promise.resolve();
+
+    const errorEvent = sent.find((event) => {
+      if (event["type"] !== "status") return false;
+      const data = event["data"] as Record<string, unknown> | undefined;
+      return data?.["requestId"] === "turn-disconnect" && data?.["status"] === "error";
+    });
+
+    expect(errorEvent).toBeUndefined();
   });
 
   it("blocks flag-only chat submissions before calling the provider", async () => {

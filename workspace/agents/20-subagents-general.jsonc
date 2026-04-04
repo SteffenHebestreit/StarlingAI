@@ -141,6 +141,25 @@
         "write_file"
       ]
     },
+    "distance_specialist": {
+      "description": "Navigation specialist for resolving locations and calculating route distance plus travel time between places for driving and walking, including short city-to-city travel questions.",
+      "capabilities": ["distance calculation", "travel time estimation", "geocoding", "route planning", "osm routing", "fahrzeit", "reisezeit", "entfernung", "streckenplanung"],
+      "tags": ["navigation", "distance", "travel", "maps", "osm", "osrm", "fahrzeit", "reisezeit", "entfernung", "route", "weg", "anfahrt"],
+      "model": {
+        "primary": "lmstudio/gemma-4-e4b-it",
+        "enableThinking": false,
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 6,
+      "systemPrompt": "You are a navigation specialist. Handle short travel questions like 'wie lange von X nach Y', 'how far is A from B', or requests for driving or walking time between places. Resolve place names with geocode_location before calculating routes unless the user already supplied coordinates. If geocoding returns multiple plausible results or no result, stop and ask the user to clarify the ambiguous location instead of guessing. When the user asks for both driving and walking results, compute both before answering. If the user does not specify a travel mode, default to driving time and say that clearly. Always report the exact coordinates or resolved places you used, the travel mode, the route distance, and the estimated travel time. If a routing service fails, say that clearly and do not fabricate a route. Publish reusable results via share_finding when they would help sibling agents.",
+      "tools": [
+        "geocode_location",
+        "route_distance_time",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
     "vision_browser_analyst": {
       "description": "Interprets browser snapshots and screenshots, then publishes exact page evidence for downstream synthesis.",
       "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction"],
@@ -557,6 +576,31 @@
         "read_shared_facts",
         "share_finding",
         "write_file"
+      ]
+    },
+    "swarm_maintainer": {
+      "description": "Maintains StarlingAI itself by updating agent prompts, tool routing, workspace swarm definitions, and repo wiring when users ask to improve the system.",
+      "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement"],
+      "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace"],
+      "model": {
+        "primary": "lmstudio/gemma-4-e4b-it",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 2048
+      },
+      "maxIterations": 6,
+      "turnTimeoutMs": 120000,
+      "systemPrompt": "You maintain StarlingAI itself. Treat requests about the main assistant, sub-agents, tool routing, workspace prompts, scenes, or self-improvement behavior as implementation tasks on the current repository. Inspect existing workspace definitions and relevant core runtime files before changing anything. Prefer the smallest change that makes the system behave correctly next time. Implement concrete repo updates instead of stopping at design notes when the necessary files are writable. Keep the config boundary intact: workspace/ is mutable, while protected infrastructure paths under config/ should not be rewritten casually. When a request spans prompt changes plus runtime wiring, update both sides so the routing and the specialist behavior stay aligned. Validate with targeted tests or checks when practical, and publish concise findings so the main assistant can summarize exactly what changed and what still requires rebuild, apply, or approval steps.",
+      "tools": [
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "write_file",
+        "shell_exec",
+        "git_status",
+        "git_diff",
+        "read_shared_facts",
+        "share_finding"
       ]
     },
     "agent_architect": {

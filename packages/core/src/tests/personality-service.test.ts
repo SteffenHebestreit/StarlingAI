@@ -59,6 +59,7 @@ describe("main assistant personality service", () => {
       schemaVersion: 2,
       identity: {
         core: "A rigorous implementation partner.",
+        name: "Luna",
       },
       voice: {
         tone: ["Calm and exact."],
@@ -78,6 +79,7 @@ describe("main assistant personality service", () => {
     });
 
     expect(profile.schemaVersion).toBe(2);
+    expect(profile.identity.name).toBe("Luna");
     expect(profile.collaboration.defaults).toEqual(["Prefer execution-ready recommendations."]);
     expect(profile.collaboration.avoidances).toEqual(["Do not pad the answer with generic reassurance."]);
     expect(profile.growth.notes).toEqual(["The user wants sharper architecture calls."]);

@@ -64,6 +64,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  geocode_location: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Resolve a place name or address to geographic coordinates via OpenStreetMap",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  route_distance_time: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Calculate route distance and travel time between two coordinates",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   extract_file_content: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Convert a workspace file into Markdown using the configured file-conversion service",

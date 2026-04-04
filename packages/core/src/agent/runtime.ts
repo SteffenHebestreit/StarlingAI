@@ -19,12 +19,14 @@ import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { loadMainAssistantPersonality } from "../personality/service.js";
 
 const log = childLogger("agent:runtime");
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
+  search_agents: 2,
   create_ephemeral_agent: 1,
   computer_session_start: 1,
   computer_focus_window: 2,
@@ -95,6 +97,41 @@ const PENTEST_METHODOLOGY_PATTERNS = [
   /\b(check|inspect|review|read|analyze|ask)\b[\s\S]{0,80}\b(pentest[_ -]?agent|pentest[_ -]?coordinator|prompt)\b/,
   /\b(do not want to do the pentest|don't want to do the pentest|not asking you to do the pentest|wanna know what schema it follows)\b/,
 ];
+const SWARM_MAINTENANCE_HINT_TERMS = [
+  "agent set", "agent-set", "agents-set", "main agent", "main-agent", "sub agent", "sub-agent", "subagent",
+  "tool set", "tool-set", "toolset", "workspace/agents", "config assistant", "self tune", "self-tune",
+  "system prompt", "prompt optimizer", "routing prompt", "swarm", "starlingai itself",
+];
+const SWARM_MAINTENANCE_PATTERNS = [
+  /\b(implement|add|update|improve|change|modify|wire|integrate|refine|fix)\b[\s\S]{0,100}\b(agent|agents|sub-?agents?|toolset|tool set|tools|prompt|system prompt|routing|main agent|main-assistant|swarm)\b/,
+  /\b(toolset|tool set|agent set|agents-set|main agent|main-agent|workspace\/agents|config assistant)\b[\s\S]{0,100}\b(implement|update|improve|change|modify|fix|wire|integrate)\b/,
+  /\b(why|check why|investigate why)\b[\s\S]{0,120}\b(does not want to implement|won't implement|refuses to implement|cannot implement|can not implement)\b/,
+  /\b(not asking you to use the system|asking you to improve the system|improve starlingai|update starlingai|maintain the swarm)\b/,
+];
+const NAVIGATION_HINT_TERMS = [
+  "distance", "travel time", "driving time", "walking time", "route", "routing", "directions",
+  "fahrzeit", "reisezeit", "wegzeit", "strecke", "entfernung", "route", "anfahrt", "fu\u00dfweg",
+];
+const NAVIGATION_PATTERNS = [
+  /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
+  /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
+  /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
+];
+const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
+  "ahoi",
+  "aloha",
+  "bonjour",
+  "ciao",
+  "hello",
+  "hey",
+  "hi",
+  "hallo",
+  "moin",
+  "ok",
+  "okay",
+  "servus",
+  "yo",
+]);
 
 export interface RunTurnOptions {
   session: AgentSession;
@@ -115,11 +152,11 @@ export interface RunTurnOptions {
   humanInLoopSteps?: string[];
   /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
   autoApprove?: boolean;
-  /** Override sub-agent maxIterations for delegated tasks this turn. */
+  /** Override sub-agent maxIterations for delegated tasks this turn. 0 disables the cap. */
   maxIterationsOverride?: number;
   /** When set, this turn is a tool-dev session — iteration limits are lifted. */
   _toolDevSessionId?: string;
-  /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). */
+  /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
   enableThinking?: boolean;
@@ -161,6 +198,8 @@ export interface DynamicTurnGuidance {
   computerAccessSensitive?: boolean;
   pentestSensitive?: boolean;
   pentestMethodologySensitive?: boolean;
+  swarmMaintenanceSensitive?: boolean;
+  navigationSensitive?: boolean;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -433,8 +472,12 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const pentestSensitive = PENTEST_HINT_TERMS.some((term) => normalized.includes(term));
   const pentestMethodologySensitive = pentestSensitive
     && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
+  const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
+    || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
+  const navigationSensitive = NAVIGATION_HINT_TERMS.some((term) => normalized.includes(term))
+    || NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
 
-  if (!freshnessSensitive && !sourceSensitive && !mailSensitive && !productivitySensitive && !computerAccessSensitive && !pentestMethodologySensitive) return null;
+  if (!freshnessSensitive && !sourceSensitive && !mailSensitive && !productivitySensitive && !computerAccessSensitive && !pentestMethodologySensitive && !swarmMaintenanceSensitive && !navigationSensitive) return null;
 
   const reasons: string[] = [];
   if (freshnessSensitive) reasons.push("freshness-sensitive");
@@ -443,6 +486,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (productivitySensitive) reasons.push("productivity-task");
   if (computerAccessSensitive && !pentestSensitive) reasons.push("owned-computer-access");
   if (pentestMethodologySensitive) reasons.push("pentest-methodology");
+  if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
+  if (navigationSensitive) reasons.push("navigation-routing");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
@@ -486,6 +531,21 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     );
   }
 
+  if (navigationSensitive) {
+    promptParts.push(
+      "The user is asking for route distance or travel time between places.",
+      delegateMode
+        ? "You MUST use the delegate_to_agent tool with agentName='distance_specialist' immediately when that agent exists. Pass the full origin/destination request as the task."
+        : "Prefer the dedicated navigation tools or the distance_specialist for route questions instead of answering from memory.",
+      delegateMode
+        ? "Do NOT stop at a generic estimate or a plan to look it up. Delegate the task and then synthesize the concrete result."
+        : "Resolve ambiguous places before answering and include the exact coordinates used.",
+      "If the locations are ambiguous, ask one concise clarification question instead of guessing.",
+      "For route answers, report the travel mode, route distance, estimated travel time, and the coordinates or resolved places used.",
+      "If the user did not specify a mode, prefer driving time by default and say so clearly.",
+    );
+  }
+
   if (pentestMethodologySensitive) {
     promptParts.push(
       "The user is asking about the pentest plan, methodology, configured workflow, or pentest-agent behavior. This is NOT a request to start a live pentest engagement.",
@@ -495,6 +555,26 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
         : "Inspect the local pentest definitions and docs first. Prefer reading workspace/agents/30-subagents-pentest.jsonc and starlingai.example.json before answering.",
       "Summarize the actual configured phases, approval gates, and specialist handoffs. If a previous answer incorrectly asked for authorization for a methodology question, say that plainly and then give the plan.",
       "Do not call pentest_set_scope, nmap_scan, nikto_scan, sqlmap_scan, metasploit_exec, pentest_exec, or other active pentest tools for this kind of request.",
+    );
+  }
+
+  if (swarmMaintenanceSensitive) {
+    promptParts.push(
+      "The user is asking you to improve StarlingAI itself: prompts, agents, tool routing, workspace behavior, or swarm configuration.",
+      "Treat this as swarm maintenance inside the current repository, not as an external deployment-only request.",
+      delegateMode
+        ? "You MUST use the delegate_to_agent tool with agentName='swarm_maintainer' immediately when that agent exists. Pass the full user request as the task."
+        : "Inspect the local workspace definitions first and handle the change directly when your tool set allows it.",
+      delegateMode
+        ? "Do NOT call search_agents or list_agents first for this class of request when swarm_maintainer exists. The specialist is already known."
+        : "Do not waste time on agent discovery for this class of request.",
+      delegateMode
+        ? "Prefer swarm_maintainer for the full request; use prompt_optimizer for narrowly prompt-only work and integration_builder or qa_guard only when a more specific implementation specialist is clearly better."
+        : "Inspect the local workspace definitions first. Prefer reading workspace/agents/*, workspace/scenes/*, and starlingai.example.json before answering.",
+      "Do NOT claim that you cannot modify the toolset or agent set when the requested change is achievable through repository edits under workspace/ or other writable project files.",
+      "Protected infrastructure paths under config/ still require proposal-only handling or a clearly scoped manual step; do not rewrite that boundary.",
+      "If the request is to change prompts or routing behavior, make the smallest concrete repo change instead of stopping at a conceptual design.",
+      "After implementing or proposing the change, summarize exactly what changed and what still needs build, apply, or approval steps.",
     );
   }
 
@@ -531,25 +611,73 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     computerAccessSensitive,
     pentestSensitive,
     pentestMethodologySensitive,
+    swarmMaintenanceSensitive,
+    navigationSensitive,
   };
+}
+
+export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
+  const profile = loadMainAssistantPersonality();
+  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
+  const languageInstruction = compactMessage.length > 0
+    ? buildLanguageInstructionForTurn(compactMessage)
+    : "Reply in German.";
+  const behaviorInstruction = shouldDefaultToGermanForMessage(compactMessage)
+    ? "For short or greeting-only openings, reply with one short, polite sentence and move directly to helping. Do not use small talk. Do not introduce yourself or mention your name unless the user explicitly asks."
+    : "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
+  const nameInstruction = profile.identity.name
+    ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself "StarlingAI" in conversation unless the user is explicitly asking about the product or platform name.`
+    : "Do not use the platform name \"StarlingAI\" as your personal name in conversation. If the user did not ask for your name, reply without naming yourself.";
+  return `Language and identity for this turn: ${languageInstruction} ${behaviorInstruction} ${nameInstruction}`;
+}
+
+export function shouldDefaultToGermanForMessage(userMessage: string): boolean {
+  const compactMessage = userMessage.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!compactMessage) return true;
+
+  const letterCount = Array.from(compactMessage).filter((char) => /\p{L}/u.test(char)).length;
+  if (letterCount > 0 && letterCount <= 2) return true;
+
+  const tokens = compactMessage.match(/\p{L}+/gu) ?? [];
+  if (tokens.length === 0) return true;
+
+  if (tokens.length <= 2 && tokens.every((token) => AMBIGUOUS_SHORT_LANGUAGE_TOKENS.has(token))) {
+    return true;
+  }
+
+  return false;
+}
+
+export function buildLanguageInstructionForTurn(userMessage: string): string {
+  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
+  if (!compactMessage) return "Reply in German.";
+  if (shouldDefaultToGermanForMessage(compactMessage)) {
+    return `The user's latest message is ${JSON.stringify(compactMessage)}. Treat this message as language-ambiguous because it is too short or only a generic greeting. Reply in German even if the wording could also look like a short English greeting.`;
+  }
+  return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message. If the message becomes mixed or ambiguous after all, reply in German.`;
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then config, then default 15 min.
-  const turnTimeoutMs = opts.turnTimeoutOverrideMs ?? config.gateway?.turnTimeoutMs ?? 900_000;
-  const turnAbort = new AbortController();
-  const timeoutHandle = setTimeout(() => turnAbort.abort(), turnTimeoutMs);
+  // An explicit override of 0 disables the timeout entirely.
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? config.gateway?.turnTimeoutMs ?? 900_000;
+  const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
+  const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
+  const inertAbort = new AbortController();
+  const timeoutHandle = turnAbort
+    ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
+    : undefined;
 
   // Merge caller signal with per-turn timeout: either source can cancel the turn.
   const signal: AbortSignal = opts.signal
-    ? AbortSignal.any([opts.signal, turnAbort.signal])
-    : turnAbort.signal;
+    ? (turnAbort ? AbortSignal.any([opts.signal, turnAbort.signal]) : opts.signal)
+    : (turnAbort?.signal ?? inertAbort.signal);
 
   try {
-    return await _runTurn(opts, signal, turnAbort.signal);
+    return await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
   } finally {
-    clearTimeout(timeoutHandle);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -612,6 +740,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // ── Build message history ─────────────────────────────────────────────────
   session.addMessage({ role: "user", content: userMessage });
+  session.pruneTransientTurnSystemMessages();
   session.incrementTurn();
 
   logAudit("message_received", { length: userMessage.length }, {
@@ -648,6 +777,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
     maxIterationsOverride: opts.maxIterationsOverride,
+    turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
     signal,
     swarmState: {
@@ -689,7 +819,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const isToolDevSession = !!opts._toolDevSessionId;
   const maxToolIterations = isToolDevSession
     ? Number.MAX_SAFE_INTEGER
-    : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS);
+    : (opts.maxIterationsOverride === 0
+        ? Number.MAX_SAFE_INTEGER
+        : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -743,6 +875,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const flowGuidance = iterationCount === 0
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
+    const languageAndIdentityGuidance = iterationCount === 0
+      ? buildLanguageAndIdentityTurnGuidance(userMessage)
+      : "";
     const memoryGuidance = iterationCount === 0
       ? await formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
           sessionId: session.id,
@@ -755,6 +890,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const systemMessages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
+      ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),

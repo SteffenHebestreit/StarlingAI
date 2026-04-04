@@ -58,6 +58,8 @@ export interface ToolContext {
   autoApprove?: boolean;
   /** Override sub-agent maxIterations for delegated tasks this turn. */
   maxIterationsOverride?: number;
+  /** Override the per-turn timeout in ms for delegated tasks. 0 disables timeout inheritance. */
+  turnTimeoutOverrideMs?: number;
   /** Shared turn-local swarm state for orchestration and recovery. */
   swarmState?: SwarmState;
   /** Optional live callback whenever swarm state changes during a turn. */

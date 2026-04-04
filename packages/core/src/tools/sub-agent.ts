@@ -628,7 +628,7 @@ export function looksLikeFailureResult(result: string): boolean {
 export function looksLikeInfrastructureFailure(result: string): boolean {
   if (!result.trim()) return false;
   const preview = result.slice(0, 800);
-  return /\b(timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
+  return /\b(ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -1103,6 +1103,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         onComputerScreenshot: ctx.onComputerScreenshot,
         onComputerSessionState: ctx.onComputerSessionState,
         maxIterationsOverride: ctx.maxIterationsOverride,
+        turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       };
 
       let output: string;
@@ -1789,7 +1790,7 @@ registerTool({
     const agentName = String(args["agentName"] ?? "").trim();
     const task = String(args["task"] ?? "").trim();
     const context = args["context"] ? String(args["context"]) : undefined;
-    const fallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
+    const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
 
@@ -1808,6 +1809,12 @@ registerTool({
         error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}`,
       };
     }
+
+    const fallbackAgents = explicitFallbackAgents?.length
+      ? explicitFallbackAgents
+      : agentName === "swarm_maintainer"
+        ? ["integration_builder", "coder", "prompt_optimizer"].filter((candidate) => !ctx.allowedAgents || ctx.allowedAgents.includes(candidate))
+        : undefined;
 
     return executeDelegationWithFallback({
       agentName,

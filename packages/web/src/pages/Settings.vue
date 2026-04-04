@@ -96,11 +96,20 @@
               Keep this focused on tone, style, and durable preferences. It does not override safety rules or access boundaries.
             </div>
 
+            <div class="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-gray-400">
+              The main assistant now mirrors the user's language automatically. If the message language is unclear, it falls back to German.
+            </div>
+
             <div v-if="personalityStore.profile" class="flex flex-wrap gap-2 text-[11px] text-gray-500">
               <span class="badge-store">rev {{ personalityStore.profile.revision }}</span>
               <span class="badge-config">updated by {{ personalityStore.profile.updatedBy }}</span>
               <span class="badge-config">{{ formatPersonalityUpdatedAt(personalityStore.profile.updatedAt) }}</span>
               <span v-if="personalityStore.profile.reason" class="badge-config max-w-full truncate" :title="personalityStore.profile.reason">{{ personalityStore.profile.reason }}</span>
+            </div>
+
+            <div>
+              <label class="field-label">Assistant Name <span class="text-gray-600 font-normal">optional</span></label>
+              <input v-model="personalityForm.name" type="text" class="input-box" placeholder="e.g. Luna" />
             </div>
 
             <div>
@@ -250,6 +259,8 @@
                     </span>
                   </div>
                   <div class="mt-2 text-[11px] text-gray-500 font-mono break-all">{{ multimodalForm.ttsBaseUrl || 'not configured' }}</div>
+                  <div v-if="multimodalStore.status.tts.modelName" class="mt-1 text-[11px] text-gray-600 font-mono break-all">{{ multimodalStore.status.tts.modelName }}</div>
+                  <div v-if="multimodalStore.status.tts.capabilities?.length" class="mt-1 text-[11px] text-gray-600 break-all">Capabilities: {{ multimodalStore.status.tts.capabilities.join(', ') }}</div>
                   <div v-if="multimodalStore.status.tts.error" class="mt-1 text-[11px] text-red-300">{{ multimodalStore.status.tts.error }}</div>
                 </div>
 
@@ -405,6 +416,13 @@
                 <div>
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen-Compatible Library</div>
                   <div class="text-xs text-gray-500 mt-1">Upload a sample once, save it in a qwen-compatible voice library, and reuse the returned voice ID for faster synthesis.</div>
+                  <div class="text-xs text-gray-500 mt-1">If auto-transcription struggles, fill "Audio Example Transcript" above and StarlingAI will forward it with the upload.</div>
+                </div>
+                <div v-if="qwenVoiceSaveSupported === false" class="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {{ qwenVoiceSaveMessage }}
+                </div>
+                <div v-else-if="qwenBuiltInSpeakerMessage" class="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100/90">
+                  {{ qwenBuiltInSpeakerMessage }}
                 </div>
                 <div class="multimodal-grid">
                   <div>
@@ -423,7 +441,7 @@
                 </div>
                 <div v-if="savedVoiceForm.message" class="text-xs" :class="savedVoiceForm.error ? 'text-red-400' : 'text-green-300'">{{ savedVoiceForm.message }}</div>
                 <div class="flex justify-end">
-                  <button @click="saveVoiceSampleToLibrary" :disabled="savedVoiceForm.saving || !savedVoiceForm.file" class="btn-ghost px-4 py-2 rounded-xl text-xs">
+                  <button @click="saveVoiceSampleToLibrary" :disabled="savedVoiceForm.saving || !savedVoiceForm.file || qwenVoiceSaveSupported === false" class="btn-ghost px-4 py-2 rounded-xl text-xs">
                     {{ savedVoiceForm.saving ? 'Saving Voice…' : 'Upload And Save Voice' }}
                   </button>
                 </div>
@@ -1259,8 +1277,8 @@
                   </div>
                   <div class="md:col-span-2 flex items-center justify-between gap-4 pt-1">
                     <div>
-                      <label class="field-label text-xs">thinking mode <span class="text-gray-600 font-normal">Qwen3.5 chain-of-thought reasoning</span></label>
-                      <p class="text-[11px] text-gray-600 mt-0.5">When set, StarlingAI sends <code class="text-gray-400">enable_thinking</code> via <code class="text-gray-400">extra_body</code> and applies Qwen-recommended sampling (on: temp 0.6 / top_p 0.95 · off: temp 0.7 / top_p 0.8) unless you override top_p.</p>
+                      <label class="field-label text-xs">thinking mode <span class="text-gray-600 font-normal">supported reasoning models</span></label>
+                      <p class="text-[11px] text-gray-600 mt-0.5">When set, StarlingAI sends <code class="text-gray-400">enable_thinking</code> via <code class="text-gray-400">extra_body</code> for models that support it, including Gemma 4 and Qwen. Qwen also gets its recommended sampling defaults unless you explicitly override <code class="text-gray-400">top_p</code>.</p>
                     </div>
                     <select
                       :value="agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'"
@@ -1876,6 +1894,7 @@ const multimodalForm = reactive({
 });
 
 const personalityForm = reactive({
+  name: "",
   identity: "",
   toneText: "",
   styleText: "",
@@ -1895,6 +1914,24 @@ const savedVoiceForm = reactive({
   saving: false,
   error: false,
   message: "",
+});
+
+const qwenTtsStatus = computed(() => multimodalStore.status?.tts ?? null);
+const qwenVoiceSaveSupported = computed(() => {
+  if (multimodalForm.ttsApi !== "qwen-compatible") return undefined;
+  return qwenTtsStatus.value?.voiceCloneSupported;
+});
+const qwenVoiceSaveMessage = computed(() => {
+  if (qwenVoiceSaveSupported.value !== false) return "";
+  const modelName = qwenTtsStatus.value?.modelName ?? qwenTtsStatus.value?.modelId ?? "The selected model";
+  return `${modelName} cannot save or replay cloned voices. Switch the playground to a Base model with voice_clone capability before uploading a sample.`;
+});
+const qwenBuiltInSpeakerMessage = computed(() => {
+  if (multimodalForm.ttsApi !== "qwen-compatible") return "";
+  if (qwenTtsStatus.value?.customVoiceSupported === true) return "";
+  if (qwenTtsStatus.value?.voiceCloneSupported !== true) return "";
+  const modelName = qwenTtsStatus.value?.modelName ?? qwenTtsStatus.value?.modelId ?? "The selected model";
+  return `${modelName} is a voice-clone model. Plain speaker synthesis may fail until you save a voice and set Default Voice ID, or switch to a model with custom_voice capability.`;
 });
 
 interface ModelEndpointEditorConfig {
@@ -2108,6 +2145,7 @@ function linesFromList(values: readonly string[]): string {
 }
 
 function syncPersonalityForm(profile: AssistantPersonalityProfile | null) {
+  personalityForm.name = profile?.identity.name ?? "";
   personalityForm.identity = profile?.identity.core ?? "";
   personalityForm.toneText = linesFromList(profile?.voice.tone ?? []);
   personalityForm.styleText = linesFromList(profile?.voice.style ?? []);
@@ -2132,6 +2170,7 @@ async function submitPersonalityForm() {
 
   await personalityStore.save({
     identity: {
+      name: personalityForm.name.trim() || undefined,
       core: personalityForm.identity.trim(),
     },
     voice: {
@@ -2225,6 +2264,12 @@ async function saveVoiceSampleToLibrary() {
   savedVoiceForm.message = "";
   savedVoiceForm.error = false;
 
+  if (qwenVoiceSaveSupported.value === false) {
+    savedVoiceForm.error = true;
+    savedVoiceForm.message = qwenVoiceSaveMessage.value;
+    return;
+  }
+
   if (!savedVoiceForm.file) {
     savedVoiceForm.error = true;
     savedVoiceForm.message = "Select a voice sample file first";
@@ -2242,13 +2287,25 @@ async function saveVoiceSampleToLibrary() {
       file: savedVoiceForm.file,
       name: savedVoiceForm.name.trim(),
       language: savedVoiceForm.language.trim() || undefined,
+      referenceText: multimodalForm.ttsVoiceSampleText.trim() || undefined,
     });
     multimodalForm.ttsDefaultVoiceId = result.voice_id;
     if (!multimodalForm.ttsVoiceSampleText.trim() && result.ref_text) {
       multimodalForm.ttsVoiceSampleText = result.ref_text;
     }
+
+    const nextConfig = structuredClone(multimodalStore.config);
+    nextConfig.tts.defaultVoiceId = result.voice_id;
+    if (!nextConfig.tts.voiceSampleText && result.ref_text) {
+      nextConfig.tts.voiceSampleText = result.ref_text;
+    }
+    await multimodalStore.save(nextConfig);
+    if (multimodalStore.error) {
+      throw new Error(`Saved voice '${result.name}' as '${result.voice_id}', but failed to persist it as Default Voice ID: ${multimodalStore.error}`);
+    }
+
     savedVoiceForm.error = false;
-    savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}'`;
+    savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}' and set it as Default Voice ID`;
   } catch (error) {
     savedVoiceForm.error = true;
     savedVoiceForm.message = error instanceof Error ? error.message : String(error);

@@ -213,6 +213,74 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
+  it("treats maxIterationsOverride=0 as unlimited for delegated sub-agents", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-unlimited-iterations-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        unlimited_agent: {
+          description: "Unlimited iteration test agent",
+          systemPrompt: "Inspect the workspace before replying.",
+          tools: ["read_file"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "read_file",
+      description: "Stub read tool",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "workspace overview" };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "read-1",
+            name: "read_file",
+            arguments: { path: "workspace/README.md" },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "finished after reading",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "unlimited_agent",
+        task: "Review the workspace.",
+        parentSessionId: "parent-unlimited",
+        workspacePath: tempDir,
+        maxIterationsOverride: 0,
+      });
+
+      expect(result.output).toBe("finished after reading");
+      expect(result.stats.toolCount).toBe(1);
+      expect(result.stats.iterations).toBe(1);
+      expect(completeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      unregisterTool("read_file");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects coordinator-style completion claims when no tool calls were executed", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-hallucinated-completion-"));
     const configPath = join(tempDir, "starlingai.json");

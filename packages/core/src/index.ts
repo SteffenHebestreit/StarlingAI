@@ -45,6 +45,7 @@ import "./tools/memory.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
+import "./tools/navigation.js";
 import "./tools/multimodal.js";
 import "./tools/document-output.js";
 import "./tools/pentest.js";

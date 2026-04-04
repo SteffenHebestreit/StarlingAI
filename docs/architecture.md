@@ -85,7 +85,9 @@ The **human-in-the-loop approval system** (`approval/`) adds a third layer of ov
 
 The "Guarded" in StarlingAI reflects a fundamental constraint: agents in a starling murmuration are free to move, but StarlingAI agents operate within strict security boundaries. Speed and autonomy never come at the cost of control. This security contract applies regardless of what task domain the swarm is working in.
 
-**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational.
+**Current sandbox scope — important clarification:** Sandboxing applies at the tool-execution level, not the agent-process level. `shell_exec`, `run_script`, and all `selfdev__*` dynamic tools always execute inside the dedicated `sandbox` Docker container (`--cap-drop ALL`, `--read-only`, `--network none`). Individual sub-agents that have `container.enabled: true` in their config also run their entire LLM loop in an isolated container via `container-runner.ts`. However, sub-agents without that flag run in-process inside the gateway. Stage 8 will invert this to an opt-out model: all sub-agents default to containerized execution.
+
+**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing for tool execution, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational. See [ROADMAP.md](../ROADMAP.md#gap-1--container-isolation-is-opt-in-not-universal) for the planned Stage 8 container isolation improvements.
 
 See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) for the full specification.
 
@@ -97,7 +99,7 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
-| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox, outcome tracking, audit trail, hot-reload config |
+| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + container.enabled agents), outcome tracking, audit trail, hot-reload config |
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
