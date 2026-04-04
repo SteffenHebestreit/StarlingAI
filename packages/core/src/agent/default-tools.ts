@@ -37,9 +37,6 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "browser_type",
   "browser_select_option",
   "browser_screenshot",
-  // Navigation tools — available directly for quick geocoding/routing queries in hybrid mode
-  "geocode_location",
-  "route_distance_time",
   // Git read-only tools — available directly for quick repo insight
   "git_status",
   "git_log",
