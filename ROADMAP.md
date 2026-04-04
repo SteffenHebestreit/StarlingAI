@@ -92,15 +92,11 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
-### GAP-5 — Navigation Tools Not in Main Agent's Hybrid-Mode Direct Set
+### GAP-5 — Navigation Tools Scope
 
-> **Status: ✅ Implemented in v0.3.2**
+> **Status: Closed (not a gap) — navigation tools belong to `distance_specialist`, not the main agent**
 
-**Reality today (pre-v0.3.2):** `geocode_location` and `route_distance_time` are correctly registered as Tier 0 read-only tools, and the `distance_specialist` sub-agent has them. The `buildDynamicTurnGuidance` function correctly routes navigation queries to `distance_specialist` in `orchestration_only` mode.
-
-**Gap:** In `hybrid` mode, the main agent cannot call navigation tools directly — it must always delegate to `distance_specialist` even for trivial one-step queries (e.g., "how far is Berlin from Hamburg"). The round-trip delegation adds latency and an extra LLM call.
-
-**v0.3.2 fix (Stage 8.4):** Added `geocode_location` and `route_distance_time` to `DIRECT_MAIN_TOOL_NAMES` in `agent/default-tools.ts`. The main agent in hybrid mode can now call these directly for simple queries; complex multi-leg routing tasks should still be delegated to `distance_specialist`.
+**Clarification:** `geocode_location` and `route_distance_time` are correctly scoped to the `distance_specialist` sub-agent and are not appropriate for the main agent's direct tool set. The main agent's role is orchestration; delegating navigation queries to a specialist is the intended design, not a workaround. No fix required.
 
 ---
 
@@ -124,7 +120,7 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 | ✅ Instructions updated; `swarm_delegate` tool pending |
 | `self_improvement_applied` audit events | High | GAP-3 | ✅ v0.3.2 |
 | Warden `config_proposal_flood` check | High | GAP-4 | ✅ v0.3.2 |
-| Navigation tools in `DIRECT_MAIN_TOOL_NAMES` | Low | GAP-5 | ✅ v0.3.2 |
+| Navigation tools scope | Low | GAP-5 | ✅ Not a gap — correctly scoped to distance_specialist |
 | `selfdev__` prefix guard in dynamic-tools.ts | Low | GAP-6 | ✅ v0.3.2 |
 | Multi-instance gateway clustering (Redis-backed session sharding) | Medium | — | Planned |
 | Configurable approval timeout per scene | Low | — | Planned |

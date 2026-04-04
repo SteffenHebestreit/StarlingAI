@@ -120,7 +120,7 @@ The system has completed **Stage 7** of the swarm vision (with Stage 8 gap-closu
 | **Browser tools** | 7 | Implemented | `browser_navigate`, `browser_snapshot`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_select_option`, `browser_screenshot` (Playwright MCP wrappers) |
 | **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; one-click HTTP callbacks; WebSocket `approval.respond` RPC |
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
-| **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (22 tools incl. navigation) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
+| **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
 | **Container opt-out model** | 8 | Implemented (v0.3.2) | `agents.defaultContainerized: true` global flag + per-agent `container.disabled: true` escape hatch; 15 trusted read-only agents pre-opted-out (see GAP-1 in ROADMAP) |
 | **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
