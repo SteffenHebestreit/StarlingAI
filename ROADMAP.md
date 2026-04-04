@@ -1,6 +1,6 @@
 # StarlingAI — Roadmap
 
-> **Last updated:** 2026-04-04 · **Current release:** v0.3.1 (Stage 7 complete)
+> **Last updated:** 2026-04-04 · **Current release:** v0.3.2 (Stage 7 complete + Stage 8 gap-closure in progress)
 
 This roadmap tracks both the completed architecture milestones and the honest gap analysis of where the implementation diverges from the swarm philosophy. It is a living document — the swarm may self-update entries in the `workspace/` area, but the core architecture decisions here are operator-owned.
 
@@ -26,6 +26,8 @@ These are gaps between the stated philosophy and the current implementation. Eve
 
 ### GAP-1 — Container Isolation Is Opt-In, Not Universal
 
+> **Status: ✅ Partially implemented in v0.3.2 — opt-out model deployed**
+
 **Philosophy stated:** *"Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-only`, and `--network none` enforced."*
 
 **Reality today:** Sub-agent LLM loops run **in-process** inside the main gateway Node.js process by default. Isolation applies to:
@@ -36,13 +38,15 @@ These are gaps between the stated philosophy and the current implementation. Eve
 
 **Impact:** A compromised or misbehaving sub-agent could in theory interfere with other in-process sessions, escalate through shared module state, or read environment variables that other agents left in memory.
 
-**Planned fix (Stage 8.1):** Add an opt-out flag `container.disabled: true` instead of the current opt-in `container.enabled: true`. All agents default to containerized execution. Operators can opt out for trusted low-latency agents (e.g., `read_file`-only specialists).
+**v0.3.2 fix (Stage 8.1):** Added `agents.defaultContainerized: boolean` global flag to config schema and `container.disabled: true` per-agent escape hatch. When `defaultContainerized: true`, all agents run containerized unless they explicitly opt out. 15 trusted read-only agents in `20-subagents-general.jsonc` are pre-marked `container.disabled: true`. Operators can enable the default-containerized mode by setting `agents.defaultContainerized: true` in gateway config.
 
-**Interim mitigation:** The four-layer guardrail stack, tool-tier enforcement, and Warden monitoring provide meaningful defense in depth. Runtime credential isolation (AES-256-GCM store, no secrets in model context) remains fully enforced regardless of process boundary.
+**Remaining work (Stage 8.1 completion):** Enable `defaultContainerized: true` by default in the shipped config once the container image build pipeline is verified in CI.
 
 ---
 
 ### GAP-2 — Autonomous Bidding Is a Last-Resort Fallback, Not the Primary Routing Path
+
+> **Status: ✅ Behavioral fix implemented in v0.3.2**
 
 **Philosophy stated:** *"Outcome-weighted routing improves specialist selection over time — the swarm gets smarter the more it works."*
 
@@ -54,65 +58,76 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 **Why this is still valuable:** The bidding system is the correct fallback for undirected tasks, and its bid scores feed back into swarm state via `task_announced`/`task_bid` events on the bus. The architecture is correct; the orchestrator guidance just favors explicit naming.
 
-**Planned fix (Stage 8.2):** Update the main assistant's `customInstructions` to prefer calling `delegate_to_agent` **without an agent name** for tasks where the specialist is not obvious. Let the swarm decide. Reserve explicit naming only for well-established specialists and known-good routing paths.
+**v0.3.2 fix (Stage 8.2):** Updated the main assistant's `customInstructions` in `10-core-agents.jsonc` to explicitly prefer calling `delegate_to_agent` **without an agent name** for tasks where the specialist is not immediately obvious. Reserve explicit naming for known specialists with proven routing history.
 
-**Supporting change:** Add a `swarm_delegate` shorthand tool that forces undirected delegation (no `agentName` field), nudging the LLM toward emergent routing rather than scripted assignment.
+**Remaining work:** A dedicated `swarm_delegate` tool (no `agentName` field, forces undirected delegation) would further nudge the LLM away from scripted assignment — planned for Stage 8.2 completion.
 
 ---
 
 ### GAP-3 — Self-Improvement Lacks Structured Attribution Audit Trail
 
+> **Status: ✅ Implemented in v0.3.2**
+
 **Philosophy stated:** *"Bounded self-improvement... refine its own system-prompt, update durable user and workflow memory, create new sub-agents."*
 
-**Reality today:** The `config-assistant.ts` proposal system gates changes behind human approval, and `flow-memory.ts` records outcomes. However, there is no structured audit entry that links a specific `workspace/agents/*.jsonc` change to the agent that proposed it and the turn in which it was approved. An operator reviewing the git diff cannot tell which agent made a change and why.
+**Reality today (pre-v0.3.2):** The `config-assistant.ts` proposal system gates changes behind human approval, and `flow-memory.ts` records outcomes. However, there is no structured audit entry that links a specific `workspace/agents/*.jsonc` change to the agent that proposed it and the turn in which it was approved. An operator reviewing the git diff cannot tell which agent made a change and why.
 
-**Planned fix (Stage 8.3):** When `config-assistant` applies an approved proposal, write a structured `self_improvement_applied` audit event containing: proposing agent name, target file, field changed, old value, new value, approval channel, and session ID. This makes the self-improvement loop fully traceable.
+**v0.3.2 fix (Stage 8.3):** Added three new structured audit events to `audit/schema.ts` and emitted from `gateway/index.ts`:
+- `config_proposal_created` — fires when a proposal is drafted (proposingAgent, targetAgent, mode, summary)
+- `config_proposal_applied` — fires when an operator approves and applies (proposalId, proposingAgent, targetAgent)
+- `self_improvement_applied` — fires alongside `config_proposal_applied` with full detail: configChanges (path + newValue), promptChanges (agentName + strategy), summary
 
 ---
 
 ### GAP-4 — Warden Has No Self-Improvement Abuse Detection
 
-**Reality today:** The Warden monitors for `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, and computer-use anomalies. It does **not** watch for:
+> **Status: ✅ Implemented in v0.3.2**
+
+**Reality today (pre-v0.3.2):** The Warden monitors for `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, and computer-use anomalies. It does **not** watch for:
 - A single agent/session flooding the config-assistant with rapid proposals (`config_proposal_flood`)
 - Repeated self-improvement cycles that keep failing and re-trying (`self_improve_loop`)
 - An agent repeatedly trying to grant itself higher tool tiers
 
-**Planned fix (Stage 8.3 — ships with GAP-3 fix):** Add `config_proposal_flood` check to Warden: more than 5 config proposals from a single session within 10 minutes triggers a `warden_alert` and suspends further proposals from that session until operator acknowledgement.
+**v0.3.2 fix (Stage 8.3):** Added `config_proposal_flood` check (#7) to `warden.ts`: more than 5 `config_proposal_created` events from a single session within 10 minutes triggers a `warden_alert` (severity: warn) and clears the session's proposal counter. The Warden now subscribes to `config_proposal_created` and `config_proposal_applied` events on the audit bus.
 
 ---
 
 ### GAP-5 — Navigation Tools Not in Main Agent's Hybrid-Mode Direct Set
 
-**Reality today:** `geocode_location` and `route_distance_time` are correctly registered as Tier 0 read-only tools, and the `distance_specialist` sub-agent has them. The `buildDynamicTurnGuidance` function correctly routes navigation queries to `distance_specialist` in `orchestration_only` mode.
+> **Status: ✅ Implemented in v0.3.2**
+
+**Reality today (pre-v0.3.2):** `geocode_location` and `route_distance_time` are correctly registered as Tier 0 read-only tools, and the `distance_specialist` sub-agent has them. The `buildDynamicTurnGuidance` function correctly routes navigation queries to `distance_specialist` in `orchestration_only` mode.
 
 **Gap:** In `hybrid` mode, the main agent cannot call navigation tools directly — it must always delegate to `distance_specialist` even for trivial one-step queries (e.g., "how far is Berlin from Hamburg"). The round-trip delegation adds latency and an extra LLM call.
 
-**Planned fix (Stage 8.4 — already partially implemented in this release):** Add `geocode_location` and `route_distance_time` to `DIRECT_MAIN_TOOL_NAMES` so the main agent in hybrid mode can call them directly for simple queries while still delegating complex routing tasks to `distance_specialist`.
+**v0.3.2 fix (Stage 8.4):** Added `geocode_location` and `route_distance_time` to `DIRECT_MAIN_TOOL_NAMES` in `agent/default-tools.ts`. The main agent in hybrid mode can now call these directly for simple queries; complex multi-leg routing tasks should still be delegated to `distance_specialist`.
 
 ---
 
 ### GAP-6 — Dynamic Tool Name Collision Risk (selfdev__ Prefix Stacking)
 
-**Reality today:** A self-developed tool named `selfdev__something` would register as `selfdev__selfdev__something`, which still matches the `selfdev__` Tier 2 pattern. No security bypass is possible (the Tier 2 sandbox enforcement still applies), but the double-prefix is confusing and may cause unexpected routing behavior.
+> **Status: ✅ Implemented in v0.3.2**
 
-**Planned fix (Stage 8.4):** Add a validation check in `dynamic-tools.ts` that rejects tool names starting with `selfdev__` — the prefix is the system's namespace, not the tool author's.
+**Reality today (pre-v0.3.2):** A self-developed tool named `selfdev__something` would register as `selfdev__selfdev__something`, which still matches the `selfdev__` Tier 2 pattern. No security bypass is possible (the Tier 2 sandbox enforcement still applies), but the double-prefix is confusing and may cause unexpected routing behavior.
+
+**v0.3.2 fix (Stage 8.4):** Added a prefix guard in `dynamic-tools.ts` `validateDefinition()` — tool definitions whose `name` starts with `selfdev__` are now rejected with a validation failure. The prefix is the system's namespace, not the tool author's.
 
 ---
 
-## Stage 8 — Swarm Integrity & Scale (Planned, 2026 Q2)
+## Stage 8 — Swarm Integrity & Scale (In Progress, 2026 Q2)
 
 **Theme:** Close the architecture gaps identified above and harden the system for multi-instance deployments.
 
-| Task | Priority | GAP |
-|------|----------|-----|
-| Default-containerized sub-agents (opt-out model) | High | GAP-1 |
-| Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 |
-| `self_improvement_applied` audit events | High | GAP-3 |
-| Warden `config_proposal_flood` check | High | GAP-4 |
-| Navigation tools in `DIRECT_MAIN_TOOL_NAMES` | Low | GAP-5 |
-| `selfdev__` prefix guard in dynamic-tools.ts | Low | GAP-6 |
-| Multi-instance gateway clustering (Redis-backed session sharding) | Medium | — |
-| Configurable approval timeout per scene | Low | — |
+| Task | Priority | GAP | Status |
+|------|----------|-----|--------|
+| Default-containerized sub-agents (opt-out model) | High | GAP-1 | ✅ v0.3.2 (enable `defaultContainerized: true` to activate) |
+| Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 | ✅ Instructions updated; `swarm_delegate` tool pending |
+| `self_improvement_applied` audit events | High | GAP-3 | ✅ v0.3.2 |
+| Warden `config_proposal_flood` check | High | GAP-4 | ✅ v0.3.2 |
+| Navigation tools in `DIRECT_MAIN_TOOL_NAMES` | Low | GAP-5 | ✅ v0.3.2 |
+| `selfdev__` prefix guard in dynamic-tools.ts | Low | GAP-6 | ✅ v0.3.2 |
+| Multi-instance gateway clustering (Redis-backed session sharding) | Medium | — | Planned |
+| Configurable approval timeout per scene | Low | — | Planned |
 
 ---
 

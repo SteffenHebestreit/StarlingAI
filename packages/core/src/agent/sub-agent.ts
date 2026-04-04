@@ -371,12 +371,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
     // ── Dispatch to container runner if configured ───────────────────────────
-    if (agentCfg.container?.enabled) {
+    // An agent is containerized when EITHER:
+    //   a) its own config has container.enabled: true  (explicit opt-in), OR
+    //   b) agents.defaultContainerized is true globally AND container.disabled !== true
+    //      (opt-out model — closed GAP-1 from ROADMAP)
+    const isContainerized =
+      agentCfg.container?.enabled === true ||
+      (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true);
+    if (isContainerized) {
       const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
       await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
       let containerRun;
       try {
-        log.info({ agentName: opts.agentName, maxConcurrent }, "Dispatching to containerized sub-agent");
+        const containerReason = agentCfg.container?.enabled ? "explicit" : "defaultContainerized";
+        log.info({ agentName: opts.agentName, maxConcurrent, containerReason }, "Dispatching to containerized sub-agent");
         containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
       } finally {
         releaseSlot(opts.agentName);
