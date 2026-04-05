@@ -26,6 +26,7 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
+import { closeNeo4j } from "./db/neo4j.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
 import { loadPersistedGaps } from "./agent/self-improve.js";
 
@@ -193,6 +194,7 @@ export async function main() {
     await shutdownMcpServers();
     shutdownDynamicTools();
     await shutdownEphemeralStore();
+    await closeNeo4j();
     stopAllCronJobs();
     stopAllReminders();
     stopAllTimers();

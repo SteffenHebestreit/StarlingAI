@@ -30,7 +30,7 @@ interface CachedEmbeddingQuery {
 }
 
 const TOOL_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [
-  { pattern: /web_search|web_fetch|searxng/, keywords: ["research", "web", "search", "facts", "documentation", "sources"] },
+  { pattern: /web_search|web_fetch|searxng/, keywords: ["research", "web", "search", "facts", "documentation", "sources", "news", "updates", "latest", "current", "release notes"] },
   { pattern: /playwright|browser_/, keywords: ["browser", "automation", "login", "forms", "screenshots", "navigation", "scraping"] },
   { pattern: /code_sandbox|run_js|run_ts/, keywords: ["coding", "scripts", "execution", "analysis", "transform"] },
   { pattern: /shell_exec|run_script/, keywords: ["shell", "terminal", "devops", "ops", "commands"] },
@@ -76,6 +76,21 @@ const CODE_CONTEXT_TOKENS = new Set([
 const WORKFLOW_AUTOMATION_TOKENS = new Set([
   "automation", "pipeline", "workflow", "n8n", "integrate", "integration",
   "orchestrate", "orchestration",
+]);
+
+const FRESHNESS_NEWS_TOKENS = new Set([
+  "news", "latest", "recent", "current", "today", "release", "releases", "update", "updates",
+  "releasenotes", "entwicklungen", "neuigkeiten", "aktuell", "aktuelle", "aktuellen", "neuesten",
+  "nachrichten", "meldungen", "trends",
+]);
+
+const BROAD_DELIVERABLE_TOKENS = new Set([
+  "comprehensive", "guide", "overview", "report", "summary", "update", "audit", "comparison",
+  "compare", "umfangreiches", "umfangreiche", "uberblick", "überblick", "zusammenfassung", "vergleich",
+]);
+
+const AGGREGATED_NEWS_TOKENS = new Set([
+  "news", "updates", "neuigkeiten", "nachrichten", "meldungen", "trends",
 ]);
 
 const TTS_PHRASES: RegExp[] = [
@@ -188,6 +203,44 @@ function isWorkflowSpecialist(cfg: SubAgentConfig): boolean {
     || tags.includes("workflow") || tags.includes("automation") || tags.includes("n8n");
 }
 
+function isApiSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.includes("http_request")
+    || /(api testing|rest|graphql|http debugging|http api|endpoint validation|response validation)/.test(combined);
+}
+
+function isBrowserSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.some((tool) => tool.startsWith("browser_") || tool === "get_site_credentials" || tool === "site_fill_credentials")
+    || /(browser automation|login flows|form filling|portal automation|web scraping)/.test(combined);
+}
+
+function isWorkspaceRetrievalSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.includes("workspace_search")
+    || /(workspace retrieval|document retrieval|knowledge lookup|code search|workspace search)/.test(combined);
+}
+
+function isGitSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.some((tool) => tool.startsWith("git_"))
+    || /(git|version control|repository review|branch management|commit management|vcs)/.test(combined);
+}
+
+function isDedicatedGitSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  return tools.some((tool) => tool.startsWith("git_"));
+}
+
+function isSourceGroundedAuthor(cfg: SubAgentConfig): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return /(source-grounded|scientific writing|paper drafting|literature review|evidence-based reports|technical paper)/.test(combined);
+}
+
 function isNavigationSpecialist(cfg: SubAgentConfig): boolean {
   const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
   const tags = (cfg.tags ?? []).join(" ").toLowerCase();
@@ -202,6 +255,68 @@ function isNavigationSpecialist(cfg: SubAgentConfig): boolean {
     || tags.includes("fahrzeit")
     || tags.includes("reisezeit")
     || tags.includes("route");
+}
+
+function isWebResearchCoordinator(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
+  const tags = (cfg.tags ?? []).join(" ").toLowerCase();
+  const description = cfg.description.toLowerCase();
+
+  const coordinates = tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+  const webFocus = /web|research|browser|evidence|source|retrieval/.test(`${description} ${caps} ${tags}`);
+  return coordinates && webFocus;
+}
+
+function isPlanningCoordinator(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  const coordinates = tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+  return coordinates && /(planning|planner|coordination|coordinator|roadmap|dependencies|deliverable|workflow)/.test(combined);
+}
+
+function isQualitySupervisor(cfg: SubAgentConfig): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return /(quality assurance|quality gate|\bqa\b|acceptance criteria|verification|supervisor|review gate|gap analysis)/.test(combined);
+}
+
+function isPentestSpecialist(cfg: SubAgentConfig): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return /(pentest|penetration test|security|offensive|exploit|vulnerability|cve|sqlmap|nikto|nmap|hydra|metasploit)/.test(combined);
+}
+
+function isVisualizationSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.includes("generate_chart_html")
+    || tools.includes("generate_mermaid_diagram")
+    || /(chart|plot|graph|diagram|visualization|visualisation|table|html chart|mermaid)/.test(combined);
+}
+
+function isDataSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.includes("metric_query")
+    || tools.includes("metric_write")
+    || /(data analysis|statistics|csv|json|spreadsheet|metrics|tabular|dataset|time-series|time series|data cleanup|normali[sz]ation)/.test(combined);
+}
+
+function isExecutionCoordinator(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  const coordinates = tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+  return coordinates && /(mission|execution|parallel|partition|dependency|dependencies|quality|orchestration)/.test(combined);
+}
+
+function isCitationResearchSpecialist(cfg: SubAgentConfig): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return /(citation|bibliograph|paper|report|brief|primary source)/.test(combined);
+}
+
+function isNarrativeSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean {
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return isWritingSpecialist(cfg, keywords)
+    || /(summary|summari[sz]ation|writer|writing|paper|report|brief|synthesis)/.test(combined);
 }
 
 function isChannelOpsSpecialist(cfg: SubAgentConfig): boolean {
@@ -282,6 +397,37 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
 
   // Workflow / automation intent
   const workflowIntent = hasToken(queryTokens, WORKFLOW_AUTOMATION_TOKENS);
+  const freshnessNewsIntent = hasToken(queryTokens, FRESHNESS_NEWS_TOKENS)
+    || hasPhrase(normalizedQuery, [
+      /latest\s+news/,
+      /recent\s+news/,
+      /current\s+news/,
+      /technical\s+news/,
+      /tech\s+news/,
+      /release\s+notes/,
+      /aktuelle[nrsm]*\s+nachrichten/,
+      /technische[nrsm]*\s+nachrichten/,
+      /news\s+technical/,
+    ]);
+  const broadDeliverableIntent = hasToken(queryTokens, BROAD_DELIVERABLE_TOKENS)
+    || hasPhrase(normalizedQuery, [
+      /umfangreiches?\s+update/,
+      /comprehensive\s+(update|overview|report)/,
+      /step by step/,
+      /deep dive/,
+      /grosses?\s+update/,
+    ]);
+  const aggregatedNewsIntent = hasToken(queryTokens, AGGREGATED_NEWS_TOKENS)
+    || hasPhrase(normalizedQuery, [
+      /latest\s+news/,
+      /recent\s+news/,
+      /current\s+news/,
+      /technical\s+news/,
+      /tech\s+news/,
+      /aktuelle[nrsm]*\s+nachrichten/,
+      /technische[nrsm]*\s+nachrichten/,
+      /news\s+technical/,
+    ]);
   const navigationIntent = hasPhrase(normalizedQuery, [
     /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
     /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
@@ -293,6 +439,56 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   const mailSpecialist = isMailSpecialist(cfg, keywords);
   const notificationSpecialist = isNotificationSpecialist(cfg);
   const navigationSpecialist = isNavigationSpecialist(cfg);
+  const apiSpecialist = isApiSpecialist(cfg);
+  const browserSpecialist = isBrowserSpecialist(cfg);
+  const workspaceRetrievalSpecialist = isWorkspaceRetrievalSpecialist(cfg);
+  const gitSpecialist = isGitSpecialist(cfg);
+  const dedicatedGitSpecialist = isDedicatedGitSpecialist(cfg);
+  const sourceGroundedAuthor = isSourceGroundedAuthor(cfg);
+  const citationResearchSpecialist = isCitationResearchSpecialist(cfg);
+  const webResearchCoordinator = isWebResearchCoordinator(cfg);
+  const planningCoordinator = isPlanningCoordinator(cfg);
+  const qualitySupervisor = isQualitySupervisor(cfg);
+  const pentestSpecialist = isPentestSpecialist(cfg);
+  const visualizationSpecialist = isVisualizationSpecialist(cfg);
+  const dataSpecialist = isDataSpecialist(cfg);
+  const dataHeavyIntent = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate)\b/i.test(normalizedQuery);
+  const visualizationIntent = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalizedQuery);
+  const sequentialIntent = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalizedQuery);
+  const synthesisIntent = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalizedQuery);
+  const externalDataIntent = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|source|sources)\b/i.test(normalizedQuery);
+  const securityIntent = /\b(pentest|penetration|security|vulnerability|vulnerabilities|cve|exploit|scan|scanning|attack|attacks|nikto|sqlmap|nmap|hydra|metasploit|authorized scope|target host|target hosts)\b/i.test(normalizedQuery);
+  const apiExecutionIntent = /\b(endpoint|endpoints|request|response|responses|payload|headers?|rest|graphql|http|json|validate|call|test)\b/i.test(normalizedQuery);
+  const documentationLookupIntent = researchIntent && /\b(documentation|docs|spec|specification|reference|official)\b/i.test(normalizedQuery) && !apiExecutionIntent;
+  const browserExecutionIntent = /\b(log ?in|login|sign ?in|fill out|submit|download)\b/i.test(normalizedQuery)
+    && /\b(portal|website|site|page|form|invoice|dashboard)\b/i.test(normalizedQuery);
+  const codeGenerationIntent = !codeAnalysisIntent
+    && /\b(write|create|implement|build)\b/i.test(normalizedQuery)
+    && /\b(function|class|script|module|component|utility|cli|program)\b/i.test(normalizedQuery);
+  const sourceGroundedAuthoringIntent = writingIntent
+    && /\b(paper|report|brief|review|article)\b/i.test(normalizedQuery)
+    && /\b(source|sources|citation|citations|notes|evidence|collected)\b/i.test(normalizedQuery);
+  const workspaceLookupIntent = /\b(workspace|project|repository|repo)\b/i.test(normalizedQuery)
+    && /\b(search|find|reference|references|mention|mentions|files?|where|all)\b/i.test(normalizedQuery);
+  const channelMentions = ["slack", "discord", "telegram", "email", "mail"].filter((channel) => new RegExp(`\\b${channel}\\b`, "i").test(normalizedQuery)).length;
+  const multiChannelNotificationIntent = outboundNotificationIntent || (/\bsend\b/i.test(normalizedQuery) && channelMentions >= 2);
+  const qualityGateIntent = hasPhrase(normalizedQuery, [
+    /quality\s+check/,
+    /qa\s+check/,
+    /acceptance\s+criteria/,
+    /meets?\s+the\s+requirements/,
+    /met\s+the\s+requirements/,
+    /good\s+enough/,
+    /verify\s+(the\s+)?(draft|response|answer|deliverable)/,
+    /review\s+(the\s+)?(draft|response|answer|deliverable)\s+against/,
+    /should\s+we\s+rerun/,
+    /another\s+(targeted\s+)?run/,
+  ]);
+
+  const compositeIntent = sequentialIntent
+    || (visualizationIntent && (externalDataIntent || dataHeavyIntent || researchIntent || freshnessNewsIntent))
+    || (synthesisIntent && ((researchIntent ? 1 : 0) + (dataHeavyIntent ? 1 : 0) + (writingIntent ? 1 : 0) >= 2))
+    || (broadDeliverableIntent && ((researchIntent ? 1 : 0) + (dataHeavyIntent ? 1 : 0) + (visualizationIntent ? 1 : 0) + (writingIntent ? 1 : 0) >= 2));
 
   let adjustment = 0;
 
@@ -305,6 +501,16 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (writingIntent) {
     if (writingSpecialist) adjustment += 0.1;
     if (researchSpecialist && !writingSpecialist) adjustment -= 0.04;
+  }
+
+  if (documentationLookupIntent) {
+    if (researchSpecialist && !citationResearchSpecialist) adjustment += 0.12;
+    if (apiSpecialist) adjustment -= 0.14;
+  }
+
+  if (apiExecutionIntent && !documentationLookupIntent) {
+    if (apiSpecialist) adjustment += 0.14;
+    if (researchSpecialist && !apiSpecialist) adjustment -= 0.05;
   }
 
   // ── Mailbox triage / reading / drafting ──
@@ -321,6 +527,12 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   if (outboundNotificationIntent) {
     if (notificationSpecialist) adjustment += 0.16;
     if (mailSpecialist && !notificationSpecialist) adjustment -= 0.06;
+  }
+
+  if (multiChannelNotificationIntent) {
+    if (notificationSpecialist) adjustment += 0.2;
+    if (writingSpecialist && !notificationSpecialist) adjustment -= 0.16;
+    if (mailSpecialist && !notificationSpecialist) adjustment -= 0.12;
   }
 
   // ── TTS vs STT ──
@@ -340,10 +552,87 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     if (isPromptSpecialist(cfg)) adjustment -= 0.12;
   }
 
+  if (codeGenerationIntent) {
+    if (isCodeWriterSpecialist(cfg)) adjustment += 0.18;
+    if (dataSpecialist && !isCodeWriterSpecialist(cfg)) adjustment -= 0.14;
+    if (researchSpecialist && !isCodeWriterSpecialist(cfg)) adjustment -= 0.06;
+  }
+
+  if (browserExecutionIntent && !compositeIntent) {
+    if (browserSpecialist) adjustment += 0.22;
+    if (webResearchCoordinator) adjustment -= 0.14;
+    if (researchSpecialist && !browserSpecialist) adjustment -= 0.08;
+  }
+
   // ── Workflow automation vs channel ops ──
   if (workflowIntent) {
     if (isWorkflowSpecialist(cfg)) adjustment += 0.1;
     if (isChannelOpsSpecialist(cfg) && !isWorkflowSpecialist(cfg)) adjustment -= 0.08;
+    if (writingSpecialist && !isWorkflowSpecialist(cfg)) adjustment -= 0.1;
+    if (mailSpecialist && !isWorkflowSpecialist(cfg)) adjustment -= 0.08;
+  }
+
+  if (workspaceLookupIntent) {
+    if (workspaceRetrievalSpecialist) adjustment += 0.18;
+    if (webResearchCoordinator) adjustment -= 0.14;
+    if (apiSpecialist) adjustment -= 0.08;
+  }
+
+  if (gitContext) {
+    if (dedicatedGitSpecialist) adjustment += 0.2;
+    else if (gitSpecialist) adjustment += 0.08;
+    if (writingSpecialist && !gitSpecialist) adjustment -= 0.08;
+  }
+
+  if (sourceGroundedAuthoringIntent) {
+    if (sourceGroundedAuthor) adjustment += 0.22;
+    if (citationResearchSpecialist && !sourceGroundedAuthor) adjustment -= 0.16;
+    if (researchSpecialist && !sourceGroundedAuthor) adjustment -= 0.06;
+  }
+
+  // ── Fresh/current news and release updates ──
+  if (freshnessNewsIntent) {
+    if (webResearchCoordinator) {
+      if (aggregatedNewsIntent) adjustment += broadDeliverableIntent ? 0.36 : 0.28;
+      else adjustment += broadDeliverableIntent ? 0.26 : 0.18;
+    } else if (researchSpecialist) {
+      if (aggregatedNewsIntent) adjustment += broadDeliverableIntent ? 0.14 : 0.1;
+      else adjustment += broadDeliverableIntent ? 0.18 : 0.14;
+    }
+
+    if (navigationSpecialist) adjustment -= 0.28;
+    if (writingSpecialist && !researchSpecialist) adjustment -= 0.08;
+    if (mailSpecialist) adjustment -= 0.1;
+  }
+
+  // ── Composite / dependency-heavy missions ──
+  if (compositeIntent) {
+    if (planningCoordinator && (!pentestSpecialist || securityIntent)) adjustment += 0.24;
+    else if (webResearchCoordinator && (researchIntent || freshnessNewsIntent || externalDataIntent)) adjustment += 0.1;
+
+    if (researchSpecialist && !planningCoordinator && visualizationIntent) adjustment -= 0.06;
+    if (writingSpecialist && !planningCoordinator && (dataHeavyIntent || visualizationIntent)) adjustment -= 0.04;
+  }
+
+  if (pentestSpecialist && !securityIntent) {
+    adjustment -= compositeIntent ? 0.28 : 0.18;
+  }
+
+  if (navigationSpecialist && !navigationIntent && (visualizationIntent || dataHeavyIntent || externalDataIntent || compositeIntent)) {
+    adjustment -= 0.22;
+  }
+
+  if (visualizationIntent) {
+    if (visualizationSpecialist) adjustment += (dataHeavyIntent || externalDataIntent || researchIntent) ? 0.2 : 0.12;
+    if (writingSpecialist && !visualizationSpecialist) adjustment -= 0.08;
+    if (researchSpecialist && !visualizationSpecialist && !planningCoordinator && dataHeavyIntent) adjustment -= 0.04;
+  }
+
+  if (qualityGateIntent) {
+    if (qualitySupervisor) adjustment += 0.28;
+    if (planningCoordinator && !qualitySupervisor) adjustment += 0.06;
+    if (researchSpecialist && !qualitySupervisor) adjustment -= 0.06;
+    if (writingSpecialist && !qualitySupervisor) adjustment -= 0.08;
   }
 
   // ── Navigation / route distance ──
@@ -354,6 +643,89 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   }
 
   return adjustment;
+}
+
+export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConfig): number {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const inferredKeywords = inferAgentSearchKeywords("shape", cfg);
+  const webResearchCoordinator = isWebResearchCoordinator(cfg);
+  const planningCoordinator = isPlanningCoordinator(cfg);
+  const executionCoordinator = isExecutionCoordinator(cfg);
+  const visualizationSpecialist = isVisualizationSpecialist(cfg);
+  const dataSpecialist = isDataSpecialist(cfg);
+  const researchSpecialist = isResearchSpecialist(cfg, inferredKeywords);
+  const narrativeSpecialist = isNarrativeSpecialist(cfg, inferredKeywords);
+  const citationResearchSpecialist = isCitationResearchSpecialist(cfg);
+
+  const sourceAcquisitionIntent = /\b(official|source|sources|citation|citations|documentation|docs|reference|references|latest|current|recent|today|now|last year)\b/i.test(normalizedQuery);
+  const externalDomainIntent = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|benchmark|benchmarks|statistics?)\b/i.test(normalizedQuery);
+  const structuredAnalysisIntent = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|normalize|normalise|clean|tabulate|aggregate)\b/i.test(normalizedQuery);
+  const visualizationIntent = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid|html)\b/i.test(normalizedQuery);
+  const browserIntent = /\b(browser|website|portal|page|login|log in|form|click|scrape|scraping|navigate|interactive)\b/i.test(normalizedQuery);
+  const sequentialIntent = /\b(first|then|after|before|next|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalizedQuery);
+  const groundedInputIntent = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalizedQuery);
+  const citationIntent = /\b(citation|citations|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalizedQuery);
+  const newsIntent = /\b(news|update|updates|release|releases|release notes|trend|trends|nachrichten|neuigkeiten|aktuell|aktuelle|aktuellen)\b/i.test(normalizedQuery);
+
+  const renderFromEvidenceIntent = groundedInputIntent
+    && visualizationIntent
+    && !sourceAcquisitionIntent
+    && !externalDomainIntent
+    && !sequentialIntent;
+
+  const evidenceToArtifactWorkflow = visualizationIntent
+    && (sourceAcquisitionIntent || externalDomainIntent || structuredAnalysisIntent)
+    && (!renderFromEvidenceIntent || sequentialIntent);
+
+  const pureStructuredAnalysisIntent = structuredAnalysisIntent
+    && !visualizationIntent
+    && !sourceAcquisitionIntent
+    && !browserIntent;
+
+  let adjustment = 0;
+
+  if (renderFromEvidenceIntent) {
+    if (visualizationSpecialist) adjustment += 0.24;
+    if (planningCoordinator) adjustment -= 0.14;
+    if (researchSpecialist && !visualizationSpecialist && !planningCoordinator) adjustment -= 0.08;
+    if (narrativeSpecialist && !visualizationSpecialist) adjustment -= 0.12;
+  }
+
+  if (evidenceToArtifactWorkflow) {
+    if (executionCoordinator) adjustment += 0.24;
+    else if (planningCoordinator) adjustment += 0.12;
+
+    if (webResearchCoordinator && browserIntent) adjustment += 0.08;
+    else if (webResearchCoordinator && !browserIntent && structuredAnalysisIntent && visualizationIntent) adjustment -= 0.08;
+    else if (webResearchCoordinator && !browserIntent && structuredAnalysisIntent) adjustment -= 0.03;
+
+    if (visualizationSpecialist && !planningCoordinator && !renderFromEvidenceIntent) adjustment -= 0.08;
+    if (narrativeSpecialist && !planningCoordinator) adjustment -= 0.1;
+  }
+
+  if (pureStructuredAnalysisIntent) {
+    if (dataSpecialist) adjustment += 0.12;
+    if (planningCoordinator) adjustment -= 0.06;
+    if (narrativeSpecialist && !dataSpecialist) adjustment -= 0.08;
+  }
+
+  if (sourceAcquisitionIntent && !visualizationIntent && !structuredAnalysisIntent) {
+    if (webResearchCoordinator) adjustment += newsIntent ? 0.12 : 0.08;
+    else if (researchSpecialist && !planningCoordinator && !citationResearchSpecialist) adjustment += newsIntent ? 0.1 : 0.08;
+
+    if (!citationIntent && citationResearchSpecialist) adjustment -= 0.06;
+  }
+
+  if (newsIntent && !visualizationIntent && !structuredAnalysisIntent && !sourceAcquisitionIntent) {
+    if (webResearchCoordinator) adjustment += 0.1;
+    else if (researchSpecialist && !planningCoordinator) adjustment += 0.08;
+  }
+
+  return Math.max(-0.3, Math.min(0.3, adjustment));
 }
 
 let _index: EmbeddingEntry[] = [];
@@ -372,6 +744,7 @@ const EMBEDDING_RETRY_MAX_DELAY_MS = 120_000;
 const SEARCH_STOP_WORDS = new Set<string>([
   "a", "an", "and", "any", "are", "can", "check", "could", "do", "does", "for", "from",
   "give", "i", "in", "is", "it", "me", "my", "of", "on", "ones", "our", "please", "show",
+  "each", "every", "last",
   "tell", "the", "their", "them", "these", "this", "those", "to", "us", "we", "with", "you",
   "de", "der", "die", "das", "dem", "den", "des", "ein", "eine", "einer", "eines", "und",
   "für", "fuer", "im", "in", "ist", "kann", "kannst", "meine", "meinen", "meiner", "meines",

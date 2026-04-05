@@ -99,6 +99,24 @@ export function escapeLineTag(s: string): string {
 }
 
 /**
+ * Escape a string for safe interpolation into a QuestDB SQL WHERE clause.
+ *
+ * QuestDB's HTTP /exec endpoint does not support parameterized queries, so we
+ * must escape at the string level. This function:
+ *   1. Escapes single-quotes by doubling them (standard SQL escaping).
+ *   2. Strips SQL comment starters (--) and statement terminators (;) which
+ *      could be used to inject additional clauses.
+ *
+ * Never use raw user input in QuestDB SQL without passing it through this helper.
+ */
+export function escapeSqlString(s: string): string {
+  return s
+    .replace(/--/g, "")        // strip comment starters
+    .replace(/;/g, "")         // strip statement terminators
+    .replace(/'/g, "''");      // escape single-quotes (standard SQL)
+}
+
+/**
  * Build a single InfluxDB line-protocol line from structured input.
  */
 export function buildLine(opts: {

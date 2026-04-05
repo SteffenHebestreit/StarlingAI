@@ -8,7 +8,7 @@
 import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
@@ -39,15 +39,69 @@ interface HeuristicRoutingSignals {
   looksFresh: boolean;
   looksSourceHeavy: boolean;
   looksWebTask: boolean;
+  looksArtifactRender: boolean;
+  looksGroundedInput: boolean;
+  looksSequential: boolean;
+  looksVisualization: boolean;
+  looksDataHeavy: boolean;
+  looksExternalData: boolean;
+  looksSynthesisHeavy: boolean;
+  looksMultiStageEvidenceWorkflow: boolean;
+  looksRenderFromProvidedData: boolean;
+  domainCount: number;
+  prefersPlanner: boolean;
 }
 
 function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const normalized = query.trim().toLowerCase();
+  const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
+  const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now|last year|this year)\b/i.test(normalized);
+  const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
+  const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
+  const looksArtifactRender = /\b(create|build|generate|render|produce|turn|convert|visuali[sz]e|present|html)\b/i.test(normalized);
+  const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
+  const looksSequential = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
+  const looksVisualization = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalized);
+  const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized);
+  const looksExternalData = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|latest|recent|current|source|sources)\b/i.test(normalized);
+  const looksSynthesisHeavy = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalized);
+  const looksRenderFromProvidedData = looksGroundedInput
+    && (looksVisualization || looksArtifactRender)
+    && !looksSourceHeavy
+    && !looksFresh
+    && !looksExternalData
+    && !looksSequential;
+  const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
+    && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
+    && (!looksRenderFromProvidedData || looksSequential);
+  const domainCount = [
+    looksWebTask || looksSourceHeavy || looksFresh,
+    looksDataHeavy,
+    looksVisualization,
+    /\b(report|brief|paper|summary|presentation|writeup|document)\b/i.test(normalized),
+  ].filter(Boolean).length;
+
   return {
-    looksBroad: /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized),
-    looksFresh: /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now)\b/i.test(normalized),
-    looksSourceHeavy: /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized),
-    looksWebTask: /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized),
+    looksBroad,
+    looksFresh,
+    looksSourceHeavy,
+    looksWebTask,
+    looksArtifactRender,
+    looksGroundedInput,
+    looksSequential,
+    looksVisualization,
+    looksDataHeavy,
+    looksExternalData,
+    looksSynthesisHeavy,
+    looksMultiStageEvidenceWorkflow,
+    looksRenderFromProvidedData,
+    domainCount,
+    prefersPlanner: looksSequential
+      || looksMultiStageEvidenceWorkflow
+      || (looksVisualization && (looksExternalData || looksDataHeavy))
+      || (looksSynthesisHeavy && domainCount >= 2)
+      || domainCount >= 3
+      || (looksBroad && domainCount >= 2),
   };
 }
 
@@ -61,9 +115,45 @@ function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[
   ];
 }
 
+function buildPlannerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    "planning",
+    ...(signals.looksSequential ? ["dependencies"] : []),
+    ...(signals.looksVisualization ? ["visualization"] : []),
+    ...(signals.looksDataHeavy ? ["analysis"] : []),
+    ...(signals.looksExternalData ? ["research"] : []),
+  ];
+}
+
+function buildMissionCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    "coordination",
+    "parallel",
+    ...(signals.looksSequential ? ["dependencies"] : []),
+    ...(signals.looksVisualization ? ["visualization"] : []),
+    ...(signals.looksDataHeavy ? ["analysis"] : []),
+    ...(signals.looksExternalData ? ["research"] : []),
+    ...(signals.looksSynthesisHeavy ? ["synthesis"] : []),
+    "quality",
+  ];
+}
+
+function buildChartDesignerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    ...(signals.looksGroundedInput ? ["verified"] : []),
+    ...(signals.looksVisualization ? ["chart"] : []),
+    ...(signals.looksDataHeavy ? ["data"] : []),
+    "artifact",
+  ];
+}
+
 function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
-  if (!signals.looksWebTask || !(signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
+  if (!(signals.looksWebTask || signals.looksSourceHeavy || signals.looksFresh)) {
+    return false;
+  }
+
+  if (signals.looksMultiStageEvidenceWorkflow && !signals.looksWebTask) {
     return false;
   }
 
@@ -76,6 +166,52 @@ function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude
   }
 
   return Boolean(getConfig().subAgents["web_task_coordinator"]);
+}
+
+function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: string[]): boolean {
+  const signals = analyzeHeuristicRoutingQuery(query);
+  if (!signals.prefersPlanner) {
+    return false;
+  }
+
+  if (exclude.includes("project_planner")) {
+    return false;
+  }
+
+  if (ctx.allowedAgents && !ctx.allowedAgents.includes("project_planner")) {
+    return false;
+  }
+
+  const planner = getConfig().subAgents["project_planner"];
+  if (!planner) {
+    return false;
+  }
+
+  const tools = planner.tools ?? [];
+  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+}
+
+function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
+  const signals = analyzeHeuristicRoutingQuery(query);
+  if (!signals.prefersPlanner) {
+    return false;
+  }
+
+  if (exclude.includes("mission_coordinator")) {
+    return false;
+  }
+
+  if (ctx.allowedAgents && !ctx.allowedAgents.includes("mission_coordinator")) {
+    return false;
+  }
+
+  const coordinator = getConfig().subAgents["mission_coordinator"];
+  if (!coordinator) {
+    return false;
+  }
+
+  const tools = coordinator.tools ?? [];
+  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
 }
 
 export interface AgentRoutingCandidate {
@@ -216,14 +352,21 @@ const GPU_HEAVY_QUERY_TERMS = [
   "neural", "inference", "model weights", "fine-tune", "fine tune",
 ];
 
-function computeGpuAffinityAdjustment(query: string, cfg: { compute?: { gpuPreferred?: boolean; gpuTier?: string } | null }): number {
+function computeGpuAffinityAdjustment(
+  query: string,
+  cfg: { compute?: { gpuPreferred?: boolean; gpuTier?: string } | null },
+  poolHasGpuAgents: boolean,
+): number {
   const lq = query.toLowerCase();
   const isComputeHeavy = GPU_HEAVY_QUERY_TERMS.some(t => lq.includes(t));
   if (!isComputeHeavy) return 0;
 
   const gpuTier = cfg.compute?.gpuTier ?? "none";
   if (cfg.compute?.gpuPreferred && gpuTier !== "none") return 0.06; // prefer GPU-capable agents
-  if (gpuTier === "none") return -0.04; // gently deprioritize non-GPU agents for heavy tasks
+  // Only penalize non-GPU agents when there is at least one GPU-capable peer —
+  // otherwise the penalty lowers everyone's score equally and pushes the router
+  // toward ephemeral agent generation unnecessarily.
+  if (gpuTier === "none" && poolHasGpuAgents) return -0.04;
   return 0;
 }
 
@@ -274,6 +417,10 @@ export async function resolveAgentRouting(
     }
   }
 
+  // Pre-compute whether any agent in the pool declares GPU capability, so the
+  // GPU-affinity penalty is only applied when a GPU-capable peer actually exists.
+  const poolHasGpuAgents = entries.some(([, cfg]) => cfg.compute?.gpuPreferred && (cfg.compute?.gpuTier ?? "none") !== "none");
+
   let ranked = entries
     .map(([name, cfg]) => {
       const keywordMatch = scoreAgentKeywordMatch(raw, name, cfg);
@@ -281,13 +428,14 @@ export async function resolveAgentRouting(
       const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
       const outcomeBoost = computeOutcomeBoost(name, config.workspacePath);
-      const intentAdjustment = computeAgentIntentAdjustment(raw, cfg, [
+      const intentReinforcement = computeAgentIntentAdjustment(raw, cfg, [
         ...keywordMatch.matchedTerms,
         ...(cfg.capabilities ?? []),
         ...(cfg.tags ?? []),
-      ]);
-      const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg);
-      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentAdjustment + gpuAdjustment));
+      ]) * 0.25;
+      const taskShapeAdjustment = computeAgentTaskShapeAdjustment(raw, cfg);
+      const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
+      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment));
       return {
         name,
         cfg,
@@ -324,6 +472,37 @@ export async function resolveAgentRouting(
         };
       })
       .sort(compareRoutingResults);
+  }
+
+  const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
+  const preferMissionInSearch = preferenceSignals.looksMultiStageEvidenceWorkflow
+    || (preferenceSignals.looksSequential
+      && (preferenceSignals.looksVisualization || preferenceSignals.looksExternalData || preferenceSignals.looksSourceHeavy || preferenceSignals.looksDataHeavy));
+  const preferWebCoordinatorInSearch = !preferenceSignals.looksMultiStageEvidenceWorkflow
+    && !preferenceSignals.looksDataHeavy
+    && !preferenceSignals.looksVisualization
+    && (preferenceSignals.looksWebTask || preferenceSignals.looksSourceHeavy || preferenceSignals.looksFresh);
+  const preferProjectPlannerInSearch = preferenceSignals.prefersPlanner
+    && !preferMissionInSearch
+    && !preferenceSignals.looksSourceHeavy
+    && !preferenceSignals.looksFresh
+    && !preferenceSignals.looksExternalData
+    && !preferenceSignals.looksVisualization
+    && !preferenceSignals.looksDataHeavy;
+  const preferredNames = [
+    preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
+    preferMissionInSearch ? "mission_coordinator" : null,
+    preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
+    preferProjectPlannerInSearch ? "project_planner" : null,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const preferredName of preferredNames) {
+    const preferredCandidate = ranked.find((candidate) => candidate.name === preferredName);
+    if (!preferredCandidate) {
+      continue;
+    }
+    ranked = [preferredCandidate, ...ranked.filter((candidate) => candidate.name !== preferredName)];
+    break;
   }
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
@@ -463,6 +642,60 @@ interface TaskGraphNodeInput {
   fallbackAgents?: string[];
   routingQuery?: string;
   skillMatchThreshold?: number;
+}
+
+const DEFAULT_MAX_AGENT_CALLS_PER_TURN = 2;
+const DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN = 8;
+
+function totalDelegationsThisTurn(ctx: ToolContext): number {
+  return [...(ctx._turnAgentCounts?.values() ?? [])].reduce((sum, count) => sum + count, 0);
+}
+
+function getPerAgentDelegationLimit(ctx: ToolContext, agentName: string): number {
+  const override = ctx._turnAgentRepeatLimitOverrides?.[agentName];
+  return Math.max(DEFAULT_MAX_AGENT_CALLS_PER_TURN, override ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN);
+}
+
+function getTotalDelegationLimit(ctx: ToolContext): number {
+  return Math.max(DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN, ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN);
+}
+
+function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+  const counts = new Map<string, number>();
+  for (const agentName of agentNames) {
+    const normalized = agentName?.trim();
+    if (!normalized) continue;
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+
+  const repeatOverrides: Record<string, number> = {
+    ...(ctx._turnAgentRepeatLimitOverrides ?? {}),
+  };
+
+  let changed = false;
+  for (const [agentName, count] of counts.entries()) {
+    if (count <= DEFAULT_MAX_AGENT_CALLS_PER_TURN) continue;
+    const nextLimit = Math.max(repeatOverrides[agentName] ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN, count);
+    if (repeatOverrides[agentName] !== nextLimit) {
+      repeatOverrides[agentName] = nextLimit;
+      changed = true;
+    }
+  }
+
+  const nextTotalLimit = Math.max(
+    ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN,
+    totalDelegationsThisTurn(ctx) + Math.max(1, plannedDelegations) + 1,
+  );
+
+  if (!changed && nextTotalLimit === (ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN)) {
+    return ctx;
+  }
+
+  return {
+    ...ctx,
+    _turnAgentRepeatLimitOverrides: repeatOverrides,
+    _turnTotalDelegationLimitOverride: nextTotalLimit,
+  };
 }
 
 interface ArchitectEphemeralSpec {
@@ -667,7 +900,7 @@ export function looksLikeFailureResult(result: string): boolean {
 export function looksLikeInfrastructureFailure(result: string): boolean {
   if (!result.trim()) return false;
   const preview = result.slice(0, 800);
-  return /\b(ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
+  return /\b(timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -684,6 +917,9 @@ function uniqueNames(values: string[]): string[] {
 
 async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: string[]): Promise<AgentRoutingCandidate[]> {
   const excluded = new Set(exclude);
+  const preferMissionCoordinator = shouldPreferMissionCoordinator(query, ctx, exclude);
+  const preferWebTaskCoordinator = shouldPreferWebTaskCoordinator(query, ctx, exclude);
+  const preferProjectPlanner = shouldPreferProjectPlanner(query, ctx, exclude);
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
@@ -727,9 +963,17 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       return left.name.localeCompare(right.name);
     });
 
-  const coordinatorCandidate = heuristicCandidates.find((candidate) => candidate.name === "web_task_coordinator");
-  if (coordinatorCandidate) {
-    return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
+  const preferredCoordinators = [
+    preferMissionCoordinator ? "mission_coordinator" : null,
+    preferWebTaskCoordinator ? "web_task_coordinator" : null,
+    preferProjectPlanner ? "project_planner" : null,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const preferredCoordinator of preferredCoordinators) {
+    const coordinatorCandidate = mergedCandidates.find((candidate) => candidate.name === preferredCoordinator);
+    if (coordinatorCandidate) {
+      return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
+    }
   }
 
   return mergedCandidates;
@@ -758,11 +1002,24 @@ function buildHeuristicRoutingCandidates(
     heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
   };
 
+  if (shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
+    maybeAdd("mission_coordinator", 0.68, buildMissionCoordinatorMatchedTerms(signals));
+  }
+
   if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
     maybeAdd("web_task_coordinator", 0.62, buildCoordinatorMatchedTerms(signals));
   }
 
-  if (signals.looksSourceHeavy || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
+  if (shouldPreferProjectPlanner(normalized, ctx, [...excluded])) {
+    maybeAdd("project_planner", 0.64, buildPlannerMatchedTerms(signals));
+  }
+
+  if (signals.looksRenderFromProvidedData) {
+    maybeAdd("chart_designer", 0.66, buildChartDesignerMatchedTerms(signals));
+  }
+
+  if ((signals.looksSourceHeavy && /\b(citation|citations|reference|references|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalized))
+    || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
     maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
   }
 
@@ -995,9 +1252,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
 
-  // Per-turn limits — prevent runaway delegation loops from smaller local LLMs.
-  const MAX_AGENT_CALLS_PER_TURN = 2;      // same agent may not be re-spawned more than this many times
-  const MAX_TOTAL_DELEGATIONS_PER_TURN = 8; // hard ceiling across all agents in a single turn
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 
   while (true) {
@@ -1015,15 +1269,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     // Hard ceiling: if we've already spawned too many agents this turn, stop and tell the LLM to synthesize
-    const totalDelegations = [...ctx._turnAgentCounts.values()].reduce((sum, n) => sum + n, 0);
-    if (totalDelegations >= MAX_TOTAL_DELEGATIONS_PER_TURN) {
+    const totalDelegations = totalDelegationsThisTurn(ctx);
+    const maxTotalDelegationsPerTurn = getTotalDelegationLimit(ctx);
+    if (totalDelegations >= maxTotalDelegationsPerTurn) {
       taskState.status = "failed";
       taskState.error = "Turn delegation budget exceeded.";
       publishSwarmState(ctx);
       return {
         success: false,
         output: "",
-        error: `Turn delegation limit (${MAX_TOTAL_DELEGATIONS_PER_TURN}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
+        error: `Turn delegation limit (${maxTotalDelegationsPerTurn}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
         metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
@@ -1039,6 +1294,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           bestAutoMatchScore = topCandidate.score;
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
+            || topCandidate.confidence !== "low"
             || !shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold);
           if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
@@ -1051,7 +1307,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         }
       }
 
-      // ── Step 2: heuristic web-task-coordinator fallback ──────────────────
+      // ── Step 2: heuristic coordinator fallbacks ─────────────────────────
+      if (candidateQueue.length === 0) {
+        if (attemptedAgents.length > 0 && shouldPreferMissionCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
+          routingCandidateMap.set("mission_coordinator", {
+            confidence: "medium",
+            matchedTerms: buildMissionCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
+            score: 0.68,
+          });
+          candidateQueue.push("mission_coordinator");
+        }
+      }
+
       if (candidateQueue.length === 0) {
         if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
           routingCandidateMap.set("web_task_coordinator", {
@@ -1089,9 +1356,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     const candidate = candidateQueue.shift()!;
     if (attemptedAgents.includes(candidate)) continue;
 
-    // Per-agent repeat cap: skip if this agent has already been called MAX_AGENT_CALLS_PER_TURN times this turn
+    // Per-agent repeat cap: skip if this agent has already been called its allowed number of times this turn
     const prevCalls = ctx._turnAgentCounts.get(candidate) ?? 0;
-    if (prevCalls >= MAX_AGENT_CALLS_PER_TURN) {
+    if (prevCalls >= getPerAgentDelegationLimit(ctx, candidate)) {
       continue;
     }
     ctx._turnAgentCounts.set(candidate, prevCalls + 1);
@@ -1414,6 +1681,8 @@ registerTool({
     swarmState.objective = String(args["objective"] ?? swarmState.objective);
     publishSwarmState(ctx);
 
+    const delegatedCtx = withDelegationFanoutAllowance(ctx, rawNodes.map((node) => node.agentName), rawNodes.length);
+
     const remaining = new Map(rawNodes.map((node) => [node.id, node]));
     const completed = new Set<string>();
     const failed = new Set<string>();
@@ -1499,7 +1768,7 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, ctx),
+        }, delegatedCtx),
       })));
 
       for (const { node, result } of results) {
@@ -1896,7 +2165,7 @@ registerTool({
 
 registerTool({
   name: "parallel_delegate",
-  description: "Run multiple independent sub-agent tasks in parallel and collect all results. Use when the orchestrator needs outputs from 2–5 agents that don't depend on each other. Returns all results concatenated with separators.",
+  description: "Run multiple independent sub-agent tasks in parallel and collect all results. Use when the orchestrator needs outputs from 2–5 independent partitions. Repeating the same agent is allowed when each task is a distinct partition of the work. Returns all results concatenated with separators.",
   parameters: {
     type: "object",
     properties: {
@@ -1945,12 +2214,14 @@ registerTool({
       { sessionId: ctx.sessionId }
     );
 
+    const delegatedCtx = withDelegationFanoutAllowance(ctx, tasks.map((taskSpec) => taskSpec.agentName), tasks.length);
+
     const results = await Promise.all(
       tasks.map((taskSpec, index) => executeDelegationWithFallback({
         ...taskSpec,
         taskId: `parallel_${index + 1}`,
         taskTitle: summarizeText(taskSpec.task, 80),
-      }, ctx))
+      }, delegatedCtx))
     );
 
     const formatted = results.map((result, index) => {
