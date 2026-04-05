@@ -38,6 +38,12 @@ export interface DynamicToolDefinition {
     /** Promotion lifecycle: undefined / "none" = not nominated, "pending" = awaiting operator review */
     promotionStatus?: "none" | "pending" | "approved" | "rejected";
     promotionNominatedAt?: string;
+    /**
+     * Persisted runtime call stats — written to disk periodically so counters
+     * survive gateway restarts and continue toward the promotion threshold.
+     */
+    runtimeCalls?: number;
+    runtimeSuccesses?: number;
 }
 
 // ── Promotion queue ─────────────────────────────────────────────────────────
@@ -204,9 +210,14 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
         unregisterTool(fullName);
     }
 
-    // Ensure runtime stats entry exists (preserve across re-registrations)
+    // Seed runtime stats from persisted values (survives gateway restarts).
+    // Only initialise from disk if no in-memory entry exists yet — re-registrations
+    // after a hot-reload preserve the accumulated in-process counts.
     if (!_runtimeStats.has(def.name)) {
-        _runtimeStats.set(def.name, { calls: 0, successes: 0 });
+        _runtimeStats.set(def.name, {
+            calls: def.runtimeCalls ?? 0,
+            successes: def.runtimeSuccesses ?? 0,
+        });
     }
 
     const handler: ToolHandler = {
@@ -220,6 +231,8 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
             stats.calls++;
             if (result.success) stats.successes++;
             _runtimeStats.set(def.name, stats);
+            // Persist updated stats so they survive gateway restarts
+            persistStats(def.name, stats);
             // Auto-nominate if threshold reached and not already nominated
             maybeNominateForPromotion(def.name);
             return result;
@@ -264,6 +277,20 @@ function syncDynamicTools(): void {
             _loadedTools.delete(name);
             log.info({ toolName: name }, "Dynamic tool unregistered (file removed)");
         }
+    }
+}
+
+/** Persist updated call stats into the tool's JSON file on disk. */
+function persistStats(bareToolName: string, stats: _CallStats): void {
+    const def = _loadedTools.get(bareToolName);
+    if (!def) return;
+    def.runtimeCalls = stats.calls;
+    def.runtimeSuccesses = stats.successes;
+    try {
+        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+    } catch (err) {
+        log.warn({ err, toolName: bareToolName }, "Failed to persist runtime stats — counts will reset on restart");
     }
 }
 

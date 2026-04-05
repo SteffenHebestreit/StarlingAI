@@ -290,7 +290,12 @@ function persistCheckpoint(workspacePath: string, cp: TaskCheckpoint): void {
     ensureDir(workspacePath);
     writeFileSync(checkpointPath(workspacePath, cp.taskId), JSON.stringify(cp, null, 2), "utf-8");
   } catch (err) {
-    log.warn({ err, taskId: cp.taskId }, "Failed to persist checkpoint to disk");
+    // Checkpoint is still held in _store (in-process), but will NOT survive a
+    // gateway restart. Log a warn with enough context for operators to notice.
+    log.warn(
+      { err, taskId: cp.taskId, agentName: cp.agentName, status: cp.status },
+      "Failed to persist checkpoint to disk — paused task will be lost on restart",
+    );
   }
 }
 

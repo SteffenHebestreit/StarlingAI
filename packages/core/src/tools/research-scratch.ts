@@ -21,7 +21,7 @@
 
 import { v4 as uuid } from "uuid";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { isQuestDbAvailable, questWrite, questQuery, buildLine, escapeLineTag } from "../db/questdb.js";
+import { isQuestDbAvailable, questWrite, questQuery, buildLine, escapeLineTag, escapeSqlString } from "../db/questdb.js";
 import { ephemeralPut as _ephemeralPut, ephemeralQuery as _ephemeralQuery, ephemeralDelete as _ephemeralDelete } from "../runtime/ephemeral-store/index.js";
 
 const RESEARCH_NAMESPACE = "research-notes";
@@ -139,8 +139,8 @@ registerTool({
 
     if (isQuestDbAvailable()) {
       try {
-        const sessionEsc = ctx.sessionId.slice(0, 64).replace(/'/g, "''");
-        const topicFilter = filterTopic ? ` AND topic = '${escapeLineTag(filterTopic).replace(/'/g, "''")}'` : "";
+        const sessionEsc = escapeSqlString(ctx.sessionId.slice(0, 64));
+        const topicFilter = filterTopic ? ` AND topic = '${escapeSqlString(escapeLineTag(filterTopic))}'` : "";
         const rows = await questQuery(
           `SELECT topic, content, source, importance, timestamp AS ts
            FROM research_notes
@@ -207,7 +207,7 @@ registerTool({
   async execute(_args, ctx: ToolContext): Promise<ToolResult> {
     if (isQuestDbAvailable()) {
       try {
-        const sessionEsc = ctx.sessionId.slice(0, 64).replace(/'/g, "''");
+        const sessionEsc = escapeSqlString(ctx.sessionId.slice(0, 64));
         const rows = await questQuery(
           `SELECT topic, importance, count() AS n
            FROM research_notes

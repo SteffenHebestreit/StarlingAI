@@ -168,9 +168,13 @@ registerTool({
 
     if (!cypher) return { success: false, output: "", error: "cypher is required" };
 
-    // Safety: reject write operations
+    // Safety: defense-in-depth keyword block for write operations.
+    // The primary enforcement is the neo4j READ session mode (session.READ),
+    // which the driver enforces at the server level. This check is a second
+    // layer to catch attempts before they reach the wire and to produce a
+    // clearer error message than a neo4j access-mode exception.
     const upper = cypher.toUpperCase();
-    for (const kw of ["CREATE", "MERGE", "DELETE", "SET", "REMOVE", "DROP", "CALL apoc.schema", "CALL db."]) {
+    for (const kw of ["CREATE", "MERGE", "DELETE", "SET", "REMOVE", "DROP", "FOREACH", "CALL apoc.do", "CALL apoc.schema", "CALL db."]) {
       if (upper.includes(kw)) {
         return { success: false, output: "", error: `graph_query is read-only. Use graph_upsert_entity / graph_relate for writes. Blocked keyword: ${kw}` };
       }
