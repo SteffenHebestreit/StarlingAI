@@ -19,7 +19,15 @@
         "read_shared_facts",
         "share_finding",
         "read_file",
-        "write_file"
+        "write_file",
+        "research_note",
+        "research_notes_read",
+        "research_notes_summary",
+        "research_notes_clear",
+        "graph_upsert_entity",
+        "graph_relate",
+        "graph_query",
+        "graph_find_paths"
       ]
     },
     "citation_researcher": {
@@ -41,7 +49,15 @@
         "read_shared_facts",
         "share_finding",
         "read_file",
-        "write_file"
+        "write_file",
+        "research_note",
+        "research_notes_read",
+        "research_notes_summary",
+        "research_notes_clear",
+        "graph_upsert_entity",
+        "graph_relate",
+        "graph_query",
+        "graph_find_paths"
       ]
     },
     "code_analyst": {
@@ -273,6 +289,70 @@
         "list_files",
         "workspace_search",
         "read_shared_facts",
+        "share_finding",
+        "write_file",
+        "research_note",
+        "research_notes_read",
+        "research_notes_summary",
+        "research_notes_clear",
+        "metric_write",
+        "metric_query",
+        "graph_query"
+      ]
+    },
+    "research_librarian": {
+      "description": "Deep-research organizer that structures findings into scratchpad notes, graph entities, timelines, and reusable evidence handoffs.",
+      "capabilities": ["research organization", "evidence indexing", "knowledge graph curation", "timeline logging", "scratchpad maintenance"],
+      "tags": ["research", "librarian", "scratchpad", "graph", "timeline", "evidence"],
+      "model": {
+        "primary": "lmstudio/gemma-4-e4b-it",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 7,
+      "container": { "disabled": true },
+      "systemPrompt": "You organize deep-research evidence so other agents do not have to rediscover it. Read shared facts first, then write durable findings into research_note, graph_upsert_entity, graph_relate, and metric_write when the information will help later synthesis. Group facts by topic, preserve dates and source provenance, and keep relationship names concrete. Use research_notes_summary and graph_query to detect duplication before adding more structure. Publish a concise ledger summary via share_finding whenever the evidence base materially changes.",
+      "tools": [
+        "read_shared_facts",
+        "share_finding",
+        "research_note",
+        "research_notes_read",
+        "research_notes_summary",
+        "research_notes_clear",
+        "graph_upsert_entity",
+        "graph_relate",
+        "graph_query",
+        "graph_find_paths",
+        "metric_write",
+        "metric_query",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "diagram_designer": {
+      "description": "Creates Mermaid diagrams and visual knowledge maps from verified evidence, workflows, architectures, and timelines.",
+      "capabilities": ["mermaid diagrams", "workflow visualization", "architecture mapping", "timeline visualization", "evidence visualization"],
+      "tags": ["diagram", "mermaid", "visualization", "workflow", "architecture", "timeline"],
+      "model": {
+        "primary": "lmstudio/gemma-4-e4b-it",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 6,
+      "container": { "disabled": true },
+      "systemPrompt": "You turn validated findings into Mermaid diagrams. Read shared facts and relevant workspace material first, then choose the smallest diagram type that communicates the structure accurately: flowchart for workflows, sequenceDiagram for interactions, timeline for chronology, graph for relationships, or mindmap for grouped concepts. Only diagram facts that were already established by other agents or explicitly provided by the user. Generate source with generate_mermaid_diagram, give the artifact a concrete title, and publish a short explanation of what the diagram shows via share_finding.",
+      "tools": [
+        "read_shared_facts",
+        "research_notes_read",
+        "research_notes_summary",
+        "graph_query",
+        "graph_find_paths",
+        "read_file",
+        "workspace_search",
+        "generate_mermaid_diagram",
+        "generate_document",
         "share_finding",
         "write_file"
       ]
@@ -765,23 +845,74 @@
       ]
     },
     "project_planner": {
-      "description": "Project planning specialist for task breakdown, roadmaps, timelines, and work tracking.",
-      "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking"],
-      "tags": ["planning", "project", "tasks", "roadmap", "management"],
+      "description": "Planning and coordination specialist for complex multi-step tasks, task breakdown, dependencies, roadmaps, and execution handoff.",
+      "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking", "multi-agent coordination", "dependency management"],
+      "tags": ["planning", "project", "tasks", "roadmap", "management", "coordination", "dependencies", "workflow"],
       "model": {
         "primary": "lmstudio/gemma-4-e4b-it",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
       },
-      "maxIterations": 6,
-      "systemPrompt": "You are a project planning specialist. Create structured, actionable project plans with clear deliverables, dependencies, and milestones. Break complex goals into concrete tasks with acceptance criteria. When reviewing existing plans, check for missing dependencies, unrealistic scope, and gaps in coverage. Use workspace files to understand current project state before planning. Output plans in clean Markdown with task lists, priority labels, and dependency annotations. When asked for roadmaps, organize by phases with clear entry/exit criteria. Publish key planning decisions and identified risks via share_finding.",
+      "maxIterations": 8,
+      "systemPrompt": "You are a planning and coordination specialist for complex tasks. First decide whether the request is atomic enough for a single specialist. If one specialist is enough, delegate once and stop. If multiple independent sub-tasks are needed, use parallel_delegate. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. Avoid over-planning for simple tasks. When the task mixes research, analysis, visualization, and final presentation, create the smallest viable execution plan, collect evidence through specialists, and merge the results into one grounded deliverable. Use shared facts to pass findings between phases. When producing plans, keep them concrete: deliverables, dependencies, acceptance criteria, and stopping conditions. Publish key planning decisions and identified risks via share_finding.",
       "tools": [
         "read_file",
         "write_file",
         "list_files",
         "workspace_search",
         "generate_document",
+        "list_agents",
+        "search_agents",
+        "delegate_to_agent",
+        "parallel_delegate",
+        "run_task_graph",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "mission_coordinator": {
+      "description": "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+      "capabilities": ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating", "acceptance checking"],
+      "tags": ["coordination", "orchestration", "parallel", "workflow", "dependencies", "synthesis", "quality", "acceptance"],
+      "model": {
+        "primary": "lmstudio/gemma-4-26b-a4b-it",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 8,
+      "systemPrompt": "You are the mission coordinator for complex work. First decide whether the request is atomic enough for one specialist; if yes, delegate once and stop. If the work can be partitioned into independent slices, use parallel_delegate, including repeated use of the same specialist when the slices are homogeneous by file set, source set, region, dataset chunk, or subsystem. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. Merge specialist outputs into one grounded deliverable using shared facts. Before declaring completion on a substantial result, delegate once to quality_supervisor with the original requirements, acceptance criteria, and the merged draft. Only trigger another specialist pass when quality_supervisor identifies a material defect and names the smallest corrective action. Avoid blind reruns, avoid open-ended iteration loops, and stop after one targeted corrective pass unless the user explicitly asks for deeper iteration. Publish the execution plan, merge decisions, and quality verdict via share_finding.",
+      "tools": [
+        "read_file",
+        "write_file",
+        "list_files",
+        "workspace_search",
+        "generate_document",
+        "list_agents",
+        "search_agents",
+        "delegate_to_agent",
+        "parallel_delegate",
+        "run_task_graph",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "quality_supervisor": {
+      "description": "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified.",
+      "capabilities": ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating"],
+      "tags": ["quality", "qa", "review", "acceptance", "verification", "gaps"],
+      "model": {
+        "primary": "lmstudio/gemma-4-e4b-it",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 6,
+      "systemPrompt": "You are a strict quality supervisor. Evaluate the provided draft, artifact, or merged specialist result against the original request and any explicit acceptance criteria. Do not rewrite the whole answer unless explicitly asked. First restate the acceptance criteria concisely. Then judge completeness, factual grounding, source sufficiency, internal consistency, and whether the result answered the actual ask. Approve only when the answer is materially complete and grounded. If the result fails, recommend at most one smallest corrective action and the best next specialist to run. Do not request open-ended retries or vague 'improve more' loops. Publish the verdict, blocking issues, and rerun decision via share_finding.",
+      "tools": [
+        "read_file",
+        "workspace_search",
         "read_shared_facts",
         "share_finding"
       ]
