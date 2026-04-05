@@ -62,6 +62,9 @@ import "./tools/mail.js";
 import "./tools/agent-datastore.js";
 import "./tools/tool-develop.js";
 import "./tools/self-improve-tools.js";
+import "./tools/graph.js";
+import "./tools/timeseries.js";
+import "./tools/research-scratch.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";
