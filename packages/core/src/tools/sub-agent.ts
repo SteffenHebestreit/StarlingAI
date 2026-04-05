@@ -407,10 +407,10 @@ const EXECUTION_TOOL_FAMILIES = {
   ]),
 };
 
-function validateEphemeralToolSelection(tools: string[]): string[] {
+function validateEphemeralToolSelection(tools: string[], opts?: { allowZeroTools?: boolean }): string[] {
   const issues: string[] = [];
 
-  if (tools.length === 0) {
+  if (tools.length === 0 && !opts?.allowZeroTools) {
     issues.push("Ephemeral agents must have at least one valid tool.");
   }
 
@@ -510,6 +510,7 @@ function buildArchitectPrompt(task: string): string {
     "",
     "Rules:",
     "- Choose at most 4 tools (up to 6 for computer-use tasks).",
+    "- If the task can be completed purely from the provided task text and context, tools may be an empty array [].",
     "- Do NOT mix execution families: shell (shell_exec, run_script), browser (mcp__playwright__*), and code (mcp__code_sandbox__*) are separate families — pick at most one.",
     "- Keep systemPrompt concise (under 200 words). State the role, key rules, and a tool budget.",
     "- maxIterations must be between 3 and 8 for non-computer tasks. For computer-use tasks (tools starting with computer_), use 10-15 iterations because each screen interaction needs snapshot+action+verify cycles.",
@@ -826,7 +827,7 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   const maxIterations = Math.min(iterCap, Math.max(iterFloor, Number(spec.maxIterations ?? (usesComputerTools ? 12 : 5)) || 5));
   const model = normalizeArchitectModel(spec.model);
 
-  const policyIssues = validateEphemeralToolSelection(tools);
+  const policyIssues = validateEphemeralToolSelection(tools, { allowZeroTools: true });
   if (policyIssues.length > 0 || !systemPrompt) {
     logAudit(
       "architect_fallback_rejected",
@@ -1028,35 +1029,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     if (candidateQueue.length === 0) {
-      if (usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
-        biddingTried = true;
-        const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
-        bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
-        if (shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
-          candidateQueue = [];
-        } else {
-        for (const bid of bids) {
-          routingCandidateMap.set(bid.agentName, {
-            confidence: bid.confidence,
-            matchedTerms: bid.matchedTerms,
-            score: bid.score,
-          });
-        }
-        candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
-        }
-      }
-
-      if (candidateQueue.length === 0) {
-        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
-          routingCandidateMap.set("web_task_coordinator", {
-            confidence: "medium",
-            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
-            score: 0.62,
-          });
-          candidateQueue.push("web_task_coordinator");
-        }
-      }
-
+      // ── Step 1: embedding + keyword routing (fast, outcome-boosted) ──────
+      // Run first for all undirected delegations — deterministic, uses
+      // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
         const routingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
         if (routingCandidates.length > 0) {
@@ -1073,6 +1048,38 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             });
             candidateQueue.push(topCandidate.name);
           }
+        }
+      }
+
+      // ── Step 2: heuristic web-task-coordinator fallback ──────────────────
+      if (candidateQueue.length === 0) {
+        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
+          routingCandidateMap.set("web_task_coordinator", {
+            confidence: "medium",
+            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
+            score: 0.62,
+          });
+          candidateQueue.push("web_task_coordinator");
+        }
+      }
+
+      // ── Step 3: autonomous bidding (last resort — 125ms window) ─────────
+      // Only when both routing and heuristics came up empty. Bidding is the
+      // correct fallback for tasks that require a dynamic peer-elected agent
+      // not represented in the static catalog.
+      if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
+        biddingTried = true;
+        const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
+        if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+          for (const bid of bids) {
+            routingCandidateMap.set(bid.agentName, {
+              confidence: bid.confidence,
+              matchedTerms: bid.matchedTerms,
+              score: bid.score,
+            });
+          }
+          candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
         }
       }
 
@@ -1813,13 +1820,13 @@ registerTool({
 
 registerTool({
   name: "delegate_to_agent",
-  description: "Delegate a task to a named specialized sub-agent. The sub-agent runs autonomously with its own model and tool set, then returns its result. Use list_agents first to see what agents are available.",
+  description: "Delegate a task to a specialized sub-agent. When agentName is omitted the swarm's autonomous bidding system selects the best specialist — prefer this for tasks where the right specialist is not obvious. Provide agentName only when you already know from prior context exactly which specialist to use.",
   parameters: {
     type: "object",
     properties: {
       agentName: {
         type: "string",
-        description: "Name of the sub-agent to invoke (must match a key in subAgents config)",
+        description: "Name of the sub-agent to invoke. OPTIONAL — omit to let the swarm bidding system pick the best specialist automatically.",
       },
       task: {
         type: "string",
@@ -1843,25 +1850,23 @@ registerTool({
         description: "Optional 0-1 threshold. If the best auto-selected specialist scores below this value, generate an ephemeral agent instead.",
       },
     },
-    required: ["agentName", "task"],
+    required: ["task"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const agentName = String(args["agentName"] ?? "").trim();
+    // agentName is now optional — omitting it triggers undirected swarm bidding
+    const agentName = args["agentName"] ? String(args["agentName"]).trim() : "";
     const task = String(args["task"] ?? "").trim();
     const context = args["context"] ? String(args["context"]) : undefined;
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
 
-    if (!agentName) {
-      return { success: false, output: "", error: "agentName is required" };
-    }
     if (!task) {
       return { success: false, output: "", error: "task is required" };
     }
 
-    // Enforce per-scene agent scope
-    if (ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
+    // Enforce per-scene agent scope only when an explicit agent was requested
+    if (agentName && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
       return {
         success: false,
         output: "",
