@@ -6,6 +6,7 @@ export interface AssistantPersonalityProfile {
   schemaVersion: 2;
   identity: {
     core: string;
+    name?: string;
   };
   voice: {
     tone: string[];
@@ -29,6 +30,7 @@ export interface AssistantPersonalityInput {
   schemaVersion?: 2;
   identity: {
     core: string;
+    name?: string;
   };
   voice: {
     tone: string[];
@@ -50,6 +52,7 @@ function cloneProfile(profile: AssistantPersonalityProfile): AssistantPersonalit
     schemaVersion: 2,
     identity: {
       core: profile.identity.core,
+      name: profile.identity.name,
     },
     voice: {
       tone: [...profile.voice.tone],

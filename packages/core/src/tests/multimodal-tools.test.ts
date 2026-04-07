@@ -293,6 +293,56 @@ describe("multimodal and browser direct tools", () => {
     }
   });
 
+  it("normalizes locale-style STT language codes for transcribe-only backends and retries without language on failure", async () => {
+    writeFileSync(join(tempDir, "transcribe-only-locale.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        stt: { ...realConfig.multimodal.stt, api: "transcribe-only" },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const form = init?.body as FormData;
+      const language = form.get("language");
+      if (language === "de") {
+        return new Response(JSON.stringify({ error: "unsupported locale variant" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ text: "retried transcript" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("transcribe_audio");
+
+      const result = await tool!.execute({ path: "transcribe-only-locale.wav", language: "de-DE" }, {
+        sessionId: "session-stt-transcribe-only-locale",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("retried transcript");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstForm = fetchMock.mock.calls[0]?.[1]?.body as FormData;
+      const secondForm = fetchMock.mock.calls[1]?.[1]?.body as FormData;
+      expect(firstForm.get("language")).toBe("de");
+      expect(secondForm.get("language")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("returns failure when the STT service responds with a non-200 error", async () => {
     writeFileSync(join(tempDir, "bad.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
 
@@ -554,6 +604,68 @@ describe("multimodal and browser direct tools", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Voice not found/);
+  });
+
+  it("falls back to plain qwen TTS when only a configured default voice sample is present but the model lacks voice_clone", async () => {
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    writeFileSync(join(tempDir, "voice-sample.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        tts: {
+          ...realConfig.multimodal.tts,
+          api: "qwen-compatible",
+          baseUrl: "http://tts.local",
+          model: "Qwen/Qwen3-TTS-12Hz-1.7B",
+          defaultSpeaker: "Vivian",
+          voiceSamplePath: "voice-sample.wav",
+          voiceSampleText: "sample voice",
+        },
+      },
+    } as typeof realConfig);
+
+    const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models")) {
+        return new Response(JSON.stringify({
+          models: { "Qwen/Qwen3-TTS-12Hz-1.7B": { capabilities: ["tts"] } },
+          current_model: "Qwen/Qwen3-TTS-12Hz-1.7B",
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/load_model")) {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/tts")) {
+        return new Response(fakeWav, {
+          status: 200,
+          headers: { "Content-Type": "audio/wav" },
+        });
+      }
+      throw new Error(`Unexpected TTS URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("synthesize_speech");
+
+      const result = await tool!.execute({ text: "Hello fallback", outputPath: "fallback.wav" }, {
+        sessionId: "session-tts-fallback",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith("/clone") || String(call[0]).endsWith("/clone-with-ref-text"))).toBe(false);
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith("/tts"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // ── analyze_image ──────────────────────────────────────────────────────────

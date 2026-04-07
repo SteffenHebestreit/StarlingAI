@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
+
 describe("rpc timeout cleanup", () => {
   afterEach(async () => {
     vi.useRealTimers();
@@ -19,7 +21,7 @@ describe("rpc timeout cleanup", () => {
     }
   });
 
-  it("archives the session when a websocket turn times out", async () => {
+  it("keeps the session alive through the synthesis grace window and only archives if the turn never resolves", async () => {
     vi.useFakeTimers();
 
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-timeout-"));
@@ -67,6 +69,11 @@ describe("rpc timeout cleanup", () => {
 
       await vi.advanceTimersByTimeAsync(30_000);
 
+      expect(session.getSession(active.id)).toBeDefined();
+      expect(session.getSessionRecord(active.id)?.isArchived()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+
       expect(session.getSession(active.id)).toBeUndefined();
       expect(session.getSessionRecord(active.id)?.isArchived()).toBe(true);
 
@@ -77,6 +84,88 @@ describe("rpc timeout cleanup", () => {
       });
 
       expect(timeoutEvent).toBeTruthy();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps --iter 0 to 200 and --timeout 0 to 7200s for safety", async () => {
+    vi.useFakeTimers();
+
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-zero-overrides-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        jwtSecret: "t".repeat(32),
+        turnTimeoutMs: 30_000,
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const runTurnMock = vi.fn(() => new Promise(() => {}));
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    try {
+      const [{ RpcConnection }, session] = await Promise.all([
+        import("../gateway/rpc.js"),
+        import("../agent/session.js"),
+      ]);
+
+      const active = session.createSession({ channel: "webchat" });
+      const connection = new RpcConnection(ws as never);
+
+      await connection.handleMessage(JSON.stringify({
+        id: "req-zero-overrides",
+        method: "chat.send",
+        params: {
+          sessionId: active.id,
+          requestId: "turn-zero-overrides",
+          message: "hello --iter 0 --timeout 0",
+        },
+      }));
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock.mock.calls[0]?.[0]).toMatchObject({
+        userMessage: "hello",
+        maxIterationsOverride: 200,
+        turnTimeoutOverrideMs: 7200000,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(session.getSession(active.id)).toBeDefined();
+      expect(session.getSessionRecord(active.id)?.isArchived()).toBe(false);
+
+      const acceptedEvent = sent.find((event) => {
+        if (event["type"] !== "status") return false;
+        const data = event["data"] as Record<string, unknown> | undefined;
+        return data?.["requestId"] === "turn-zero-overrides" && data?.["status"] === "accepted";
+      });
+
+      expect((acceptedEvent?.["data"] as Record<string, unknown> | undefined)?.["activeFlags"]).toEqual({
+        maxIterations: 200,
+        timeout: 7200,
+      });
+
+      const timeoutEvent = sent.find((event) => {
+        if (event["type"] !== "status") return false;
+        const data = event["data"] as Record<string, unknown> | undefined;
+        return data?.["requestId"] === "turn-zero-overrides" && data?.["status"] === "error";
+      });
+
+      expect(timeoutEvent).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -141,6 +230,120 @@ describe("rpc timeout cleanup", () => {
     };
     expect(olderPayload.transcript.map((message) => message.content)).toEqual(["one"]);
     expect(olderPayload.nextBeforeMessageId).toBeUndefined();
+  });
+
+  it("keeps active turns running when the websocket disconnects unexpectedly", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    let resolveTurn: ((value: {
+      response: string;
+      toolCallsExecuted: number;
+      guardrailEvents: unknown[];
+      usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+      performance: { turnDurationMs: number; llmCalls: number; llmTimeMs: number; toolIterations: number; finishReason: string };
+      blocked?: boolean;
+    }) => void) | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ signal }: { signal: AbortSignal }) => {
+        capturedSignal = signal;
+        return new Promise((resolve) => {
+          resolveTurn = resolve;
+        });
+      }),
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-disconnect",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-disconnect",
+        message: "hello",
+      },
+    }));
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    connection.close();
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    resolveTurn?.({
+      response: "done",
+      toolCallsExecuted: 0,
+      guardrailEvents: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      performance: { turnDurationMs: 1, llmCalls: 1, llmTimeMs: 1, toolIterations: 0, finishReason: "stop" },
+      blocked: false,
+    });
+
+    await Promise.resolve();
+
+    const errorEvent = sent.find((event) => {
+      if (event["type"] !== "status") return false;
+      const data = event["data"] as Record<string, unknown> | undefined;
+      return data?.["requestId"] === "turn-disconnect" && data?.["status"] === "error";
+    });
+
+    expect(errorEvent).toBeUndefined();
+  });
+
+  it("can still abort active turns when the close is explicit", async () => {
+    let capturedSignal: AbortSignal | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ signal }: { signal: AbortSignal }) => {
+        capturedSignal = signal;
+        return new Promise(() => {});
+      }),
+    }));
+
+    const ws = {
+      readyState: 1,
+      send() {
+        // No-op for this regression test.
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-explicit-abort",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-explicit-abort",
+        message: "hello",
+      },
+    }));
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    connection.close({ abortInFlightTurns: true });
+
+    expect(capturedSignal?.aborted).toBe(true);
   });
 
   it("blocks flag-only chat submissions before calling the provider", async () => {

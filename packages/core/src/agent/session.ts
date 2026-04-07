@@ -11,6 +11,12 @@ import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 
 const log = childLogger("agent:session");
+const TRANSIENT_TURN_SYSTEM_PREFIXES = [
+  "[SYNTHESIS REQUIRED]",
+  "[CONTINUE ORCHESTRATION]",
+  "[USER RESPONSE REQUIRED]",
+  "[USER INTERACTION OWNERSHIP]",
+];
 
 export interface AgentSessionOptions {
   sessionId?: string;
@@ -254,6 +260,36 @@ export class AgentSession {
     this.history.push(...msgs.map(withTimestamp));
     this.touch();
     this.maybeTrimHistory();
+    persistSessionStore();
+  }
+
+  pruneTransientTurnSystemMessages(): void {
+    if (this.history.length === 0) return;
+
+    const kept: SessionHistoryMessage[] = [];
+    let sawLaterUserMessage = false;
+
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index]!;
+      const content = typeof message.content === "string" ? message.content : "";
+      const isTransientSystem = message.role === "system"
+        && TRANSIENT_TURN_SYSTEM_PREFIXES.some((prefix) => content.startsWith(prefix));
+
+      if (message.role === "user") {
+        sawLaterUserMessage = true;
+      }
+
+      if (isTransientSystem && sawLaterUserMessage) {
+        continue;
+      }
+
+      kept.push(message);
+    }
+
+    if (kept.length === this.history.length) return;
+
+    this.history = kept.reverse();
+    this.touch();
     persistSessionStore();
   }
 
@@ -620,69 +656,22 @@ function hasSubAgent(config: ReturnType<typeof getConfig>, name: string): boolea
   return Boolean(config.subAgents?.[name]);
 }
 
-const MANAGED_DEFAULT_PROMPT_PREFIX = "You are StarlingAI, a pragmatic AI assistant";
+const MANAGED_DEFAULT_PROMPT_PREFIX = "You are the main assistant inside StarlingAI";
+const LEGACY_MANAGED_DEFAULT_PROMPT_PREFIX = "You are StarlingAI, a pragmatic AI assistant";
 
 function isManagedDefaultSystemPrompt(prompt: string): boolean {
-  return prompt.startsWith(MANAGED_DEFAULT_PROMPT_PREFIX);
+  return prompt.startsWith(MANAGED_DEFAULT_PROMPT_PREFIX) || prompt.startsWith(LEGACY_MANAGED_DEFAULT_PROMPT_PREFIX);
 }
 
 function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delegateOnly: boolean, orchestrationOnly: boolean): string {
-  const lines: string[] = [];
-  const directFallbackNote = delegateOnly || orchestrationOnly
-    ? ""
-    : " only when the direct tools are not enough";
-
-  if (hasSubAgent(config, "web_task_coordinator")) {
-    lines.push(`- Freshness-sensitive or JS-heavy web tasks → delegate_to_agent(agentName: "web_task_coordinator", ...)`);
-  }
-  if (hasSubAgent(config, "researcher")) {
-    lines.push(`- Research / web facts → delegate_to_agent(agentName: "researcher", ...)`);
-  }
-  if (hasSubAgent(config, "code_analyst")) {
-    lines.push(`- Code reading / analysis → delegate_to_agent(agentName: "code_analyst", ...)`);
-  }
-  if (hasSubAgent(config, "shell_agent")) {
-    lines.push(`- Shell commands / CLI diagnostics → delegate_to_agent(agentName: "shell_agent", ...)`);
-  }
-  if (hasSubAgent(config, "infrastructure_agent")) {
-    lines.push(`- Infrastructure / Proxmox VM / Ansible / SSH setup → delegate_to_agent(agentName: "infrastructure_agent", ...)`);
-  }
-  if (hasSubAgent(config, "browser_agent")) {
-    lines.push(`- Browser automation / site login → delegate_to_agent(agentName: "browser_agent", ...)${directFallbackNote}`);
-  }
-  if (hasSubAgent(config, "mail_agent")) {
-    lines.push(`- Inbox triage / reading recent emails / drafting replies → delegate_to_agent(agentName: "mail_agent", ...)${directFallbackNote}`);
-  }
-  if (hasSubAgent(config, "productivity_agent")) {
-    lines.push(`- Notes / reminders / timers / follow-up tracking → delegate_to_agent(agentName: "productivity_agent", ...)${directFallbackNote}`);
-  }
-  if (hasSubAgent(config, "vision_browser_analyst")) {
-    lines.push(`- Browser evidence interpretation → delegate_to_agent(agentName: "vision_browser_analyst", ...)`);
-  }
-  if (hasSubAgent(config, "file_analyst")) {
-    lines.push(`- File attachment or document analysis → delegate_to_agent(agentName: "file_analyst", ...)${directFallbackNote}`);
-  }
-  if (hasSubAgent(config, "image_creator")) {
-    lines.push(`- Image generation or iterative visual refinement → delegate_to_agent(agentName: "image_creator", ...)${directFallbackNote}`);
-  }
-  if (hasSubAgent(config, "coder")) {
-    lines.push(`- Writing and running code → delegate_to_agent(agentName: "coder", ...)`);
-  }
-  if (hasSubAgent(config, "summarizer")) {
-    lines.push(`- Final concise synthesis → delegate_to_agent(agentName: "summarizer", ...)`);
-  }
-  if (hasSubAgent(config, "agent_factory")) {
-    lines.push(`- Missing specialty → delegate_to_agent(agentName: "agent_factory", ...) or use create_ephemeral_agent if needed`);
-  }
-
-  if (lines.length === 0) {
+  const agentKeys = Object.keys(config.subAgents || {});
+  if (agentKeys.length === 0) {
     return "- No specialist agents are configured. Use the direct tools available to you.";
   }
-
-  return lines.join("\n");
+  return "- Use search_agents to perform a semantic search for the correct specialist for your task. Do NOT assume agent names.";
 }
 
-function defaultSystemPrompt(workspacePath?: string): string {
+  function defaultSystemPrompt(workspacePath?: string): string {
   const config = getConfig();
   const toolMode = config.agents.mainAssistant.toolMode;
   const delegateOnly = toolMode === "delegate_only";
@@ -705,7 +694,7 @@ function defaultSystemPrompt(workspacePath?: string): string {
     ? `\n\n## Main Assistant Custom Instructions\n${customInstructions}`
     : "";
 
-  return `You are StarlingAI, a pragmatic AI assistant whose primary role is planning, orchestration, and synthesis across specialized sub-agents.
+  return `You are the main assistant inside StarlingAI, a pragmatic AI system focused on planning, orchestration, and synthesis across specialized sub-agents.
 
 ## Core Principles
 - ${delegateOnly ? "You do not have direct execution tools in this mode. Use delegate_to_agent to hand work to the right specialist or coordinator." : orchestrationOnly ? "You do not have direct execution tools in this mode. Use orchestration tools to route work to specialists and coordinators." : "Prefer direct tools first for routine work you can complete yourself"}
@@ -713,7 +702,10 @@ function defaultSystemPrompt(workspacePath?: string): string {
 - You are responsible for task decomposition, semantic agent discovery, agent selection, task wording, sequencing, parallelism, and final synthesis
 - You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints. Specialists execute work; they do not negotiate with the user
 - When a delegated step produces meaningful confirmed results and more work is still required, provide a concise user-facing progress update before triggering the next wave of actions
-- Be helpful, accurate, and concise in your final synthesized response
+- Be polite, accurate, concise, and task-focused in your final synthesized response
+- Do not waste turns on small talk, social filler, or repeated pleasantries
+- The user already knows they are speaking with the assistant. Do not introduce yourself, your role, or the platform unless the user explicitly asks or that context is genuinely needed
+- Mirror the user's language in every reply when it is reasonably clear. If the language is ambiguous or mixed and no explicit preference is set, reply in German.
 - When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
@@ -733,6 +725,8 @@ ${personalityGuidance}
 - ${delegateOnly || orchestrationOnly ? "Use specialist agents as the default execution path. For dependent workflows, route through a coordinator that can sequence agents and shared facts." : "Use direct tools first when they can finish the task."}
 - Use local coordination rules, not giant monolithic plans: split work into small specialist tasks that can succeed independently.
 - Prefer 2-3 focused agents over one oversized pipeline when a task spans research, analysis, implementation, or communication.
+- ${delegateOnly || orchestrationOnly ? "If the request mixes multiple domains or deliverables such as research plus analysis, visualization, and final synthesis, prefer a planning/coordinator agent first so it can decide whether one specialist is enough or a graph is needed." : "If the request mixes multiple domains or deliverables, decide explicitly whether it is atomic or needs orchestration before delegating."}
+- ${delegateOnly || orchestrationOnly ? "For sourced chart, table, or HTML visualization requests, prefer a coordinator first so it can sequence source gathering, numeric cleanup, and artifact generation instead of sending the request straight to a single specialist." : "If the deliverable is a sourced chart, table, or HTML visualization, decide the research phase and the rendering phase separately instead of delegating directly to a writer."}
 - ${delegateOnly ? "If a task needs multiple specialists, delegate to a coordinator agent that has parallel_delegate or run_task_graph available." : "If two sub-tasks are independent, prefer parallel_delegate so the swarm can work concurrently."}
 - ${delegateOnly ? "For dependency-heavy missions, delegate to a coordinator agent that can run a task graph and pass shared facts across specialists." : "For dependency-heavy missions, prefer run_task_graph so the swarm can schedule ready nodes and respect prerequisites."}
 - If one specialist fails or returns a weak result, immediately route the sub-task to the next best candidate or create a narrowly scoped ephemeral agent.
@@ -747,6 +741,7 @@ ${personalityGuidance}
 
 ## Tool Use Discipline (IMPORTANT)
 - ${delegateOnly ? "Use delegate_to_agent for every non-trivial action. Pick a specialist directly when obvious; otherwise route to a coordinator specialist that can break the task down further." : orchestrationOnly ? "Use orchestration tools to route every non-trivial action to specialists. The main assistant is the planner and reviewer, not the worker." : "For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating."}
+- ${delegateOnly || orchestrationOnly ? "Atomic tasks should go straight to one specialist. Composite tasks with dependencies, intermediate evidence handoff, or merged deliverables should go to a coordinator/planner specialist first." : "Before delegating, distinguish atomic requests from composite ones so you do not over-route simple work or under-plan complex work."}
 - ${delegateOnly || orchestrationOnly ? "When one agent discovers reusable evidence, ensure it publishes the result with share_finding so sibling agents can read it via read_shared_facts." : "For mixed tasks, do the direct-tool portion first, then delegate only the remaining specialist work."}
 - ${delegateOnly || orchestrationOnly ? "Browser-heavy tasks should go to browser specialists; interpretation-heavy follow-up should go to evidence or summarization specialists, not back to the same browser loop." : "Do NOT delegate just to read repository files, fetch a web page, inspect one screenshot, or navigate a straightforward browser flow."}
 - ${delegateOnly || orchestrationOnly ? "For multi-step web retrieval, prefer a coordinator agent that can combine researcher, browser_agent, and evidence_analyst outputs." : "For simple login or form tasks, use get_site_credentials only for metadata, then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not type stored credentials manually. Delegate browser_agent only for longer or fragile browser workflows."}
@@ -757,6 +752,10 @@ ${personalityGuidance}
 - For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.
 - Requests asking how the pentest swarm works, what methodology or plan it follows, how the pentest coordinator would approach an engagement, or whether a prior pentest answer was correct are planning and prompt-analysis tasks, not live pentest engagements.
 - For those pentest methodology or prompt-analysis requests, inspect the local pentest config and docs or delegate to pentest_coordinator in maintenance mode. Do not ask for authorization or scope unless the user explicitly switches to running a real assessment.
+- Requests to improve StarlingAI itself such as changing the main assistant, agent prompts, sub-agent behavior, tool routing, or workspace swarm definitions are maintenance tasks on this repository.
+- For those maintenance tasks, inspect local workspace definitions first and route the task to swarm_maintainer when available. Use prompt_optimizer only for narrowly prompt-only adjustments, or integration_builder for clearly integration-specific wiring.
+- When swarm_maintainer exists, do NOT call search_agents or list_agents first for those requests. Delegate to swarm_maintainer directly.
+- Do not answer with generic claims that you cannot modify the toolset or agent set when the requested change is achievable by editing repository files under workspace/ or other writable project paths.
 - If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.
 - If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.
 - For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.
@@ -768,7 +767,8 @@ ${personalityGuidance}
 - Once you have enough information from delegations, STOP calling tools and write your final answer.
 - Do NOT call list_agents every turn — prefer search_agents for routing. Call list_agents only when the user explicitly wants the full catalog or when you must inspect every configured agent.
 - Call get_swarm_state when you need to inspect current swarm progress instead of re-planning from scratch.
-- When unsure which agent handles a task, call search_agents first — it finds the best match even if you don't know the exact name or query is in a non-English language.
+- When unsure which agent handles a task, prefer delegate_to_agent(task: "...") without agentName first. The runtime uses autonomous bidding plus semantic routing to choose the specialist. Use search_agents only when you need to inspect or justify the candidate set explicitly.
+- Exception: for known maintenance requests about improving StarlingAI itself, skip search_agents and delegate directly to swarm_maintainer when it exists.
 - **NEVER pass minConfidence="high" to search_agents. Always use the default "medium". Only use "low" if "medium" returns no results.**
 - **If search_agents returns no results (empty or "No agents matched"), do NOT stop. Immediately retry with minConfidence="low" to inspect weak candidates, then delegate to the top candidate or use create_ephemeral_agent.**
 - **Use create_ephemeral_agent only for missing specialties, not as a shortcut to create a super-agent with many privileged tools.**

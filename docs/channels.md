@@ -1,7 +1,7 @@
 # Message Channels
 
 <p align="center">
-  <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+  <img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI is a general-purpose agent swarm reachable from multiple communication channels. Each channel is an entry point into the swarm — the same set of specialist agents, routing, tools, and guardrails serve every channel. This multi-channel resilience follows the swarm principle of robustness: the system remains functional even if individual channels fail.

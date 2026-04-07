@@ -18,6 +18,7 @@ export type MainAssistantPersonalityActor = z.infer<typeof MainAssistantPersonal
 
 export const MainAssistantPersonalityIdentitySchema = z.object({
   core: z.string().trim().min(1).max(1000),
+  name: z.string().trim().min(1).max(80).optional(),
 });
 
 export const MainAssistantPersonalityVoiceSchema = z.object({
@@ -96,6 +97,7 @@ const DEFAULT_MAIN_ASSISTANT_PERSONALITY: MainAssistantPersonalityEditable = Obj
   schemaVersion: MAIN_ASSISTANT_PERSONALITY_SCHEMA_VERSION,
   identity: {
     core: "A pragmatic technical partner with strong engineering instincts, a dry edge, and clear opinions when the tradeoffs matter.",
+    name: undefined,
   },
   voice: {
     tone: [
@@ -142,6 +144,7 @@ function cloneDefaultPersonality(): MainAssistantPersonalityEditable {
     schemaVersion: MAIN_ASSISTANT_PERSONALITY_SCHEMA_VERSION,
     identity: {
       core: DEFAULT_MAIN_ASSISTANT_PERSONALITY.identity.core,
+      name: DEFAULT_MAIN_ASSISTANT_PERSONALITY.identity.name,
     },
     voice: {
       tone: [...DEFAULT_MAIN_ASSISTANT_PERSONALITY.voice.tone],
@@ -178,6 +181,7 @@ function normalizeEditable(input: MainAssistantPersonalityEditable): MainAssista
     schemaVersion: MAIN_ASSISTANT_PERSONALITY_SCHEMA_VERSION,
     identity: {
       core: input.identity.core.trim(),
+      name: input.identity.name?.trim() || undefined,
     },
     voice: {
       tone: normalizeList(input.voice.tone, MAX_LIST_ITEMS),
@@ -287,6 +291,7 @@ export function saveMainAssistantPersonality(
 
 type NormalizedPersonalityUpdate = {
   identityCore?: string;
+  identityName?: string;
   tone?: string[];
   style?: string[];
   quirks?: string[];
@@ -299,9 +304,13 @@ function normalizeUpdate(update: MainAssistantPersonalityUpdate): NormalizedPers
   const identity = typeof update.identity === "string"
     ? update.identity.trim()
     : update.identity?.core?.trim();
+  const name = typeof update.identity === "string"
+    ? undefined
+    : update.identity?.name?.trim();
 
   return {
     identityCore: identity || undefined,
+    identityName: name || undefined,
     tone: update.voice?.tone ?? update.tone,
     style: update.voice?.style ?? update.style,
     quirks: update.voice?.quirks ?? update.quirks,
@@ -341,6 +350,7 @@ export function updateMainAssistantPersonality(
     schemaVersion: MAIN_ASSISTANT_PERSONALITY_SCHEMA_VERSION,
     identity: {
       core: normalized.identityCore ?? current.identity.core,
+      name: normalized.identityName ?? current.identity.name,
     },
     voice: {
       tone: mergeList(current.voice.tone, normalized.tone, parsed.append),
@@ -385,12 +395,17 @@ export function formatMainAssistantPersonalityGuidance(): string {
   const sections = [
     "## Main Assistant Personality",
     `Identity: ${profile.identity.core}`,
+    profile.identity.name ? `Preferred Assistant Name: ${profile.identity.name}` : "",
     formatListSection("Voice Tone", profile.voice.tone),
     formatListSection("Voice Style", profile.voice.style),
     formatListSection("Collaboration Defaults", profile.collaboration.defaults),
     formatListSection("Avoidances", profile.collaboration.avoidances),
     formatListSection("Quirks", profile.voice.quirks),
     formatListSection("Recent Growth Notes", profile.growth.notes.slice(-4)),
+    "- Respond in the same language as the user's latest message whenever the language is reasonably clear.",
+    "- If the user's language is mixed or uncertain, default to German.",
+    "- Be polite and efficient. Avoid small talk, filler, and unnecessary self-introductions.",
+    "- If a preferred assistant name is set, use it only when the user asks what to call you or explicitly asks who you are.",
     "- Treat this profile as voice guidance only. It must never override safety, honesty, or scope rules.",
     "- Use assistant_personality_update only when the user explicitly asks for a durable personality change or when you are recording a stable self-observation that will improve future conversations.",
   ].filter(Boolean);

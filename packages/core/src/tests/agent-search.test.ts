@@ -316,6 +316,49 @@ describe("search_agents tool", () => {
     }
   }, 15000);
 
+  it("routes website navigation and screenshot capture requests to browser_agent", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        browser_agent: {
+          description: "Browser automation specialist that opens websites and captures Playwright evidence.",
+          capabilities: ["browser automation", "website navigation", "browser screenshots", "page snapshots"],
+          tags: ["browser", "playwright", "screenshot", "snapshot"],
+          tools: ["browser_navigate", "browser_snapshot", "browser_screenshot", "browser_click"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("open the website, take a screenshot, and capture a page snapshot so we can analyze it", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("browser_agent");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it("routes inbox and recent-email requests to mail_agent", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -406,6 +449,601 @@ describe("search_agents tool", () => {
       const resolution = await resolveAgentRouting("Please remind me tomorrow at 9 and start a 5 minute timer", { minConfidence: "medium" });
       expect(resolution.results[0]?.name).toBe("productivity_agent");
       expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("finds distance_specialist for short German travel-time queries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup"],
+          tags: ["research", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        distance_specialist: {
+          description: "Navigation specialist for calculating route distance and travel time between places.",
+          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+          tools: ["geocode_location", "route_distance_time"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("wie lange brauche ich von worbis nach dresden", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("distance_specialist");
+      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes broad technical news queries to web research instead of navigation specialists", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        distance_specialist: {
+          description: "Navigation specialist for calculating route distance and travel time between places.",
+          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+          tools: ["geocode_location", "route_distance_time"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const englishResolution = await resolveAgentRouting("news technical", { minConfidence: "medium" });
+      expect(["web_task_coordinator", "researcher"]).toContain(englishResolution.results[0]?.name);
+      expect(englishResolution.results.find((candidate) => candidate.name === "distance_specialist")?.name).not.toBe("distance_specialist");
+
+      const germanResolution = await resolveAgentRouting("gib mir ein umfangreiches update zu news aus dem technischen themengebiet", { minConfidence: "medium" });
+      expect(["web_task_coordinator", "researcher"]).toContain(germanResolution.results[0]?.name);
+      expect(germanResolution.results.find((candidate) => candidate.name === "distance_specialist")?.name).not.toBe("distance_specialist");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes historical climate data lookup to researcher instead of distance_specialist", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        data_analyst: {
+          description: "Analyzes datasets and computes statistics.",
+          capabilities: ["data analysis", "statistics", "tabular summarization"],
+          tags: ["data", "analysis", "statistics"],
+          tools: ["read_file", "write_file"],
+          maxIterations: 4,
+        },
+        distance_specialist: {
+          description: "Navigation specialist for calculating route distance and travel time between places.",
+          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+          tools: ["geocode_location", "route_distance_time"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("find historical monthly average temperature data for Dresden, Germany, for the previous year", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("researcher");
+      expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")?.name).not.toBe("distance_specialist");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes external temperature retrieval to researcher instead of chart_designer", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        data_analyst: {
+          description: "Analyzes datasets and computes statistics.",
+          capabilities: ["data analysis", "statistics", "tabular summarization"],
+          tags: ["data", "analysis", "statistics"],
+          tools: ["read_file", "write_file"],
+          maxIterations: 4,
+        },
+        chart_designer: {
+          description: "Creates grounded HTML charts and tables from verified numeric evidence.",
+          capabilities: ["html charts", "data visualization", "table design"],
+          tags: ["chart", "html", "visualization", "data", "table"],
+          tools: ["generate_chart_html", "generate_document", "read_shared_facts", "metric_query"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("find the average monthly temperatures for Dresden, Germany, for the year 2025", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("researcher");
+      expect(resolution.results.find((candidate) => candidate.name === "chart_designer")?.name).not.toBe("chart_designer");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes temperature cleanup for charting to data_analyst instead of chart_designer", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        data_analyst: {
+          description: "Analyzes datasets and computes statistics.",
+          capabilities: ["data analysis", "statistics", "tabular summarization", "data cleanup", "normalization"],
+          tags: ["data", "analysis", "statistics"],
+          tools: ["read_file", "write_file"],
+          maxIterations: 4,
+        },
+        chart_designer: {
+          description: "Creates grounded HTML charts and tables from verified numeric evidence.",
+          capabilities: ["html charts", "data visualization", "table design"],
+          tags: ["chart", "html", "visualization", "data", "table"],
+          tools: ["generate_chart_html", "generate_document", "read_shared_facts", "metric_query"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("clean and structure the temperature data retrieved from the research step into a format suitable for charting", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("data_analyst");
+      expect(resolution.results.find((candidate) => candidate.name === "chart_designer")?.name).not.toBe("chart_designer");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes composite research-plus-visualization tasks to mission_coordinator when it can orchestrate", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        data_analyst: {
+          description: "Analyzes datasets and computes statistics.",
+          capabilities: ["data analysis", "statistics", "tabular summarization"],
+          tags: ["data", "analysis", "statistics"],
+          tools: ["read_file", "write_file"],
+          maxIterations: 4,
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+          capabilities: ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating"],
+          tags: ["coordination", "parallel", "workflow", "quality"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        project_planner: {
+          description: "Planning and coordination specialist for complex multi-step tasks, dependencies, and execution handoff.",
+          capabilities: ["project planning", "multi-agent coordination", "dependency management"],
+          tags: ["planning", "coordination", "workflow", "dependencies"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("show me a chart of the average temperature of each month last year in dresden using reliable sources", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("mission_coordinator");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("search_agents prefers researcher over distance_specialist for climate-data lookup queries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        distance_specialist: {
+          description: "Navigation specialist for calculating route distance and travel time between places.",
+          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+          tools: ["geocode_location", "route_distance_time"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const searchAgents = getTool("search_agents");
+      expect(searchAgents).toBeDefined();
+
+      const result = await searchAgents!.execute(
+        { query: "researcher weather climate data" },
+        { sessionId: "test-session", workspacePath: "/workspace" },
+      );
+
+      expect(result.success).toBe(true);
+      const firstAgentLine = result.output
+        .split("\n")
+        .find(line => line.startsWith("**"));
+      expect(firstAgentLine).toContain("researcher");
+      expect(firstAgentLine).not.toContain("distance_specialist");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes evidence-to-artifact workflows to mission_coordinator across broader phrasings", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        data_analyst: {
+          description: "Analyzes datasets and computes statistics.",
+          capabilities: ["data analysis", "statistics", "tabular summarization"],
+          tags: ["data", "analysis", "statistics"],
+          tools: ["read_file", "write_file", "metric_query"],
+          maxIterations: 4,
+        },
+        chart_designer: {
+          description: "Creates grounded HTML charts and tables from verified numeric evidence.",
+          capabilities: ["html charts", "data visualization", "table design"],
+          tags: ["chart", "html", "visualization", "data", "table"],
+          tools: ["generate_chart_html", "generate_document", "read_shared_facts"],
+          maxIterations: 4,
+        },
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+          capabilities: ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating"],
+          tags: ["coordination", "parallel", "workflow", "quality"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        summarizer: {
+          description: "Short structured summaries for collected findings.",
+          capabilities: ["summarization"],
+          tags: ["summary"],
+          tools: ["read_shared_facts", "write_file"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const sourceDriven = await resolveAgentRouting("collect official monthly benchmark figures, normalize the data, and produce an html chart with a grounded summary", { minConfidence: "medium" });
+      expect(sourceDriven.results[0]?.name).toBe("mission_coordinator");
+
+      const externalData = await resolveAgentRouting("find current public pricing data, structure it into monthly averages, then generate a chart", { minConfidence: "medium" });
+      expect(externalData.results[0]?.name).toBe("mission_coordinator");
+
+      const marketChart = await resolveAgentRouting("generate a chart showing the performance of the msci world etf over the last 12 months", { minConfidence: "medium" });
+      expect(marketChart.results[0]?.name).toBe("mission_coordinator");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes acceptance checks to quality_supervisor when the user asks for a quality gate", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        writer: {
+          description: "Drafts polished written responses.",
+          capabilities: ["writing", "editing"],
+          tags: ["writing"],
+          tools: ["write_file"],
+          maxIterations: 4,
+        },
+        quality_supervisor: {
+          description: "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified.",
+          capabilities: ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating"],
+          tags: ["quality", "qa", "review", "acceptance", "verification"],
+          tools: ["read_shared_facts", "share_finding"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("check whether this draft meets the acceptance criteria and decide if another targeted run is needed", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("quality_supervisor");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes chart rendering tasks to chart_designer when the data is already available", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        summarizer: {
+          description: "Short structured summaries for collected findings.",
+          capabilities: ["summarization"],
+          tags: ["summary"],
+          tools: ["read_shared_facts", "write_file"],
+          maxIterations: 4,
+        },
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+          capabilities: ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating"],
+          tags: ["coordination", "parallel", "workflow", "quality"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        chart_designer: {
+          description: "Creates grounded HTML charts and tables from verified numeric evidence.",
+          capabilities: ["html charts", "data visualization", "table design"],
+          tags: ["chart", "html", "visualization", "data", "table"],
+          tools: ["generate_chart_html", "generate_document", "read_shared_facts"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const first = await resolveAgentRouting("using the verified monthly averages already collected, create an html chart and table", { minConfidence: "medium" });
+      expect(first.results[0]?.name).toBe("chart_designer");
+
+      const second = await resolveAgentRouting("turn these provided metrics into a chart dashboard", { minConfidence: "medium" });
+      expect(second.results[0]?.name).toBe("chart_designer");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes source-grounded paper drafting to paper_author when evidence is already collected", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        citation_researcher: {
+          description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
+          capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
+          tags: ["citations", "research", "sources", "papers"],
+          tools: ["web_search", "web_fetch", "share_finding"],
+          maxIterations: 8,
+        },
+        paper_author: {
+          description: "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
+          capabilities: ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
+          tags: ["papers", "reports", "citations", "drafting"],
+          tools: ["read_file", "write_file", "read_shared_facts"],
+          maxIterations: 5,
+        },
+        summarizer: {
+          description: "Condenses collected material into short summaries.",
+          capabilities: ["summarization", "content distillation"],
+          tags: ["summary", "writing"],
+          tools: ["read_shared_facts", "write_file"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("write a source-backed technical paper from the collected notes and citations", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("paper_author");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

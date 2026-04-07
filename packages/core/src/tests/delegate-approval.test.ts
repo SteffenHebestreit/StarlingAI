@@ -66,4 +66,32 @@ describe("delegate_to_agent approval propagation", () => {
       humanInLoopSteps: ["site_fill_credentials", "mcp__playwright__browser_navigate"],
     }));
   });
+
+  it("pins owned-computer access tasks to computer_use_agent when agentName is omitted", async () => {
+    const [{ getTool }, _subAgentTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const result = await delegate!.execute(
+      {
+        task: "check auf meinem pc unter 10.10.0.2 welche models geladen sind in lm studio",
+      },
+      {
+        sessionId: "session-2",
+        workspacePath: "/workspace",
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(runSubAgentMock).toHaveBeenCalledTimes(1);
+    expect(runSubAgentMock).toHaveBeenCalledWith(expect.objectContaining({
+      agentName: "computer_use_agent",
+      parentSessionId: "session-2",
+      workspacePath: "/workspace",
+    }));
+  });
 });

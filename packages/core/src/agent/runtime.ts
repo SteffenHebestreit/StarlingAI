@@ -19,12 +19,14 @@ import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { loadMainAssistantPersonality } from "../personality/service.js";
 
 const log = childLogger("agent:runtime");
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
+  search_agents: 2,
   create_ephemeral_agent: 1,
   computer_session_start: 1,
   computer_focus_window: 2,
@@ -95,6 +97,41 @@ const PENTEST_METHODOLOGY_PATTERNS = [
   /\b(check|inspect|review|read|analyze|ask)\b[\s\S]{0,80}\b(pentest[_ -]?agent|pentest[_ -]?coordinator|prompt)\b/,
   /\b(do not want to do the pentest|don't want to do the pentest|not asking you to do the pentest|wanna know what schema it follows)\b/,
 ];
+const SWARM_MAINTENANCE_HINT_TERMS = [
+  "agent set", "agent-set", "agents-set", "main agent", "main-agent", "sub agent", "sub-agent", "subagent",
+  "tool set", "tool-set", "toolset", "workspace/agents", "config assistant", "self tune", "self-tune",
+  "system prompt", "prompt optimizer", "routing prompt", "swarm", "starlingai itself",
+];
+const SWARM_MAINTENANCE_PATTERNS = [
+  /\b(implement|add|update|improve|change|modify|wire|integrate|refine|fix)\b[\s\S]{0,100}\b(agent|agents|sub-?agents?|toolset|tool set|tools|prompt|system prompt|routing|main agent|main-assistant|swarm)\b/,
+  /\b(toolset|tool set|agent set|agents-set|main agent|main-agent|workspace\/agents|config assistant)\b[\s\S]{0,100}\b(implement|update|improve|change|modify|fix|wire|integrate)\b/,
+  /\b(why|check why|investigate why)\b[\s\S]{0,120}\b(does not want to implement|won't implement|refuses to implement|cannot implement|can not implement)\b/,
+  /\b(not asking you to use the system|asking you to improve the system|improve starlingai|update starlingai|maintain the swarm)\b/,
+];
+const NAVIGATION_HINT_TERMS = [
+  "distance", "travel time", "driving time", "walking time", "route", "routing", "directions",
+  "fahrzeit", "reisezeit", "wegzeit", "strecke", "entfernung", "route", "anfahrt", "fu\u00dfweg",
+];
+const NAVIGATION_PATTERNS = [
+  /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
+  /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
+  /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
+];
+const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
+  "ahoi",
+  "aloha",
+  "bonjour",
+  "ciao",
+  "hello",
+  "hey",
+  "hi",
+  "hallo",
+  "moin",
+  "ok",
+  "okay",
+  "servus",
+  "yo",
+]);
 
 export interface RunTurnOptions {
   session: AgentSession;
@@ -115,11 +152,11 @@ export interface RunTurnOptions {
   humanInLoopSteps?: string[];
   /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
   autoApprove?: boolean;
-  /** Override sub-agent maxIterations for delegated tasks this turn. */
+  /** Override sub-agent maxIterations for delegated tasks this turn. 0 disables the cap. */
   maxIterationsOverride?: number;
   /** When set, this turn is a tool-dev session — iteration limits are lifted. */
   _toolDevSessionId?: string;
-  /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). */
+  /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
   enableThinking?: boolean;
@@ -161,6 +198,8 @@ export interface DynamicTurnGuidance {
   computerAccessSensitive?: boolean;
   pentestSensitive?: boolean;
   pentestMethodologySensitive?: boolean;
+  swarmMaintenanceSensitive?: boolean;
+  navigationSensitive?: boolean;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -217,6 +256,131 @@ function collapseDuplicateToolCallsInResponse(
   return filtered;
 }
 
+function collapseExcessDirectDelegationsInResponse(
+  toolCalls: LLMResponse["tool_calls"],
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): LLMResponse["tool_calls"] {
+  let seenDirectDelegation = false;
+  const filtered: LLMResponse["tool_calls"] = [];
+
+  for (const toolCall of toolCalls) {
+    if (toolCall.name !== "delegate_to_agent") {
+      filtered.push(toolCall);
+      continue;
+    }
+
+    if (!seenDirectDelegation) {
+      seenDirectDelegation = true;
+      filtered.push(toolCall);
+      continue;
+    }
+
+    logAudit("tool_call_blocked", {
+      tool: toolCall.name,
+      reason: "multiple_direct_delegations_same_response",
+      args: toolCall.arguments,
+    }, {
+      sessionId,
+      severity: "warn",
+    });
+    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:multiple_direct_delegations_same_response` });
+  }
+
+  return filtered;
+}
+
+const ORCHESTRATION_LAUNCHER_TOOL_NAMES = new Set([
+  "delegate_to_agent",
+  "parallel_delegate",
+  "run_task_graph",
+]);
+const AGENT_DISCOVERY_TOOL_NAMES = new Set([
+  "search_agents",
+  "list_agents",
+]);
+
+function collapseMixedOrchestrationLaunchersInResponse(
+  toolCalls: LLMResponse["tool_calls"],
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): LLMResponse["tool_calls"] {
+  let firstLauncherName: string | null = null;
+  const filtered: LLMResponse["tool_calls"] = [];
+
+  for (const toolCall of toolCalls) {
+    if (!ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)) {
+      filtered.push(toolCall);
+      continue;
+    }
+
+    if (!firstLauncherName) {
+      firstLauncherName = toolCall.name;
+      filtered.push(toolCall);
+      continue;
+    }
+
+    logAudit("tool_call_blocked", {
+      tool: toolCall.name,
+      reason: "multiple_orchestration_launchers_same_response",
+      keptTool: firstLauncherName,
+      args: toolCall.arguments,
+    }, {
+      sessionId,
+      severity: "warn",
+    });
+    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:multiple_orchestration_launchers_same_response` });
+  }
+
+  return filtered;
+}
+
+function collapseMixedDiscoveryAndOrchestrationToolsInResponse(
+  toolCalls: LLMResponse["tool_calls"],
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): LLMResponse["tool_calls"] {
+  let selectedPhase: "discovery" | "orchestration" | null = null;
+  const filtered: LLMResponse["tool_calls"] = [];
+
+  for (const toolCall of toolCalls) {
+    const phase = ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)
+      ? "orchestration"
+      : AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name)
+        ? "discovery"
+        : null;
+
+    if (!phase) {
+      filtered.push(toolCall);
+      continue;
+    }
+
+    if (!selectedPhase) {
+      selectedPhase = phase;
+      filtered.push(toolCall);
+      continue;
+    }
+
+    if (selectedPhase === phase) {
+      filtered.push(toolCall);
+      continue;
+    }
+
+    logAudit("tool_call_blocked", {
+      tool: toolCall.name,
+      reason: "mixed_discovery_and_orchestration_same_response",
+      keptPhase: selectedPhase,
+      args: toolCall.arguments,
+    }, {
+      sessionId,
+      severity: "warn",
+    });
+    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:mixed_discovery_and_orchestration_same_response` });
+  }
+
+  return filtered;
+}
+
 export function buildRepeatedOutputFingerprint(toolName: string, args: Record<string, unknown>, resultText: string): string {
   return `${toolName}|${stableSerialize(args)}|${resultText.slice(0, 500)}`;
 }
@@ -227,8 +391,39 @@ function sanitizeUserFacingAssistantResponse(value: string, toolIterations: numb
 
 function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
   if (toolIterations === 0) return false;
+  if (!raw.trim() || cleaned.length === 0) return true;
   if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
   return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
+}
+
+const CONTINUATION_PROMISE_RE = /\b(i(?:'ll| will)(?:\s+now)?|i am going to|ich werde(?:\s+nun)?|ich beauftrage(?:\s+nun)?|n[äa]chste orchestrierung|next orchestration|next logical step|n[äa]chste logische aktion)\b/i;
+const MISLEADING_EXECUTED_NEXT_STEP_RE = /\b(the next (?:logical )?(?:step|action)|der n[äa]chste(?: logische)?(?: schritt| aktion)|die n[äa]chste(?: logische)? aktion)\b[\s\S]{0,80}\b(which has been executed|has been executed|was executed|has already been executed|wurde(?:\s+bereits)?\s+ausgef[üu]hrt|ist bereits erfolgt)\b/i;
+
+function shouldRewriteTerminalResponse(value: string, toolIterations: number): boolean {
+  if (toolIterations === 0) return false;
+  return CONTINUATION_PROMISE_RE.test(value) || MISLEADING_EXECUTED_NEXT_STEP_RE.test(value);
+}
+
+async function rewriteTerminalResponseIfNeeded(
+  response: string,
+  toolIterations: number,
+  session: AgentSession,
+  provider: ChatProvider,
+  signal: AbortSignal,
+): Promise<string> {
+  if (!shouldRewriteTerminalResponse(response, toolIterations)) {
+    return response;
+  }
+
+  const rewritten = await forceSynthesis(
+    session,
+    provider,
+    signal,
+    "Write the final user-facing answer for this turn now. This turn is ending. Do NOT promise that you will do another tool call, delegation, orchestration step, or investigation next. Do NOT say 'I will now', 'next orchestration', or similar future-action phrasing unless that action already happened. Do NOT turn a proposed next step into a completed action: phrases in delegated evidence like 'I will now attempt...' or 'the next step...' are not proof that the action ran, and you must not say a next step 'has been executed' unless this turn includes the completed tool result for that action. Either give the best current answer from the gathered evidence or ask one concise user-facing question if a user decision is required.",
+  );
+
+  const cleaned = sanitizeUserFacingAssistantResponse(rewritten ?? "", 0);
+  return cleaned || response;
 }
 
 async function finalizeUserFacingAssistantResponse(
@@ -240,7 +435,8 @@ async function finalizeUserFacingAssistantResponse(
 ): Promise<string> {
   const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
   if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
-    return cleaned || rawResponse.trim() || "(no response)";
+    const stableResponse = cleaned || rawResponse.trim() || "(no response)";
+    return await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
   }
 
   const synthesized = await forceSynthesis(
@@ -252,11 +448,12 @@ async function finalizeUserFacingAssistantResponse(
   if (synthesized) {
     const cleanedSynthesized = sanitizeUserFacingAssistantResponse(synthesized, 0);
     if (cleanedSynthesized) {
-      return cleanedSynthesized;
+      return await rewriteTerminalResponseIfNeeded(cleanedSynthesized, toolIterations, session, provider, signal);
     }
   }
 
-  return cleaned || rawResponse.trim() || "(no response)";
+  const fallbackResponse = cleaned || rawResponse.trim() || "(no response)";
+  return await rewriteTerminalResponseIfNeeded(fallbackResponse, toolIterations, session, provider, signal);
 }
 
 function collapseWhitespace(value: string): string {
@@ -291,8 +488,58 @@ function stripPresentationFormatting(value: string): string {
 function looksLikeDelegatedFailureEvidence(value: string): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
+  if (/<\|channel\>\w+/i.test(preview)) return true;
   return /^error:/i.test(preview)
-    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|delegation limit|already failed|not permitted)\b/i.test(preview);
+    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted)\b/i.test(preview)
+    || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
+}
+
+const CONTINUATION_CUE_RE = /\b(next (logical )?(step|action)|n[äa]chste (logische )?(schritt|aktion)|before summarizing|continue orchestration|continue with|drill down|inspect the contents|fetch the contents|final required action|determine the actual data file format|extract the raw numerical values)\b/i;
+const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval required|needs approval|ask the user|missing .* from the user|which one|which option|clarify|need the user to|authorization reference|approved target scope)\b/i;
+
+type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "none";
+
+function classifyPostOrchestrationDisposition(
+  toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>,
+): PostOrchestrationDisposition {
+  const orchestrationResults = toolResultMessages.filter((message) => {
+    const text = typeof message.content === "string" ? message.content : "";
+    return text.includes("Observed evidence:")
+      && (
+        text.includes("Delegated result from")
+        || text.includes("Parallel delegation completed")
+        || text.includes("Task graph completed")
+        || text.includes("Ephemeral agent ")
+      );
+  });
+
+  if (orchestrationResults.length === 0) {
+    return "none";
+  }
+
+  let sawContinuationCue = false;
+
+  for (const message of orchestrationResults) {
+    const text = typeof message.content === "string" ? message.content : "";
+    const metadata = message.metadata ?? {};
+    const terminalState = typeof metadata["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
+    const delegationSucceeded = metadata["delegationSucceeded"] !== false;
+    const delegationOutcome = typeof metadata["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
+
+    if (USER_INTERACTION_CUE_RE.test(text)) {
+      return "ask_user";
+    }
+
+    if (!delegationSucceeded || delegationOutcome === "failure" || delegationOutcome === "partial" || (terminalState && terminalState !== "completed") || looksLikeDelegatedFailureEvidence(text)) {
+      return "synthesize";
+    }
+
+    if (CONTINUATION_CUE_RE.test(text)) {
+      sawContinuationCue = true;
+    }
+  }
+
+  return sawContinuationCue ? "continue" : "synthesize";
 }
 
 export function buildModelVisibleToolResult(
@@ -311,9 +558,14 @@ export function buildModelVisibleToolResult(
       ? metadata["routingReason"] as Record<string, unknown>
       : undefined;
     const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
-    const delegationFailed = metadata?.["delegationSucceeded"] === false
-      || /^error:/i.test(cleaned)
-      || looksLikeDelegatedFailureEvidence(cleaned);
+    const delegationOutcome = typeof metadata?.["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
+    const delegationPartial = delegationOutcome === "partial";
+    const delegationFailed = delegationOutcome === "failure"
+      || (!delegationPartial && (
+        metadata?.["delegationSucceeded"] === false
+        || /^error:/i.test(cleaned)
+        || looksLikeDelegatedFailureEvidence(cleaned)
+      ));
 
     if (agentName === "computer_use_agent") {
       const evidence = truncatePlainText(cleaned, 1600);
@@ -326,6 +578,19 @@ export function buildModelVisibleToolResult(
           "Do NOT claim the task was completed.",
           "Do NOT invent root causes like connectivity, firewall, permissions, or configuration unless the evidence explicitly says so.",
           "Do NOT delegate again for the same information in this turn.",
+          `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+        ].filter(Boolean);
+        return parts.join("\n");
+      }
+      if (delegationPartial) {
+        const parts = [
+          `Delegated result from ${agentName} — PARTIAL PROGRESS.`,
+          attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
+          routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+          "IMPORTANT: Use the evidence below. State clearly that the desktop run made progress but was interrupted before full completion.",
+          "Do NOT ignore the collected evidence.",
+          "Do NOT invent root causes like connectivity, firewall, permissions, or configuration unless the evidence explicitly says so.",
+          "Do NOT delegate again for the same information in this turn unless the user asks for another attempt.",
           `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
         ].filter(Boolean);
         return parts.join("\n");
@@ -349,6 +614,16 @@ export function buildModelVisibleToolResult(
         routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
         "IMPORTANT: This delegated attempt failed. Report the failure honestly using only the explicit evidence below.",
         "Do NOT claim the task was completed or infer extra causes that are not explicitly present in the evidence.",
+        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+      ].filter(Boolean);
+      return parts.join("\n");
+    }
+    if (delegationPartial) {
+      const parts = [
+        `Delegated result from ${agentName} — PARTIAL RESULT.`,
+        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
+        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+        "IMPORTANT: Use the evidence below and say clearly that the delegated work was interrupted or incomplete.",
         `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
       ].filter(Boolean);
       return parts.join("\n");
@@ -380,8 +655,11 @@ export function buildModelVisibleToolResult(
     const failed = Array.isArray(metadata?.["failed"]) ? (metadata?.["failed"] as unknown[]).length : 0;
     const blocked = Array.isArray(metadata?.["blocked"]) ? (metadata?.["blocked"] as unknown[]).length : 0;
     const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    const taskGraphStatus = failed > 0 || blocked > 0
+      ? `Task graph finished with incomplete status. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`
+      : `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`;
     return [
-      `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`,
+      taskGraphStatus,
       "IMPORTANT: Relay ALL specific details from the evidence below (task states, selected agents, values) in your answer. Do NOT replace them with guessed details.",
       `Observed evidence:\n${evidence || "No usable task-graph result returned."}`,
     ].join("\n");
@@ -397,6 +675,25 @@ export function buildModelVisibleToolResult(
       "IMPORTANT: Relay ALL specific details from the evidence below in your answer.",
       `Observed evidence:\n${evidence || "No usable ephemeral-agent result returned."}`,
     ].filter(Boolean).join("\n");
+  }
+
+  if (toolName === "search_agents") {
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      "Agent routing suggestions only. No delegation has happened yet.",
+      "IMPORTANT: Treat this as candidate-selection guidance, not as proof that any task was routed or executed.",
+      "If this turn ends without a completed delegate_to_agent call, do NOT tell the user that work was routed to any suggested agent.",
+      `Observed evidence:\n${evidence || "No routing suggestions returned."}`,
+    ].join("\n");
+  }
+
+  if (toolName === "list_agents") {
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      "Agent catalog listing only. No delegation has happened yet.",
+      "IMPORTANT: Treat this as discovery context, not as proof that any task was routed or executed.",
+      `Observed evidence:\n${evidence || "No agent catalog returned."}`,
+    ].join("\n");
   }
 
   return fallback;
@@ -433,8 +730,13 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const pentestSensitive = PENTEST_HINT_TERMS.some((term) => normalized.includes(term));
   const pentestMethodologySensitive = pentestSensitive
     && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
+  const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
+    || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
+  const navigationSensitive = NAVIGATION_HINT_TERMS.some((term) => normalized.includes(term))
+    || NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
 
-  if (!freshnessSensitive && !sourceSensitive && !mailSensitive && !productivitySensitive && !computerAccessSensitive && !pentestMethodologySensitive) return null;
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive };
+  if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
   if (freshnessSensitive) reasons.push("freshness-sensitive");
@@ -443,6 +745,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (productivitySensitive) reasons.push("productivity-task");
   if (computerAccessSensitive && !pentestSensitive) reasons.push("owned-computer-access");
   if (pentestMethodologySensitive) reasons.push("pentest-methodology");
+  if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
+  if (navigationSensitive) reasons.push("navigation-routing");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
@@ -486,6 +790,21 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     );
   }
 
+  if (navigationSensitive) {
+    promptParts.push(
+      "The user is asking for route distance or travel time between places.",
+      delegateMode
+        ? "You MUST use the delegate_to_agent tool with agentName='distance_specialist' immediately when that agent exists. Pass the full origin/destination request as the task."
+        : "Prefer the dedicated navigation tools or the distance_specialist for route questions instead of answering from memory.",
+      delegateMode
+        ? "Do NOT stop at a generic estimate or a plan to look it up. Delegate the task and then synthesize the concrete result."
+        : "Resolve ambiguous places before answering and include the exact coordinates used.",
+      "If the locations are ambiguous, ask one concise clarification question instead of guessing.",
+      "For route answers, report the travel mode, route distance, estimated travel time, and the coordinates or resolved places used.",
+      "If the user did not specify a mode, prefer driving time by default and say so clearly.",
+    );
+  }
+
   if (pentestMethodologySensitive) {
     promptParts.push(
       "The user is asking about the pentest plan, methodology, configured workflow, or pentest-agent behavior. This is NOT a request to start a live pentest engagement.",
@@ -498,6 +817,26 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     );
   }
 
+  if (swarmMaintenanceSensitive) {
+    promptParts.push(
+      "The user is asking you to improve StarlingAI itself: prompts, agents, tool routing, workspace behavior, or swarm configuration.",
+      "Treat this as swarm maintenance inside the current repository, not as an external deployment-only request.",
+      delegateMode
+        ? "You MUST use the delegate_to_agent tool with agentName='swarm_maintainer' immediately when that agent exists. Pass the full user request as the task."
+        : "Inspect the local workspace definitions first and handle the change directly when your tool set allows it.",
+      delegateMode
+        ? "Do NOT call search_agents or list_agents first for this class of request when swarm_maintainer exists. The specialist is already known."
+        : "Do not waste time on agent discovery for this class of request.",
+      delegateMode
+        ? "Prefer swarm_maintainer for the full request; use prompt_optimizer for narrowly prompt-only work and integration_builder or qa_guard only when a more specific implementation specialist is clearly better."
+        : "Inspect the local workspace definitions first. Prefer reading workspace/agents/*, workspace/scenes/*, and starlingai.example.json before answering.",
+      "Do NOT claim that you cannot modify the toolset or agent set when the requested change is achievable through repository edits under workspace/ or other writable project files.",
+      "Protected infrastructure paths under config/ still require proposal-only handling or a clearly scoped manual step; do not rewrite that boundary.",
+      "If the request is to change prompts or routing behavior, make the smallest concrete repo change instead of stopping at a conceptual design.",
+      "After implementing or proposing the change, summarize exactly what changed and what still needs build, apply, or approval steps.",
+    );
+  }
+
   if (freshnessSensitive || sourceSensitive) {
     promptParts.push(
       delegateMode
@@ -505,7 +844,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
         : "Use direct web tools before answering if they are available.",
       "A tool-free answer is invalid unless prior tool results already contain the necessary evidence for this exact request.",
       delegateMode
-        ? "Use delegate_to_agent for simple specialist routing. For multi-step specialist collaboration, delegate to a coordinator-style agent that can orchestrate researcher, browser, and evidence-analysis agents."
+        ? "Use delegate_to_agent for atomic specialist routing. For multi-step specialist collaboration or requests that mix research, analysis, visualization, and synthesis, delegate to a coordinator-style or planning agent first."
         : "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
       delegateMode
         ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists."
@@ -531,25 +870,73 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     computerAccessSensitive,
     pentestSensitive,
     pentestMethodologySensitive,
+    swarmMaintenanceSensitive,
+    navigationSensitive,
   };
+}
+
+export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
+  const profile = loadMainAssistantPersonality();
+  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
+  const languageInstruction = compactMessage.length > 0
+    ? buildLanguageInstructionForTurn(compactMessage)
+    : "Reply in German.";
+  const behaviorInstruction = shouldDefaultToGermanForMessage(compactMessage)
+    ? "For short or greeting-only openings, reply with one short, polite sentence and move directly to helping. Do not use small talk. Do not introduce yourself or mention your name unless the user explicitly asks."
+    : "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
+  const nameInstruction = profile.identity.name
+    ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself "StarlingAI" in conversation unless the user is explicitly asking about the product or platform name.`
+    : "Do not use the platform name \"StarlingAI\" as your personal name in conversation. If the user did not ask for your name, reply without naming yourself.";
+  return `Language and identity for this turn: ${languageInstruction} ${behaviorInstruction} ${nameInstruction}`;
+}
+
+export function shouldDefaultToGermanForMessage(userMessage: string): boolean {
+  const compactMessage = userMessage.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!compactMessage) return true;
+
+  const letterCount = Array.from(compactMessage).filter((char) => /\p{L}/u.test(char)).length;
+  if (letterCount > 0 && letterCount <= 2) return true;
+
+  const tokens = compactMessage.match(/\p{L}+/gu) ?? [];
+  if (tokens.length === 0) return true;
+
+  if (tokens.length <= 2 && tokens.every((token) => AMBIGUOUS_SHORT_LANGUAGE_TOKENS.has(token))) {
+    return true;
+  }
+
+  return false;
+}
+
+export function buildLanguageInstructionForTurn(userMessage: string): string {
+  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
+  if (!compactMessage) return "Reply in German.";
+  if (shouldDefaultToGermanForMessage(compactMessage)) {
+    return `The user's latest message is ${JSON.stringify(compactMessage)}. Treat this message as language-ambiguous because it is too short or only a generic greeting. Reply in German even if the wording could also look like a short English greeting.`;
+  }
+  return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message. If the message becomes mixed or ambiguous after all, reply in German.`;
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then config, then default 15 min.
-  const turnTimeoutMs = opts.turnTimeoutOverrideMs ?? config.gateway?.turnTimeoutMs ?? 900_000;
-  const turnAbort = new AbortController();
-  const timeoutHandle = setTimeout(() => turnAbort.abort(), turnTimeoutMs);
+  // An explicit override of 0 disables the timeout entirely.
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? config.gateway?.turnTimeoutMs ?? 1_800_000;
+  const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
+  const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
+  const inertAbort = new AbortController();
+  const timeoutHandle = turnAbort
+    ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
+    : undefined;
 
   // Merge caller signal with per-turn timeout: either source can cancel the turn.
   const signal: AbortSignal = opts.signal
-    ? AbortSignal.any([opts.signal, turnAbort.signal])
-    : turnAbort.signal;
+    ? (turnAbort ? AbortSignal.any([opts.signal, turnAbort.signal]) : opts.signal)
+    : (turnAbort?.signal ?? inertAbort.signal);
 
   try {
-    return await _runTurn(opts, signal, turnAbort.signal);
+    return await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
   } finally {
-    clearTimeout(timeoutHandle);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -612,6 +999,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // ── Build message history ─────────────────────────────────────────────────
   session.addMessage({ role: "user", content: userMessage });
+  session.pruneTransientTurnSystemMessages();
   session.incrementTurn();
 
   logAudit("message_received", { length: userMessage.length }, {
@@ -648,6 +1036,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
     maxIterationsOverride: opts.maxIterationsOverride,
+    turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
     signal,
     swarmState: {
@@ -689,7 +1078,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const isToolDevSession = !!opts._toolDevSessionId;
   const maxToolIterations = isToolDevSession
     ? Number.MAX_SAFE_INTEGER
-    : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS);
+    : (opts.maxIterationsOverride === 0
+        ? Number.MAX_SAFE_INTEGER
+        : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -743,6 +1134,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const flowGuidance = iterationCount === 0
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
+    const languageAndIdentityGuidance = iterationCount === 0
+      ? buildLanguageAndIdentityTurnGuidance(userMessage)
+      : "";
     const memoryGuidance = iterationCount === 0
       ? await formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
           sessionId: session.id,
@@ -755,6 +1149,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const systemMessages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
+      ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
@@ -823,6 +1218,40 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
     llmResponse.tool_calls = collapseDuplicateToolCallsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+
+    const synthesisRequiredInHistory = collapsedHistory.some((message) =>
+      message.role === "system"
+      && typeof message.content === "string"
+      && message.content.startsWith("[SYNTHESIS REQUIRED]"),
+    );
+    const userResponseRequiredInHistory = collapsedHistory.some((message) =>
+      message.role === "system"
+      && typeof message.content === "string"
+      && message.content.startsWith("[USER RESPONSE REQUIRED]"),
+    );
+
+    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0) {
+      logAudit("guardrail_flagged", {
+        type: "tool_calls_after_synthesis_required",
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
+      log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
+      break;
+    }
+
+    if (userResponseRequiredInHistory && llmResponse.tool_calls.length > 0) {
+      logAudit("guardrail_flagged", {
+        type: "tool_calls_after_user_response_required",
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
+      log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after delegated results required a user response — forcing synthesis");
+      break;
+    }
 
     // ── No tool calls — final response ────────────────────────────────────
     // NOTE: do NOT short-circuit on finishReason === "stop" here — many quantized
@@ -838,7 +1267,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Do NOT answer directly from memory.",
             "You MUST call an orchestration tool now instead of writing a natural-language answer.",
             "For a simple web lookup, prefer delegate_to_agent with researcher or citation_researcher.",
-            "For broader multi-step online research, prefer delegate_to_agent with web_task_coordinator.",
+            "For broader multi-step online research, prefer delegate_to_agent with mission_coordinator or web_task_coordinator.",
             "A tool-free answer before delegation is invalid for this turn.",
           ].join(" ");
           guardrailEvents.push({ type: "delegation_required", details: "tool_free_research_answer_rejected" });
@@ -869,7 +1298,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         );
       }
 
-      const rawResponse = llmResponse.content ?? "(no response)";
+      const rawResponse = llmResponse.content ?? "";
 
       // Output guardrail scan
       const outputScan = scanOutput(rawResponse);
@@ -1040,6 +1469,25 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
 
       if (!allowedToolNameSet.has(tc.name)) {
+        // ── Agent-name-as-tool recovery ──────────────────────────────────────
+        // Local LLMs sometimes call "computer_use_agent(...)" as if it were a
+        // tool, instead of delegate_to_agent(agentName: "computer_use_agent").
+        // If the unrecognised tool name matches a configured sub-agent AND
+        // delegate_to_agent is available, silently rewrite the call.
+        const knownAgents = getConfig().subAgents ?? {};
+        if (tc.name in knownAgents && allowedToolNameSet.has("delegate_to_agent")) {
+          const recoveredAgentName = tc.name;
+          const recoveredTask = typeof tc.arguments?.task === "string"
+            ? tc.arguments.task
+            : (typeof tc.arguments?.query === "string" ? tc.arguments.query : JSON.stringify(tc.arguments));
+          tc.arguments = { agentName: recoveredAgentName, task: recoveredTask };
+          tc.name = "delegate_to_agent";
+          logAudit("tool_call_recovered", {
+            originalTool: recoveredAgentName,
+            rewrittenTo: "delegate_to_agent",
+            reason: "agent_name_as_tool",
+          }, { sessionId: session.id, severity: "info" });
+        } else {
         logAudit("tool_call_blocked", { tool: tc.name, reason: "not_in_turn_toolset" }, {
           sessionId: session.id,
           severity: "warn",
@@ -1053,6 +1501,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           tool_call_id: tc.id,
         });
         continue;
+        }
       }
 
       // Block disallowed tools
@@ -1314,27 +1763,32 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // When orchestration returns grounded evidence, inject a strong nudge
     // telling the model to synthesize NOW instead of re-delegating for the same data.
     {
-      const evidenceBearingOrchestrationResults = toolResultMessages.filter((m) => {
-        const txt = typeof m.content === "string" ? m.content : "";
-        return txt.includes("Observed evidence:")
-          && !txt.includes("No usable")
-          && (
-            txt.includes("Delegated result from")
-            || txt.includes("Parallel delegation completed")
-            || txt.includes("Task graph completed")
-            || txt.includes("Ephemeral agent ")
-          );
-      });
-      if (evidenceBearingOrchestrationResults.length > 0) {
-        const nudge = {
-          role: "system" as const,
+      const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
+      if (disposition === "synthesize") {
+        session.addMessage({
+          role: "system",
           content:
             "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks. " +
             "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. " +
             "Do NOT delegate again for the same information — the evidence is already collected. " +
             "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
-        };
-        session.addMessage(nudge);
+        });
+      } else if (disposition === "continue") {
+        session.addMessage({
+          role: "system",
+          content:
+            "[CONTINUE ORCHESTRATION] The latest delegated evidence identifies a concrete follow-up action that has not yet been executed. " +
+            "You may continue in this same turn if the next action is materially different from prior delegations and directly advances the request. " +
+            "Do NOT repeat the same delegation, and do NOT ask for information already present in the evidence. " +
+            "Treat delegated phrases like 'I will now attempt...' or 'the next step...' as proposed follow-up work, not proof that it already happened. Do NOT tell the user a next step 'has been executed' unless this turn includes the completed tool result for that action.",
+        });
+      } else if (disposition === "ask_user") {
+        session.addMessage({
+          role: "system",
+          content:
+            "[USER RESPONSE REQUIRED] The latest delegated evidence indicates that further progress requires clarification, authorization, approval, or another user decision. " +
+            "Ask the user yourself in one concise message and do NOT call more tools until they respond.",
+        });
       }
 
       if (toolResultMessages.length > 0) {
@@ -1343,7 +1797,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           content:
             "[USER INTERACTION OWNERSHIP] The main assistant owns all user-facing interaction. " +
             "If the latest delegated results require clarification, authorization, approval, or another user decision, ask the user yourself in one concise message and stop delegating until they respond. " +
-            "If meaningful intermediate results were confirmed and more work still remains, provide a short progress update summarizing what is already known, what remains open, and what you will do next before triggering more orchestration.",
+            "If meaningful intermediate results were confirmed and more work still remains, provide a short progress update summarizing what is already known and what remains open. " +
+            "Only describe a next action if you are actually going to call another tool in this same turn. Never restate a proposed follow-up from delegated evidence as already executed unless a completed tool result in this turn proves it happened. If synthesis is required or the turn is ending, do not promise automatic continuation.",
         });
       }
     }
@@ -1431,7 +1886,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.",
   );
   const fallbackMsg = "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
-  const finalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
+  const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
+  const finalMsg = await rewriteTerminalResponseIfNeeded(normalizedFinalMsg, iterationCount, session, provider, signal);
   session.addMessage({ role: "assistant", content: finalMsg });
   if (opts.onChunk) opts.onChunk(finalMsg);
 

@@ -1456,14 +1456,22 @@ describe("gateway HTTP bridge", () => {
 
       if (req.method === "GET" && req.url === "/models") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ models: { "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "voice_clone"] } }, current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct" }));
+        res.end(JSON.stringify({ models: { "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "voice_clone", "custom_voice"] } }, current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct" }));
         return;
       }
 
       if (req.method === "POST" && req.url === "/voices/save") {
         expect(req.headers["content-type"]).toContain("multipart/form-data");
-        req.resume();
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
         req.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          expect(body).toContain('name="name"');
+          expect(body).toContain("Steffen Voice");
+          expect(body).toContain('name="lang"');
+          expect(body).toContain("English");
+          expect(body).toContain('name="ref_text"');
+          expect(body).toContain("Hallo aus dem Beispielclip");
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok", voice_id: "saved-steffen", name: "Steffen Voice", ref_text: "hello from the saved profile" }));
         });
@@ -1586,6 +1594,7 @@ describe("gateway HTTP bridge", () => {
       const saveVoiceForm = new FormData();
       saveVoiceForm.append("name", "Steffen Voice");
       saveVoiceForm.append("language", "English");
+      saveVoiceForm.append("referenceText", "Hallo aus dem Beispielclip");
       saveVoiceForm.append("file", new File([new Uint8Array([5, 6, 7, 8])], "voice.wav", { type: "audio/wav" }));
       const saveVoiceResponse = await fetch(`${baseUrl}/api/multimodal/voices/save`, {
         method: "POST",
@@ -1680,6 +1689,222 @@ describe("gateway HTTP bridge", () => {
       await gateway.stop();
       auth.resetAuthStateForTests();
       await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("falls back to plain qwen TTS when config supplies a default voice sample but the selected model lacks voice_clone", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-fallback-"));
+    const port = 23500 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 24500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(join(tempDir, "voice-sample.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    upstreamServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.url === "/health" || req.url === "/api/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "healthy" }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ models: { "Qwen/Qwen3-TTS-12Hz-1.7B": { capabilities: ["tts"] } }, current_model: "Qwen/Qwen3-TTS-12Hz-1.7B" }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/load_model") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/tts") {
+        let rawBody = "";
+        req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+        req.on("end", () => {
+          const body = JSON.parse(rawBody) as { text: string; speaker: string };
+          expect(body.text).toBe("fallback speech");
+          expect(body.speaker).toBe("Vivian");
+          res.writeHead(200, { "Content-Type": "audio/wav" });
+          res.end(Buffer.from("RIFFfallback"));
+        });
+        return;
+      }
+
+      if (req.url?.startsWith("/clone") || req.url?.includes("/voices/save")) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "clone path should not be called" }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "j".repeat(32),
+      },
+      workspacePath: tempDir,
+      multimodal: {
+        tts: {
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          api: "qwen-compatible",
+          model: "Qwen/Qwen3-TTS-12Hz-1.7B",
+          defaultSpeaker: "Vivian",
+          voiceSamplePath: "voice-sample.wav",
+          voiceSampleText: "sample voice",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const ttsResponse = await fetch(`${baseUrl}/api/multimodal/tts`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: "fallback speech" }),
+      });
+
+      expect(ttsResponse.status).toBe(200);
+      expect(ttsResponse.headers.get("content-type")).toContain("audio/wav");
+      const ttsBytes = Buffer.from(await ttsResponse.arrayBuffer());
+      expect(ttsBytes.subarray(0, 4).toString()).toBe("RIFF");
+    } finally {
+      await gateway.stop();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("returns a clear error when plain qwen TTS is requested against a voice-clone-only model", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-voice-clone-only-"));
+    const port = 24600 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 25600 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    upstreamServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "healthy" }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          models: { "Qwen/Qwen3-TTS-12Hz-1.7B-Base": { name: "1.7B Base", capabilities: ["tts", "voice_clone"] } },
+          current_model: "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/load_model") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/tts") {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "gateway should reject before reaching upstream /tts" }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "j".repeat(32),
+      },
+      multimodal: {
+        tts: {
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          api: "qwen-compatible",
+          model: "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+          defaultSpeaker: "Vivian",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const ttsResponse = await fetch(`${baseUrl}/api/multimodal/tts`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: "plain speech" }),
+      });
+
+      expect(ttsResponse.status).toBe(400);
+      await expect(ttsResponse.json()).resolves.toMatchObject({
+        error: expect.stringContaining("does not support built-in speaker synthesis"),
+      });
+    } finally {
+      await gateway.stop();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, gatewayTestTimeoutMs);

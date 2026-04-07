@@ -81,7 +81,7 @@ export const MainAssistantConfigSchema = z.object({
 
 export const EphemeralGenerationSchema = z.object({
   enabled: z.boolean().default(true),
-  skillMatchThreshold: z.number().min(0).max(1).default(0.75),
+  skillMatchThreshold: z.number().min(0).max(1).default(0.7),
   architectAgentName: z.string().min(1).default("agent_architect"),
 });
 
@@ -180,7 +180,7 @@ export const GatewaySchema = z.object({
   bindHost: z.enum(["loopback", "lan", "docker"]).default("loopback"),
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
-  turnTimeoutMs: z.number().int().min(30000).default(900000), // 15 minutes
+  turnTimeoutMs: z.number().int().min(30000).default(1800000), // 30 minutes
   maxBodyBytes: z.number().int().min(1024).max(52_428_800).default(1_048_576), // 1 MB
   /** Publicly reachable base URL, used to construct approval callback URLs sent to external systems */
   publicUrl: z.string().url().optional(),
@@ -269,7 +269,7 @@ export const RetrievalRerankerSchema = z.object({
 });
 
 export const RetrievalSearchSchema = z.object({
-  backend: z.enum(["auto", "searxng", "duckduckgo"]).default("auto"),
+  backend: z.enum(["auto", "searxng", "playwright", "duckduckgo"]).default("auto"),
   searxngBaseUrl: z.string().url().optional(),
   timeoutMs: z.number().int().min(1000).max(60000).default(12000),
 });
@@ -365,11 +365,28 @@ export type SiteCredential = z.infer<typeof SiteCredentialSchema>;
 
 export const SubAgentContainerSchema = z.object({
   enabled: z.boolean().default(false),
+  /** Set to true to explicitly opt this agent OUT of containerized execution even when
+   *  agents.defaultContainerized is enabled globally. Use only for trusted, read-only
+   *  specialists where in-process execution is acceptable (e.g. memory_search-only agents). */
+  disabled: z.boolean().default(false),
   image: z.string().default("starlingai/agent-worker:dev"),
   memoryMb: z.number().int().min(128).max(4096).default(512),
   cpus: z.number().min(0.1).max(4).default(0.5),
   timeoutMs: z.number().int().min(5000).max(300000).default(60000),
-});
+}).refine(
+  data => !(data.enabled && data.disabled),
+  { message: "container.enabled and container.disabled cannot both be true" },
+);
+
+/** Optional GPU/compute resource requirements for GPU-aware routing (Stage 9). */
+export const AgentComputeProfileSchema = z.object({
+  /** Minimum GPU VRAM required in MB (0 = no GPU required). */
+  minVramMb: z.number().int().min(0).default(0),
+  /** Whether this agent benefits from GPU acceleration (used for routing preference). */
+  gpuPreferred: z.boolean().default(false),
+  /** Named GPU tier required: "none" | "low" | "medium" | "high" | "any" */
+  gpuTier: z.enum(["none", "low", "medium", "high", "any"]).default("none"),
+}).optional();
 
 export const SubAgentConfigSchema = z.object({
   description: z.string(),                          // shown to orchestrator LLM
@@ -381,9 +398,11 @@ export const SubAgentConfigSchema = z.object({
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all
   maxIterations: z.number().int().min(1).max(30).default(5), // hard cap on tool-call loops
-  turnTimeoutMs: z.number().int().min(1_000).max(900_000).optional(), // optional per-agent wall-clock turn timeout
+  turnTimeoutMs: z.number().int().min(1_000).max(1_800_000).optional(), // optional per-agent wall-clock turn timeout
   maxConcurrent: z.number().int().min(1).max(20).optional(), // max simultaneous containers (default: 3)
   container: SubAgentContainerSchema.optional(),    // run in ephemeral Docker container
+  /** GPU/compute resource requirements — used for GPU-aware routing. */
+  compute: AgentComputeProfileSchema,
 });
 
 export const SubAgentsSchema = z.record(SubAgentConfigSchema);
@@ -703,6 +722,11 @@ export const ConfigSchema = z.object({
     }).default({}),
     mainAssistant: MainAssistantConfigSchema.default({}),
     ephemeralGeneration: EphemeralGenerationSchema.default({}),
+    /** When true, ALL sub-agents default to containerized execution (Docker isolation).
+     *  Individual agents can opt out by setting container.disabled: true in their config.
+     *  Defaults to false for backwards compatibility; set true in production for full
+     *  alignment with the "every agent runs in an isolated container" security principle. */
+    defaultContainerized: z.boolean().default(false),
     rateLimit: RateLimitSchema.default({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),

@@ -21,8 +21,13 @@ services:
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
       - REDIS_URL=redis://redis:6379
       - MONGODB_URL=mongodb://mongo:27017/starlingai
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-starlingai}
+      - QUESTDB_URL=http://questdb:9000
       - SAI_AUDIT_LOG=/data/audit.jsonl
       - SAI_CRED_STORE=/data/credentials.enc
+      - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
       - N8N_PASSWORD=${N8N_PASSWORD:-}
@@ -37,6 +42,7 @@ services:
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
+      - SAI_WORKSPACE_CONFIG_PATH=/workspace/workspace
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
@@ -53,6 +59,10 @@ services:
       redis:
         condition: service_healthy
       mongo:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      questdb:
         condition: service_healthy
       fastapi-mcp-template:
         condition: service_healthy
@@ -313,6 +323,48 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── Neo4j (graph database — entity relationships, knowledge graphs) ─────────
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-starlingai}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_memory_heap_initial__size=256m
+      - NEO4J_dbms_memory_heap_max__size=512m
+      - NEO4J_dbms_memory_pagecache_size=256m
+      - NEO4J_server_default__listen__address=0.0.0.0
+    volumes:
+      - gc-neo4j-data:/data
+      - gc-neo4j-logs:/logs
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── QuestDB (time-series — agent metrics, event timelines, research logs) ──
+  questdb:
+    image: questdb/questdb:8.2.1
+    restart: unless-stopped
+    environment:
+      - QDB_PG_ENABLED=false   # disable Postgres wire (HTTP API only)
+      - QDB_HTTP_BIND_TO=0.0.0.0:9000
+      - QDB_LOG_W_STDOUT_LEVEL=ERROR
+    volumes:
+      - gc-questdb-data:/var/lib/questdb
+    networks:
+      - starlingai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc ': >/dev/tcp/127.0.0.1/9000'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   # ── MongoDB (ephemeral agent data store) ────────────────────────────────────
   mongo:
     image: mongo:7
@@ -332,6 +384,9 @@ volumes:
   gc-postgres-data:
   gc-redis-data:
   gc-mongo-data:
+  gc-neo4j-data:
+  gc-neo4j-logs:
+  gc-questdb-data:
   gc-data:
   gc-mail-data:
   gc-workspace:

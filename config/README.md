@@ -22,6 +22,8 @@ After loading `config/`, the loader merges in `workspace/` (agent-mutable zone) 
 
 Run `pnpm sai config build` to compile everything into the root `starlingai.json` artifact that Docker mounts.
 
+The repository root should stay limited to entrypoints, compose files, core docs, and compiled artifacts. Helper scripts belong under `scripts/` or `scripts/devtools/`, and generated reports belong under `artifacts/`.
+
 ## Gateway Reverse Proxy Note
 
 When the dashboard calls the gateway from a different browser origin, add that dashboard origin under `gateway.corsAllowedOrigins` in `config/gateway/*.jsonc`. The origin from `gateway.publicUrl` is also accepted automatically.

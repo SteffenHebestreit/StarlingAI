@@ -73,6 +73,10 @@ const COMPUTER_CLIPBOARD_THRESHOLD = 5;           // clipboard reads per session
 
 const COMPUTER_STALE_LOOP_THRESHOLD = 3;          // identical screenshots in a row
 
+// Self-improvement abuse windows
+const CONFIG_PROPOSAL_WINDOW_MS = 10 * 60 * 1_000; // 10 min
+const CONFIG_PROPOSAL_THRESHOLD = 5;               // proposals per session
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 /** sessionId → hit timestamps */
@@ -117,14 +121,21 @@ const _computerClipboardReads = new Map<string, number[]>();
 /** computerSessionId → last N screenshot hashes (ring buffer for stale detection) */
 const _computerScreenshotHashes = new Map<string, string[]>();
 
+/** sessionId → config proposal timestamps (self-improvement abuse detection) */
+const _configProposalsBySession = new Map<string, number[]>();
+
 let _alertsEmitted = 0;
 let _wardenInterval: ReturnType<typeof setInterval> | null = null;
 let _unsubscribeAudit: (() => void) | null = null;
 
+/** Ring buffer of the last 200 alerts — queryable by the dashboard. */
+const ALERT_RING_SIZE = 200;
+const _alertRing: Array<WardenAlert & { ts: string }> = [];
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -217,6 +228,16 @@ export function startWarden(): void {
         hits.push(now);
         _agentMessagesBySender.set(key, hits);
       }
+    }
+
+    // ── Config proposal accumulation (self-improvement abuse detection) ────
+    if (
+      (event.type === "config_proposal_created" || event.type === "config_proposal_applied") &&
+      event.sessionId
+    ) {
+      const hits = _configProposalsBySession.get(event.sessionId) ?? [];
+      hits.push(now);
+      _configProposalsBySession.set(event.sessionId, hits);
     }
 
     // ── Computer-use action accumulation ────────────────────────────────────
@@ -365,6 +386,8 @@ export function resetWardenForTests(): void {
   _computerCredentialPrompts.clear();
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
+  _configProposalsBySession.clear();
+  _alertRing.length = 0;
   _alertsEmitted = 0;
 }
 
@@ -534,7 +557,31 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 7. Computer focus thrashing ──────────────────────────────────────────────
+  // 7. Config proposal flood (self-improvement abuse) ───────────────────────
+  for (const [sessionId, timestamps] of _configProposalsBySession) {
+    const recent = timestamps.filter(t => now - t < CONFIG_PROPOSAL_WINDOW_MS);
+    if (recent.length === 0) {
+      _configProposalsBySession.delete(sessionId);
+      continue;
+    }
+    _configProposalsBySession.set(sessionId, recent);
+
+    if (recent.length >= CONFIG_PROPOSAL_THRESHOLD) {
+      const alert = makeAlert(
+        "config_proposal_flood",
+        "warn",
+        sessionId,
+        `Session generated ${recent.length} config proposals in 10 minutes — possible self-improvement runaway. Further proposals suspended until operator review.`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      // Reset window so the alert fires at most once per burst
+      _configProposalsBySession.set(sessionId, []);
+    }
+  }
+
+  // 8. Computer focus thrashing ──────────────────────────────────────────────
   for (const [csId, timestamps] of _computerFocusSwitches) {
     const recent = timestamps.filter(t => now - t < COMPUTER_FOCUS_WINDOW_MS);
     if (recent.length === 0) {
@@ -557,7 +604,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 8. Computer click storm ──────────────────────────────────────────────────
+  // 9. Computer click storm ──────────────────────────────────────────────────
   for (const [csId, timestamps] of _computerClicks) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CLICK_WINDOW_MS);
     if (recent.length === 0) {
@@ -581,7 +628,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 9. Computer credential prompt loop ───────────────────────────────────────
+  // 10. Computer credential prompt loop ───────────────────────────────────────
   for (const [csId, timestamps] of _computerCredentialPrompts) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CREDENTIAL_WINDOW_MS);
     if (recent.length === 0) {
@@ -605,7 +652,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 10. Computer clipboard exfiltration ───────────────────────────────────────
+  // 11. Computer clipboard exfiltration ───────────────────────────────────────
   for (const [csId, timestamps] of _computerClipboardReads) {
     const recent = timestamps.filter(t => now - t < COMPUTER_CLIPBOARD_WINDOW_MS);
     if (recent.length === 0) {
@@ -629,7 +676,7 @@ function sweepAnomalies(): WardenAlert[] {
     }
   }
 
-  // 11. Computer stale loop ──────────────────────────────────────────────────
+  // 12. Computer stale loop ──────────────────────────────────────────────────
   for (const [csId, hashes] of _computerScreenshotHashes) {
     if (hashes.length >= COMPUTER_STALE_LOOP_THRESHOLD) {
       const tail = hashes.slice(-COMPUTER_STALE_LOOP_THRESHOLD);
@@ -671,6 +718,9 @@ function makeAlert(
 
 function emitAlert(alert: WardenAlert): void {
   _alertsEmitted++;
+  // Push to ring buffer for dashboard queries
+  _alertRing.push({ ...alert, ts: new Date().toISOString() });
+  if (_alertRing.length > ALERT_RING_SIZE) _alertRing.shift();
   logAudit(
     "warden_alert",
     {
@@ -683,4 +733,9 @@ function emitAlert(alert: WardenAlert): void {
     { severity: alert.severity, channel: "warden" },
   );
   log[alert.severity]({ alertType: alert.type, subject: alert.subject }, `Warden: ${alert.detail}`);
+}
+
+/** Return recent warden alerts (up to last 200) for the operator dashboard. */
+export function getWardenAlerts(): Array<WardenAlert & { ts: string }> {
+  return [..._alertRing];
 }

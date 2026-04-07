@@ -80,8 +80,10 @@ export interface AdaptiveTimeoutRecommendation {
 const MIN_PROFILE_RUNS = 3;
 const MIN_TIMEOUT_SAMPLES = 3;
 const MIN_ADAPTIVE_TIMEOUT_MS = 15_000;
-const MAX_ADAPTIVE_TIMEOUT_MS = 900_000;
+const MAX_ADAPTIVE_TIMEOUT_MS = 1_800_000;
 const TIMEOUT_HEADROOM_FACTOR = 1.5;
+const PROMPT_OUTCOME_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
+const PROMPT_MIN_ADVERSE_OUTCOMES = 2;
 
 export function computeAgentCostProfile(agentName: string, workspacePath: string): AgentCostProfile | null {
   const outcomes = readRecentOutcomes(workspacePath, 50);
@@ -130,7 +132,11 @@ export function computeAdaptiveSubAgentTimeoutMs(
  * Empty string if there's nothing noteworthy.
  */
 export function formatOutcomesForPrompt(workspacePath: string): string {
-  const outcomes = readRecentOutcomes(workspacePath, 30);
+  const cutoffMs = Date.now() - PROMPT_OUTCOME_LOOKBACK_MS;
+  const outcomes = readRecentOutcomes(workspacePath, 30).filter((entry) => {
+    const tsMs = Date.parse(entry.ts);
+    return Number.isFinite(tsMs) && tsMs >= cutoffMs;
+  });
   if (outcomes.length === 0) return "";
 
   // Aggregate per-agent stats from the most recent window
@@ -138,27 +144,27 @@ export function formatOutcomesForPrompt(workspacePath: string): string {
     success: number;
     failure: number;
     partial: number;
-    latestLesson?: string;
-    lastFailureTask?: string;
   }>();
 
   for (const o of outcomes) {
     const s = stats.get(o.agent) ?? { success: 0, failure: 0, partial: 0 };
     s[o.outcome]++;
-    if (o.lesson) s.latestLesson = o.lesson;
-    if ((o.outcome === "failure" || o.outcome === "partial") && o.task) {
-      s.lastFailureTask = o.task.slice(0, 80);
-    }
     stats.set(o.agent, s);
   }
 
-  const failingAgents = [...stats.entries()].filter(([, s]) => s.failure > 0 || s.partial > 0);
+  const failingAgents = [...stats.entries()]
+    .filter(([name, s]) => !name.startsWith("ephemeral:"))
+    .filter(([, s]) => s.failure + s.partial >= PROMPT_MIN_ADVERSE_OUTCOMES)
+    .sort((left, right) => {
+      const leftAdverse = left[1].failure + left[1].partial;
+      const rightAdverse = right[1].failure + right[1].partial;
+      if (rightAdverse !== leftAdverse) return rightAdverse - leftAdverse;
+      return left[0].localeCompare(right[0]);
+    });
   if (failingAgents.length === 0) return "";
 
   const lines = failingAgents.map(([name, s]) => {
-    const lessonNote = s.latestLesson ? ` — Lesson: "${s.latestLesson}"` : "";
-    const taskNote = !s.latestLesson && s.lastFailureTask ? ` (last failed: "${s.lastFailureTask}")` : "";
-    return `- **${name}**: ${s.failure} failure(s), ${s.partial} partial(s) [${s.success} success(es)]${lessonNote}${taskNote}`;
+    return `- **${name}**: ${s.failure} failure(s), ${s.partial} partial(s) [${s.success} success(es)]`;
   });
 
   return [
