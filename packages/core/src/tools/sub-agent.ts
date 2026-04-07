@@ -8,7 +8,7 @@
 import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
@@ -20,6 +20,7 @@ import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAut
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
 import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact } from "../swarm/memory.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
+import { recordCapabilityGap } from "../agent/self-improve.js";
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
@@ -38,16 +39,93 @@ interface HeuristicRoutingSignals {
   looksFresh: boolean;
   looksSourceHeavy: boolean;
   looksWebTask: boolean;
+  looksArtifactRender: boolean;
+  looksGroundedInput: boolean;
+  looksSequential: boolean;
+  looksVisualization: boolean;
+  looksDataHeavy: boolean;
+  looksExternalData: boolean;
+  looksSynthesisHeavy: boolean;
+  looksMultiStageEvidenceWorkflow: boolean;
+  looksRenderFromProvidedData: boolean;
+  looksComputerUse: boolean;
+  domainCount: number;
+  prefersPlanner: boolean;
 }
 
 function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const normalized = query.trim().toLowerCase();
+  const looksTimeWindow = /\b(last|past)\s+\d+\s+(days?|weeks?|months?|years?)\b/i.test(normalized);
+  const looksMarketData = /\b(etf|fund|funds|index|indices|stocks?|shares?|equities|benchmark|benchmarks|returns?|historical|history|time[ -]?series|performance)\b/i.test(normalized);
+  const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
+  const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now|last year|this year)\b/i.test(normalized);
+  const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
+  const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
+  const looksArtifactRender = /\b(create|build|generate|render|produce|turn|convert|visuali[sz]e|present|html)\b/i.test(normalized);
+  const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
+  const looksSequential = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
+  const looksVisualization = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalized);
+  const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized)
+    || looksMarketData
+    || looksTimeWindow;
+  const looksExternalData = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|latest|recent|current|source|sources)\b/i.test(normalized)
+    || (looksMarketData && !looksGroundedInput)
+    || (looksTimeWindow && looksVisualization && !looksGroundedInput);
+  const looksSynthesisHeavy = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalized);
+  const looksRenderFromProvidedData = looksGroundedInput
+    && (looksVisualization || looksArtifactRender)
+    && !looksSourceHeavy
+    && !looksFresh
+    && !looksExternalData
+    && !looksSequential;
+  const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
+    && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
+    && (!looksRenderFromProvidedData || looksSequential);
+  const looksSecurityScan = /\b(pentest|penetration|security|vulnerabilit|cve|exploit|scan|nmap|nikto|sqlmap|hydra|metasploit|authorized scope)\b/i.test(normalized);
+  const hasDesktopKeyword = /\b(meinem?\s+(?:pc|computer|rechner|desktop|workstation)|my\s+(?:pc|computer|desktop|workstation)|on\s+(?:the\s+)?(?:pc|computer|desktop|machine)\s+at|lokale[mnrs]?\s+(?:pc|computer|rechner|desktop))\b/i.test(normalized);
+  const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
+  const hasDesktopAppContext = /\b(rdp|vnc|ssh|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
+  const looksComputerUse = !looksSecurityScan
+    && (hasDesktopKeyword || (hasIpAddress && hasDesktopAppContext));
+
+  const domainCount = [
+    looksWebTask || looksSourceHeavy || looksFresh,
+    looksDataHeavy,
+    looksVisualization,
+    /\b(report|brief|paper|summary|presentation|writeup|document)\b/i.test(normalized),
+  ].filter(Boolean).length;
+
   return {
-    looksBroad: /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized),
-    looksFresh: /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now)\b/i.test(normalized),
-    looksSourceHeavy: /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized),
-    looksWebTask: /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized),
+    looksBroad,
+    looksFresh,
+    looksSourceHeavy,
+    looksWebTask,
+    looksArtifactRender,
+    looksGroundedInput,
+    looksSequential,
+    looksVisualization,
+    looksDataHeavy,
+    looksExternalData,
+    looksSynthesisHeavy,
+    looksMultiStageEvidenceWorkflow,
+    looksRenderFromProvidedData,
+    looksComputerUse,
+    domainCount,
+    prefersPlanner: looksSequential
+      || looksMultiStageEvidenceWorkflow
+      || (looksVisualization && (looksExternalData || looksDataHeavy))
+      || (looksSynthesisHeavy && domainCount >= 2)
+      || domainCount >= 3
+      || (looksBroad && domainCount >= 2),
   };
+}
+
+function getPinnedAgentForTask(task: string): string | null {
+  const signals = analyzeHeuristicRoutingQuery(task);
+  if (signals.looksComputerUse) {
+    return "computer_use_agent";
+  }
+  return null;
 }
 
 function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
@@ -60,9 +138,45 @@ function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[
   ];
 }
 
+function buildPlannerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    "planning",
+    ...(signals.looksSequential ? ["dependencies"] : []),
+    ...(signals.looksVisualization ? ["visualization"] : []),
+    ...(signals.looksDataHeavy ? ["analysis"] : []),
+    ...(signals.looksExternalData ? ["research"] : []),
+  ];
+}
+
+function buildMissionCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    "coordination",
+    "parallel",
+    ...(signals.looksSequential ? ["dependencies"] : []),
+    ...(signals.looksVisualization ? ["visualization"] : []),
+    ...(signals.looksDataHeavy ? ["analysis"] : []),
+    ...(signals.looksExternalData ? ["research"] : []),
+    ...(signals.looksSynthesisHeavy ? ["synthesis"] : []),
+    "quality",
+  ];
+}
+
+function buildChartDesignerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
+  return [
+    ...(signals.looksGroundedInput ? ["verified"] : []),
+    ...(signals.looksVisualization ? ["chart"] : []),
+    ...(signals.looksDataHeavy ? ["data"] : []),
+    "artifact",
+  ];
+}
+
 function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
-  if (!signals.looksWebTask || !(signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
+  if (!(signals.looksWebTask || signals.looksSourceHeavy || signals.looksFresh)) {
+    return false;
+  }
+
+  if (signals.looksMultiStageEvidenceWorkflow && !signals.looksWebTask) {
     return false;
   }
 
@@ -77,6 +191,56 @@ function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude
   return Boolean(getConfig().subAgents["web_task_coordinator"]);
 }
 
+function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: string[]): boolean {
+  const signals = analyzeHeuristicRoutingQuery(query);
+  if (!signals.prefersPlanner) {
+    return false;
+  }
+
+  if (exclude.includes("project_planner")) {
+    return false;
+  }
+
+  if (ctx.allowedAgents && !ctx.allowedAgents.includes("project_planner")) {
+    return false;
+  }
+
+  const planner = getConfig().subAgents["project_planner"];
+  if (!planner) {
+    return false;
+  }
+
+  const tools = planner.tools ?? [];
+  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+}
+
+function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
+  const signals = analyzeHeuristicRoutingQuery(query);
+  if (!signals.prefersPlanner) {
+    return false;
+  }
+
+  if (signals.looksRenderFromProvidedData) {
+    return false;
+  }
+
+  if (exclude.includes("mission_coordinator")) {
+    return false;
+  }
+
+  if (ctx.allowedAgents && !ctx.allowedAgents.includes("mission_coordinator")) {
+    return false;
+  }
+
+  const coordinator = getConfig().subAgents["mission_coordinator"];
+  if (!coordinator) {
+    return false;
+  }
+
+  const tools = coordinator.tools ?? [];
+  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+}
+
 export interface AgentRoutingCandidate {
   name: string;
   description: string;
@@ -88,6 +252,8 @@ export interface AgentRoutingCandidate {
   tags: string[];
   /** Performance and cost profile derived from recent outcome log entries. */
   costProfile?: AgentCostProfile;
+  /** GPU/compute resource requirements declared by the agent (Stage 9). */
+  computeProfile?: { gpuPreferred: boolean; gpuTier: string; minVramMb: number };
 }
 
 export interface AgentRoutingResolution {
@@ -144,6 +310,11 @@ function toCandidate(
     capabilities: cfg.capabilities ?? [],
     tags: cfg.tags ?? [],
     costProfile: computeAgentCostProfile(name, workspacePath) ?? undefined,
+    computeProfile: cfg.compute ? {
+      gpuPreferred: cfg.compute.gpuPreferred ?? false,
+      gpuTier: cfg.compute.gpuTier ?? "none",
+      minVramMb: cfg.compute.minVramMb ?? 0,
+    } : undefined,
   };
 }
 
@@ -190,6 +361,42 @@ function computeOutcomeBoost(agentName: string, workspacePath: string): number {
   return (successRate - 0.5) * 0.25;
 }
 
+/**
+ * Compute a GPU-affinity score adjustment for an agent.
+ *
+ * Rules (Stage 9 GPU-aware routing):
+ *   - If the agent declares gpuTier "none" and the query contains compute-heavy
+ *     terms, it gets a small negative adjustment to yield to GPU-capable peers.
+ *   - If the agent declares gpuPreferred: true and the query looks compute-heavy,
+ *     it gets a small positive boost.
+ *   - If an agent declares a minVramMb > 0, that metadata is surfaced in search
+ *     results so operators know the requirement (routing cannot enforce VRAM at
+ *     runtime without hardware introspection — see ROADMAP Stage 9).
+ */
+const GPU_HEAVY_QUERY_TERMS = [
+  "embed", "embedding", "transcribe", "speech", "audio", "image", "generate image",
+  "vision", "ocr", "stable diffusion", "whisper", "llava", "gpu", "cuda", "vram",
+  "neural", "inference", "model weights", "fine-tune", "fine tune",
+];
+
+function computeGpuAffinityAdjustment(
+  query: string,
+  cfg: { compute?: { gpuPreferred?: boolean; gpuTier?: string } | null },
+  poolHasGpuAgents: boolean,
+): number {
+  const lq = query.toLowerCase();
+  const isComputeHeavy = GPU_HEAVY_QUERY_TERMS.some(t => lq.includes(t));
+  if (!isComputeHeavy) return 0;
+
+  const gpuTier = cfg.compute?.gpuTier ?? "none";
+  if (cfg.compute?.gpuPreferred && gpuTier !== "none") return 0.06; // prefer GPU-capable agents
+  // Only penalize non-GPU agents when there is at least one GPU-capable peer —
+  // otherwise the penalty lowers everyone's score equally and pushes the router
+  // toward ephemeral agent generation unnecessarily.
+  if (gpuTier === "none" && poolHasGpuAgents) return -0.04;
+  return 0;
+}
+
 export async function resolveAgentRouting(
   query: string,
   opts?: {
@@ -211,6 +418,7 @@ export async function resolveAgentRouting(
   if (opts?.allowedAgents) {
     entries = entries.filter(([name]) => opts.allowedAgents!.includes(name));
   }
+  const availableEntries = new Map(entries);
 
   // Filter out agents whose circuit breaker is open
   const trippedAgents: string[] = entries
@@ -237,6 +445,10 @@ export async function resolveAgentRouting(
     }
   }
 
+  // Pre-compute whether any agent in the pool declares GPU capability, so the
+  // GPU-affinity penalty is only applied when a GPU-capable peer actually exists.
+  const poolHasGpuAgents = entries.some(([, cfg]) => cfg.compute?.gpuPreferred && (cfg.compute?.gpuTier ?? "none") !== "none");
+
   let ranked = entries
     .map(([name, cfg]) => {
       const keywordMatch = scoreAgentKeywordMatch(raw, name, cfg);
@@ -244,12 +456,14 @@ export async function resolveAgentRouting(
       const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
       const outcomeBoost = computeOutcomeBoost(name, config.workspacePath);
-      const intentAdjustment = computeAgentIntentAdjustment(raw, cfg, [
+      const intentReinforcement = computeAgentIntentAdjustment(raw, cfg, [
         ...keywordMatch.matchedTerms,
         ...(cfg.capabilities ?? []),
         ...(cfg.tags ?? []),
-      ]);
-      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentAdjustment));
+      ]) * 0.25;
+      const taskShapeAdjustment = computeAgentTaskShapeAdjustment(raw, cfg);
+      const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
+      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment));
       return {
         name,
         cfg,
@@ -286,6 +500,78 @@ export async function resolveAgentRouting(
         };
       })
       .sort(compareRoutingResults);
+  }
+
+  const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
+  const preferMissionInSearch = preferenceSignals.looksMultiStageEvidenceWorkflow
+    || (preferenceSignals.looksSequential
+      && (preferenceSignals.looksVisualization || preferenceSignals.looksExternalData || preferenceSignals.looksSourceHeavy || preferenceSignals.looksDataHeavy));
+  const preferWebCoordinatorInSearch = !preferenceSignals.looksMultiStageEvidenceWorkflow
+    && !preferenceSignals.looksDataHeavy
+    && !preferenceSignals.looksVisualization
+    && (preferenceSignals.looksWebTask || preferenceSignals.looksSourceHeavy || preferenceSignals.looksFresh);
+  const preferProjectPlannerInSearch = preferenceSignals.prefersPlanner
+    && !preferMissionInSearch
+    && !preferenceSignals.looksSourceHeavy
+    && !preferenceSignals.looksFresh
+    && !preferenceSignals.looksExternalData
+    && !preferenceSignals.looksVisualization
+    && !preferenceSignals.looksDataHeavy;
+  const preferredNames = [
+    preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
+    preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
+    preferMissionInSearch ? "mission_coordinator" : null,
+    preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
+    preferProjectPlannerInSearch ? "project_planner" : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const maybeAppendHeuristicCandidate = (name: string, score: number, matchedTerms: string[]) => {
+    const existing = ranked.find((candidate) => candidate.name === name);
+    if (existing) {
+      // Boost existing candidate if heuristic score is higher
+      if (score > existing.combinedScore) {
+        existing.combinedScore = score;
+        existing.matchedTerms = [...new Set([...existing.matchedTerms, ...matchedTerms])];
+      }
+      return;
+    }
+    const cfg = availableEntries.get(name);
+    if (!cfg) {
+      return;
+    }
+    ranked.push({
+      name,
+      cfg,
+      matchedTerms,
+      combinedScore: score,
+    });
+  };
+
+  if (preferenceSignals.looksComputerUse) {
+    maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+  if (preferenceSignals.looksRenderFromProvidedData) {
+    maybeAppendHeuristicCandidate("chart_designer", 0.72, buildChartDesignerMatchedTerms(preferenceSignals));
+  }
+  if (preferMissionInSearch) {
+    maybeAppendHeuristicCandidate("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(preferenceSignals));
+  }
+  if (preferWebCoordinatorInSearch) {
+    maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(preferenceSignals));
+  }
+  if (preferProjectPlannerInSearch) {
+    maybeAppendHeuristicCandidate("project_planner", 0.72, buildPlannerMatchedTerms(preferenceSignals));
+  }
+
+  ranked = ranked.sort(compareRoutingResults).slice(0, 5);
+
+  for (const preferredName of preferredNames) {
+    const preferredCandidate = ranked.find((candidate) => candidate.name === preferredName);
+    if (!preferredCandidate) {
+      continue;
+    }
+    ranked = [preferredCandidate, ...ranked.filter((candidate) => candidate.name !== preferredName)];
+    break;
   }
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
@@ -369,10 +655,10 @@ const EXECUTION_TOOL_FAMILIES = {
   ]),
 };
 
-function validateEphemeralToolSelection(tools: string[]): string[] {
+function validateEphemeralToolSelection(tools: string[], opts?: { allowZeroTools?: boolean }): string[] {
   const issues: string[] = [];
 
-  if (tools.length === 0) {
+  if (tools.length === 0 && !opts?.allowZeroTools) {
     issues.push("Ephemeral agents must have at least one valid tool.");
   }
 
@@ -427,6 +713,60 @@ interface TaskGraphNodeInput {
   skillMatchThreshold?: number;
 }
 
+const DEFAULT_MAX_AGENT_CALLS_PER_TURN = 2;
+const DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN = 8;
+
+function totalDelegationsThisTurn(ctx: ToolContext): number {
+  return [...(ctx._turnAgentCounts?.values() ?? [])].reduce((sum, count) => sum + count, 0);
+}
+
+function getPerAgentDelegationLimit(ctx: ToolContext, agentName: string): number {
+  const override = ctx._turnAgentRepeatLimitOverrides?.[agentName];
+  return Math.max(DEFAULT_MAX_AGENT_CALLS_PER_TURN, override ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN);
+}
+
+function getTotalDelegationLimit(ctx: ToolContext): number {
+  return Math.max(DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN, ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN);
+}
+
+function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+  const counts = new Map<string, number>();
+  for (const agentName of agentNames) {
+    const normalized = agentName?.trim();
+    if (!normalized) continue;
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+
+  const repeatOverrides: Record<string, number> = {
+    ...(ctx._turnAgentRepeatLimitOverrides ?? {}),
+  };
+
+  let changed = false;
+  for (const [agentName, count] of counts.entries()) {
+    if (count <= DEFAULT_MAX_AGENT_CALLS_PER_TURN) continue;
+    const nextLimit = Math.max(repeatOverrides[agentName] ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN, count);
+    if (repeatOverrides[agentName] !== nextLimit) {
+      repeatOverrides[agentName] = nextLimit;
+      changed = true;
+    }
+  }
+
+  const nextTotalLimit = Math.max(
+    ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN,
+    totalDelegationsThisTurn(ctx) + Math.max(1, plannedDelegations) + 1,
+  );
+
+  if (!changed && nextTotalLimit === (ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN)) {
+    return ctx;
+  }
+
+  return {
+    ...ctx,
+    _turnAgentRepeatLimitOverrides: repeatOverrides,
+    _turnTotalDelegationLimitOverride: nextTotalLimit,
+  };
+}
+
 interface ArchitectEphemeralSpec {
   agentName?: unknown;
   description?: unknown;
@@ -460,7 +800,7 @@ function parseArchitectSpec(content: string): ArchitectEphemeralSpec {
   return JSON.parse(jsonStr) as ArchitectEphemeralSpec;
 }
 
-function buildArchitectPrompt(task: string): string {
+function buildArchitectPrompt(task: string, previousContext?: string): string {
   const toolList = [...GRANTABLE_TOOLS].join(", ");
   const defaultModel = getConfig().agents.defaults.model.primary;
   return [
@@ -472,7 +812,9 @@ function buildArchitectPrompt(task: string): string {
     "",
     "Rules:",
     "- Choose at most 4 tools (up to 6 for computer-use tasks).",
+    "- If the task can be completed purely from the provided task text and context, tools may be an empty array [].",
     "- Do NOT mix execution families: shell (shell_exec, run_script), browser (mcp__playwright__*), and code (mcp__code_sandbox__*) are separate families — pick at most one.",
+    "- If the task requires fetching data from the web using browser tools (mcp__playwright__*), ALWAYS also include web_search so the agent can discover valid URLs before navigating. Never invent placeholder or example URLs.",
     "- Keep systemPrompt concise (under 200 words). State the role, key rules, and a tool budget.",
     "- maxIterations must be between 3 and 8 for non-computer tasks. For computer-use tasks (tools starting with computer_), use 10-15 iterations because each screen interaction needs snapshot+action+verify cycles.",
     "- For computer-use agents: include 'Do NOT call the same tool with identical arguments twice in a row' in the systemPrompt. The session is already started — begin with computer_list_windows, not computer_session_start.",
@@ -489,13 +831,14 @@ function buildArchitectPrompt(task: string): string {
     "}",
     "",
     `Task: ${task.slice(0, 1200)}`,
+    ...(previousContext ? ["", "Context from previous attempts (use these real URLs and facts — do NOT invent placeholder URLs):", previousContext] : []),
   ].join("\n");
 }
 
-async function requestArchitectSpec(task: string, ctx: ToolContext): Promise<ArchitectEphemeralSpec | null> {
+async function requestArchitectSpec(task: string, ctx: ToolContext, previousContext?: string): Promise<ArchitectEphemeralSpec | null> {
   const settings = getEphemeralGenerationSettings();
   const architectAgentName = settings.architectAgentName;
-  const architectPrompt = buildArchitectPrompt(task);
+  const architectPrompt = buildArchitectPrompt(task, previousContext);
 
   try {
     const response = await runSubAgent({
@@ -628,7 +971,27 @@ export function looksLikeFailureResult(result: string): boolean {
 export function looksLikeInfrastructureFailure(result: string): boolean {
   if (!result.trim()) return false;
   const preview = result.slice(0, 800);
+  // Sub-agent execution timeouts ("Sub-agent 'X' timed out after Yms") are
+  // retryable with a different agent — they are NOT infrastructure failures.
+  if (/\bSub-agent\b.{0,60}\btimed out\b/i.test(preview)) return false;
   return /\b(timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
+}
+
+function shouldAcceptPartialDelegation(
+  agentName: string,
+  task: string,
+  stats: { toolCount: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined,
+): boolean {
+  if (stats?.outcome !== "partial") {
+    return false;
+  }
+
+  const looksComputerUse = agentName === "computer_use_agent" || analyzeHeuristicRoutingQuery(task).looksComputerUse;
+  if (!looksComputerUse) {
+    return false;
+  }
+
+  return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -643,8 +1006,20 @@ function uniqueNames(values: string[]): string[] {
   return result;
 }
 
+function buildDelegationFailureMessage(title: string, detail: string, opts?: { prefix?: string }): string {
+  const trimmedDetail = detail.trim();
+  const prefix = opts?.prefix ?? `All candidate agents failed for task '${title}'.`;
+  if (!trimmedDetail) {
+    return prefix;
+  }
+  return `${prefix}\n${trimmedDetail}`;
+}
+
 async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: string[]): Promise<AgentRoutingCandidate[]> {
   const excluded = new Set(exclude);
+  const preferMissionCoordinator = shouldPreferMissionCoordinator(query, ctx, exclude);
+  const preferWebTaskCoordinator = shouldPreferWebTaskCoordinator(query, ctx, exclude);
+  const preferProjectPlanner = shouldPreferProjectPlanner(query, ctx, exclude);
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
@@ -657,6 +1032,15 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       allowedAgents: ctx.allowedAgents,
     });
     candidates = [...low.results, ...low.weakCandidates];
+
+    // Total routing failure — no agent at any confidence. Auto-record for self-improvement.
+    if (candidates.length === 0) {
+      recordCapabilityGap({
+        description: `Delegation failed — no agent found for task: "${query.slice(0, 300)}"`,
+        exampleInput: query.slice(0, 500),
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
+    }
   }
 
   // Deduplicate by name, exclude already-attempted agents
@@ -667,7 +1051,17 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
     return true;
   });
 
-  const heuristicCandidates = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
+  const { candidates: heuristicCandidates, boosts: heuristicBoosts } = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
+
+  // Apply heuristic score boosts to routed candidates that were already seen
+  for (const [name, boost] of heuristicBoosts) {
+    const existing = routed.find(c => c.name === name);
+    if (existing && boost.score > existing.score) {
+      existing.score = boost.score;
+      existing.matchedTerms = [...new Set([...existing.matchedTerms, ...boost.matchedTerms])];
+    }
+  }
+
   const mergedCandidates = [...routed, ...heuristicCandidates]
     .sort((left, right) => {
       if (right.score !== left.score) {
@@ -679,9 +1073,17 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       return left.name.localeCompare(right.name);
     });
 
-  const coordinatorCandidate = heuristicCandidates.find((candidate) => candidate.name === "web_task_coordinator");
-  if (coordinatorCandidate) {
-    return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
+  const preferredCoordinators = [
+    preferMissionCoordinator ? "mission_coordinator" : null,
+    preferWebTaskCoordinator ? "web_task_coordinator" : null,
+    preferProjectPlanner ? "project_planner" : null,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const preferredCoordinator of preferredCoordinators) {
+    const coordinatorCandidate = mergedCandidates.find((candidate) => candidate.name === preferredCoordinator);
+    if (coordinatorCandidate) {
+      return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
+    }
   }
 
   return mergedCandidates;
@@ -692,33 +1094,68 @@ function buildHeuristicRoutingCandidates(
   ctx: ToolContext,
   excluded: Set<string>,
   seen: Set<string>,
-): AgentRoutingCandidate[] {
+): { candidates: AgentRoutingCandidate[]; boosts: Map<string, { score: number; matchedTerms: string[] }> } {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return [];
+  if (!normalized) return { candidates: [], boosts: new Map() };
 
   const config = getConfig();
   const defaultModel = config.agents.defaults.model.primary;
   const heuristicCandidates: AgentRoutingCandidate[] = [];
+  const heuristicBoosts = new Map<string, { score: number; matchedTerms: string[] }>();
   const signals = analyzeHeuristicRoutingQuery(normalized);
 
   const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
-    if (excluded.has(name) || seen.has(name)) return;
+    if (excluded.has(name)) return;
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(name)) return;
     const cfg = config.subAgents[name];
     if (!cfg) return;
+    if (seen.has(name)) {
+      // Agent already in routed candidates — record boost request so the
+      // caller can apply it to the existing entry.
+      heuristicBoosts.set(name, { score, matchedTerms });
+      return;
+    }
     seen.add(name);
     heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
   };
 
-  if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
-    maybeAdd("web_task_coordinator", 0.62, buildCoordinatorMatchedTerms(signals));
+  if (signals.looksComputerUse) {
+    maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
   }
 
-  if (signals.looksSourceHeavy || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
+  if (shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
+    maybeAdd("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(signals));
+  }
+
+  if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
+    maybeAdd("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(signals));
+  }
+
+  if (shouldPreferProjectPlanner(normalized, ctx, [...excluded])) {
+    maybeAdd("project_planner", 0.72, buildPlannerMatchedTerms(signals));
+  }
+
+  if (signals.looksRenderFromProvidedData) {
+    maybeAdd("chart_designer", 0.72, buildChartDesignerMatchedTerms(signals));
+  }
+
+  // Boost browser_agent when the task explicitly mentions Playwright, browser automation,
+  // or cookie handling — avoid sending these to researcher which only has web_fetch.
+  if (/\b(playwright|browser.?agent|cookie.?consent|cookie.?banner|interactive|js.?rendered|javascript.?heavy)\b/i.test(normalized)) {
+    maybeAdd("browser_agent", 0.72, ["browser", "playwright", "interactive"]);
+  }
+
+  // Boost web_task_coordinator for web data tasks that need coordinated retrieval + charting
+  if (signals.looksVisualization && (signals.looksExternalData || signals.looksDataHeavy) && !signals.looksRenderFromProvidedData) {
+    maybeAdd("web_task_coordinator", 0.72, ["web", "data", "chart", "coordination"]);
+  }
+
+  if ((signals.looksSourceHeavy && /\b(citation|citations|reference|references|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalized))
+    || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
     maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
   }
 
-  return heuristicCandidates;
+  return { candidates: heuristicCandidates, boosts: heuristicBoosts };
 }
 
 // ─── Architect fallback ───────────────────────────────────────────────────────
@@ -760,7 +1197,10 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
     return null;
   }
 
-  const spec = await requestArchitectSpec(task, ctx);
+  // Gather shared context from prior attempts so the ephemeral agent knows
+  // about URLs, facts, and partial results already discovered.
+  const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: "architect" });
+  const spec = await requestArchitectSpec(task, ctx, sharedCtx ?? undefined);
   if (!spec) {
     return null;
   }
@@ -779,7 +1219,7 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   const maxIterations = Math.min(iterCap, Math.max(iterFloor, Number(spec.maxIterations ?? (usesComputerTools ? 12 : 5)) || 5));
   const model = normalizeArchitectModel(spec.model);
 
-  const policyIssues = validateEphemeralToolSelection(tools);
+  const policyIssues = validateEphemeralToolSelection(tools, { allowZeroTools: true });
   if (policyIssues.length > 0 || !systemPrompt) {
     logAudit(
       "architect_fallback_rejected",
@@ -810,9 +1250,13 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   let result: string;
   let terminalState: string | undefined;
   try {
+    // Inject shared facts into the ephemeral agent's context so it can use
+    // URLs, partial results, and evidence discovered by earlier agents.
+    const ephemeralSharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: ephemeralName });
     const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
+      context: ephemeralSharedCtx ?? undefined,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       signal: ctx.signal,
@@ -863,6 +1307,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const signature = buildTaskSignature(title, request.task, request.dependsOn ?? []);
   const skillMatchThreshold = resolveSkillMatchThreshold(request.skillMatchThreshold);
   const explicitAgentRequested = typeof request.agentName === "string" && request.agentName.trim().length > 0;
+  // Look up the primary agent's domain — used to gate implicit cross-domain fallbacks.
+  const primaryAgentDomain = explicitAgentRequested
+    ? (getConfig().subAgents[request.agentName!]?.domain ?? readPromotedAgents(getConfig().workspacePath)[request.agentName!]?.domain)
+    : undefined;
   const reusableTask = request.taskId ? undefined : findReusableSwarmTask(ctx, signature);
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
@@ -874,6 +1322,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         taskId: reusableTask.id,
         attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
         delegationSucceeded: true,
+        reused: true,
+      },
+    };
+  }
+
+  if (reusableTask?.status === "partial" && reusableTask.output) {
+    return {
+      success: true,
+      output: reusableTask.output,
+      metadata: {
+        agentName: reusableTask.selectedAgent,
+        taskId: reusableTask.id,
+        attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
         reused: true,
       },
     };
@@ -947,9 +1410,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
 
-  // Per-turn limits — prevent runaway delegation loops from smaller local LLMs.
-  const MAX_AGENT_CALLS_PER_TURN = 2;      // same agent may not be re-spawned more than this many times
-  const MAX_TOTAL_DELEGATIONS_PER_TURN = 8; // hard ceiling across all agents in a single turn
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 
   while (true) {
@@ -961,55 +1421,48 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       return {
         success: false,
         output: "",
-        error: "Turn cancelled — delegation aborted.",
+        error: buildDelegationFailureMessage(
+          title,
+          taskState.error,
+          { prefix: "Turn cancelled — delegation aborted." },
+        ),
         metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
 
     // Hard ceiling: if we've already spawned too many agents this turn, stop and tell the LLM to synthesize
-    const totalDelegations = [...ctx._turnAgentCounts.values()].reduce((sum, n) => sum + n, 0);
-    if (totalDelegations >= MAX_TOTAL_DELEGATIONS_PER_TURN) {
+    const totalDelegations = totalDelegationsThisTurn(ctx);
+    const maxTotalDelegationsPerTurn = getTotalDelegationLimit(ctx);
+    if (totalDelegations >= maxTotalDelegationsPerTurn) {
       taskState.status = "failed";
       taskState.error = "Turn delegation budget exceeded.";
       publishSwarmState(ctx);
       return {
         success: false,
         output: "",
-        error: `Turn delegation limit (${MAX_TOTAL_DELEGATIONS_PER_TURN}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
+        error: `Turn delegation limit (${maxTotalDelegationsPerTurn}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
         metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
 
     if (candidateQueue.length === 0) {
-      if (usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
-        biddingTried = true;
-        const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
-        bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
-        if (shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
-          candidateQueue = [];
-        } else {
-        for (const bid of bids) {
-          routingCandidateMap.set(bid.agentName, {
-            confidence: bid.confidence,
-            matchedTerms: bid.matchedTerms,
-            score: bid.score,
-          });
-        }
-        candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
-        }
+      const requestSignals = analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task);
+      // Block implicit cross-domain fallbacks: when the primary agent was
+      // explicitly named, has a domain tag (e.g. "communication"), and the
+      // caller did not provide explicit fallbackAgents, do not try random
+      // agents from other domains. Return the failure to the orchestrator
+      // so it can make an informed routing decision.
+      const allowImplicitFallbackRouting = !explicitAgentRequested
+        || (request.fallbackAgents?.length ?? 0) > 0
+        || (!requestSignals.looksComputerUse && !primaryAgentDomain);
+
+      if (!allowImplicitFallbackRouting) {
+        break;
       }
 
-      if (candidateQueue.length === 0) {
-        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
-          routingCandidateMap.set("web_task_coordinator", {
-            confidence: "medium",
-            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
-            score: 0.62,
-          });
-          candidateQueue.push("web_task_coordinator");
-        }
-      }
-
+      // ── Step 1: embedding + keyword routing (fast, outcome-boosted) ──────
+      // Run first for all undirected delegations — deterministic, uses
+      // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
         const routingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
         if (routingCandidates.length > 0) {
@@ -1029,15 +1482,58 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         }
       }
 
+      // ── Step 2: heuristic coordinator fallbacks ─────────────────────────
+      if (candidateQueue.length === 0) {
+        if (attemptedAgents.length > 0 && shouldPreferMissionCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
+          routingCandidateMap.set("mission_coordinator", {
+            confidence: "medium",
+            matchedTerms: buildMissionCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
+            score: 0.68,
+          });
+          candidateQueue.push("mission_coordinator");
+        }
+      }
+
+      if (candidateQueue.length === 0) {
+        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
+          routingCandidateMap.set("web_task_coordinator", {
+            confidence: "medium",
+            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
+            score: 0.62,
+          });
+          candidateQueue.push("web_task_coordinator");
+        }
+      }
+
+      // ── Step 3: autonomous bidding (last resort — 125ms window) ─────────
+      // Only when both routing and heuristics came up empty. Bidding is the
+      // correct fallback for tasks that require a dynamic peer-elected agent
+      // not represented in the static catalog.
+      if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
+        biddingTried = true;
+        const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
+        if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+          for (const bid of bids) {
+            routingCandidateMap.set(bid.agentName, {
+              confidence: bid.confidence,
+              matchedTerms: bid.matchedTerms,
+              score: bid.score,
+            });
+          }
+          candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
+        }
+      }
+
       if (candidateQueue.length === 0) break;
     }
 
     const candidate = candidateQueue.shift()!;
     if (attemptedAgents.includes(candidate)) continue;
 
-    // Per-agent repeat cap: skip if this agent has already been called MAX_AGENT_CALLS_PER_TURN times this turn
+    // Per-agent repeat cap: skip if this agent has already been called its allowed number of times this turn
     const prevCalls = ctx._turnAgentCounts.get(candidate) ?? 0;
-    if (prevCalls >= MAX_AGENT_CALLS_PER_TURN) {
+    if (prevCalls >= getPerAgentDelegationLimit(ctx, candidate)) {
       continue;
     }
     ctx._turnAgentCounts.set(candidate, prevCalls + 1);
@@ -1103,10 +1599,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         onComputerScreenshot: ctx.onComputerScreenshot,
         onComputerSessionState: ctx.onComputerSessionState,
         maxIterationsOverride: ctx.maxIterationsOverride,
+        turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       };
 
       let output: string;
-      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string } | undefined;
+      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined;
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -1131,17 +1628,29 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolNames = [...stats.toolNames];
       }
 
-      const weak = (stats?.terminalState !== undefined && stats.terminalState !== "completed") || looksLikeFailureResult(output);
+      const delegationOutcome = stats?.outcome;
+      const acceptPartial = shouldAcceptPartialDelegation(candidate, request.task, stats);
+      const weak = delegationOutcome === "failure"
+        || (!acceptPartial && (
+          (stats?.terminalState !== undefined && stats.terminalState !== "completed")
+          || looksLikeFailureResult(output)
+        ));
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
 
       if (weak) {
-        attempt.status = "failed";
-        taskState.error = summarizeText(output);
-        taskState.status = "failed";
+        const partial = delegationOutcome === "partial";
+        attempt.status = partial ? "partial" : "failed";
+        taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
+        taskState.status = partial ? "partial" : "failed";
         lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
         publishSwarmState(ctx);
-        emitSwarmEvent("task_failed", { sessionId: ctx.sessionId, taskId, agentName: candidate, data: { reason: "weak_result" } });
+        emitSwarmEvent(partial ? "task_partial" : "task_failed", {
+          sessionId: ctx.sessionId,
+          taskId,
+          agentName: candidate,
+          data: { reason: partial ? "partial_result" : "weak_result" },
+        });
         announceAgentCapability({
           sessionId: ctx.sessionId,
           agentName: candidate,
@@ -1165,13 +1674,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         await writeSharedFact(ctx.sessionId, k, v);
       }
 
-      attempt.status = "completed";
-      taskState.status = "completed";
+      const partial = delegationOutcome === "partial";
+      attempt.status = partial ? "partial" : "completed";
+      taskState.status = partial ? "partial" : "completed";
       taskState.output = output;
       taskState.error = undefined;
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
       publishSwarmState(ctx);
-      emitSwarmEvent("task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
+      emitSwarmEvent(partial ? "task_partial" : "task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
       announceAgentCapability({
         sessionId: ctx.sessionId,
         agentName: candidate,
@@ -1195,6 +1705,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           taskId,
           attemptedAgents,
           delegationSucceeded: true,
+          delegationOutcome: delegationOutcome ?? "success",
+          ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -1251,7 +1763,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   return {
     success: false,
     output: "",
-    error: `All candidate agents failed for task '${title}'. ${taskState.error}`,
+    error: buildDelegationFailureMessage(title, taskState.error ?? "No suitable agent completed the task."),
     metadata: { taskId, attemptedAgents, delegationSucceeded: false },
   };
 }
@@ -1359,6 +1871,8 @@ registerTool({
     swarmState.objective = String(args["objective"] ?? swarmState.objective);
     publishSwarmState(ctx);
 
+    const delegatedCtx = withDelegationFanoutAllowance(ctx, rawNodes.map((node) => node.agentName), rawNodes.length);
+
     const remaining = new Map(rawNodes.map((node) => [node.id, node]));
     const completed = new Set<string>();
     const failed = new Set<string>();
@@ -1444,7 +1958,7 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, ctx),
+        }, delegatedCtx),
       })));
 
       for (const { node, result } of results) {
@@ -1724,6 +2238,12 @@ registerTool({
       : "";
 
     if (resolution.results.length === 0 && resolution.weakCandidates.length === 0) {
+      // Complete routing failure — auto-record a capability gap for self-improvement pipeline
+      recordCapabilityGap({
+        description: `No agent found for routing query: "${raw}"`,
+        exampleInput: raw,
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
         output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}`,
@@ -1732,6 +2252,12 @@ registerTool({
 
     if (resolution.results.length === 0) {
       const topCandidates = resolution.weakCandidates.map((candidate) => `- ${candidate.name} (${candidate.confidence})`).join("\n");
+      // Only weak candidates — record gap so the pipeline can design a better specialist
+      recordCapabilityGap({
+        description: `No agent met minimum confidence for routing query: "${raw}" (only low-confidence candidates)`,
+        exampleInput: raw,
+        sessionId: ctx.sessionId,
+      }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
         output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}\n\nTop weak candidates:\n${topCandidates}`,
@@ -1753,13 +2279,13 @@ registerTool({
 
 registerTool({
   name: "delegate_to_agent",
-  description: "Delegate a task to a named specialized sub-agent. The sub-agent runs autonomously with its own model and tool set, then returns its result. Use list_agents first to see what agents are available.",
+  description: "Delegate a task to a specialized sub-agent. When agentName is omitted the swarm's autonomous bidding system selects the best specialist — prefer this for tasks where the right specialist is not obvious. Provide agentName only when you already know from prior context exactly which specialist to use.",
   parameters: {
     type: "object",
     properties: {
       agentName: {
         type: "string",
-        description: "Name of the sub-agent to invoke (must match a key in subAgents config)",
+        description: "Name of the sub-agent to invoke. OPTIONAL — omit to let the swarm bidding system pick the best specialist automatically.",
       },
       task: {
         type: "string",
@@ -1783,30 +2309,45 @@ registerTool({
         description: "Optional 0-1 threshold. If the best auto-selected specialist scores below this value, generate an ephemeral agent instead.",
       },
     },
-    required: ["agentName", "task"],
+    required: ["task"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const agentName = String(args["agentName"] ?? "").trim();
+    // agentName is now optional — omitting it triggers undirected swarm bidding
+    const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
     const task = String(args["task"] ?? "").trim();
     const context = args["context"] ? String(args["context"]) : undefined;
-    const fallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
+    const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
 
-    if (!agentName) {
-      return { success: false, output: "", error: "agentName is required" };
-    }
     if (!task) {
       return { success: false, output: "", error: "task is required" };
     }
 
-    // Enforce per-scene agent scope
-    if (ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
+    const pinnedAgentName = !requestedAgentName ? getPinnedAgentForTask(task) : null;
+    const agentName = requestedAgentName || pinnedAgentName || "";
+
+    // Enforce per-scene agent scope only when an explicit agent was requested
+    if (agentName && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
       return {
         success: false,
         output: "",
         error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}`,
       };
+    }
+
+    const fallbackAgents = explicitFallbackAgents?.length
+      ? explicitFallbackAgents
+      : agentName === "swarm_maintainer"
+        ? ["integration_builder", "coder", "prompt_optimizer"].filter((candidate) => !ctx.allowedAgents || ctx.allowedAgents.includes(candidate))
+        : undefined;
+
+    if (pinnedAgentName && pinnedAgentName !== requestedAgentName) {
+      logAudit("delegate_agent_pinned", {
+        requestedAgentName: requestedAgentName || null,
+        pinnedAgentName,
+        taskPreview: summarizeText(task, 120),
+      }, { sessionId: ctx.sessionId });
     }
 
     return executeDelegationWithFallback({
@@ -1825,7 +2366,7 @@ registerTool({
 
 registerTool({
   name: "parallel_delegate",
-  description: "Run multiple independent sub-agent tasks in parallel and collect all results. Use when the orchestrator needs outputs from 2–5 agents that don't depend on each other. Returns all results concatenated with separators.",
+  description: "Run multiple independent sub-agent tasks in parallel and collect all results. Use when the orchestrator needs outputs from 2–5 independent partitions. Repeating the same agent is allowed when each task is a distinct partition of the work. Returns all results concatenated with separators.",
   parameters: {
     type: "object",
     properties: {
@@ -1874,12 +2415,14 @@ registerTool({
       { sessionId: ctx.sessionId }
     );
 
+    const delegatedCtx = withDelegationFanoutAllowance(ctx, tasks.map((taskSpec) => taskSpec.agentName), tasks.length);
+
     const results = await Promise.all(
       tasks.map((taskSpec, index) => executeDelegationWithFallback({
         ...taskSpec,
         taskId: `parallel_${index + 1}`,
         taskTitle: summarizeText(taskSpec.task, 80),
-      }, ctx))
+      }, delegatedCtx))
     );
 
     const formatted = results.map((result, index) => {

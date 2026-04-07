@@ -1,7 +1,7 @@
 # Architecture & Design Philosophy
 
 <p align="center">
-    <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+    <img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI is a general-purpose AI agent swarm built around four principles borrowed from the murmuration of starlings, extended with an explicit security contract. The system is designed to tackle any task domain by dynamically composing the right specialist agents — not by building one-off pipelines for specific workflows.
@@ -85,7 +85,9 @@ The **human-in-the-loop approval system** (`approval/`) adds a third layer of ov
 
 The "Guarded" in StarlingAI reflects a fundamental constraint: agents in a starling murmuration are free to move, but StarlingAI agents operate within strict security boundaries. Speed and autonomy never come at the cost of control. This security contract applies regardless of what task domain the swarm is working in.
 
-**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational.
+**Current sandbox scope — important clarification:** Sandboxing applies at the tool-execution level, not the agent-process level. `shell_exec`, `run_script`, and all `selfdev__*` dynamic tools always execute inside the dedicated `sandbox` Docker container (`--cap-drop ALL`, `--read-only`, `--network none`). Individual sub-agents that have `container.enabled: true` in their config also run their entire LLM loop in an isolated container via `container-runner.ts`. However, sub-agents without that flag run in-process inside the gateway. Stage 8 will invert this to an opt-out model: all sub-agents default to containerized execution.
+
+**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing for tool execution, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational. See [ROADMAP.md](../ROADMAP.md#gap-1--container-isolation-is-opt-in-not-universal) for the planned Stage 8 container isolation improvements.
 
 See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) for the full specification.
 
@@ -93,18 +95,18 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The system has completed **Stage 7** of the swarm vision: full multimodal capability, human-in-the-loop approval gates, and intervention diagnostics, on top of the complete distributed swarm infrastructure from Stages 1–6.
+The system has completed **Stage 9** of the swarm vision, with the current `v0.4.1` release focused on artifact generation, browser-backed research fallbacks, and operator-facing debugging/export polish on top of the Stage 9 foundations.
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
-| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox, outcome tracking, audit trail, hot-reload config |
+| **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + opt-in/opt-out container model), outcome tracking, audit trail, hot-reload config |
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
 | **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
-| **Warden agent** | 3 | Implemented | Subscribes to live audit stream; detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach |
+| **Warden agent** | 3 | Implemented | Detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach, **config_proposal_flood** (v0.3.2) |
 | **Swarm morphing** | 3 | Implemented | Per-agent concurrency semaphores with FIFO queuing and backpressure events |
 | **Collective memory** | 3 | Implemented | Redis Hash+List shared facts, `write_shared_fact`, `read_shared_facts`, embedding-backed semantic lookup, `share_finding` tool |
 | **Adaptive routing** | 3 | Implemented | Circuit breaker (>60% failure rate), `allLowConfidence` flag, routing rationale output |
@@ -120,6 +122,12 @@ The system has completed **Stage 7** of the swarm vision: full multimodal capabi
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
 | **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
+| **Container opt-out model** | 8 | Implemented (v0.3.2) | `agents.defaultContainerized: true` global flag + per-agent `container.disabled: true` escape hatch; 15 trusted read-only agents pre-opted-out (see GAP-1 in ROADMAP) |
+| **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
+| **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
+| **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |
+| **Browser-backed search and fetch fallback** | 9.1 | Implemented (v0.4.1) | Search can fall back through Playwright when SearXNG is unavailable; `web_fetch` prefers rendered HTML for JavaScript-heavy pages |
+| **Session debug Markdown export** | 9.1 | Implemented (v0.4.1) | REST export combines transcript, raw history, and audit evidence for operator review |
 
 ---
 

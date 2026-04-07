@@ -71,6 +71,12 @@ interface PendingApproval {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
+
+interface RpcConnectionCloseOptions {
+  abortInFlightTurns?: boolean;
+}
+
 /**
  * Substitute {{key}} or {{key|default}} placeholders in a task string.
  * Values come from `params`; missing keys fall back to their declared default,
@@ -95,9 +101,9 @@ interface OverrideFlags {
  * Parse inline override flags from a message string.
  * Supported flags:
  *   --auto         — auto-approve all tool calls this turn
- *   --iter N       — override sub-agent maxIterations (1–50)
+ *   --iter N       — override sub-agent maxIterations (0 = unlimited, else 1–50)
  *   --agent NAME   — force delegation to a specific agent
- *   --timeout N    — override turn timeout in seconds (10–3600)
+ *   --timeout N    — override turn timeout in seconds (0 = unlimited, else 10–3600)
  * Returns the cleaned message (flags stripped) and the parsed flags.
  */
 function parseOverrideFlags(message: string): { clean: string; flags: OverrideFlags } {
@@ -111,7 +117,10 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
 
   const iterMatch = clean.match(/--iter\s+(\d+)\b/);
   if (iterMatch) {
-    flags.maxIterationsOverride = Math.max(1, Math.min(50, parseInt(iterMatch[1]!, 10)));
+    const parsedIterations = parseInt(iterMatch[1]!, 10);
+    flags.maxIterationsOverride = parsedIterations === 0
+      ? 200
+      : Math.max(1, Math.min(50, parsedIterations));
     clean = clean.replace(/\s*--iter\s+\d+\b/, "");
   }
 
@@ -123,7 +132,10 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
 
   const timeoutMatch = clean.match(/--timeout\s+(\d+)\b/);
   if (timeoutMatch) {
-    flags.turnTimeoutSec = Math.max(10, Math.min(3600, parseInt(timeoutMatch[1]!, 10)));
+    const parsedTimeoutSec = parseInt(timeoutMatch[1]!, 10);
+    flags.turnTimeoutSec = parsedTimeoutSec === 0
+      ? 7200
+      : Math.max(10, Math.min(3600, parsedTimeoutSec));
     clean = clean.replace(/\s*--timeout\s+\d+\b/, "");
   }
 
@@ -518,19 +530,26 @@ export class RpcConnection {
             data: {
               status: "error",
               requestId,
-              error: `Turn timed out after ${Math.round(effectiveTurnTimeoutMs / 60000)} minutes. Session archived.`,
+              error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
             },
           });
         };
 
-        timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs);
+        if (effectiveTurnTimeoutMs > 0) {
+          timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+        }
 
-        if (overrideFlags.autoApprove || overrideFlags.maxIterationsOverride || overrideFlags.forceAgent || overrideFlags.turnTimeoutSec) {
+        if (
+          overrideFlags.autoApprove
+          || overrideFlags.maxIterationsOverride !== undefined
+          || overrideFlags.forceAgent
+          || overrideFlags.turnTimeoutSec !== undefined
+        ) {
           const flagSummary = [
             overrideFlags.autoApprove ? "auto-approve" : null,
-            overrideFlags.maxIterationsOverride ? `iter=${overrideFlags.maxIterationsOverride}` : null,
+            overrideFlags.maxIterationsOverride !== undefined ? `iter=${overrideFlags.maxIterationsOverride}` : null,
             overrideFlags.forceAgent ? `agent=${overrideFlags.forceAgent}` : null,
-            overrideFlags.turnTimeoutSec ? `timeout=${overrideFlags.turnTimeoutSec}s` : null,
+            overrideFlags.turnTimeoutSec !== undefined ? `timeout=${overrideFlags.turnTimeoutSec}s` : null,
           ].filter(Boolean).join(", ");
           log.info({ requestId, flags: flagSummary }, "Inline overrides active");
         }
@@ -677,10 +696,19 @@ export class RpcConnection {
     }
   }
 
-  close(): void {
+  close(options: RpcConnectionCloseOptions = {}): void {
+    const shouldAbortInFlightTurns = options.abortInFlightTurns === true;
     this.auditUnsubscribe?.();
     this.notificationsUnsubscribe?.();
-    for (const ac of this.abortControllers.values()) ac.abort();
+    for (const [id, controller] of this.abortControllers) {
+      if (shouldAbortInFlightTurns) {
+        controller.abort();
+        log.info({ connId: this.connId, turnId: id }, "Aborted in-flight turn on connection close");
+      } else {
+        log.info({ connId: this.connId, turnId: id }, "Preserved in-flight turn after connection close to allow session recovery");
+      }
+    }
+    this.abortControllers.clear();
     // Reject any pending approvals so tool calls unblock immediately
     for (const [, pending] of this.pendingApprovals) {
       clearTimeout(pending.timeout);

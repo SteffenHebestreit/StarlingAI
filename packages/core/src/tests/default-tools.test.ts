@@ -52,12 +52,13 @@ describe("default main assistant tools", () => {
 
   it("surfaces document export tools in the direct tool list when registered", () => {
     registerStubTool("generate_document");
+    registerStubTool("generate_mermaid_diagram");
     registerStubTool("generate_chart_html");
     registerStubTool("generate_pdf");
 
     const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
 
-    expect(availableDirectTools).toEqual(["generate_document", "generate_chart_html", "generate_pdf"]);
+    expect(availableDirectTools).toEqual(["generate_document", "generate_mermaid_diagram", "generate_chart_html", "generate_pdf"]);
   });
 
   it("surfaces the new git insight and http tools in the direct tool list when registered", () => {

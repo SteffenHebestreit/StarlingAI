@@ -28,6 +28,19 @@
         </div>
       </div>
 
+      <div v-if="message.statusText" class="message-progress">
+        <div class="message-progress__current">{{ message.statusText }}</div>
+        <div v-if="progressHistory.length > 1" class="message-progress__history">
+          <div
+            v-for="(entry, index) in progressHistory"
+            :key="`${message.id}-progress-${index}`"
+            class="message-progress__history-item"
+          >
+            {{ entry }}
+          </div>
+        </div>
+      </div>
+
       <!-- Execution steps (prefer delegated sub-agent actions over wrapper tool calls) -->
       <div v-if="executionItems.length" class="tool-status-wrap">
         <div class="tool-status" @click="toolHistoryOpen = !toolHistoryOpen">
@@ -111,6 +124,17 @@
               <span>{{ att.filename }}</span>
               <span v-if="att.size">{{ formatAttachmentSize(att.size) }}</span>
             </div>
+            <div v-if="att.previewMode === 'mermaid'" class="artifact-card__preview artifact-card__preview--mermaid">
+              <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-card__placeholder">Rendering diagram…</div>
+              <div v-else-if="mermaidPreviewErrors[mermaidAttachmentKey(att)]" class="artifact-card__placeholder artifact-card__placeholder--error">
+                {{ mermaidPreviewErrors[mermaidAttachmentKey(att)] }}
+              </div>
+              <div
+                v-else-if="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
+                class="mermaid-inline-diagram"
+                v-html="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
+              />
+            </div>
           </div>
           <div class="artifact-card__actions">
             <button
@@ -122,7 +146,14 @@
               {{ artifactPreviewLoading === att.filename ? 'Loading…' : 'Preview' }}
             </button>
             <button
-              v-if="!att.isDirectory"
+              v-if="att.externalUrl"
+              class="artifact-action"
+              @click="openExternalAttachment(att)"
+            >
+              Open
+            </button>
+            <button
+              v-else-if="!att.isDirectory"
               class="artifact-action"
               @click="downloadAttachment(att)"
             >
@@ -220,8 +251,13 @@
             v-if="artifactPreview.kind === 'html' || artifactPreview.kind === 'pdf'"
             :src="artifactPreview.url"
             class="artifact-preview-frame"
-            :sandbox="artifactPreview.kind === 'html' ? 'allow-scripts' : undefined"
+            :sandbox="artifactPreview.sandbox"
+            referrerpolicy="no-referrer"
           />
+          <div v-else-if="artifactPreview.kind === 'mermaid'" class="artifact-preview-mermaid">
+            <div class="artifact-preview-mermaid__canvas" v-html="artifactPreview.svg" />
+            <pre v-if="artifactPreview.text">{{ artifactPreview.text }}</pre>
+          </div>
           <pre v-else-if="artifactPreview.kind === 'text'">{{ artifactPreview.text }}</pre>
           <audio v-else-if="artifactPreview.kind === 'audio'" :src="artifactPreview.url" controls class="artifact-preview-audio" />
         </div>
@@ -231,12 +267,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import mermaid from "mermaid";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
 
-type ExecutionStatus = "running" | "done" | "failed";
+type ExecutionStatus = "running" | "done" | "partial" | "failed";
 
 interface ExecutionItem {
   key: string;
@@ -252,18 +289,25 @@ interface ExecutionItem {
 interface ArtifactPreviewState {
   title: string;
   filename: string;
-  kind: "html" | "pdf" | "text" | "audio";
+  kind: "html" | "pdf" | "text" | "audio" | "mermaid";
   url?: string;
   text?: string;
+  svg?: string;
+  sandbox?: string;
 }
 
-function mapExecutionStatus(status: "running" | "completed" | "failed"): ExecutionStatus {
+let mermaidInitialized = false;
+let mermaidRenderCounter = 0;
+
+function mapExecutionStatus(status: "running" | "completed" | "partial" | "failed"): ExecutionStatus {
   if (status === "completed") return "done";
+  if (status === "partial") return "partial";
   return status;
 }
 
 function executionStatusSymbol(status: ExecutionStatus): string {
   if (status === "done") return "✓";
+  if (status === "partial") return "~";
   if (status === "failed") return "!";
   return "…";
 }
@@ -285,6 +329,10 @@ const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
+const progressHistory = computed(() => props.message.statusHistory?.slice(-4) ?? []);
+const mermaidPreviewSvg = ref<Record<string, string>>({});
+const mermaidPreviewErrors = ref<Record<string, string>>({});
+const mermaidPreviewLoading = ref<Record<string, boolean>>({});
 
 // ── Parse thinking blocks out of content ─────────────────────────────────────
 const THINKING_RE = /<(thinking|think)>([\s\S]*?)<\/(thinking|think)>/gi;
@@ -433,10 +481,28 @@ const activeExecutionLabel = computed(() => {
       : `${failedCount} tool call${failedCount !== 1 ? "s" : ""} failed`;
   }
 
+  const partialCount = items.filter((item) => item.status === "partial").length;
+  if (partialCount > 0) {
+    return swarmExecutionItems.value.length > 0
+      ? `${partialCount} sub-agent action${partialCount !== 1 ? "s" : ""} partial`
+      : `${partialCount} tool call${partialCount !== 1 ? "s" : ""} partial`;
+  }
+
   return swarmExecutionItems.value.length > 0
     ? `${items.filter((item) => item.kind === "subagent").length} sub-agent action${items.filter((item) => item.kind === "subagent").length !== 1 ? "s" : ""} completed${swarmToolCallCount.value > 0 ? ` · ${swarmToolCallCount.value} tool call${swarmToolCallCount.value === 1 ? "" : "s"}` : ""}`
     : `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
+
+watch(
+  () => [props.isStreaming, executionItems.value.some((item) => item.status === "running")],
+  ([isStreamingNow, hasRunningItems]) => {
+    if (isStreamingNow && hasRunningItems) {
+      toolHistoryOpen.value = true;
+      contentCollapsed.value = false;
+    }
+  },
+  { immediate: true },
+);
 
 const imageAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) =>
   Boolean(attachment.dataUrl?.startsWith("data:image/")) || attachment.previewMode === "image" || attachment.contentType?.startsWith("image/")
@@ -444,9 +510,25 @@ const imageAttachments = computed(() => (props.message.attachments ?? []).filter
 
 const artifactAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) => !imageAttachments.value.includes(attachment)));
 
+const mermaidAttachments = computed(() => artifactAttachments.value.filter((attachment) => attachment.previewMode === "mermaid"));
+
+watch(mermaidAttachments, (attachments) => {
+  for (const attachment of attachments) {
+    void ensureMermaidPreview(attachment);
+  }
+}, { immediate: true });
+
+function mermaidAttachmentKey(attachment: ChatAttachment): string {
+  return attachment.relativePath || attachment.filename;
+}
+
 function attachmentLabel(attachment: ChatAttachment): string {
   if (attachment.isDirectory) {
     return "Folder artifact";
+  }
+
+  if (attachment.externalUrl) {
+    return "Live source";
   }
 
   switch (attachment.previewMode) {
@@ -456,6 +538,8 @@ function attachmentLabel(attachment: ChatAttachment): string {
       return "PDF artifact";
     case "audio":
       return "Audio artifact";
+    case "mermaid":
+      return "Mermaid diagram";
     case "json":
       return "JSON artifact";
     case "text":
@@ -473,11 +557,55 @@ function formatAttachmentSize(bytes?: number): string {
 }
 
 function isPreviewable(attachment: ChatAttachment): boolean {
-  return Boolean(attachment.relativePath) && ["html", "pdf", "text", "json", "audio"].includes(attachment.previewMode ?? "download");
+  return Boolean(attachment.relativePath || attachment.externalUrl)
+    && ["html", "pdf", "text", "json", "audio", "mermaid"].includes(attachment.previewMode ?? "download");
+}
+
+function ensureMermaidInitialized(): void {
+  if (mermaidInitialized) return;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: "neutral",
+  });
+  mermaidInitialized = true;
+}
+
+async function renderMermaidSvg(source: string, suffix: string): Promise<string> {
+  ensureMermaidInitialized();
+  const id = `mermaid-${++mermaidRenderCounter}-${suffix.replace(/[^a-z0-9_-]/gi, "-")}`;
+  const rendered = await mermaid.render(id, source);
+  return DOMPurify.sanitize(rendered.svg, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  });
+}
+
+async function ensureMermaidPreview(attachment: ChatAttachment): Promise<void> {
+  const key = mermaidAttachmentKey(attachment);
+  if (!attachment.relativePath || mermaidPreviewSvg.value[key] || mermaidPreviewErrors.value[key] || mermaidPreviewLoading.value[key]) {
+    return;
+  }
+
+  mermaidPreviewLoading.value = { ...mermaidPreviewLoading.value, [key]: true };
+  try {
+    const { blob } = await gateway.fetchWorkspaceArtifactBlob(attachment.relativePath, { disposition: "inline" });
+    const source = await blob.text();
+    mermaidPreviewSvg.value = {
+      ...mermaidPreviewSvg.value,
+      [key]: await renderMermaidSvg(source, key),
+    };
+  } catch (error) {
+    mermaidPreviewErrors.value = {
+      ...mermaidPreviewErrors.value,
+      [key]: `Diagram preview failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    mermaidPreviewLoading.value = { ...mermaidPreviewLoading.value, [key]: false };
+  }
 }
 
 function closeArtifactPreview(): void {
-  if (artifactPreview.value?.url) {
+  if (artifactPreview.value?.url?.startsWith("blob:")) {
     URL.revokeObjectURL(artifactPreview.value.url);
   }
   artifactPreview.value = null;
@@ -489,13 +617,36 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
     return;
   }
 
-  if (!attachment.relativePath) return;
-
   artifactPreviewLoading.value = attachment.filename;
   closeArtifactPreview();
 
   try {
+    if (attachment.externalUrl) {
+      artifactPreview.value = {
+        title: attachment.title || attachment.filename,
+        filename: attachment.filename,
+        kind: attachment.previewMode === "pdf" ? "pdf" : attachment.previewMode === "audio" ? "audio" : "html",
+        url: attachment.externalUrl,
+        sandbox: attachment.previewMode === "html" ? "allow-scripts allow-same-origin allow-forms allow-popups" : undefined,
+      };
+      return;
+    }
+
+    if (!attachment.relativePath) return;
+
     const { blob, filename } = await gateway.fetchWorkspaceArtifactBlob(attachment.relativePath, { disposition: "inline" });
+    if (attachment.previewMode === "mermaid") {
+      const source = await blob.text();
+      artifactPreview.value = {
+        title: attachment.title || filename,
+        filename,
+        kind: "mermaid",
+        text: source,
+        svg: await renderMermaidSvg(source, filename),
+      };
+      return;
+    }
+
     if ((attachment.previewMode ?? "download") === "text" || attachment.previewMode === "json") {
       artifactPreview.value = {
         title: attachment.title || filename,
@@ -512,6 +663,7 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
       filename,
       kind: attachment.previewMode === "audio" ? "audio" : attachment.previewMode === "pdf" ? "pdf" : "html",
       url,
+      sandbox: attachment.previewMode === "html" ? "allow-scripts" : undefined,
     };
   } catch (error) {
     artifactPreview.value = {
@@ -523,6 +675,11 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   } finally {
     artifactPreviewLoading.value = null;
   }
+}
+
+function openExternalAttachment(attachment: ChatAttachment): void {
+  if (!attachment.externalUrl) return;
+  window.open(attachment.externalUrl, "_blank", "noopener,noreferrer");
 }
 
 async function downloadAttachment(attachment: ChatAttachment, archive = false): Promise<void> {
@@ -547,6 +704,19 @@ function renderMarkdown(raw: string): string {
   return DOMPurify.sanitize(html);
 }
 
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderStreamingText(raw: string): string {
+  return `<span class="message-streaming-text">${escapeHtml(raw)}</span>`;
+}
+
 const renderedContent = computed(() => {
   const raw = mainContent.value;
   if (!raw) return "";
@@ -556,7 +726,7 @@ const renderedContent = computed(() => {
 const renderedStreamingContent = computed(() => {
   const raw = mainStreamingText.value;
   if (!raw) return "<span class=\"cursor-blink\"></span>";
-  return renderMarkdown(raw) + "<span class=\"cursor-blink\"></span>";
+  return renderStreamingText(raw) + "<span class=\"cursor-blink\"></span>";
 });
 
 // ── Per-message export ────────────────────────────────────────────────────────
@@ -725,6 +895,33 @@ onBeforeUnmount(() => {
   gap: 0.4rem;
 }
 
+.artifact-card__preview {
+  margin-top: 0.65rem;
+  border-radius: 0.8rem;
+  overflow: hidden;
+}
+
+.artifact-card__preview--mermaid {
+  background: rgba(245, 248, 255, 0.96);
+  border: 1px solid rgba(125, 211, 252, 0.22);
+  padding: 0.7rem;
+}
+
+.artifact-card__placeholder {
+  color: #5b6b8a;
+  font-size: 0.74rem;
+}
+
+.artifact-card__placeholder--error {
+  color: #b91c1c;
+}
+
+.mermaid-inline-diagram :deep(svg) {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
 .artifact-action {
   border: 1px solid rgba(125, 211, 252, 0.24);
   background: rgba(125, 211, 252, 0.08);
@@ -753,6 +950,37 @@ onBeforeUnmount(() => {
   border-radius: 1.2rem;
   overflow: hidden;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.message-progress {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.95rem;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+}
+
+.message-progress__current {
+  color: #dff7ff;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.message-progress__history {
+  display: grid;
+  gap: 0.18rem;
+  color: #9fc6d9;
+  font-size: 0.72rem;
+}
+
+.message-progress__history-item {
+  line-height: 1.35;
+}
+
+.message-streaming-text {
+  white-space: pre-wrap;
 }
 
 .artifact-preview-modal__header {
@@ -799,6 +1027,23 @@ onBeforeUnmount(() => {
   color: #d7efff;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.artifact-preview-mermaid {
+  display: grid;
+  gap: 1rem;
+}
+
+.artifact-preview-mermaid__canvas {
+  padding: 1rem;
+  border-radius: 0.9rem;
+  background: rgba(250, 252, 255, 0.98);
+}
+
+.artifact-preview-mermaid__canvas :deep(svg) {
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 .artifact-preview-frame {
@@ -950,6 +1195,7 @@ onBeforeUnmount(() => {
 }
 .tool-history__status { font-size: 0.75rem; }
 .tool-history__status--done    { color: #4ade80; }
+.tool-history__status--partial { color: #fbbf24; }
 .tool-history__status--running { color: #e879f9; animation: pulse 1s infinite; }
 .tool-history__status--failed  { color: #f87171; }
 

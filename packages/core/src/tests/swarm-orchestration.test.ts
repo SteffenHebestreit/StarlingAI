@@ -152,6 +152,95 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-maintainer-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        swarm_maintainer: {
+          description: "Maintains the swarm",
+          tools: ["read_file", "write_file"],
+          capabilities: ["maintenance"],
+          tags: ["swarm"],
+        },
+        integration_builder: {
+          description: "Integration specialist",
+          tools: ["read_file", "write_file", "shell_exec"],
+          capabilities: ["integration"],
+          tags: ["integration"],
+        },
+        coder: {
+          description: "Coding specialist",
+          tools: ["read_file", "write_file"],
+          capabilities: ["code"],
+          tags: ["code"],
+        },
+        prompt_optimizer: {
+          description: "Prompt specialist",
+          tools: ["read_file", "write_file"],
+          capabilities: ["prompts"],
+          tags: ["prompts"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
+      if (agentName === "swarm_maintainer") {
+        return `Sub-agent '${agentName}' timed out after 120000ms while working on ${task}`;
+      }
+      return `${agentName}:${task}:ok`;
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Maintain StarlingAI",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "swarm_maintainer",
+      task: "Implement a maintenance change",
+    }, {
+      sessionId: "session-maintenance-fallback",
+      workspacePath,
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("integration_builder");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("swarm_maintainer");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("integration_builder");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
   it("auto-routes to a coordinator fallback when a broad current-source research task stalls", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-routing-"));
     tempDirs.push(workspacePath);
@@ -239,6 +328,151 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[0]?.status).toBe("failed");
     expect(tasks[0]?.attempts[1]?.agentName).toBe("web_task_coordinator");
     expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("auto-routes unsourced market chart requests to mission_coordinator", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-market-chart-routing-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research specialist",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["web research"],
+          tags: ["research"],
+        },
+        chart_designer: {
+          description: "Creates grounded HTML charts from verified data.",
+          tools: ["generate_chart_html", "read_shared_facts"],
+          capabilities: ["html charts", "data visualization"],
+          tags: ["chart", "visualization", "data"],
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for multi-step evidence-to-artifact missions.",
+          tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          capabilities: ["multi-agent coordination", "dependency management", "quality gating"],
+          tags: ["coordination", "workflow", "quality"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:ok`);
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Market chart",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      task: "Generate a chart showing the performance of the MSCI World ETF over the last 12 months.",
+    }, {
+      sessionId: "session-market-chart-routing",
+      workspacePath,
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("mission_coordinator");
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledWith(expect.objectContaining({
+      agentName: "mission_coordinator",
+      task: "Generate a chart showing the performance of the MSCI World ETF over the last 12 months.",
+    }));
+  }, 30_000);
+
+  it("surfaces partial delegated progress when the selected agent times out", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-timeout-partial-progress-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        mission_coordinator: {
+          description: "Execution coordinator for multi-step evidence-to-artifact missions.",
+          tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          capabilities: ["multi-agent coordination", "dependency management", "quality gating"],
+          tags: ["coordination", "workflow", "quality"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementationOnce(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: [
+        `Sub-agent '${args.agentName}' timed out after 60000ms`,
+        "Partial progress before interruption:",
+        "- fetch [completed] Fetch monthly ETF figures via researcher | Collected monthly MSCI World ETF figures.",
+        "- Tool calls executed: 3 (list_agents, share_finding, run_task_graph)",
+      ].join("\n"),
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 3,
+        toolNames: ["list_agents", "share_finding", "run_task_graph"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "timeout",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const result = await delegate!.execute({
+      task: "Generate a chart showing the performance of the MSCI World ETF over the last 12 months.",
+    }, {
+      sessionId: "session-timeout-partial-progress",
+      workspacePath,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("All candidate agents failed");
+    expect(result.error).toContain("Partial progress before interruption");
+    expect(result.error).toContain("fetch [completed] Fetch monthly ETF figures via researcher");
   }, 30_000);
 
   it("treats sessionId planning chatter as failure and uses the fallback agent", async () => {
@@ -663,5 +897,88 @@ describe("swarm orchestration tools", () => {
     expect(facts["euro_numbers"]).toBe("3 5");
     expect(facts["evidence_source"]).toBe("official_results_page");
     expect(swarmState.tasks["summarize"]?.status).toBe("completed");
+  }, 15000);
+
+  it("preserves computer-use partial progress instead of classifying it as failed", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName === "computer_use_agent") {
+        return {
+          output: [
+            "Sub-agent 'computer_use_agent' timed out after 1000ms",
+            "Partial progress before interruption:",
+            "- Tool calls executed: 3 (computer_list_nodes, computer_session_start, computer_snapshot)",
+            "- Iterations completed: 1",
+          ].join("\n"),
+          stats: {
+            agentName: args.agentName,
+            sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+            promptChars: 0,
+            userContentChars: String(args.task ?? "").length,
+            toolCount: 3,
+            toolNames: ["computer_list_nodes", "computer_session_start", "computer_snapshot"],
+            iterations: 1,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            maxIterations: 5,
+            model: "mock",
+            capabilities: [],
+            outcome: "partial",
+            terminalState: "timeout",
+          },
+        };
+      }
+
+      return {
+        output: await runSubAgentMock(args),
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(args.task ?? "").length,
+          toolCount: 0,
+          toolNames: [],
+          iterations: 0,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          outcome: "success",
+          terminalState: "completed",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Inspect desktop models",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      task: "Check on my PC which models are loaded in LM Studio.",
+    }, {
+      sessionId: "session-computer-partial",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("computer_use_agent");
+    expect(result.metadata?.["delegationOutcome"]).toBe("partial");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.status).toBe("partial");
+    expect(tasks[0]?.attempts).toHaveLength(1);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("computer_use_agent");
+    expect(tasks[0]?.attempts[0]?.status).toBe("partial");
   }, 15000);
 });

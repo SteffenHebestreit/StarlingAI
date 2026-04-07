@@ -26,6 +26,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "analyze_image",
   "generate_image",
   "generate_document",
+  "generate_mermaid_diagram",
   "generate_chart_html",
   "generate_pdf",
   "get_site_credentials",

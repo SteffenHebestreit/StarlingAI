@@ -519,7 +519,7 @@ function progressFromSwarmState(
   counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number }
 ): Partial<SceneJobProgress> {
   const tasks = Object.values(state.tasks);
-  const completedTasks = tasks.filter(task => task.status === "completed").length;
+  const completedTasks = tasks.filter(task => task.status === "completed" || task.status === "partial").length;
   const runningTasks = tasks.filter(task => task.status === "running").length;
   const startedAttempts = tasks.reduce((sum, task) => sum + task.attempts.length, 0);
 

@@ -353,6 +353,30 @@ describe("computer tools", () => {
     expect(second.output).toContain("already active");
   });
 
+  it("lists active sessions so controllers can attach before starting a new one", async () => {
+    const firstCtx = {
+      sessionId: "controller-list-sessions-1",
+      workspacePath: tempDir,
+      approvalCallback: async () => true,
+    };
+    const secondCtx = {
+      sessionId: "controller-list-sessions-2",
+      workspacePath: tempDir,
+      approvalCallback: async () => true,
+    };
+
+    const start = await executeTool("computer_session_start", { node: "desktop" }, firstCtx);
+    expect(start.success).toBe(true);
+    const sessionId = String(start.metadata?.["sessionId"]);
+
+    const sessions = await executeTool("computer_list_sessions", {}, secondCtx);
+    expect(sessions.success).toBe(true);
+    expect(sessions.output).toContain("Active computer sessions:");
+    expect(sessions.output).toContain(sessionId);
+    expect(sessions.output).toContain("adapter=remote_vnc");
+    expect(sessions.output).toContain("Prefer computer_session_attach");
+  });
+
   it("routes named remote_vnc nodes through the remote access sidecar", async () => {
     const ctx = {
       sessionId: "controller-sidecar",

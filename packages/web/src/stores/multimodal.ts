@@ -67,6 +67,11 @@ export interface MultimodalServiceStatus {
   disabled?: boolean;
   status?: number;
   error?: string;
+  modelId?: string;
+  modelName?: string;
+  capabilities?: string[];
+  voiceCloneSupported?: boolean;
+  customVoiceSupported?: boolean;
 }
 
 export interface MultimodalStatus {

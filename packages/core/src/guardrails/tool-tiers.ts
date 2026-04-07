@@ -64,6 +64,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  geocode_location: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Resolve a place name or address to geographic coordinates via OpenStreetMap",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  route_distance_time: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Calculate route distance and travel time between two coordinates",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   extract_file_content: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Convert a workspace file into Markdown using the configured file-conversion service",
@@ -121,6 +133,42 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   export_workspace_artifact: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Expose an existing workspace file or folder as a downloadable chat artifact",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  research_notes_read: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read accumulated research scratchpad notes for the current session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  research_notes_summary: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Summarize research scratchpad notes by topic and importance",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  graph_query: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Run read-only Cypher queries against the Neo4j knowledge graph",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  graph_find_paths: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Find shortest relationship paths between graph entities",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  metric_query: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Run read-only SQL queries against QuestDB time-series data",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  metric_list_tables: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List available QuestDB time-series tables",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -291,6 +339,48 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   generate_chart_html: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate an HTML chart report and save it inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_mermaid_diagram: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a Mermaid diagram source artifact and save it inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  research_note: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write a research finding into the durable scratchpad for the current session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  research_notes_clear: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Clear research scratchpad notes for the current session",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  graph_upsert_entity: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create or update a node in the Neo4j knowledge graph",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  graph_relate: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create or update a relationship between graph entities",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  graph_delete_node: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete a node and its relationships from the Neo4j knowledge graph",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  metric_write: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write a measurement into QuestDB time-series storage",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -713,6 +803,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   computer_list_nodes: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List configured computer nodes available for connection",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  computer_list_sessions: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List currently open computer sessions for reuse or attach",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

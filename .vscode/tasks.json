@@ -5,6 +5,23 @@
 			"label": "core test suite",
 			"type": "shell",
 			"command": "source \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1 || true; nvm use --silent default >/dev/null 2>&1 || true; if command -v pnpm >/dev/null 2>&1; then pnpm --filter @starlingai/core test; else corepack pnpm --filter @starlingai/core test; fi",
+			"windows": {
+				"command": "powershell.exe",
+				"args": [
+					"-NoProfile",
+					"-Command",
+					"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/core test"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
 			"options": {
 				"shell": {
 					"executable": "bash",
@@ -272,6 +289,22 @@
 			],
 			"windows": {
 				"command": "docker",
+				"args": [
+					"compose",
+					"restart",
+					"gateway"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false
 		},
 		{
 			"label": "gateway mail env debug",
@@ -317,6 +350,24 @@
 				"printenv | grep '^SAI_MAIL'"
 			],
 			"windows": {
+				"command": "docker",
+				"args": [
+					"exec",
+					"starlingai-mail-service-1",
+					"sh",
+					"-lc",
+					"printenv | grep '^SAI_MAIL'"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
 			"isBackground": false
 		},
 		{
@@ -349,54 +400,153 @@
 					}
 				}
 			},
-				"command": "docker",
-				"args": [
-					"exec",
-					"starlingai-mail-service-1",
-					"sh",
-					"-lc",
-					"printenv | grep '^SAI_MAIL'"
-				],
-				"options": {
-					"shell": {
-						"executable": "cmd.exe",
-						"args": [
-							"/d",
-							"/c"
-						]
-					}
-				}
-			},
-			"isBackground": false
-				"args": [
-					"compose",
-					"restart",
-					"gateway"
-				],
-				"options": {
-					"shell": {
-						"executable": "cmd.exe",
-						"args": [
-							"/d",
-							"/c"
-						]
-					}
-				}
-			},
 			"isBackground": false
 		},
 		{
-			"label": "gateway mail env debug",
+			"label": "sai start build pentest",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"scripts/sai.mjs",
+				"start",
+				"--build",
+				"--pentest"
+			],
+			"windows": {
+				"command": "node",
+				"args": [
+					"scripts/sai.mjs",
+					"start",
+					"--build",
+					"--pentest"
+				],
+				"options": {
+					"shell": {
+						"executable": "cmd.exe",
+						"args": [
+							"/d",
+							"/c"
+						]
+					}
+				}
+			},
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "sai start build pentest",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"scripts/sai.mjs",
+				"start",
+				"--build",
+				"--pentest"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "sai rebuild",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"scripts/sai.mjs",
+				"start",
+				"--build",
+				"--pentest"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "core build debug",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/core build"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "docker build computer-remote verbose",
 			"type": "shell",
 			"command": "docker",
 			"args": [
-				"exec",
-				"starlingai-gateway-1",
-				"sh",
-				"-lc",
-				"printenv | grep '^SAI_MAIL'"
+				"compose",
+				"-f",
+				"docker-compose.yml",
+				"build",
+				"--no-cache",
+				"--progress",
+				"plain",
+				"computer-remote"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "docker build verbose cmd",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"--progress",
+				"plain",
+				"-f",
+				"docker-compose.yml",
+				"build",
+				"--no-cache",
+				"computer-remote"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "docker build ps verbose",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"docker compose --progress plain -f docker-compose.yml build --no-cache computer-remote 2>&1 | Out-String"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "lmstudio models check",
+			"type": "shell",
+			"command": "curl.exe",
+			"args": [
+				"-sS",
+				"http://10.10.0.2:1234/v1/models"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "web build release validation",
+			"type": "shell",
+			"command": "pnpm",
+			"args": [
+				"--filter",
+				"@starlingai/web",
+				"build"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "web build release validation ps",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/web build"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

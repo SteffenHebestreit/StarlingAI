@@ -39,12 +39,15 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: Date;
+  statusText?: string;
+  statusHistory?: string[];
   attachments?: Array<{
     filename: string;
     dataUrl?: string;
     relativePath?: string;
+    externalUrl?: string;
     contentType?: string;
-    previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "download";
+    previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "mermaid" | "download";
     size?: number;
     isDirectory?: boolean;
     title?: string;
@@ -60,7 +63,7 @@ export interface ChatMessage {
 
 export interface SwarmTaskAttempt {
   agentName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "partial" | "failed";
   startedAt: string;
   finishedAt?: string;
   summary?: string;
@@ -72,7 +75,7 @@ export interface SwarmTaskAttempt {
 export interface SwarmTaskState {
   id: string;
   title: string;
-  status: "pending" | "running" | "completed" | "failed" | "blocked";
+  status: "pending" | "running" | "completed" | "partial" | "failed" | "blocked";
   dependsOn: string[];
   selectedAgent?: string;
   attempts: SwarmTaskAttempt[];
@@ -134,7 +137,14 @@ const SESSION_TRANSCRIPT_PAGE_SIZE = 100;
 const CONNECT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
+const DELEGATED_TURN_LIVENESS_PROBE_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
+const TURN_RECOVERY_POLL_MS = 2_000;
+const TURN_RECOVERY_TIMEOUT_MS = 60_000;
+const TURN_STALL_WARNING_MS = 20_000;
+const TURN_STALL_RECOVERY_MS = 45_000;
+const TURN_DELEGATED_STALL_WARNING_MS = 60_000;
+const TURN_DELEGATED_STALL_RECOVERY_MS = 120_000;
 const LEGACY_DIRECT_GATEWAY_WS_URL = "ws://localhost:8765/ws";
 
 export function defaultGatewayWsUrl(): string {
@@ -206,8 +216,9 @@ export interface ChatAttachment {
   filename: string;
   dataUrl?: string;
   relativePath?: string;
+  externalUrl?: string;
   contentType?: string;
-  previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "download";
+  previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "mermaid" | "download";
   size?: number;
   isDirectory?: boolean;
   title?: string;
@@ -235,6 +246,11 @@ function cloneGuardrailEvents(events: ChatMessage["guardrailEvents"]): ChatMessa
   return events.map((event) => ({ ...event }));
 }
 
+function cloneStatusHistory(history: ChatMessage["statusHistory"]): ChatMessage["statusHistory"] {
+  if (!history?.length) return undefined;
+  return [...history];
+}
+
 function normalizeHydratedMessages(input: ChatMessage[]): ChatMessage[] {
   const normalized: ChatMessage[] = [];
 
@@ -242,6 +258,7 @@ function normalizeHydratedMessages(input: ChatMessage[]): ChatMessage[] {
     const message: ChatMessage = {
       ...entry,
       timestamp: new Date(entry.timestamp),
+      statusHistory: cloneStatusHistory(entry.statusHistory),
       attachments: cloneAttachments(entry.attachments),
       toolCalls: cloneToolCalls(entry.toolCalls),
       guardrailEvents: cloneGuardrailEvents(entry.guardrailEvents),
@@ -320,10 +337,44 @@ export function sanitizeAssistantMessageContent(
   return cleaned;
 }
 
+function summarizeToolOnlyAssistantTurn(toolCalls?: ChatMessage["toolCalls"]): string {
+  if (!toolCalls?.length) return "";
+
+  const toolNames = [...new Set(toolCalls.map((toolCall) => toolCall.name).filter(Boolean))];
+  if (toolNames.length === 0) return "";
+
+  if (toolNames.length === 1) {
+    const toolName = toolNames[0];
+    if (toolName === "delegate_to_agent") {
+      const rawTask = toolCalls.find((toolCall) => toolCall.name === toolName)?.args?.task;
+      const task = typeof rawTask === "string" ? rawTask.replace(/\s+/g, " ").trim() : "";
+      if (task) {
+        const summary = task.length > 160 ? `${task.slice(0, 157)}...` : task;
+        return `Delegated work completed without a text summary: ${summary}`;
+      }
+      return "Delegated work completed without a text summary. See execution details below.";
+    }
+
+    if (toolName === "parallel_delegate") {
+      const rawTasks = toolCalls.find((toolCall) => toolCall.name === toolName)?.args?.tasks;
+      const taskCount = Array.isArray(rawTasks) ? rawTasks.length : 0;
+      const suffix = taskCount > 0 ? ` (${taskCount} task${taskCount === 1 ? "" : "s"})` : "";
+      return `Parallel delegation completed without a text summary${suffix}. See execution details below.`;
+    }
+
+    if (toolName === "run_task_graph") {
+      return "Task graph execution completed without a text summary. See execution details below.";
+    }
+  }
+
+  return `This turn completed via ${toolNames.join(", ")} without a text summary. See execution details below.`;
+}
+
 function inferContentTypeFromPath(path: string): string {
   const normalized = path.toLowerCase();
   if (normalized.endsWith(".html") || normalized.endsWith(".htm")) return "text/html; charset=utf-8";
   if (normalized.endsWith(".md")) return "text/markdown; charset=utf-8";
+  if (normalized.endsWith(".mmd") || normalized.endsWith(".mermaid")) return "text/vnd.mermaid; charset=utf-8";
   if (normalized.endsWith(".txt")) return "text/plain; charset=utf-8";
   if (normalized.endsWith(".json")) return "application/json; charset=utf-8";
   if (normalized.endsWith(".pdf")) return "application/pdf";
@@ -346,6 +397,7 @@ function inferPreviewMode(contentType: string): ChatAttachment["previewMode"] {
   if (contentType.startsWith("text/html")) return "html";
   if (contentType.startsWith("application/pdf")) return "pdf";
   if (contentType.startsWith("application/json")) return "json";
+  if (contentType.startsWith("text/vnd.mermaid")) return "mermaid";
   if (contentType.startsWith("text/")) return "text";
   return "download";
 }
@@ -354,18 +406,30 @@ function filenameFromRelativePath(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function extractToolAttachments(name: string, metadata: unknown): ChatAttachment[] {
-  if (!metadata || typeof metadata !== "object") {
-    return [];
+function filenameFromExternalUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const lastSegment = parsed.pathname.split("/").filter(Boolean).pop();
+    return lastSegment ? decodeURIComponent(lastSegment) : parsed.hostname;
+  } catch {
+    return "linked-source.html";
   }
+}
 
-  const value = metadata as Record<string, unknown>;
+function buildToolAttachment(name: string, value: Record<string, unknown>): ChatAttachment | null {
   const outputPath = typeof value["outputPath"] === "string" ? value["outputPath"] : "";
   const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : undefined;
+  const externalUrl = typeof value["externalUrl"] === "string"
+    ? value["externalUrl"]
+    : typeof value["sourceUrl"] === "string"
+      ? value["sourceUrl"]
+      : undefined;
   const filename = typeof value["filename"] === "string"
     ? value["filename"]
     : outputPath
       ? filenameFromRelativePath(outputPath)
+      : externalUrl
+        ? filenameFromExternalUrl(externalUrl)
       : dataUrl
         ? "generated-image.png"
         : "artifact";
@@ -373,6 +437,8 @@ function extractToolAttachments(name: string, metadata: unknown): ChatAttachment
     ? value["contentType"]
     : outputPath
       ? inferContentTypeFromPath(outputPath)
+      : externalUrl
+        ? "text/html; charset=utf-8"
       : dataUrl?.startsWith("data:")
         ? dataUrl.slice(5, dataUrl.indexOf(";"))
         : "application/octet-stream";
@@ -385,34 +451,72 @@ function extractToolAttachments(name: string, metadata: unknown): ChatAttachment
       ? value["size"]
       : undefined;
 
-  if (!outputPath && !dataUrl) {
-    return [];
+  if (!outputPath && !dataUrl && !externalUrl) {
+    return null;
   }
 
   if (name === "generate_image" && dataUrl?.startsWith("data:image/")) {
-    return [{
+    return {
       filename,
       dataUrl,
       relativePath: outputPath || undefined,
+      externalUrl,
       contentType,
       previewMode: "image",
       size,
       title: typeof value["title"] === "string" ? value["title"] : undefined,
-      sourceTool: name,
-    }];
+      sourceTool: typeof value["sourceTool"] === "string" ? value["sourceTool"] : name,
+    };
   }
 
-  return [{
+  return {
     filename,
     dataUrl,
     relativePath: outputPath || undefined,
+    externalUrl,
     contentType,
     previewMode,
     size,
     isDirectory: value["isDirectory"] === true,
     title: typeof value["title"] === "string" ? value["title"] : undefined,
-    sourceTool: name,
-  }];
+    sourceTool: typeof value["sourceTool"] === "string" ? value["sourceTool"] : name,
+  };
+}
+
+function extractToolAttachments(name: string, metadata: unknown): ChatAttachment[] {
+  if (!metadata || typeof metadata !== "object") {
+    return [];
+  }
+
+  const attachments: ChatAttachment[] = [];
+  const seen = new Set<string>();
+
+  const visit = (value: unknown, inheritedToolName: string): void => {
+    if (!value || typeof value !== "object") {
+      return;
+    }
+
+    const entry = value as Record<string, unknown>;
+    const toolName = typeof entry["sourceTool"] === "string" ? entry["sourceTool"] : inheritedToolName;
+    const attachment = buildToolAttachment(toolName, entry);
+    if (attachment) {
+      const key = [attachment.relativePath ?? "", attachment.dataUrl ?? "", attachment.filename, attachment.sourceTool ?? ""].join("::");
+      if (!seen.has(key)) {
+        seen.add(key);
+        attachments.push(attachment);
+      }
+    }
+
+    const nestedArtifacts = entry["artifacts"];
+    if (Array.isArray(nestedArtifacts)) {
+      for (const nestedArtifact of nestedArtifacts) {
+        visit(nestedArtifact, toolName);
+      }
+    }
+  };
+
+  visit(metadata, name);
+  return attachments;
 }
 
 function extractCompletedThinkingBlocks(text: string): string {
@@ -427,11 +531,15 @@ function mergeFinalAssistantContent(response: unknown, streamedText: string, too
 
   const completedThinking = extractCompletedThinkingBlocks(streamedText);
   if (!completedThinking) {
-    return sanitizeAssistantMessageContent(finalResponse, toolCalls) || finalResponse;
+    return sanitizeAssistantMessageContent(finalResponse, toolCalls)
+      || finalResponse
+      || summarizeToolOnlyAssistantTurn(toolCalls);
   }
 
   const merged = [completedThinking, finalResponse].filter(Boolean).join("\n\n");
-  return sanitizeAssistantMessageContent(merged, toolCalls) || merged;
+  return sanitizeAssistantMessageContent(merged, toolCalls)
+    || merged
+    || summarizeToolOnlyAssistantTurn(toolCalls);
 }
 
 function buildAcceptedStatusMessage(data: Record<string, unknown>): string | null {
@@ -485,6 +593,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   const selectedSwarmRunId = ref<string | null>(null);
   const isStreaming = ref(false);   // true while text chunks are arriving
   const isError = ref(false);       // true when last turn ended in an error
+  const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
   const pendingIntervention = ref<InterventionNotice | null>(null);
 
@@ -500,7 +609,15 @@ export const useGatewayStore = defineStore("gateway", () => {
     toolName: string;
     args: Record<string, unknown>;
   }
+
+  interface PendingTurnRecovery {
+    sessionId: string;
+    baselineTotalMessages: number;
+    startedAt: number;
+  }
+
   const pendingApproval = ref<PendingApproval | null>(null);
+  const pendingTurnRecovery = ref<PendingTurnRecovery | null>(null);
   const notificationsSubscribed = ref(false);
 
   let ws: WebSocket | null = null;
@@ -508,7 +625,11 @@ export const useGatewayStore = defineStore("gateway", () => {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let turnRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let turnStallWarningTimer: ReturnType<typeof setTimeout> | null = null;
+  let turnStallRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeatInFlight = false;
+  let turnRecoveryInFlight = false;
   let lifecycleHooksInstalled = false;
   let consecutiveReconnects = 0;
   const MAX_RECONNECT_ATTEMPTS = 12;
@@ -534,6 +655,35 @@ export const useGatewayStore = defineStore("gateway", () => {
       heartbeatTimer = null;
     }
     heartbeatInFlight = false;
+  }
+
+  function clearTurnRecoveryTimer(): void {
+    if (turnRecoveryTimer) {
+      clearTimeout(turnRecoveryTimer);
+      turnRecoveryTimer = null;
+    }
+  }
+
+  function clearTurnStallTimers(): void {
+    if (turnStallWarningTimer) {
+      clearTimeout(turnStallWarningTimer);
+      turnStallWarningTimer = null;
+    }
+    if (turnStallRecoveryTimer) {
+      clearTimeout(turnStallRecoveryTimer);
+      turnStallRecoveryTimer = null;
+    }
+  }
+
+  function clearTurnStallState(): void {
+    clearTurnStallTimers();
+    turnLikelyStalled.value = false;
+  }
+
+  function clearPendingTurnRecovery(): void {
+    clearTurnRecoveryTimer();
+    pendingTurnRecovery.value = null;
+    turnRecoveryInFlight = false;
   }
 
   function closeActiveSocket(reason?: string): void {
@@ -563,6 +713,114 @@ export const useGatewayStore = defineStore("gateway", () => {
       consecutiveReconnects++;
       connect();
     }, backoff);
+  }
+
+  async function probeDelegatedTurnLiveness(): Promise<boolean> {
+    if (!pendingRequestId.value || !connected.value || !ws || ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    try {
+      await rpc("gateway.status", undefined, DELEGATED_TURN_LIVENESS_PROBE_TIMEOUT_MS);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function recoverFromStalledTurn(): Promise<void> {
+    if (!pendingRequestId.value) {
+      clearTurnStallState();
+      return;
+    }
+
+    if (hasActiveWorkInFlight()) {
+      const connectionHealthy = await probeDelegatedTurnLiveness();
+      if (!pendingRequestId.value) {
+        clearTurnStallState();
+        return;
+      }
+      if (connectionHealthy) {
+        turnLikelyStalled.value = false;
+        updateStreamingStatus(
+          "Connection is still healthy. Work is still in progress, so the turn will stay open while waiting for the next progress event.",
+          { appendHistory: false },
+        );
+        armPendingTurnWatchdog();
+        return;
+      }
+    }
+
+    turnLikelyStalled.value = true;
+    updateStreamingStatus(
+      "No progress signal was received for this turn. Reconnecting to recover the active session.",
+      { appendHistory: true },
+    );
+
+    beginPendingTurnRecovery();
+    stopHeartbeat();
+    connected.value = false;
+    connecting.value = false;
+    rejectPendingRpcs("Connection stalled");
+    closeActiveSocket("Turn stalled");
+    scheduleReconnect(0);
+  }
+
+  const DELEGATION_TOOL_NAMES = new Set(["delegate_to_agent", "parallel_delegate", "run_task_graph"]);
+
+  function hasActiveWorkInFlight(): boolean {
+    const streamingMessage = getStreamingMessage();
+    const pendingToolCalls = streamingMessage?.toolCalls?.filter((tc) => tc.result === undefined) ?? [];
+    const hasActiveDelegation = pendingToolCalls.some((tc) => DELEGATION_TOOL_NAMES.has(tc.name));
+    const hasPendingToolCall = pendingToolCalls.length > 0;
+    const activeSwarmTask = Object.values(liveSwarmState.value?.tasks ?? {}).some((task) => task.status === "running" || task.status === "pending");
+    return hasActiveDelegation || hasPendingToolCall || activeSwarmTask;
+  }
+
+  function getPendingTurnWatchdogDelays(): { warningMs: number; recoveryMs: number; delegated: boolean } {
+    const delegated = hasActiveWorkInFlight();
+    return delegated
+      ? {
+          warningMs: TURN_DELEGATED_STALL_WARNING_MS,
+          recoveryMs: TURN_DELEGATED_STALL_RECOVERY_MS,
+          delegated: true,
+        }
+      : {
+          warningMs: TURN_STALL_WARNING_MS,
+          recoveryMs: TURN_STALL_RECOVERY_MS,
+          delegated: false,
+        };
+  }
+
+  function armPendingTurnWatchdog(): void {
+    clearTurnStallTimers();
+    if (!pendingRequestId.value) {
+      turnLikelyStalled.value = false;
+      return;
+    }
+
+    const { warningMs, recoveryMs, delegated } = getPendingTurnWatchdogDelays();
+
+    turnStallWarningTimer = setTimeout(() => {
+      if (!pendingRequestId.value) return;
+      turnLikelyStalled.value = true;
+      updateStreamingStatus(
+        delegated
+          ? "Work is still in progress (sub-agent or tool call active). Waiting a bit longer before treating it as stalled."
+          : "No progress signal has arrived recently. The agent may be stalled.",
+        { appendHistory: false },
+      );
+    }, warningMs);
+
+    turnStallRecoveryTimer = setTimeout(() => {
+      void recoverFromStalledTurn();
+    }, recoveryMs);
+  }
+
+  function notePendingTurnActivity(): void {
+    if (!pendingRequestId.value) return;
+    turnLikelyStalled.value = false;
+    armPendingTurnWatchdog();
   }
 
   function installLifecycleHooks(): void {
@@ -610,6 +868,86 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearTimeout(pendingRpc.timeout);
       pendingRpc.reject(new Error(message));
       pendingRpcs.delete(id);
+    }
+  }
+
+  function scheduleTurnRecovery(delayMs = TURN_RECOVERY_POLL_MS): void {
+    if (turnRecoveryTimer || !pendingTurnRecovery.value) return;
+    turnRecoveryTimer = setTimeout(() => {
+      turnRecoveryTimer = null;
+      void recoverPendingTurn();
+    }, delayMs);
+  }
+
+  function beginPendingTurnRecovery(): void {
+    if (!pendingRequestId.value) return;
+
+    const sessionId = currentSessionId.value;
+    if (!sessionId) {
+      failPendingTurn("Connection lost while waiting for a response. Please try again.");
+      return;
+    }
+
+    if (!pendingTurnRecovery.value) {
+      pendingTurnRecovery.value = {
+        sessionId,
+        baselineTotalMessages: currentSessionTranscriptTotalMessages.value,
+        startedAt: Date.now(),
+      };
+      insertSystemFeedbackMessage("Connection lost. Reconnecting and recovering the active turn.");
+    }
+
+    pendingApproval.value = null;
+    pendingIntervention.value = null;
+    liveSwarmState.value = null;
+    isStreaming.value = false;
+    clearTurnStallTimers();
+  }
+
+  async function recoverPendingTurn(): Promise<void> {
+    const recovery = pendingTurnRecovery.value;
+    if (!recovery || !connected.value || turnRecoveryInFlight) return;
+
+    turnRecoveryInFlight = true;
+    try {
+      const result = await getSessionTranscript(recovery.sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
+      const lastMessage = result.transcript[result.transcript.length - 1];
+      const hasRecoveredAssistantReply = result.totalMessages > recovery.baselineTotalMessages
+        && lastMessage?.role === "assistant";
+
+      if (hasRecoveredAssistantReply || result.session.archivedAt) {
+        currentSessionId.value = result.session.archivedAt ? null : recovery.sessionId;
+        currentSessionTranscriptTotalMessages.value = result.totalMessages;
+        currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
+        hydrateTranscript(result.transcript);
+        applyCurrentSessionRunSelection(currentSessionId.value ?? recovery.sessionId);
+        pendingRequestId.value = null;
+        pendingApproval.value = null;
+        pendingIntervention.value = null;
+        isStreaming.value = false;
+        isError.value = false;
+        clearTurnStallState();
+        clearPendingTurnRecovery();
+        return;
+      }
+
+      if (Date.now() - recovery.startedAt >= TURN_RECOVERY_TIMEOUT_MS) {
+        clearPendingTurnRecovery();
+        failPendingTurn("Connection was lost and the active turn could not be recovered. Please try again.");
+        return;
+      }
+
+      scheduleTurnRecovery();
+    } catch {
+      if (Date.now() - recovery.startedAt >= TURN_RECOVERY_TIMEOUT_MS) {
+        clearPendingTurnRecovery();
+        failPendingTurn("Connection was lost and the active turn could not be recovered. Please try again.");
+        return;
+      }
+
+      scheduleTurnRecovery();
+    } finally {
+      turnRecoveryInFlight = false;
     }
   }
 
@@ -702,6 +1040,51 @@ export const useGatewayStore = defineStore("gateway", () => {
     return structuredClone(swarmState);
   }
 
+  function summarizeTaskTitle(task: string, maxLength = 80): string {
+    const compact = task.replace(/\s+/g, " ").trim();
+    return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+  }
+
+  function synthesizeSwarmStateFromToolCalls(
+    toolCalls: ChatMessage["toolCalls"],
+    errorText: string,
+  ): SwarmState | null {
+    if (!toolCalls?.length) return null;
+
+    const delegatedCall = toolCalls.find((toolCall) => toolCall.name === "delegate_to_agent");
+    if (!delegatedCall) return null;
+
+    const task = typeof delegatedCall.args?.task === "string" ? delegatedCall.args.task.trim() : "";
+    const agentName = typeof delegatedCall.args?.agentName === "string" ? delegatedCall.args.agentName.trim() : "delegated_agent";
+    const now = new Date().toISOString();
+    const title = task ? summarizeTaskTitle(task) : `Delegated task via ${agentName}`;
+
+    return {
+      objective: task || `Delegated task via ${agentName}`,
+      startedAt: now,
+      updatedAt: now,
+      tasks: {
+        task_1: {
+          id: "task_1",
+          title,
+          status: "failed",
+          dependsOn: [],
+          selectedAgent: agentName,
+          attempts: [{
+            agentName,
+            status: "failed",
+            startedAt: now,
+            finishedAt: now,
+            summary: summarizeTaskTitle(errorText, 220),
+            toolCount: 0,
+            iterations: 0,
+          }],
+          error: errorText,
+        },
+      },
+    };
+  }
+
   function appendSwarmRun(status: SwarmRunRecord["status"], swarmState: SwarmState | null) {
     if (!swarmState || !currentSessionId.value) return;
     const sessionId = currentSessionId.value;
@@ -731,13 +1114,19 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function failPendingTurn(errorText: string, preservePendingState = false) {
     const idx = messages.value.findIndex(m => m.id === "streaming");
+    const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
+    const preservedSwarmState = liveSwarmState.value
+      ?? streamingMessage?.swarmState
+      ?? synthesizeSwarmStateFromToolCalls(streamingMessage?.toolCalls, errorText);
     const errorMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
       content: `⚠️ ${errorText}`,
       timestamp: new Date(),
       blocked: true,
-      swarmState: liveSwarmState.value ?? undefined,
+      swarmState: preservedSwarmState ?? undefined,
+      toolCalls: streamingMessage?.toolCalls,
+      attachments: streamingMessage?.attachments,
     };
 
     if (!preservePendingState) {
@@ -748,7 +1137,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       pendingApproval.value = null;
       pendingIntervention.value = null;
       isStreaming.value = false;
-      appendSwarmRun("error", liveSwarmState.value);
+      clearTurnStallState();
+      appendSwarmRun("error", preservedSwarmState);
       liveSwarmState.value = null;
     }
 
@@ -757,6 +1147,8 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function resetLocalSessionState() {
+    clearPendingTurnRecovery();
+    clearTurnStallState();
     messages.value = [];
     currentSessionTranscriptTotalMessages.value = 0;
     currentSessionTranscriptNextBeforeMessageId.value = null;
@@ -789,6 +1181,27 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function getStreamingMessage(): ChatMessage | undefined {
     return messages.value.find((entry) => entry.id === "streaming");
+  }
+
+  function updateStreamingStatus(content: string, options: { appendHistory?: boolean } = {}): void {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const streamingMessage = getStreamingMessage();
+    if (!streamingMessage) {
+      insertSystemFeedbackMessage(trimmed);
+      return;
+    }
+
+    streamingMessage.statusText = trimmed;
+
+    if (options.appendHistory === false) return;
+
+    const nextHistory = [...(streamingMessage.statusHistory ?? [])];
+    if (nextHistory[nextHistory.length - 1] !== trimmed) {
+      nextHistory.push(trimmed);
+      streamingMessage.statusHistory = nextHistory.slice(-6);
+    }
   }
 
   function insertSystemFeedbackMessage(content: string): void {
@@ -938,9 +1351,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         return;
       }
 
-      // If a turn was in-flight, surface it as an error — the response is now lost
       if (pendingRequestId.value) {
-        failPendingTurn("Connection lost while waiting for a response. Please try again.");
+        beginPendingTurnRecovery();
       }
       scheduleReconnect();
     };
@@ -995,10 +1407,20 @@ export const useGatewayStore = defineStore("gateway", () => {
       connected.value = true;
       connecting.value = false;
       consecutiveReconnects = 0;
+      notePendingTurnActivity();
       startHeartbeat();
       const data = msg["data"] as Record<string, unknown>;
       sessions.value = (data["sessions"] as GatewaySession[]) ?? [];
-      if (currentSessionId.value && sessions.value.some((session) => session.id === currentSessionId.value && !session.archivedAt)) {
+      if (pendingTurnRecovery.value) {
+        const recoverySessionId = pendingTurnRecovery.value.sessionId;
+        if (sessions.value.some((session) => session.id === recoverySessionId)) {
+          currentSessionId.value = recoverySessionId;
+          void recoverPendingTurn();
+        } else {
+          clearPendingTurnRecovery();
+          failPendingTurn("Connection was restored, but the active session no longer exists.");
+        }
+      } else if (currentSessionId.value && sessions.value.some((session) => session.id === currentSessionId.value && !session.archivedAt)) {
         void loadSession(currentSessionId.value).catch(() => {
           currentSessionId.value = null;
           resetLocalSessionState();
@@ -1015,6 +1437,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       const id = msg["id"] as string;
       const pendingRpc = pendingRpcs.get(id);
       if (pendingRpc) {
+        notePendingTurnActivity();
         clearTimeout(pendingRpc.timeout);
         pendingRpcs.delete(id);
         if (msg["ok"]) pendingRpc.resolve(msg["payload"]);
@@ -1053,6 +1476,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.chunk") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         isStreaming.value = true;
         streamingText.value += String(data["text"] ?? "");
       }
@@ -1062,6 +1486,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.tool_start") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         const streamingMessage = getStreamingMessage();
         if (streamingMessage) {
           streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
@@ -1070,6 +1495,7 @@ export const useGatewayStore = defineStore("gateway", () => {
             args: data["args"] as Record<string, unknown>,
           }];
         }
+        updateStreamingStatus(`Running ${String(data["name"])}...`, { appendHistory: true });
       }
       return;
     }
@@ -1077,10 +1503,23 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.swarm") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         const swarmState = normalizeSwarmState(data["swarmState"]);
         if (swarmState) {
           liveSwarmState.value = swarmState;
           attachSwarmStateToMessage("streaming", swarmState);
+
+          const tasks = Object.values(swarmState.tasks ?? {});
+          const runningCount = tasks.filter((task) => task.status === "running").length;
+          const pendingCount = tasks.filter((task) => task.status === "pending").length;
+          const completedCount = tasks.filter((task) => task.status === "completed").length;
+          const statusParts: string[] = [];
+          if (runningCount > 0) statusParts.push(`${runningCount} running`);
+          if (pendingCount > 0) statusParts.push(`${pendingCount} pending`);
+          if (completedCount > 0) statusParts.push(`${completedCount} done`);
+          if (statusParts.length > 0) {
+            updateStreamingStatus(`Swarm plan active: ${statusParts.join(" · ")}`, { appendHistory: false });
+          }
         }
       }
       return;
@@ -1089,6 +1528,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.approval_needed") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         const approvalId = String(data["approvalId"]);
         pendingApproval.value = {
           approvalId,
@@ -1111,6 +1551,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.intervention") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         pendingIntervention.value = data["notice"] as InterventionNotice;
         const notice = data["notice"] as InterventionNotice;
         notifications.pushLocalNotification({
@@ -1135,6 +1576,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "agent.tool_done") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
         const streamingMessage = getStreamingMessage();
         if (streamingMessage?.toolCalls) {
           const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
@@ -1151,6 +1593,15 @@ export const useGatewayStore = defineStore("gateway", () => {
           if (attachments.length) {
             streamingMessage.attachments = [...(streamingMessage.attachments ?? []), ...attachments];
           }
+
+          const completedTools = streamingMessage.toolCalls?.filter((toolCall) => toolCall.result !== undefined).length ?? 0;
+          const shouldCheckpoint = completedTools <= 2 || completedTools % 3 === 0;
+          updateStreamingStatus(
+            completedTools > 0
+              ? `Completed ${completedTools} tool call${completedTools === 1 ? "" : "s"}. Latest: ${String(data["name"])}.`
+              : `Completed ${String(data["name"])}.`,
+            { appendHistory: shouldCheckpoint },
+          );
         }
       }
       return;
@@ -1159,13 +1610,14 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "status") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] !== pendingRequestId.value) return;
+      notePendingTurnActivity();
 
       const status = data["status"] as string;
 
       if (status === "accepted") {
         const feedback = buildAcceptedStatusMessage(data);
         if (feedback) {
-          insertSystemFeedbackMessage(feedback);
+          updateStreamingStatus(feedback, { appendHistory: true });
         }
         return;
       }
@@ -1186,6 +1638,8 @@ export const useGatewayStore = defineStore("gateway", () => {
           toolCalls: streamingMessage?.toolCalls,
           attachments: streamingMessage?.attachments,
           blocked: isBlocked,
+          statusText: streamingMessage?.statusText,
+          statusHistory: cloneStatusHistory(streamingMessage?.statusHistory),
           swarmState: swarmState ?? undefined,
           usage: data["usage"] as TurnUsage | undefined,
           perf: rawPerf ? {
@@ -1201,6 +1655,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         streamingText.value = "";
         pendingRequestId.value = null;
         isStreaming.value = false;
+        clearTurnStallState();
         isError.value = isBlocked;
         pendingApproval.value = null;
         appendSwarmRun(isBlocked ? "blocked" : "ok", swarmState);
@@ -1314,6 +1769,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     streamingText.value = "";
     liveSwarmState.value = null;
     pendingIntervention.value = null;
+    turnLikelyStalled.value = false;
 
     // Add streaming placeholder
     messages.value.push({
@@ -1321,7 +1777,10 @@ export const useGatewayStore = defineStore("gateway", () => {
       role: "assistant",
       content: "",
       timestamp: new Date(),
+      statusText: "Working on it...",
+      statusHistory: ["Working on it..."],
     });
+    armPendingTurnWatchdog();
 
     try {
       await rpc("chat.send", {
@@ -1374,11 +1833,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     file: File;
     name: string;
     language?: string;
+    referenceText?: string;
   }): Promise<SavedTtsVoiceResult> {
     const formData = new FormData();
     formData.append("file", input.file, input.file.name);
     formData.append("name", input.name);
     if (input.language) formData.append("language", input.language);
+    if (input.referenceText) formData.append("referenceText", input.referenceText);
 
     const response = await authorizedFetch("/api/multimodal/voices/save", {
       method: "POST",
@@ -1390,6 +1851,8 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function synthesizeSpeech(input: {
     text: string;
     voice?: string;
+    voiceId?: string;
+    speaker?: string;
     language?: string;
     quality?: string;
     gender?: string;
@@ -1451,6 +1914,19 @@ export const useGatewayStore = defineStore("gateway", () => {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = options.suggestedFilename ?? artifact.filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function downloadSessionDebugMarkdown(sessionId: string): Promise<void> {
+    const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/debug-markdown`);
+    const blob = await response.blob();
+    const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
+      ?? `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
@@ -1532,6 +2008,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     isLoading,
     isStreaming,
     isError,
+    turnLikelyStalled,
     pendingApproval,
     pendingIntervention,
     connect,
@@ -1555,6 +2032,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     uploadToWorkspace,
     fetchWorkspaceArtifactBlob,
     downloadWorkspaceArtifact,
+    downloadSessionDebugMarkdown,
     respondApproval,
     dismissIntervention,
     cancelTurn,

@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, watchConfig } from "./config/loader.js";
+import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
 import { initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
 import { flushAuditLog } from "./audit/logger.js";
@@ -25,6 +25,8 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 // Ephemeral store + dynamic tools
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
+import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
+import { closeNeo4j } from "./db/neo4j.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
 import { loadPersistedGaps } from "./agent/self-improve.js";
 
@@ -45,6 +47,7 @@ import "./tools/memory.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
+import "./tools/navigation.js";
 import "./tools/multimodal.js";
 import "./tools/document-output.js";
 import "./tools/pentest.js";
@@ -60,6 +63,9 @@ import "./tools/mail.js";
 import "./tools/agent-datastore.js";
 import "./tools/tool-develop.js";
 import "./tools/self-improve-tools.js";
+import "./tools/graph.js";
+import "./tools/timeseries.js";
+import "./tools/research-scratch.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";
@@ -103,9 +109,10 @@ export async function main() {
   loadDynamicTools();
   watchDynamicToolsDirectory();
 
-  // Recover persisted dev sessions and capability gaps
+  // Recover persisted dev sessions, capability gaps, and task checkpoints
   await loadPersistedSessions();
   await loadPersistedGaps();
+  loadCheckpointsFromDisk(getConfig().workspacePath);
 
   // Start gateway (WS + REST)
   const gateway = createGateway();
@@ -187,6 +194,7 @@ export async function main() {
     await shutdownMcpServers();
     shutdownDynamicTools();
     await shutdownEphemeralStore();
+    await closeNeo4j();
     stopAllCronJobs();
     stopAllReminders();
     stopAllTimers();

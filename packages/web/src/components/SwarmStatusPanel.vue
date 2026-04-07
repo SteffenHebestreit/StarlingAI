@@ -10,6 +10,7 @@
         <div class="swarm-panel__meta">
           <span v-if="counts.running" class="swarm-pill swarm-pill--running">{{ counts.running }} running</span>
           <span class="swarm-pill swarm-pill--completed">{{ counts.completed }} done</span>
+          <span v-if="counts.partial" class="swarm-pill swarm-pill--partial">{{ counts.partial }} partial</span>
           <span v-if="counts.pending" class="swarm-pill swarm-pill--pending">{{ counts.pending }} pending</span>
           <span v-if="counts.failed" class="swarm-pill swarm-pill--failed">{{ counts.failed }} failed</span>
           <span v-if="counts.blocked" class="swarm-pill swarm-pill--blocked">{{ counts.blocked }} blocked</span>
@@ -151,10 +152,11 @@ function toggleExpanded(): void {
 
 const statusPriority: Record<SwarmTaskState["status"], number> = {
   running: 0,
-  failed: 1,
-  blocked: 2,
-  pending: 3,
-  completed: 4,
+  partial: 1,
+  failed: 2,
+  blocked: 3,
+  pending: 4,
+  completed: 5,
 };
 
 const tasks = computed(() => Object.values(props.state.tasks).sort((left, right) => {
@@ -169,6 +171,7 @@ const counts = computed(() => tasks.value.reduce((acc, task) => {
 }, {
   running: 0,
   completed: 0,
+  partial: 0,
   pending: 0,
   failed: 0,
   blocked: 0,
@@ -409,6 +412,7 @@ function formatTimestamp(value: string): string {
 }
 
 .swarm-timeline__dot--running { background: #60a5fa; }
+.swarm-timeline__dot--partial { background: #fbbf24; }
 .swarm-timeline__dot--completed { background: #4ade80; }
 .swarm-timeline__dot--failed { background: #f87171; }
 
@@ -447,6 +451,7 @@ function formatTimestamp(value: string): string {
 
 .swarm-pill--running { background: rgba(59, 130, 246, 0.14); color: #93c5fd; border-color: rgba(59, 130, 246, 0.28); }
 .swarm-pill--completed { background: rgba(34, 197, 94, 0.14); color: #86efac; border-color: rgba(34, 197, 94, 0.28); }
+.swarm-pill--partial { background: rgba(251, 191, 36, 0.14); color: #fcd34d; border-color: rgba(251, 191, 36, 0.24); }
 .swarm-pill--pending { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.24); }
 .swarm-pill--failed { background: rgba(248, 113, 113, 0.14); color: #fca5a5; border-color: rgba(248, 113, 113, 0.24); }
 .swarm-pill--blocked { background: rgba(251, 191, 36, 0.14); color: #fcd34d; border-color: rgba(251, 191, 36, 0.24); }
@@ -467,6 +472,7 @@ function formatTimestamp(value: string): string {
 
 .swarm-card--running { border-color: rgba(59, 130, 246, 0.25); }
 .swarm-card--completed { border-color: rgba(34, 197, 94, 0.24); }
+.swarm-card--partial { border-color: rgba(251, 191, 36, 0.24); }
 .swarm-card--failed { border-color: rgba(248, 113, 113, 0.24); }
 .swarm-card--blocked { border-color: rgba(251, 191, 36, 0.24); }
 
@@ -501,6 +507,7 @@ function formatTimestamp(value: string): string {
 
 .swarm-card__status--running { color: #93c5fd; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.25); }
 .swarm-card__status--completed { color: #86efac; background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.22); }
+.swarm-card__status--partial { color: #fcd34d; background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.2); }
 .swarm-card__status--pending { color: #cbd5e1; background: rgba(148, 163, 184, 0.12); border-color: rgba(148, 163, 184, 0.2); }
 .swarm-card__status--failed { color: #fca5a5; background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.2); }
 .swarm-card__status--blocked { color: #fcd34d; background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.2); }
@@ -640,6 +647,7 @@ function formatTimestamp(value: string): string {
 
 .swarm-attempt__status--running { color: #93c5fd; background: rgba(59, 130, 246, 0.12); }
 .swarm-attempt__status--completed { color: #86efac; background: rgba(34, 197, 94, 0.12); }
+.swarm-attempt__status--partial { color: #fcd34d; background: rgba(251, 191, 36, 0.12); }
 .swarm-attempt__status--failed { color: #fca5a5; background: rgba(248, 113, 113, 0.12); }
 
 .swarm-attempt__summary {

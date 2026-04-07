@@ -9,6 +9,7 @@ const router = createRouter({
     { path: "/sessions", component: () => import("@/pages/Sessions.vue") },
     { path: "/agents", component: () => import("@/pages/Settings.vue") },
     { path: "/settings", component: () => import("@/pages/Settings.vue") },
+    { path: "/swarm", component: () => import("@/pages/SwarmDashboard.vue") },
     { path: "/definitions", redirect: "/agents" },
     { path: "/config-assistant", redirect: "/agents" },
     { path: "/:pathMatch(.*)*", redirect: "/" },

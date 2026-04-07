@@ -15,6 +15,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
+import { buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
@@ -34,6 +35,7 @@ import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
 import { getChannelStatuses } from "../channels/registry.js";
+import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./speech-summary.js";
 import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
 import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
@@ -48,6 +50,10 @@ import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getAgentMessageBacklogSnapshot } from "../swarm/memory.js";
+import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
+import { listCapabilityGaps } from "../agent/self-improve.js";
+import { getWardenAlerts } from "../agent/warden.js";
+import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { computerSessionManager } from "../agent/computer-session.js";
@@ -638,27 +644,37 @@ export function createGateway() {
     language?: string;
     prompt?: string;
   }): Promise<Response> {
-    if (input.api === "transcribe-only") {
-      const fallbackForm = new FormData();
-      fallbackForm.append("audio", input.audioBlob, input.filename);
-      if (input.language) fallbackForm.append("language", input.language);
-      if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+    const normalizedLanguage = normalizeSttLanguage(input.language);
 
-      return fetchWithTimeout(
-        upstreamUrl(input.baseUrl, "/transcribe"),
-        {
-          method: "POST",
-          headers: upstreamHeaders(input.apiKey),
-          body: fallbackForm,
-        },
-        input.timeoutMs,
-      );
+    if (input.api === "transcribe-only") {
+      const directResponse = await sendDirectTranscribeRequest({
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+        timeoutMs: input.timeoutMs,
+        audioBlob: input.audioBlob,
+        filename: input.filename,
+        language: normalizedLanguage,
+        prompt: input.prompt,
+      });
+
+      if (shouldRetryTranscribeWithoutLanguage(directResponse.status, normalizedLanguage)) {
+        return sendDirectTranscribeRequest({
+          baseUrl: input.baseUrl,
+          apiKey: input.apiKey,
+          timeoutMs: input.timeoutMs,
+          audioBlob: input.audioBlob,
+          filename: input.filename,
+          prompt: input.prompt,
+        });
+      }
+
+      return directResponse;
     }
 
     const openAiForm = new FormData();
     openAiForm.append("file", input.audioBlob, input.filename);
     openAiForm.append("model", input.model);
-    if (input.language) openAiForm.append("language", input.language);
+    if (normalizedLanguage) openAiForm.append("language", normalizedLanguage);
     if (input.prompt) openAiForm.append("prompt", input.prompt);
 
     const openAiResponse = await fetchWithTimeout(
@@ -679,6 +695,71 @@ export function createGateway() {
       return openAiResponse;
     }
 
+    const directFallbackResponse = await sendDirectTranscribeRequest({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      audioBlob: input.audioBlob,
+      filename: input.filename,
+      language: normalizedLanguage,
+      prompt: input.prompt,
+    });
+
+    if (shouldRetryTranscribeWithoutLanguage(directFallbackResponse.status, normalizedLanguage)) {
+      return sendDirectTranscribeRequest({
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+        timeoutMs: input.timeoutMs,
+        audioBlob: input.audioBlob,
+        filename: input.filename,
+        prompt: input.prompt,
+      });
+    }
+
+    return directFallbackResponse;
+  }
+
+  function normalizeSttLanguage(language: string | undefined): string | undefined {
+    if (!language) return undefined;
+    const normalized = language.trim();
+    if (!normalized) return undefined;
+
+    const lower = normalized.toLowerCase().replace(/_/g, "-");
+    const directMap: Record<string, string> = {
+      auto: "auto",
+      german: "de",
+      "de-de": "de",
+      de: "de",
+      english: "en",
+      "en-us": "en",
+      en: "en",
+      polish: "pl",
+      "pl-pl": "pl",
+      pl: "pl",
+    };
+    if (directMap[lower]) return directMap[lower];
+
+    if (/^[a-z]{2,3}(?:-[a-z0-9]{2,8})+$/i.test(lower)) {
+      return lower.split("-")[0];
+    }
+
+    return normalized;
+  }
+
+  function shouldRetryTranscribeWithoutLanguage(status: number, language: string | undefined): boolean {
+    if (!language || language === "auto") return false;
+    return status === 400 || status === 422 || status >= 500;
+  }
+
+  async function sendDirectTranscribeRequest(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    audioBlob: Blob;
+    filename: string;
+    language?: string;
+    prompt?: string;
+  }): Promise<Response> {
     const fallbackForm = new FormData();
     fallbackForm.append("audio", input.audioBlob, input.filename);
     if (input.language) fallbackForm.append("language", input.language);
@@ -814,6 +895,89 @@ export function createGateway() {
     };
   }
 
+  // TTL-cached TTS capability snapshot (avoid hitting /models on every TTS request)
+  let _ttsCapabilityCache: { result: Awaited<ReturnType<typeof getQwenTtsCapabilitySnapshotUncached>>; cachedAt: number } | null = null;
+  const TTS_CAPABILITY_CACHE_TTL_MS = 60_000;
+
+  async function getQwenTtsCapabilitySnapshot(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }) {
+    if (_ttsCapabilityCache && (Date.now() - _ttsCapabilityCache.cachedAt) < TTS_CAPABILITY_CACHE_TTL_MS) {
+      return _ttsCapabilityCache.result;
+    }
+    const result = await getQwenTtsCapabilitySnapshotUncached(input);
+    _ttsCapabilityCache = { result, cachedAt: Date.now() };
+    return result;
+  }
+
+  async function getQwenTtsCapabilitySnapshotUncached(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }): Promise<{
+    modelId?: string;
+    modelName?: string;
+    capabilities?: string[];
+    voiceCloneSupported?: boolean;
+    customVoiceSupported?: boolean;
+  } | null> {
+    try {
+      const response = await fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/models"),
+        { headers: upstreamHeaders(input.apiKey) },
+        input.timeoutMs,
+      );
+      if (!response.ok) return null;
+
+      const body = await parseUpstreamJsonResponse(response, "TTS model list returned a non-JSON response");
+      const models = body["models"];
+      if (!models || typeof models !== "object") return null;
+
+      const modelMap = models as Record<string, unknown>;
+      const requestedModel = input.requestedModel?.trim();
+      const currentModel = typeof body["current_model"] === "string" ? body["current_model"] : undefined;
+      const modelKey = requestedModel && requestedModel in modelMap
+        ? requestedModel
+        : currentModel && currentModel in modelMap
+          ? currentModel
+          : undefined;
+      if (!modelKey) return null;
+
+      const modelInfo = modelMap[modelKey];
+      if (!modelInfo || typeof modelInfo !== "object") return null;
+
+      const typedModelInfo = modelInfo as Record<string, unknown>;
+      const capabilities = Array.isArray(typedModelInfo["capabilities"])
+        ? (typedModelInfo["capabilities"] as unknown[]).map(String)
+        : [];
+
+      return {
+        modelId: modelKey,
+        modelName: typeof typedModelInfo["name"] === "string" ? typedModelInfo["name"] : modelKey,
+        capabilities,
+        voiceCloneSupported: capabilities.includes("voice_clone"),
+        customVoiceSupported: capabilities.includes("custom_voice"),
+      };
+    } catch (err) {
+      log.debug({ err }, "Failed to fetch TTS capability snapshot");
+      return null;
+    }
+  }
+
+  function qwenBuiltInSpeakerSupport(snapshot: {
+    voiceCloneSupported?: boolean;
+    customVoiceSupported?: boolean;
+  } | null): boolean | undefined {
+    if (!snapshot) return undefined;
+    if (snapshot.customVoiceSupported) return true;
+    if (snapshot.voiceCloneSupported) return false;
+    return undefined;
+  }
+
   async function sendTtsRequest(input: {
     api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
@@ -827,6 +991,7 @@ export function createGateway() {
     audioExample?: { filename: string; contentType: string; bytes: Uint8Array };
     referenceText?: string;
     saveVoiceAs?: string;
+    allowVoiceCloneFallback?: boolean;
     quality?: string;
     gender?: string;
     speed?: number;
@@ -869,7 +1034,24 @@ export function createGateway() {
       if (!loadModelResponse.ok) return loadModelResponse;
     }
 
+    const qwenCapabilitySnapshot = await getQwenTtsCapabilitySnapshot({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      requestedModel: model,
+    });
+
     if (input.savedVoiceId) {
+      if (qwenCapabilitySnapshot?.voiceCloneSupported === false) {
+        const modelName = qwenCapabilitySnapshot.modelName ?? qwenCapabilitySnapshot.modelId ?? "The selected model";
+        return new Response(JSON.stringify({
+          error: `${modelName} does not support saved-voice playback. Switch to a qwen-compatible model with voice_clone capability.`,
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       const formData = new FormData();
       formData.append("text", input.text);
       formData.append("lang", language);
@@ -881,6 +1063,44 @@ export function createGateway() {
     }
 
     if (input.audioExample) {
+      const cloneSupported = qwenCapabilitySnapshot?.voiceCloneSupported;
+      if (cloneSupported === false) {
+        if (input.allowVoiceCloneFallback) {
+          const builtInSpeakerSupported = qwenBuiltInSpeakerSupport(qwenCapabilitySnapshot);
+          if (builtInSpeakerSupported === false) {
+            const modelName = qwenCapabilitySnapshot?.modelName ?? qwenCapabilitySnapshot?.modelId ?? "The selected model";
+            return new Response(JSON.stringify({
+              error: `${modelName} does not support either voice cloning or built-in speaker synthesis in this qwen-compatible backend. Switch models or remove the voice sample and configure a saved voice ID instead.`,
+            }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          return fetchWithTimeout(
+            upstreamUrl(input.baseUrl, "/tts"),
+            {
+              method: "POST",
+              headers: upstreamHeaders(input.apiKey, { "Content-Type": "application/json" }),
+              body: JSON.stringify({
+                text: input.text,
+                lang: language,
+                speaker: input.speaker ?? "Vivian",
+                instruct: input.gender ?? input.quality ?? "",
+              }),
+            },
+            input.timeoutMs,
+          );
+        }
+
+        return new Response(JSON.stringify({
+          error: "The selected qwen-compatible TTS model does not support voice cloning. Remove the voice sample or switch to a model with voice_clone capability.",
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       if (input.saveVoiceAs) {
         const saveForm = new FormData();
         saveForm.append("name", input.saveVoiceAs);
@@ -917,6 +1137,16 @@ export function createGateway() {
       );
     }
 
+    if (qwenBuiltInSpeakerSupport(qwenCapabilitySnapshot) === false) {
+      const modelName = qwenCapabilitySnapshot?.modelName ?? qwenCapabilitySnapshot?.modelId ?? "The selected model";
+      return new Response(JSON.stringify({
+        error: `${modelName} does not support built-in speaker synthesis in this qwen-compatible backend. Use a saved voice ID or audio example, or switch to a model with custom_voice capability.`,
+      }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     return fetchWithTimeout(
       upstreamUrl(input.baseUrl, "/tts"),
       {
@@ -931,6 +1161,15 @@ export function createGateway() {
       },
       input.timeoutMs,
     );
+  }
+
+  async function qwenTtsSupportsVoiceClone(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }): Promise<boolean | undefined> {
+    return (await getQwenTtsCapabilitySnapshot(input))?.voiceCloneSupported;
   }
 
   // ── Health endpoints ─────────────────────────────────────────────────────
@@ -1066,6 +1305,14 @@ export function createGateway() {
     const imageGenHealthPromise = multimodalConfig.imageGeneration
       ? checkImageGenerationHealth(multimodalConfig.imageGeneration)
       : Promise.resolve(null);
+    const ttsCapabilityPromise = multimodalConfig.tts.api === "qwen-compatible" && multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
+      ? getQwenTtsCapabilitySnapshot({
+          baseUrl: multimodalConfig.tts.baseUrl,
+          apiKey: multimodalConfig.tts.apiKey,
+          timeoutMs: multimodalConfig.tts.timeoutMs,
+          requestedModel: multimodalConfig.tts.model,
+        })
+      : Promise.resolve(null);
 
     const visionModel = multimodalConfig.files.visionModel;
     const vision = visionModel
@@ -1091,7 +1338,7 @@ export function createGateway() {
         })
       : Promise.resolve(null);
 
-    const [files, stt, tts, imageGeneration, visionHealth] = await Promise.all([
+    const [files, stt, tts, imageGeneration, visionHealth, ttsCapabilitySnapshot] = await Promise.all([
       checkEndpointHealth({
         baseUrl: multimodalConfig.files.baseUrl,
         apiKey: multimodalConfig.files.apiKey,
@@ -1116,13 +1363,17 @@ export function createGateway() {
             }),
       imageGenHealthPromise,
       vision,
+      ttsCapabilityPromise,
     ]);
 
     return c.json({
       files,
       vision: visionHealth,
       stt,
-      tts,
+      tts: {
+        ...tts,
+        ...(ttsCapabilitySnapshot ?? {}),
+      },
       imageGeneration,
       wakeWord: multimodalConfig.wakeWord,
     });
@@ -1300,6 +1551,9 @@ export function createGateway() {
     if (!(uploadedFile instanceof File)) {
       return c.json({ error: "file is required" }, 400);
     }
+    if (uploadedFile.size <= 0) {
+      return c.json({ error: "Audio upload was empty. Record a little longer and try again." }, 400);
+    }
     if (!multimodalServiceConfigured(multimodalConfig.stt.baseUrl)) {
       return disabledServiceResponse("STT is disabled: configure multimodal.stt.baseUrl to enable transcription.");
     }
@@ -1391,6 +1645,10 @@ export function createGateway() {
     const language = typeof languageValue === "string" && languageValue.trim()
       ? normalizeTtsLanguage(languageValue.trim(), multimodalConfig.tts.api)
       : normalizeTtsLanguage(multimodalConfig.tts.defaultLanguage, multimodalConfig.tts.api);
+    const referenceTextValue = formData.get("referenceText") ?? formData.get("ref_text");
+    const referenceText = typeof referenceTextValue === "string" && referenceTextValue.trim()
+      ? referenceTextValue.trim()
+      : "";
 
     if (multimodalConfig.tts.api !== "qwen-compatible") {
       return c.json({ error: "Voice sample saving is only supported for qwen-compatible TTS backends." }, 400);
@@ -1415,10 +1673,24 @@ export function createGateway() {
         }
       }
 
+      const qwenCapabilitySnapshot = await getQwenTtsCapabilitySnapshot({
+        baseUrl: multimodalConfig.tts.baseUrl,
+        apiKey: multimodalConfig.tts.apiKey,
+        timeoutMs: multimodalConfig.tts.timeoutMs,
+        requestedModel: multimodalConfig.tts.model,
+      });
+      if (qwenCapabilitySnapshot?.voiceCloneSupported === false) {
+        const modelName = qwenCapabilitySnapshot.modelName ?? qwenCapabilitySnapshot.modelId ?? "The selected model";
+        return c.json({
+          error: `${modelName} does not support saving or replaying cloned voices. Switch to a qwen-compatible Base model with voice_clone capability.`,
+        }, 400);
+      }
+
       const upstreamForm = new FormData();
       upstreamForm.append("name", name);
       upstreamForm.append("lang", language);
       upstreamForm.append("file", uploadedFile, uploadedFile.name);
+      if (referenceText) upstreamForm.append("ref_text", referenceText);
 
       const upstream = await fetchWithTimeout(
         upstreamUrl(multimodalConfig.tts.baseUrl, "/voices/save"),
@@ -1463,8 +1735,17 @@ export function createGateway() {
     if (!text) return c.json({ error: "text is required" }, 400);
 
     try {
-      const audioExamplePath = typeof body["audioExamplePath"] === "string" && body["audioExamplePath"].trim()
+      const explicitAudioExamplePath = typeof body["audioExamplePath"] === "string" && body["audioExamplePath"].trim()
         ? body["audioExamplePath"].trim()
+        : undefined;
+      const explicitReferenceText = typeof body["referenceText"] === "string" && body["referenceText"].trim()
+        ? body["referenceText"].trim()
+        : undefined;
+      const explicitSaveVoiceAs = typeof body["saveVoiceAs"] === "string" && body["saveVoiceAs"].trim()
+        ? body["saveVoiceAs"].trim()
+        : undefined;
+      const audioExamplePath = explicitAudioExamplePath
+        ? explicitAudioExamplePath
         : multimodalConfig.tts.voiceSamplePath;
       const upstream = await sendTtsRequest({
         api: multimodalConfig.tts.api,
@@ -1487,12 +1768,9 @@ export function createGateway() {
             ? body["voice"].trim()
             : multimodalConfig.tts.defaultVoiceId,
         audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath) : undefined,
-        referenceText: typeof body["referenceText"] === "string" && body["referenceText"].trim()
-          ? body["referenceText"].trim()
-          : multimodalConfig.tts.voiceSampleText,
-        saveVoiceAs: typeof body["saveVoiceAs"] === "string" && body["saveVoiceAs"].trim()
-          ? body["saveVoiceAs"].trim()
-          : undefined,
+        referenceText: explicitReferenceText ?? multimodalConfig.tts.voiceSampleText,
+        saveVoiceAs: explicitSaveVoiceAs,
+        allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,
         quality: typeof body["quality"] === "string" ? body["quality"] : multimodalConfig.tts.defaultQuality,
         gender: typeof body["gender"] === "string" ? body["gender"] : undefined,
         speed: typeof body["speed"] === "number" ? body["speed"] : undefined,
@@ -1551,9 +1829,12 @@ export function createGateway() {
         [
           {
             role: "system",
-            content: `You are a concise voice assistant. Summarise the text the user provides into at most ${maxSentences} natural, spoken sentence(s). Use plain language — no markdown, no bullet points, no code blocks. Respond with only the summary.`,
+            content: buildSpeechSummarySystemPrompt(maxSentences, text),
           },
-          { role: "user", content: text },
+          {
+            role: "user",
+            content: buildSpeechSummaryUserPrompt(text),
+          },
         ],
         [],
       );
@@ -1836,6 +2117,30 @@ export function createGateway() {
     } catch (error) {
       const mapped = mapWorkspaceRouteError(error);
       return c.json({ error: mapped.message }, mapped.status);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/debug-markdown", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) {
+      return c.json({ error: "sessionId is required" }, 400);
+    }
+
+    try {
+      const markdown = await buildSessionDebugMarkdown(sessionId);
+      const filename = `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
+      return c.body(markdown, 200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": buildContentDisposition(filename, "attachment"),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Session not found")) {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
   });
 
@@ -2168,6 +2473,15 @@ export function createGateway() {
         tags: proposal.tags,
       });
 
+      // Structured attribution audit trail — creation event (GAP-3)
+      logAudit("config_proposal_created", {
+        proposalId: proposal.id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+        mode: proposal.mode,
+        summary: proposal.summary,
+      }, { severity: "info", channel: "config-assistant" });
+
       return c.json({ proposal, flowMemoryId: flowEntry.id }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
@@ -2214,6 +2528,26 @@ export function createGateway() {
         status: "applied",
         appliedAt: new Date().toISOString(),
       }));
+
+      // Structured attribution audit trail for self-improvement traceability (GAP-3)
+      logAudit("self_improvement_applied", {
+        proposalId: id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+        mode: proposal.mode,
+        configChanges: proposal.configChanges.map((change) => ({ path: change.path, newValue: change.value })),
+        promptChanges: proposal.promptChanges.map((change) => ({
+          agentName: change.agentName === MAIN_ASSISTANT_PROMPT_TARGET ? "main_assistant" : change.agentName,
+          strategy: change.strategy,
+        })),
+        summary: proposal.summary,
+      }, { severity: "info", channel: "config-assistant" });
+
+      logAudit("config_proposal_applied", {
+        proposalId: id,
+        proposingAgent: proposal.assistantAgent ?? null,
+        targetAgent: proposal.targetAgent ?? null,
+      }, { severity: "info", channel: "config-assistant" });
 
       appendFlowMemoryEntry(cfg.workspacePath, {
         scope: proposal.mode,
@@ -2643,6 +2977,108 @@ export function createGateway() {
         peakQueuedWaitMs: concurrency.reduce((max, s) => Math.max(max, s.oldestQueuedMs), 0),
       },
     });
+  });
+
+  // ── Swarm health dashboard — aggregated operator view ────────────────────
+  app.get("/api/swarm/health", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({
+      wardenAlerts: getWardenAlerts(),
+      capabilityGaps: listCapabilityGaps(),
+      promotionCandidates: listPromotionCandidates(),
+      dynamicToolStats: getDynamicToolStats(),
+    });
+  });
+
+  // ── Dynamic tool promotion queue ─────────────────────────────────────────
+  app.get("/api/tools/dynamic", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({ tools: getLoadedDynamicTools(), stats: getDynamicToolStats() });
+  });
+
+  app.get("/api/tools/dynamic/promotion", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({ candidates: listPromotionCandidates() });
+  });
+
+  app.post("/api/tools/dynamic/:name/promote", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const reviewedBy = typeof body["reviewedBy"] === "string" ? body["reviewedBy"] : "operator";
+
+    const ok = approvePromotion(name, reviewedBy);
+    if (!ok) return c.json({ error: "Tool not found or not in pending promotion state" }, 404);
+
+    logAudit("tool_promoted", { toolName: name, reviewedBy }, { severity: "info", channel: "self-improvement" });
+    return c.json({ success: true, toolName: name, reviewedBy });
+  });
+
+  app.post("/api/tools/dynamic/:name/reject-promotion", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const name = c.req.param("name");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const reviewedBy = typeof body["reviewedBy"] === "string" ? body["reviewedBy"] : "operator";
+
+    const ok = rejectPromotion(name, reviewedBy);
+    if (!ok) return c.json({ error: "Tool not found or not in pending promotion state" }, 404);
+
+    logAudit("tool_promotion_rejected", { toolName: name, reviewedBy }, { severity: "info", channel: "self-improvement" });
+    return c.json({ success: true, toolName: name, reviewedBy });
+  });
+
+  // ── Capability gaps ───────────────────────────────────────────────────────
+  app.get("/api/capability-gaps", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const status = c.req.query("status");
+    let gaps = listCapabilityGaps();
+    if (status) gaps = gaps.filter(g => g.status === status);
+    return c.json({ gaps });
+  });
+
+  // ── Long-running task checkpoints ─────────────────────────────────────────
+  app.get("/api/checkpoints", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const statusParam = c.req.query("status");
+    const agentName = c.req.query("agentName");
+    const validStatuses = ["active", "paused", "resumed", "completed", "failed"] as const;
+    type CS = typeof validStatuses[number];
+    const status = validStatuses.includes(statusParam as CS) ? (statusParam as CS) : undefined;
+    return c.json({ checkpoints: listCheckpoints({ status, agentName }) });
+  });
+
+  app.post("/api/checkpoints/:taskId/resume", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const taskId = c.req.param("taskId");
+    const cp = resumeCheckpoint(taskId);
+    if (!cp) return c.json({ error: "Checkpoint not found or not in paused state" }, 404);
+    return c.json({ checkpoint: cp });
+  });
+
+  app.post("/api/checkpoints/:taskId/complete", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const taskId = c.req.param("taskId");
+    const ok = completeCheckpoint(taskId);
+    if (!ok) return c.json({ error: "Checkpoint not found" }, 404);
+    return c.json({ success: true, taskId });
   });
 
   app.get("/api/channels", async (c) => {

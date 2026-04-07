@@ -108,6 +108,7 @@
                   {{ selectedTranscript.session.archivedAt ? 'Archived transcript' : 'Active transcript' }}
                 </span>
                 <button class="transcript-panel__action" @click="exportTranscriptMarkdown">Export Markdown</button>
+                <button class="transcript-panel__action" @click="exportDebugMarkdown">Debug Markdown</button>
                 <button class="transcript-panel__action" @click="exportTranscriptPDF">Export PDF</button>
               </div>
             </div>
@@ -506,6 +507,12 @@ async function exportTranscriptMarkdown(): Promise<void> {
   a.download = `starlingai-session-${transcript.session.id.slice(0, 8)}.md`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+async function exportDebugMarkdown(): Promise<void> {
+  const transcript = await getTranscriptForExport();
+  if (!transcript) return;
+  await gateway.downloadSessionDebugMarkdown(transcript.session.id);
 }
 
 async function exportTranscriptPDF(): Promise<void> {

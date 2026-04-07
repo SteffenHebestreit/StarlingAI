@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+async function flushAsyncPersistence(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("tool development workflow", () => {
   let tempDir: string;
 
@@ -122,6 +126,29 @@ describe("tool development workflow", () => {
     expect(result.error).toContain("denied");
     expect(getTool("selfdev__html_to_markdown")).toBeUndefined();
     expect(getToolDevSession(session.id)?.status).toBe("rejected");
+  });
+
+  it("persists tool dev sessions via in-memory fallback when Redis is unavailable", async () => {
+    delete process.env["REDIS_URL"];
+
+    const { createToolDevSession } = await import("../agent/tool-dev-session.js");
+    const { ephemeralQuery, ephemeralGet } = await import("../runtime/ephemeral-store/index.js");
+
+    const session = createToolDevSession({
+      toolName: "fallback_probe",
+      description: "Check fallback persistence",
+      parametersSchema: { type: "object", properties: {} },
+      sessionId: "sess-fallback",
+    });
+
+    await flushAsyncPersistence();
+
+    const queried = await ephemeralQuery({ namespace: "dev-session-lease", sessionId: "sess-fallback", limit: 10 });
+    expect(queried.some((entry) => entry.key === session.id)).toBe(true);
+
+    const loaded = await ephemeralGet("dev-session-lease", session.id);
+    expect(loaded?.sessionId).toBe("sess-fallback");
+    expect(loaded?.agentName).toBeUndefined();
   });
 });
 

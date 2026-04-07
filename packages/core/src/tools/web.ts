@@ -3,10 +3,12 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
 import { resolve as dnsResolve } from "node:dns/promises";
+import { callPlaywrightTool } from "./multimodal.js";
+import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("tool:web");
 
-type SearchBackend = "searxng" | "duckduckgo";
+type SearchBackend = "searxng" | "playwright" | "duckduckgo";
 
 interface ResolvedSearchBackendConfig {
   requestedBackend: "auto" | SearchBackend;
@@ -50,9 +52,15 @@ registerTool({
       attemptedBackends.push(backend);
 
       try {
-        const searchOutcome = backend === "searxng"
-          ? await searchSearxng(query, maxResults, searchConfig.searxngBaseUrl!, searchConfig.timeoutMs)
-          : await searchDuckDuckGo(query, maxResults, searchConfig.timeoutMs);
+        let searchOutcome: { results: SearchResult[]; rewrittenQuery: string; ranking: SearchRankingMetadata };
+
+        if (backend === "searxng") {
+          searchOutcome = await searchSearxng(query, maxResults, searchConfig.searxngBaseUrl!, searchConfig.timeoutMs);
+        } else if (backend === "playwright") {
+          searchOutcome = await searchPlaywright(query, maxResults, searchConfig.timeoutMs);
+        } else {
+          searchOutcome = await searchDuckDuckGo(query, maxResults, searchConfig.timeoutMs);
+        }
 
         const { results, rewrittenQuery, ranking } = searchOutcome;
         const queryNote = rewrittenQuery !== query.trim()
@@ -119,7 +127,7 @@ registerTool({
 
 registerTool({
   name: "web_fetch",
-  description: "Fetch and read content from a public URL. Only works with unauthenticated public pages. Returns text content.",
+  description: "Fetch and read content from a public URL. Uses Playwright for HTML pages (renders JavaScript) and native fetch for JSON APIs. Returns text content.",
   parameters: {
     type: "object",
     properties: {
@@ -157,6 +165,65 @@ registerTool({
     }
 
     try {
+      // Lightweight HEAD to determine content type before committing to a strategy
+      let contentType = "";
+      try {
+        const headRes = await fetchWithTimeout(url, 8000, {
+          method: "HEAD",
+          headers: { "User-Agent": "StarlingAI/0.1 (research assistant)" },
+        });
+        contentType = headRes.headers.get("content-type") ?? "";
+      } catch {
+        // HEAD failed (some servers reject it) — fall through to full request
+      }
+
+      const isJsonApi = /\bjson\b/i.test(contentType);
+
+      // JSON / API responses → native fetch (no browser needed)
+      if (isJsonApi) {
+        const res = await fetchWithTimeout(url, 15000, {
+          headers: {
+            "User-Agent": "StarlingAI/0.1 (research assistant)",
+            "Accept": "application/json,text/plain,*/*",
+          },
+        });
+
+        if (!res.ok) {
+          return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
+        }
+
+        let text = await res.text();
+        if (text.length > maxLength) {
+          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+        }
+        return {
+          success: true,
+          output: `**Content from:** ${url}\n\n${text}`,
+          metadata: { url, contentLength: text.length, contentType, fetchMethod: "native" },
+        };
+      }
+
+      // HTML / other content → prefer Playwright (renders JS, handles cookie banners)
+      const playwrightAvailable = getMcpConnections().has("playwright");
+      if (playwrightAvailable) {
+        try {
+          await callPlaywrightTool("browser_navigate", { url });
+          const snapshot = await callPlaywrightTool("browser_snapshot", {});
+          let text = snapshot;
+          if (text.length > maxLength) {
+            text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+          }
+          return {
+            success: true,
+            output: `**Content from:** ${url}\n\n${text}`,
+            metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright" },
+          };
+        } catch (playwrightErr) {
+          log.warn({ err: playwrightErr, url }, "web_fetch Playwright failed, falling back to native fetch");
+        }
+      }
+
+      // Fallback: native fetch with HTML stripping
       const res = await fetchWithTimeout(url, 15000, {
         headers: {
           "User-Agent": "StarlingAI/0.1 (research assistant)",
@@ -168,10 +235,10 @@ registerTool({
         return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
       }
 
-      const contentType = res.headers.get("content-type") ?? "";
+      const resContentType = res.headers.get("content-type") ?? "";
       let text: string;
 
-      if (contentType.includes("text/html")) {
+      if (resContentType.includes("text/html")) {
         const html = await res.text();
         text = stripHtml(html);
       } else {
@@ -185,7 +252,7 @@ registerTool({
       return {
         success: true,
         output: `**Content from:** ${url}\n\n${text}`,
-        metadata: { url, contentLength: text.length, contentType },
+        metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback" },
       };
     } catch (err) {
       log.error({ err, url }, "web_fetch failed");
@@ -271,6 +338,7 @@ interface SearchResult {
 export function resolveSearchBackendConfig(config: Config = getConfig()): ResolvedSearchBackendConfig {
   const searchConfig = config.retrieval.search;
   const searxngBaseUrl = searchConfig.searxngBaseUrl?.trim() || process.env["SEARXNG_BASE_URL"]?.trim();
+  const playwrightAvailable = getMcpConnections().has("playwright");
 
   if (searchConfig.backend === "searxng") {
     return {
@@ -290,9 +358,15 @@ export function resolveSearchBackendConfig(config: Config = getConfig()): Resolv
     };
   }
 
+  // auto mode: SearXNG → Playwright → DuckDuckGo
+  const backends: SearchBackend[] = [];
+  if (searxngBaseUrl) backends.push("searxng");
+  if (playwrightAvailable) backends.push("playwright");
+  backends.push("duckduckgo");
+
   return {
     requestedBackend: "auto",
-    backends: searxngBaseUrl ? ["searxng", "duckduckgo"] : ["duckduckgo"],
+    backends,
     searxngBaseUrl,
     timeoutMs: searchConfig.timeoutMs,
   };
@@ -518,6 +592,95 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string,
       },
     },
   };
+}
+
+// ─── Playwright browser-based search (DuckDuckGo via rendered browser) ───────
+
+async function searchPlaywright(query: string, maxResults: number, _timeoutMs: number): Promise<{
+  results: SearchResult[];
+  rewrittenQuery: string;
+  ranking: SearchRankingMetadata;
+}> {
+  const rewrittenQuery = expandSearchQuery(query);
+  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(rewrittenQuery)}&kl=wt-wt`;
+
+  await callPlaywrightTool("browser_navigate", { url: searchUrl });
+  const snapshot = await callPlaywrightTool("browser_snapshot", {});
+
+  const rawResults = parsePlaywrightSearchSnapshot(snapshot);
+  const rankedResults = rankSearchResults(rewrittenQuery, rawResults, maxResults);
+  const signals = extractQuerySignals(rewrittenQuery);
+
+  return {
+    results: rankedResults.map(({ score: _score, ...result }) => result),
+    rewrittenQuery,
+    ranking: {
+      topResults: rankedResults.slice(0, 3).map((result) => ({
+        title: result.title,
+        url: result.url,
+        score: Number(result.score.toFixed(3)),
+      })),
+      heuristics: {
+        phrases: signals.phrases,
+        keywordTerms: signals.keywordTerms,
+        acronymTerms: signals.acronymTerms,
+      },
+    },
+  };
+}
+
+/**
+ * Parse search results from a Playwright accessibility snapshot of
+ * DuckDuckGo's HTML-lite results page.
+ *
+ * The snapshot contains lines like:
+ *   - link "Title text" [ref=...] -> url
+ *   - text: snippet text
+ * We extract link text as title, the href as url, and subsequent
+ * non-link text as snippet.
+ */
+function parsePlaywrightSearchSnapshot(snapshot: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  const lines = snapshot.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+
+    // Match accessibility snapshot link entries
+    // Format: - link "Title" [ref=...] -> https://url
+    const linkMatch = line.match(/^-\s*link\s+"([^"]+)"\s*(?:\[ref=[^\]]*\]\s*)?->\s*(.+)$/i);
+    if (!linkMatch) continue;
+
+    const rawTitle = linkMatch[1]!.trim();
+    const rawUrl = linkMatch[2]!.trim();
+
+    // Skip DuckDuckGo navigation/internal links
+    if (!rawUrl.startsWith("http")) continue;
+    if (/duckduckgo\.com\/(about|settings|bangs|params|feedback)/i.test(rawUrl)) continue;
+
+    // Decode DuckDuckGo redirect URLs
+    const url = decodeDuckDuckGoResultUrl(rawUrl);
+
+    // Skip duplicate URLs
+    if (results.some(r => r.url === url)) continue;
+
+    // Gather the snippet from the next few non-link text lines
+    let snippet = "";
+    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+      const nextLine = lines[j]!.trim();
+      if (nextLine.startsWith("- link ")) break;
+      // Pick up text content (format varies: "- text: ..." or just text)
+      const textMatch = nextLine.match(/^(?:-\s*)?(?:text:\s*)?(.+)/);
+      if (textMatch && textMatch[1] && !textMatch[1].startsWith("- ")) {
+        snippet = textMatch[1].trim();
+        break;
+      }
+    }
+
+    results.push({ title: rawTitle, url, snippet });
+  }
+
+  return results;
 }
 
 async function searchDuckDuckGo(query: string, maxResults: number, timeoutMs: number): Promise<{
