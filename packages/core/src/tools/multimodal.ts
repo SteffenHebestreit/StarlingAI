@@ -696,7 +696,7 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   return typeof content === "string" ? content.trim() : "";
 }
 
-async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {
+export async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {
   const connection = getMcpConnections().get("playwright");
   if (!connection) {
     throw new Error("Playwright MCP server is not connected");
@@ -810,27 +810,37 @@ async function sendSttRequest(input: {
   language?: string;
   prompt?: string;
 }): Promise<Response> {
-  if (input.api === "transcribe-only") {
-    const fallbackForm = new FormData();
-    fallbackForm.append("audio", input.audioBlob, input.filename);
-    if (input.language) fallbackForm.append("language", input.language);
-    if (input.prompt) fallbackForm.append("initial_prompt", input.prompt);
+  const normalizedLanguage = normalizeSttLanguage(input.language);
 
-    return fetchWithTimeout(
-      upstreamUrl(input.baseUrl, "/transcribe"),
-      {
-        method: "POST",
-        headers: upstreamHeaders(input.apiKey),
-        body: fallbackForm,
-      },
-      input.timeoutMs,
-    );
+  if (input.api === "transcribe-only") {
+    const directResponse = await sendDirectTranscribeRequest({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      audioBlob: input.audioBlob,
+      filename: input.filename,
+      language: normalizedLanguage,
+      prompt: input.prompt,
+    });
+
+    if (shouldRetryTranscribeWithoutLanguage(directResponse.status, normalizedLanguage)) {
+      return sendDirectTranscribeRequest({
+        baseUrl: input.baseUrl,
+        apiKey: input.apiKey,
+        timeoutMs: input.timeoutMs,
+        audioBlob: input.audioBlob,
+        filename: input.filename,
+        prompt: input.prompt,
+      });
+    }
+
+    return directResponse;
   }
 
   const openAiForm = new FormData();
   openAiForm.append("file", input.audioBlob, input.filename);
   openAiForm.append("model", input.model);
-  if (input.language) openAiForm.append("language", input.language);
+  if (normalizedLanguage) openAiForm.append("language", normalizedLanguage);
   if (input.prompt) openAiForm.append("prompt", input.prompt);
 
   const openAiResponse = await fetchWithTimeout(
@@ -851,6 +861,71 @@ async function sendSttRequest(input: {
     return openAiResponse;
   }
 
+  const directFallbackResponse = await sendDirectTranscribeRequest({
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey,
+    timeoutMs: input.timeoutMs,
+    audioBlob: input.audioBlob,
+    filename: input.filename,
+    language: normalizedLanguage,
+    prompt: input.prompt,
+  });
+
+  if (shouldRetryTranscribeWithoutLanguage(directFallbackResponse.status, normalizedLanguage)) {
+    return sendDirectTranscribeRequest({
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      timeoutMs: input.timeoutMs,
+      audioBlob: input.audioBlob,
+      filename: input.filename,
+      prompt: input.prompt,
+    });
+  }
+
+  return directFallbackResponse;
+}
+
+function normalizeSttLanguage(language: string | undefined): string | undefined {
+  if (!language) return undefined;
+  const normalized = language.trim();
+  if (!normalized) return undefined;
+
+  const lower = normalized.toLowerCase().replace(/_/g, "-");
+  const directMap: Record<string, string> = {
+    auto: "auto",
+    german: "de",
+    "de-de": "de",
+    de: "de",
+    english: "en",
+    "en-us": "en",
+    en: "en",
+    polish: "pl",
+    "pl-pl": "pl",
+    pl: "pl",
+  };
+  if (directMap[lower]) return directMap[lower];
+
+  if (/^[a-z]{2,3}(?:-[a-z0-9]{2,8})+$/i.test(lower)) {
+    return lower.split("-")[0];
+  }
+
+  return normalized;
+}
+
+function shouldRetryTranscribeWithoutLanguage(status: number, language: string | undefined): boolean {
+  if (!language || language === "auto") return false;
+  return status === 400 || status === 422 || status >= 500;
+}
+
+async function sendDirectTranscribeRequest(input: {
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs: number;
+  audioBlob: Blob;
+  filename: string;
+  language?: string;
+  prompt?: string;
+}): Promise<Response> {
   const fallbackForm = new FormData();
   fallbackForm.append("audio", input.audioBlob, input.filename);
   if (input.language) fallbackForm.append("language", input.language);

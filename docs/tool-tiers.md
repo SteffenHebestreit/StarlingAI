@@ -1,7 +1,7 @@
 # Tool Tiers & Guardrails
 
 <p align="center">
-	<img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+	<img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI enforces a five-tier tool classification system on every tool call. This is the enforcement mechanism for the "Guarded" principle: agents in the swarm have freedom to discover, compose, and execute within their domain, but escalation is strictly controlled. The tiers are hard-coded at compile time — they cannot be changed via config or the API at runtime. The design principle is **default-deny with minimum privilege**: agents get the least access needed for their declared purpose, and escalation requires explicit per-call approval.
@@ -39,8 +39,8 @@ This tier model is also the hard boundary for self-improvement. The swarm may re
 | `read_file` | Read a file from the workspace |
 | `list_files` | List files in a workspace directory |
 | `export_workspace_artifact` | Surface an existing workspace file or folder as a downloadable chat artifact |
-| `web_search` | Search via the configured web-search backend (SearXNG or DuckDuckGo fallback) |
-| `web_fetch` | Fetch a URL and return text content |
+| `web_search` | Search via the configured web-search backend with SearXNG, Playwright, and DuckDuckGo fallback |
+| `web_fetch` | Fetch a URL and return text content, preferring rendered browser content for HTML pages |
 | `workspace_search` | Full-text search across workspace files |
 | `memory_search` | Search the agent memory store |
 | `session_status` | Read current session metadata |
@@ -60,6 +60,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `record_lesson` | Append a lesson-learned entry to memory | None |
 | `generate_document` | Save generated content as Markdown, text, HTML, or JSON in the workspace | None |
 | `generate_chart_html` | Save an HTML chart report with embedded visualization data in the workspace | None |
+| `generate_mermaid_diagram` | Save a Mermaid diagram artifact in the workspace for direct preview in chat | None |
 | `generate_pdf` | Save a simple PDF document in the workspace | None |
 | `n8n_fetch_leads` | Fetch lead data from an n8n workflow | None |
 | `n8n_mark_applied` | Mark a lead as applied in n8n | None |

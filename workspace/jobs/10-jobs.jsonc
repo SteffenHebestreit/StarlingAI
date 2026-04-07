@@ -48,6 +48,81 @@
           }
         }
       ]
+    },
+    "deep_research_packet": {
+      "description": "Run a deep-research dossier workflow and optionally follow it with a compact visual brief.",
+      "params": {
+        "topic": {
+          "description": "Research topic or question",
+          "default": "emerging platform risk and opportunity"
+        },
+        "deliverable": {
+          "description": "Preferred output format",
+          "default": "source-backed dossier with Mermaid diagrams where useful"
+        }
+      },
+      "steps": [
+        {
+          "scene": "deep_research_dossier",
+          "label": "Build dossier",
+          "params": {
+            "deliverable": "{{deliverable}}",
+            "includeVisuals": "yes",
+            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}}"
+          }
+        },
+        {
+          "scene": "research_visual_brief",
+          "label": "Create visual brief",
+          "params": {
+            "audience": "decision maker",
+            "visualFocus": "choose the clearest Mermaid visual structure for {{topic}}"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DEEP_RESEARCH_PACKET_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/deep-research",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "deliverable": "source-backed dossier with Mermaid diagrams where useful"
+          }
+        }
+      ]
+    },
+    "research_visual_digest": {
+      "description": "Produce a fast visual research brief for a topic that benefits from one high-signal Mermaid diagram.",
+      "params": {
+        "topic": {
+          "description": "Topic or system to summarize visually",
+          "default": "current architecture and key dependencies"
+        }
+      },
+      "steps": [
+        {
+          "scene": "research_visual_brief",
+          "label": "Research and diagram",
+          "params": {
+            "audience": "technical stakeholder",
+            "visualFocus": "create the single most useful Mermaid diagram for {{topic}}"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_RESEARCH_VISUAL_DIGEST_KEY"
+        }
+      ]
     }
   }
 }

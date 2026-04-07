@@ -48,12 +48,15 @@ interface HeuristicRoutingSignals {
   looksSynthesisHeavy: boolean;
   looksMultiStageEvidenceWorkflow: boolean;
   looksRenderFromProvidedData: boolean;
+  looksComputerUse: boolean;
   domainCount: number;
   prefersPlanner: boolean;
 }
 
 function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const normalized = query.trim().toLowerCase();
+  const looksTimeWindow = /\b(last|past)\s+\d+\s+(days?|weeks?|months?|years?)\b/i.test(normalized);
+  const looksMarketData = /\b(etf|fund|funds|index|indices|stocks?|shares?|equities|benchmark|benchmarks|returns?|historical|history|time[ -]?series|performance)\b/i.test(normalized);
   const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
   const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now|last year|this year)\b/i.test(normalized);
   const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
@@ -62,8 +65,12 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
   const looksSequential = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
   const looksVisualization = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalized);
-  const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized);
-  const looksExternalData = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|latest|recent|current|source|sources)\b/i.test(normalized);
+  const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized)
+    || looksMarketData
+    || looksTimeWindow;
+  const looksExternalData = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|latest|recent|current|source|sources)\b/i.test(normalized)
+    || (looksMarketData && !looksGroundedInput)
+    || (looksTimeWindow && looksVisualization && !looksGroundedInput);
   const looksSynthesisHeavy = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalized);
   const looksRenderFromProvidedData = looksGroundedInput
     && (looksVisualization || looksArtifactRender)
@@ -74,6 +81,13 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
     && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
     && (!looksRenderFromProvidedData || looksSequential);
+  const looksSecurityScan = /\b(pentest|penetration|security|vulnerabilit|cve|exploit|scan|nmap|nikto|sqlmap|hydra|metasploit|authorized scope)\b/i.test(normalized);
+  const hasDesktopKeyword = /\b(meinem?\s+(?:pc|computer|rechner|desktop|workstation)|my\s+(?:pc|computer|desktop|workstation)|on\s+(?:the\s+)?(?:pc|computer|desktop|machine)\s+at|lokale[mnrs]?\s+(?:pc|computer|rechner|desktop))\b/i.test(normalized);
+  const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
+  const hasDesktopAppContext = /\b(rdp|vnc|ssh|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
+  const looksComputerUse = !looksSecurityScan
+    && (hasDesktopKeyword || (hasIpAddress && hasDesktopAppContext));
+
   const domainCount = [
     looksWebTask || looksSourceHeavy || looksFresh,
     looksDataHeavy,
@@ -95,6 +109,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     looksSynthesisHeavy,
     looksMultiStageEvidenceWorkflow,
     looksRenderFromProvidedData,
+    looksComputerUse,
     domainCount,
     prefersPlanner: looksSequential
       || looksMultiStageEvidenceWorkflow
@@ -103,6 +118,14 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
       || domainCount >= 3
       || (looksBroad && domainCount >= 2),
   };
+}
+
+function getPinnedAgentForTask(task: string): string | null {
+  const signals = analyzeHeuristicRoutingQuery(task);
+  if (signals.looksComputerUse) {
+    return "computer_use_agent";
+  }
+  return null;
 }
 
 function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
@@ -194,6 +217,10 @@ function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: st
 function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
   if (!signals.prefersPlanner) {
+    return false;
+  }
+
+  if (signals.looksRenderFromProvidedData) {
     return false;
   }
 
@@ -391,6 +418,7 @@ export async function resolveAgentRouting(
   if (opts?.allowedAgents) {
     entries = entries.filter(([name]) => opts.allowedAgents!.includes(name));
   }
+  const availableEntries = new Map(entries);
 
   // Filter out agents whose circuit breaker is open
   const trippedAgents: string[] = entries
@@ -490,11 +518,52 @@ export async function resolveAgentRouting(
     && !preferenceSignals.looksVisualization
     && !preferenceSignals.looksDataHeavy;
   const preferredNames = [
+    preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
     preferMissionInSearch ? "mission_coordinator" : null,
     preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
     preferProjectPlannerInSearch ? "project_planner" : null,
   ].filter((value): value is string => Boolean(value));
+
+  const maybeAppendHeuristicCandidate = (name: string, score: number, matchedTerms: string[]) => {
+    const existing = ranked.find((candidate) => candidate.name === name);
+    if (existing) {
+      // Boost existing candidate if heuristic score is higher
+      if (score > existing.combinedScore) {
+        existing.combinedScore = score;
+        existing.matchedTerms = [...new Set([...existing.matchedTerms, ...matchedTerms])];
+      }
+      return;
+    }
+    const cfg = availableEntries.get(name);
+    if (!cfg) {
+      return;
+    }
+    ranked.push({
+      name,
+      cfg,
+      matchedTerms,
+      combinedScore: score,
+    });
+  };
+
+  if (preferenceSignals.looksComputerUse) {
+    maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+  if (preferenceSignals.looksRenderFromProvidedData) {
+    maybeAppendHeuristicCandidate("chart_designer", 0.72, buildChartDesignerMatchedTerms(preferenceSignals));
+  }
+  if (preferMissionInSearch) {
+    maybeAppendHeuristicCandidate("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(preferenceSignals));
+  }
+  if (preferWebCoordinatorInSearch) {
+    maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(preferenceSignals));
+  }
+  if (preferProjectPlannerInSearch) {
+    maybeAppendHeuristicCandidate("project_planner", 0.72, buildPlannerMatchedTerms(preferenceSignals));
+  }
+
+  ranked = ranked.sort(compareRoutingResults).slice(0, 5);
 
   for (const preferredName of preferredNames) {
     const preferredCandidate = ranked.find((candidate) => candidate.name === preferredName);
@@ -731,7 +800,7 @@ function parseArchitectSpec(content: string): ArchitectEphemeralSpec {
   return JSON.parse(jsonStr) as ArchitectEphemeralSpec;
 }
 
-function buildArchitectPrompt(task: string): string {
+function buildArchitectPrompt(task: string, previousContext?: string): string {
   const toolList = [...GRANTABLE_TOOLS].join(", ");
   const defaultModel = getConfig().agents.defaults.model.primary;
   return [
@@ -745,6 +814,7 @@ function buildArchitectPrompt(task: string): string {
     "- Choose at most 4 tools (up to 6 for computer-use tasks).",
     "- If the task can be completed purely from the provided task text and context, tools may be an empty array [].",
     "- Do NOT mix execution families: shell (shell_exec, run_script), browser (mcp__playwright__*), and code (mcp__code_sandbox__*) are separate families — pick at most one.",
+    "- If the task requires fetching data from the web using browser tools (mcp__playwright__*), ALWAYS also include web_search so the agent can discover valid URLs before navigating. Never invent placeholder or example URLs.",
     "- Keep systemPrompt concise (under 200 words). State the role, key rules, and a tool budget.",
     "- maxIterations must be between 3 and 8 for non-computer tasks. For computer-use tasks (tools starting with computer_), use 10-15 iterations because each screen interaction needs snapshot+action+verify cycles.",
     "- For computer-use agents: include 'Do NOT call the same tool with identical arguments twice in a row' in the systemPrompt. The session is already started — begin with computer_list_windows, not computer_session_start.",
@@ -761,13 +831,14 @@ function buildArchitectPrompt(task: string): string {
     "}",
     "",
     `Task: ${task.slice(0, 1200)}`,
+    ...(previousContext ? ["", "Context from previous attempts (use these real URLs and facts — do NOT invent placeholder URLs):", previousContext] : []),
   ].join("\n");
 }
 
-async function requestArchitectSpec(task: string, ctx: ToolContext): Promise<ArchitectEphemeralSpec | null> {
+async function requestArchitectSpec(task: string, ctx: ToolContext, previousContext?: string): Promise<ArchitectEphemeralSpec | null> {
   const settings = getEphemeralGenerationSettings();
   const architectAgentName = settings.architectAgentName;
-  const architectPrompt = buildArchitectPrompt(task);
+  const architectPrompt = buildArchitectPrompt(task, previousContext);
 
   try {
     const response = await runSubAgent({
@@ -900,7 +971,27 @@ export function looksLikeFailureResult(result: string): boolean {
 export function looksLikeInfrastructureFailure(result: string): boolean {
   if (!result.trim()) return false;
   const preview = result.slice(0, 800);
+  // Sub-agent execution timeouts ("Sub-agent 'X' timed out after Yms") are
+  // retryable with a different agent — they are NOT infrastructure failures.
+  if (/\bSub-agent\b.{0,60}\btimed out\b/i.test(preview)) return false;
   return /\b(timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connection refused|not reachable|host is down|failed recently and is still in cooldown|Do NOT retry)\b/i.test(preview);
+}
+
+function shouldAcceptPartialDelegation(
+  agentName: string,
+  task: string,
+  stats: { toolCount: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined,
+): boolean {
+  if (stats?.outcome !== "partial") {
+    return false;
+  }
+
+  const looksComputerUse = agentName === "computer_use_agent" || analyzeHeuristicRoutingQuery(task).looksComputerUse;
+  if (!looksComputerUse) {
+    return false;
+  }
+
+  return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -913,6 +1004,15 @@ function uniqueNames(values: string[]): string[] {
     result.push(trimmed);
   }
   return result;
+}
+
+function buildDelegationFailureMessage(title: string, detail: string, opts?: { prefix?: string }): string {
+  const trimmedDetail = detail.trim();
+  const prefix = opts?.prefix ?? `All candidate agents failed for task '${title}'.`;
+  if (!trimmedDetail) {
+    return prefix;
+  }
+  return `${prefix}\n${trimmedDetail}`;
 }
 
 async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: string[]): Promise<AgentRoutingCandidate[]> {
@@ -951,7 +1051,17 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
     return true;
   });
 
-  const heuristicCandidates = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
+  const { candidates: heuristicCandidates, boosts: heuristicBoosts } = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
+
+  // Apply heuristic score boosts to routed candidates that were already seen
+  for (const [name, boost] of heuristicBoosts) {
+    const existing = routed.find(c => c.name === name);
+    if (existing && boost.score > existing.score) {
+      existing.score = boost.score;
+      existing.matchedTerms = [...new Set([...existing.matchedTerms, ...boost.matchedTerms])];
+    }
+  }
+
   const mergedCandidates = [...routed, ...heuristicCandidates]
     .sort((left, right) => {
       if (right.score !== left.score) {
@@ -984,38 +1094,60 @@ function buildHeuristicRoutingCandidates(
   ctx: ToolContext,
   excluded: Set<string>,
   seen: Set<string>,
-): AgentRoutingCandidate[] {
+): { candidates: AgentRoutingCandidate[]; boosts: Map<string, { score: number; matchedTerms: string[] }> } {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return [];
+  if (!normalized) return { candidates: [], boosts: new Map() };
 
   const config = getConfig();
   const defaultModel = config.agents.defaults.model.primary;
   const heuristicCandidates: AgentRoutingCandidate[] = [];
+  const heuristicBoosts = new Map<string, { score: number; matchedTerms: string[] }>();
   const signals = analyzeHeuristicRoutingQuery(normalized);
 
   const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
-    if (excluded.has(name) || seen.has(name)) return;
+    if (excluded.has(name)) return;
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(name)) return;
     const cfg = config.subAgents[name];
     if (!cfg) return;
+    if (seen.has(name)) {
+      // Agent already in routed candidates — record boost request so the
+      // caller can apply it to the existing entry.
+      heuristicBoosts.set(name, { score, matchedTerms });
+      return;
+    }
     seen.add(name);
     heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
   };
 
+  if (signals.looksComputerUse) {
+    maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+
   if (shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
-    maybeAdd("mission_coordinator", 0.68, buildMissionCoordinatorMatchedTerms(signals));
+    maybeAdd("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(signals));
   }
 
   if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
-    maybeAdd("web_task_coordinator", 0.62, buildCoordinatorMatchedTerms(signals));
+    maybeAdd("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(signals));
   }
 
   if (shouldPreferProjectPlanner(normalized, ctx, [...excluded])) {
-    maybeAdd("project_planner", 0.64, buildPlannerMatchedTerms(signals));
+    maybeAdd("project_planner", 0.72, buildPlannerMatchedTerms(signals));
   }
 
   if (signals.looksRenderFromProvidedData) {
-    maybeAdd("chart_designer", 0.66, buildChartDesignerMatchedTerms(signals));
+    maybeAdd("chart_designer", 0.72, buildChartDesignerMatchedTerms(signals));
+  }
+
+  // Boost browser_agent when the task explicitly mentions Playwright, browser automation,
+  // or cookie handling — avoid sending these to researcher which only has web_fetch.
+  if (/\b(playwright|browser.?agent|cookie.?consent|cookie.?banner|interactive|js.?rendered|javascript.?heavy)\b/i.test(normalized)) {
+    maybeAdd("browser_agent", 0.72, ["browser", "playwright", "interactive"]);
+  }
+
+  // Boost web_task_coordinator for web data tasks that need coordinated retrieval + charting
+  if (signals.looksVisualization && (signals.looksExternalData || signals.looksDataHeavy) && !signals.looksRenderFromProvidedData) {
+    maybeAdd("web_task_coordinator", 0.72, ["web", "data", "chart", "coordination"]);
   }
 
   if ((signals.looksSourceHeavy && /\b(citation|citations|reference|references|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalized))
@@ -1023,7 +1155,7 @@ function buildHeuristicRoutingCandidates(
     maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
   }
 
-  return heuristicCandidates;
+  return { candidates: heuristicCandidates, boosts: heuristicBoosts };
 }
 
 // ─── Architect fallback ───────────────────────────────────────────────────────
@@ -1065,7 +1197,10 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
     return null;
   }
 
-  const spec = await requestArchitectSpec(task, ctx);
+  // Gather shared context from prior attempts so the ephemeral agent knows
+  // about URLs, facts, and partial results already discovered.
+  const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: "architect" });
+  const spec = await requestArchitectSpec(task, ctx, sharedCtx ?? undefined);
   if (!spec) {
     return null;
   }
@@ -1115,9 +1250,13 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   let result: string;
   let terminalState: string | undefined;
   try {
+    // Inject shared facts into the ephemeral agent's context so it can use
+    // URLs, partial results, and evidence discovered by earlier agents.
+    const ephemeralSharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: ephemeralName });
     const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
+      context: ephemeralSharedCtx ?? undefined,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       signal: ctx.signal,
@@ -1168,6 +1307,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const signature = buildTaskSignature(title, request.task, request.dependsOn ?? []);
   const skillMatchThreshold = resolveSkillMatchThreshold(request.skillMatchThreshold);
   const explicitAgentRequested = typeof request.agentName === "string" && request.agentName.trim().length > 0;
+  // Look up the primary agent's domain — used to gate implicit cross-domain fallbacks.
+  const primaryAgentDomain = explicitAgentRequested
+    ? (getConfig().subAgents[request.agentName!]?.domain ?? readPromotedAgents(getConfig().workspacePath)[request.agentName!]?.domain)
+    : undefined;
   const reusableTask = request.taskId ? undefined : findReusableSwarmTask(ctx, signature);
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
@@ -1179,6 +1322,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         taskId: reusableTask.id,
         attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
         delegationSucceeded: true,
+        reused: true,
+      },
+    };
+  }
+
+  if (reusableTask?.status === "partial" && reusableTask.output) {
+    return {
+      success: true,
+      output: reusableTask.output,
+      metadata: {
+        agentName: reusableTask.selectedAgent,
+        taskId: reusableTask.id,
+        attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
         reused: true,
       },
     };
@@ -1263,7 +1421,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       return {
         success: false,
         output: "",
-        error: "Turn cancelled — delegation aborted.",
+        error: buildDelegationFailureMessage(
+          title,
+          taskState.error,
+          { prefix: "Turn cancelled — delegation aborted." },
+        ),
         metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
     }
@@ -1284,6 +1446,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     if (candidateQueue.length === 0) {
+      const requestSignals = analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task);
+      // Block implicit cross-domain fallbacks: when the primary agent was
+      // explicitly named, has a domain tag (e.g. "communication"), and the
+      // caller did not provide explicit fallbackAgents, do not try random
+      // agents from other domains. Return the failure to the orchestrator
+      // so it can make an informed routing decision.
+      const allowImplicitFallbackRouting = !explicitAgentRequested
+        || (request.fallbackAgents?.length ?? 0) > 0
+        || (!requestSignals.looksComputerUse && !primaryAgentDomain);
+
+      if (!allowImplicitFallbackRouting) {
+        break;
+      }
+
       // ── Step 1: embedding + keyword routing (fast, outcome-boosted) ──────
       // Run first for all undirected delegations — deterministic, uses
       // accumulated outcome data, and incurs no extra latency.
@@ -1294,7 +1470,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           bestAutoMatchScore = topCandidate.score;
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
-            || topCandidate.confidence !== "low"
             || !shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold);
           if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
@@ -1428,7 +1603,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       };
 
       let output: string;
-      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string } | undefined;
+      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined;
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -1453,17 +1628,29 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolNames = [...stats.toolNames];
       }
 
-      const weak = (stats?.terminalState !== undefined && stats.terminalState !== "completed") || looksLikeFailureResult(output);
+      const delegationOutcome = stats?.outcome;
+      const acceptPartial = shouldAcceptPartialDelegation(candidate, request.task, stats);
+      const weak = delegationOutcome === "failure"
+        || (!acceptPartial && (
+          (stats?.terminalState !== undefined && stats.terminalState !== "completed")
+          || looksLikeFailureResult(output)
+        ));
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
 
       if (weak) {
-        attempt.status = "failed";
-        taskState.error = summarizeText(output);
-        taskState.status = "failed";
+        const partial = delegationOutcome === "partial";
+        attempt.status = partial ? "partial" : "failed";
+        taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
+        taskState.status = partial ? "partial" : "failed";
         lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
         publishSwarmState(ctx);
-        emitSwarmEvent("task_failed", { sessionId: ctx.sessionId, taskId, agentName: candidate, data: { reason: "weak_result" } });
+        emitSwarmEvent(partial ? "task_partial" : "task_failed", {
+          sessionId: ctx.sessionId,
+          taskId,
+          agentName: candidate,
+          data: { reason: partial ? "partial_result" : "weak_result" },
+        });
         announceAgentCapability({
           sessionId: ctx.sessionId,
           agentName: candidate,
@@ -1487,13 +1674,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         await writeSharedFact(ctx.sessionId, k, v);
       }
 
-      attempt.status = "completed";
-      taskState.status = "completed";
+      const partial = delegationOutcome === "partial";
+      attempt.status = partial ? "partial" : "completed";
+      taskState.status = partial ? "partial" : "completed";
       taskState.output = output;
       taskState.error = undefined;
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
       publishSwarmState(ctx);
-      emitSwarmEvent("task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
+      emitSwarmEvent(partial ? "task_partial" : "task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
       announceAgentCapability({
         sessionId: ctx.sessionId,
         agentName: candidate,
@@ -1517,6 +1705,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           taskId,
           attemptedAgents,
           delegationSucceeded: true,
+          delegationOutcome: delegationOutcome ?? "success",
+          ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -1573,7 +1763,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   return {
     success: false,
     output: "",
-    error: `All candidate agents failed for task '${title}'. ${taskState.error}`,
+    error: buildDelegationFailureMessage(title, taskState.error ?? "No suitable agent completed the task."),
     metadata: { taskId, attemptedAgents, delegationSucceeded: false },
   };
 }
@@ -2123,7 +2313,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     // agentName is now optional — omitting it triggers undirected swarm bidding
-    const agentName = args["agentName"] ? String(args["agentName"]).trim() : "";
+    const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
     const task = String(args["task"] ?? "").trim();
     const context = args["context"] ? String(args["context"]) : undefined;
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
@@ -2133,6 +2323,9 @@ registerTool({
     if (!task) {
       return { success: false, output: "", error: "task is required" };
     }
+
+    const pinnedAgentName = !requestedAgentName ? getPinnedAgentForTask(task) : null;
+    const agentName = requestedAgentName || pinnedAgentName || "";
 
     // Enforce per-scene agent scope only when an explicit agent was requested
     if (agentName && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
@@ -2148,6 +2341,14 @@ registerTool({
       : agentName === "swarm_maintainer"
         ? ["integration_builder", "coder", "prompt_optimizer"].filter((candidate) => !ctx.allowedAgents || ctx.allowedAgents.includes(candidate))
         : undefined;
+
+    if (pinnedAgentName && pinnedAgentName !== requestedAgentName) {
+      logAudit("delegate_agent_pinned", {
+        requestedAgentName: requestedAgentName || null,
+        pinnedAgentName,
+        taskPreview: summarizeText(task, 120),
+      }, { sessionId: ctx.sessionId });
+    }
 
     return executeDelegationWithFallback({
       agentName,

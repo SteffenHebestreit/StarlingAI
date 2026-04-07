@@ -1,7 +1,7 @@
 # REST API, WebSocket, And Streaming
 
 <p align="center">
-  <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+  <img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 The StarlingAI gateway exposes four externally useful surfaces for interacting with the agent swarm. These interfaces are domain-agnostic — they work the same way regardless of what kind of task the swarm is handling.
@@ -174,6 +174,19 @@ Accepted POST forms:
 ```
 
 or `Authorization: Bearer <secret>` with `{ "approved": true }`.
+
+### Sessions And Exports
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/sessions/:sessionId/debug-markdown` | authenticated Markdown export with transcript, raw session history, and matching audit events |
+
+The debug Markdown export is intended for operator review, incident handling, and release validation. It bundles:
+
+- session metadata and the active system prompt
+- the user-visible transcript, including tool-only assistant turns
+- raw persisted session history with tool call ids and metadata
+- audit events for the session and related sub-agent sessions
 
 ### Channels
 

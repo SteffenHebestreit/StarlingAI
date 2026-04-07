@@ -15,6 +15,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
+import { buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
@@ -894,7 +895,25 @@ export function createGateway() {
     };
   }
 
+  // TTL-cached TTS capability snapshot (avoid hitting /models on every TTS request)
+  let _ttsCapabilityCache: { result: Awaited<ReturnType<typeof getQwenTtsCapabilitySnapshotUncached>>; cachedAt: number } | null = null;
+  const TTS_CAPABILITY_CACHE_TTL_MS = 60_000;
+
   async function getQwenTtsCapabilitySnapshot(input: {
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    requestedModel?: string;
+  }) {
+    if (_ttsCapabilityCache && (Date.now() - _ttsCapabilityCache.cachedAt) < TTS_CAPABILITY_CACHE_TTL_MS) {
+      return _ttsCapabilityCache.result;
+    }
+    const result = await getQwenTtsCapabilitySnapshotUncached(input);
+    _ttsCapabilityCache = { result, cachedAt: Date.now() };
+    return result;
+  }
+
+  async function getQwenTtsCapabilitySnapshotUncached(input: {
     baseUrl: string;
     apiKey?: string;
     timeoutMs: number;
@@ -943,7 +962,8 @@ export function createGateway() {
         voiceCloneSupported: capabilities.includes("voice_clone"),
         customVoiceSupported: capabilities.includes("custom_voice"),
       };
-    } catch {
+    } catch (err) {
+      log.debug({ err }, "Failed to fetch TTS capability snapshot");
       return null;
     }
   }
@@ -2100,6 +2120,30 @@ export function createGateway() {
     }
   });
 
+  app.get("/api/sessions/:sessionId/debug-markdown", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) {
+      return c.json({ error: "sessionId is required" }, 400);
+    }
+
+    try {
+      const markdown = await buildSessionDebugMarkdown(sessionId);
+      const filename = `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
+      return c.body(markdown, 200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": buildContentDisposition(filename, "attachment"),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Session not found")) {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
   // ── Site credentials API ─────────────────────────────────────────────────
   // GET  /api/sites          — list all sites (usernames only, no passwords)
   // POST /api/sites/:host    — create or update a site credential
@@ -2989,6 +3033,7 @@ export function createGateway() {
     const ok = rejectPromotion(name, reviewedBy);
     if (!ok) return c.json({ error: "Tool not found or not in pending promotion state" }, 404);
 
+    logAudit("tool_promotion_rejected", { toolName: name, reviewedBy }, { severity: "info", channel: "self-improvement" });
     return c.json({ success: true, toolName: name, reviewedBy });
   });
 
@@ -3031,7 +3076,8 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const taskId = c.req.param("taskId");
-    completeCheckpoint(taskId);
+    const ok = completeCheckpoint(taskId);
+    if (!ok) return c.json({ error: "Checkpoint not found" }, 404);
     return c.json({ success: true, taskId });
   });
 

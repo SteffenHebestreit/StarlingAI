@@ -1,6 +1,6 @@
 {
   "name": "starlingai",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.6.0",
@@ -26,7 +26,8 @@
     "security:pack": "pnpm --filter @starlingai/core security:pack",
     "dev": "pnpm -r --parallel dev",
     "test": "pnpm -r test",
-    "check": "pnpm -r check",
+    "check": "node scripts/check-root-layout.mjs && pnpm -r check",
+    "check:root": "node scripts/check-root-layout.mjs",
     "lint": "pnpm -r lint",
     "gateway:dev": "pnpm --filter @starlingai/core dev",
     "computer-node:dev": "pnpm --filter @starlingai/core dev:computer-node",

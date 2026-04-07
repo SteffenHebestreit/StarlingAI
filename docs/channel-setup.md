@@ -1,7 +1,7 @@
 # Channel Setup Guide
 
 <p align="center">
-  <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+  <img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI supports the built-in web dashboard chat plus Telegram, Slack, Discord, WhatsApp, Email, and Signal channel runtimes.

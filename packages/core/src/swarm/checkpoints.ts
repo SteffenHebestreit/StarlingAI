@@ -60,6 +60,7 @@ const CHECKPOINT_CONTENT_MAX = 8_000;
 const CHECKPOINT_TASK_MAX = 2_000;
 const PROGRESS_NOTE_MAX = 4_000;
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
+const AGENT_STATE_MAX_SIZE = 16_000; // max serialized agentState size in bytes
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 
@@ -145,13 +146,19 @@ export function pauseCheckpoint(taskId: string, opts: {
     log.warn({ taskId }, "pauseCheckpoint: taskId not found");
     return null;
   }
+  if (cp.status !== "active" && cp.status !== "resumed") {
+    log.warn({ taskId, status: cp.status }, "pauseCheckpoint: checkpoint is not active or resumed");
+    return null;
+  }
 
   cp.status = "paused";
   cp.progressNote = opts.progressNote.slice(0, PROGRESS_NOTE_MAX);
   cp.conversationSummary = opts.conversationSummary.slice(0, CHECKPOINT_CONTENT_MAX);
   cp.elapsedMs = opts.elapsedMs;
   cp.iterationsCompleted = opts.iterationsCompleted;
-  cp.agentState = opts.agentState ?? {};
+  const rawState = opts.agentState ?? {};
+  const stateJson = JSON.stringify(rawState);
+  cp.agentState = stateJson.length <= AGENT_STATE_MAX_SIZE ? rawState : {};
   cp.updatedAt = new Date().toISOString();
 
   _store.set(taskId, cp);
@@ -209,10 +216,14 @@ export function resumeCheckpoint(taskId: string): TaskCheckpoint | null {
 }
 
 /** Mark a checkpoint complete (called when the resumed agent finishes). */
-export function completeCheckpoint(taskId: string): void {
+export function completeCheckpoint(taskId: string): boolean {
   const config = getConfig();
-  const cp = _store.get(taskId);
-  if (!cp) return;
+  let cp = _store.get(taskId);
+  if (!cp) {
+    cp = loadCheckpointFromDisk(config.workspacePath, taskId);
+    if (cp) _store.set(taskId, cp);
+  }
+  if (!cp) return false;
 
   cp.status = "completed";
   cp.updatedAt = new Date().toISOString();
@@ -221,6 +232,7 @@ export function completeCheckpoint(taskId: string): void {
   logAudit("task_checkpoint_completed", { taskId, agentName: cp.agentName },
     { sessionId: cp.parentSessionId, severity: "info", channel: "swarm" });
   log.info({ taskId }, "Task checkpoint completed");
+  return true;
 }
 
 /** Return all in-memory checkpoints (for the dashboard). */
@@ -264,7 +276,15 @@ export function loadCheckpointsFromDisk(workspacePath: string): void {
   const cutoff = Date.now() - CHECKPOINT_TTL_MS;
   let loaded = 0;
 
-  for (const file of readdirSync(dir).filter(f => f.endsWith(".json"))) {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter(f => f.endsWith(".json"));
+  } catch (err) {
+    log.warn({ err, dir }, "Failed to read checkpoints directory");
+    return;
+  }
+
+  for (const file of files) {
     try {
       const raw = readFileSync(join(dir, file), "utf-8");
       const cp = JSON.parse(raw) as TaskCheckpoint;

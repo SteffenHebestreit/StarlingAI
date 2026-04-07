@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
+
 describe("rpc timeout cleanup", () => {
   afterEach(async () => {
     vi.useRealTimers();
@@ -19,7 +21,7 @@ describe("rpc timeout cleanup", () => {
     }
   });
 
-  it("archives the session when a websocket turn times out", async () => {
+  it("keeps the session alive through the synthesis grace window and only archives if the turn never resolves", async () => {
     vi.useFakeTimers();
 
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-timeout-"));
@@ -67,6 +69,11 @@ describe("rpc timeout cleanup", () => {
 
       await vi.advanceTimersByTimeAsync(30_000);
 
+      expect(session.getSession(active.id)).toBeDefined();
+      expect(session.getSessionRecord(active.id)?.isArchived()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+
       expect(session.getSession(active.id)).toBeUndefined();
       expect(session.getSessionRecord(active.id)?.isArchived()).toBe(true);
 
@@ -82,7 +89,7 @@ describe("rpc timeout cleanup", () => {
     }
   });
 
-  it("preserves zero-valued inline overrides and disables the websocket timeout for --timeout 0", async () => {
+  it("caps --iter 0 to 200 and --timeout 0 to 7200s for safety", async () => {
     vi.useFakeTimers();
 
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-zero-overrides-"));
@@ -132,8 +139,8 @@ describe("rpc timeout cleanup", () => {
       expect(runTurnMock).toHaveBeenCalledTimes(1);
       expect(runTurnMock.mock.calls[0]?.[0]).toMatchObject({
         userMessage: "hello",
-        maxIterationsOverride: 0,
-        turnTimeoutOverrideMs: 0,
+        maxIterationsOverride: 200,
+        turnTimeoutOverrideMs: 7200000,
       });
 
       await vi.advanceTimersByTimeAsync(60_000);
@@ -148,8 +155,8 @@ describe("rpc timeout cleanup", () => {
       });
 
       expect((acceptedEvent?.["data"] as Record<string, unknown> | undefined)?.["activeFlags"]).toEqual({
-        maxIterations: 0,
-        timeout: 0,
+        maxIterations: 200,
+        timeout: 7200,
       });
 
       const timeoutEvent = sent.find((event) => {
@@ -225,7 +232,7 @@ describe("rpc timeout cleanup", () => {
     expect(olderPayload.nextBeforeMessageId).toBeUndefined();
   });
 
-  it("keeps an active turn running when the websocket disconnects", async () => {
+  it("keeps active turns running when the websocket disconnects unexpectedly", async () => {
     let capturedSignal: AbortSignal | undefined;
     let resolveTurn: ((value: {
       response: string;
@@ -295,6 +302,48 @@ describe("rpc timeout cleanup", () => {
     });
 
     expect(errorEvent).toBeUndefined();
+  });
+
+  it("can still abort active turns when the close is explicit", async () => {
+    let capturedSignal: AbortSignal | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ signal }: { signal: AbortSignal }) => {
+        capturedSignal = signal;
+        return new Promise(() => {});
+      }),
+    }));
+
+    const ws = {
+      readyState: 1,
+      send() {
+        // No-op for this regression test.
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-explicit-abort",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-explicit-abort",
+        message: "hello",
+      },
+    }));
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    connection.close({ abortInFlightTurns: true });
+
+    expect(capturedSignal?.aborted).toBe(true);
   });
 
   it("blocks flag-only chat submissions before calling the provider", async () => {

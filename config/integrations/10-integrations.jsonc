@@ -39,6 +39,5 @@
       "webhookUrl": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK_URL",
       "timeoutMs": 600000
     }
-  },
-  "workspacePath": "/workspace"
+  }
 }

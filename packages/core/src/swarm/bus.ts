@@ -22,6 +22,7 @@ export type SwarmEventType =
   | "task_bid"        // an agent/runtime published a ranked bid for a task
   | "task_claimed"    // an agent has started working on the task
   | "task_completed"  // agent finished successfully
+  | "task_partial"    // agent returned a partial / incomplete result
   | "task_failed"     // agent returned a failure or weak result
   | "task_requeued"   // task re-queued after heartbeat loss / container timeout
   | "agent_promoted"  // ephemeral agent auto-promoted to the permanent catalog

@@ -25,7 +25,9 @@ CMD ["pnpm", "--filter", "@starlingai/core", "test"]
 FROM deps AS build
 COPY scripts/clean-path.mjs ./scripts/clean-path.mjs
 COPY packages/core ./packages/core
-RUN pnpm --filter @starlingai/core build
+RUN cd /app/packages/core \
+    && node ../../scripts/clean-path.mjs dist \
+    && pnpm exec tsc -p tsconfig.build.json --pretty false
 
 # Shared runtime filesystem
 FROM node:22-slim AS runtime-base

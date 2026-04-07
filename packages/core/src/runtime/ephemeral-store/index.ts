@@ -34,6 +34,8 @@ export {
 
 const log = childLogger("ephemeral-store");
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const inMemoryFallback = new Map<string, EphemeralEntry>();
+const fallbackWarnings = new Set<string>();
 
 const backends: Record<EphemeralBackend, EphemeralBackendDriver> = {
   redis: redisBackend,
@@ -41,9 +43,71 @@ const backends: Record<EphemeralBackend, EphemeralBackendDriver> = {
   mongo: mongoBackend,
 };
 
-function getDriver(namespace: string): EphemeralBackendDriver {
+function getDriver(namespace: string): { backend: EphemeralBackend; driver: EphemeralBackendDriver } {
   const backend = routeNamespace(namespace);
-  return backends[backend];
+  return { backend, driver: backends[backend] };
+}
+
+function fallbackEntryKey(namespace: string, key: string): string {
+  return `${namespace}::${key}`;
+}
+
+function purgeExpiredFallback(now = Date.now()): void {
+  for (const [key, entry] of inMemoryFallback.entries()) {
+    if (new Date(entry.expiresAt).getTime() <= now) {
+      inMemoryFallback.delete(key);
+    }
+  }
+}
+
+function rememberFallback(entry: EphemeralEntry): void {
+  purgeExpiredFallback();
+  inMemoryFallback.set(fallbackEntryKey(entry.namespace, entry.key), entry);
+}
+
+function forgetFallback(namespace: string, key: string): boolean {
+  return inMemoryFallback.delete(fallbackEntryKey(namespace, key));
+}
+
+function getFallback(namespace: string, key: string): EphemeralEntry | null {
+  purgeExpiredFallback();
+  return inMemoryFallback.get(fallbackEntryKey(namespace, key)) ?? null;
+}
+
+function queryFallback(filter: EphemeralQueryFilter): EphemeralEntry[] {
+  purgeExpiredFallback();
+  const limit = filter.limit ?? 100;
+  const entries = [...inMemoryFallback.values()].filter((entry) => {
+    if (entry.namespace !== filter.namespace) return false;
+    if (filter.keyPrefix && !entry.key.startsWith(filter.keyPrefix)) return false;
+    if (filter.sessionId && entry.sessionId !== filter.sessionId) return false;
+    if (filter.agentName && entry.agentName !== filter.agentName) return false;
+    return true;
+  });
+
+  entries.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return entries.slice(0, limit);
+}
+
+function logFallback(namespace: string, backend: EphemeralBackend, err: unknown): void {
+  if (!isBackendConfigured(backend)) return;
+  const key = `${backend}:${namespace}`;
+  if (fallbackWarnings.has(key)) return;
+  fallbackWarnings.add(key);
+  log.warn({ backend, namespace, err }, "Ephemeral backend unavailable; using in-memory fallback");
+}
+
+function isBackendConfigured(backend: EphemeralBackend): boolean {
+  switch (backend) {
+    case "redis":
+      return Boolean(process.env["REDIS_URL"]);
+    case "postgres":
+      return Boolean(process.env["DATABASE_URL"]);
+    case "mongo":
+      return Boolean(process.env["MONGODB_URL"]);
+    default:
+      return false;
+  }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -74,8 +138,14 @@ export async function ephemeralPut(
     createdAt: entry.createdAt ?? now.toISOString(),
     expiresAt: entry.expiresAt ?? new Date(now.getTime() + DEFAULT_TTL_MS).toISOString(),
   };
-  const driver = getDriver(full.namespace);
-  await driver.put(full);
+  const { backend, driver } = getDriver(full.namespace);
+  try {
+    await driver.put(full);
+    forgetFallback(full.namespace, full.key);
+  } catch (err) {
+    logFallback(full.namespace, backend, err);
+    rememberFallback(full);
+  }
 }
 
 /**
@@ -85,8 +155,14 @@ export async function ephemeralGet(
   namespace: string,
   key: string,
 ): Promise<EphemeralEntry | null> {
-  const driver = getDriver(namespace);
-  return driver.get(namespace, key);
+  const { backend, driver } = getDriver(namespace);
+  try {
+    const entry = await driver.get(namespace, key);
+    return entry ?? getFallback(namespace, key);
+  } catch (err) {
+    logFallback(namespace, backend, err);
+    return getFallback(namespace, key);
+  }
 }
 
 /**
@@ -95,8 +171,23 @@ export async function ephemeralGet(
 export async function ephemeralQuery(
   filter: EphemeralQueryFilter,
 ): Promise<EphemeralEntry[]> {
-  const driver = getDriver(filter.namespace);
-  return driver.query(filter);
+  const { backend, driver } = getDriver(filter.namespace);
+  const fallbackEntries = queryFallback(filter);
+  try {
+    const backendEntries = await driver.query(filter);
+    if (backendEntries.length === 0) return fallbackEntries;
+
+    const merged = new Map<string, EphemeralEntry>();
+    for (const entry of [...backendEntries, ...fallbackEntries]) {
+      merged.set(fallbackEntryKey(entry.namespace, entry.key), entry);
+    }
+    return [...merged.values()]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, filter.limit ?? 100);
+  } catch (err) {
+    logFallback(filter.namespace, backend, err);
+    return fallbackEntries;
+  }
 }
 
 /**
@@ -106,8 +197,15 @@ export async function ephemeralDelete(
   namespace: string,
   key: string,
 ): Promise<boolean> {
-  const driver = getDriver(namespace);
-  return driver.delete(namespace, key);
+  const { backend, driver } = getDriver(namespace);
+  const fallbackDeleted = forgetFallback(namespace, key);
+  try {
+    const deleted = await driver.delete(namespace, key);
+    return deleted || fallbackDeleted;
+  } catch (err) {
+    logFallback(namespace, backend, err);
+    return fallbackDeleted;
+  }
 }
 
 /**
@@ -156,6 +254,8 @@ export function registerEphemeralCleanupCron(): void {
  * Graceful shutdown — close all backends.
  */
 export async function shutdownEphemeralStore(): Promise<void> {
+  inMemoryFallback.clear();
+  fallbackWarnings.clear();
   for (const driver of Object.values(backends)) {
     await driver.close();
   }

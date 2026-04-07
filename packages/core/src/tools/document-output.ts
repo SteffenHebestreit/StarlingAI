@@ -9,6 +9,7 @@ const log = childLogger("tool:document-output");
 
 const DOCUMENT_FORMATS = ["markdown", "text", "html", "json"] as const;
 const CHART_TYPES = ["bar", "line", "pie", "doughnut"] as const;
+const MERMAID_THEMES = ["default", "neutral", "dark", "forest"] as const;
 const PDF_PAGE_SIZES = {
   A4: { width: 595.28, height: 841.89 },
   Letter: { width: 612, height: 792 },
@@ -16,14 +17,17 @@ const PDF_PAGE_SIZES = {
 
 type DocumentFormat = typeof DOCUMENT_FORMATS[number];
 type ChartType = typeof CHART_TYPES[number];
+type MermaidTheme = typeof MERMAID_THEMES[number];
 type PdfPageSize = keyof typeof PDF_PAGE_SIZES;
+type ChartSource = { url: string; title?: string };
 
-const FORMAT_EXTENSION: Record<DocumentFormat | "pdf", string> = {
+const FORMAT_EXTENSION: Record<DocumentFormat | "pdf" | "mermaid", string> = {
   markdown: ".md",
   text: ".txt",
   html: ".html",
   json: ".json",
   pdf: ".pdf",
+  mermaid: ".mmd",
 };
 
 registerTool({
@@ -202,6 +206,94 @@ registerTool({
 });
 
 registerTool({
+  name: "generate_mermaid_diagram",
+  description:
+    "Generate and save a Mermaid diagram source artifact in the workspace. " +
+    "Use this for workflows, graphs, timelines, architecture maps, and evidence diagrams that the chat UI can preview directly.",
+  parameters: {
+    type: "object",
+    properties: {
+      title: {
+        type: "string",
+        description: "Optional diagram title used for the filename and artifact label.",
+      },
+      diagram: {
+        type: "string",
+        description: "Mermaid source text, such as 'flowchart TD' or 'sequenceDiagram'.",
+      },
+      theme: {
+        type: "string",
+        enum: [...MERMAID_THEMES],
+        description: "Optional Mermaid theme to inject when the source does not already provide an init block.",
+        default: "neutral",
+      },
+      output_file: {
+        type: "string",
+        description: "Workspace-relative Mermaid output path. Defaults to a filename derived from the title.",
+      },
+      overwrite: {
+        type: "boolean",
+        description: "When false, fail instead of overwriting an existing file.",
+        default: true,
+      },
+    },
+    required: ["diagram"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const title = optionalString(args["title"]) || "Diagram";
+    const diagram = String(args["diagram"] ?? "");
+    const theme = normalizeMermaidTheme(args["theme"]);
+    const overwrite = Boolean(args["overwrite"] ?? true);
+
+    if (!diagram.trim()) return fail("diagram is required");
+    if (!theme) return fail("theme must be one of: default, neutral, dark, forest");
+
+    const resolvedOutput = resolveOutputPath({
+      requestedPath: optionalString(args["output_file"]),
+      title,
+      format: "mermaid",
+      workspacePath: ctx.workspacePath,
+    });
+    if (!resolvedOutput.success) return fail(resolvedOutput.error);
+
+    try {
+      if (!overwrite) {
+        await stat(resolvedOutput.resolved);
+        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
+      }
+    } catch {
+      // File does not exist yet.
+    }
+
+    const rendered = renderMermaidSource({ title, diagram, theme });
+
+    try {
+      await mkdir(dirname(resolvedOutput.resolved), { recursive: true });
+      await writeFile(resolvedOutput.resolved, rendered, "utf8");
+    } catch (err) {
+      log.error({ err, outputFile: resolvedOutput.relativePath, theme }, "generate_mermaid_diagram failed");
+      return fail(`Failed to write Mermaid diagram: ${String(err)}`);
+    }
+
+    return {
+      success: true,
+      output: `Mermaid diagram saved to ${resolvedOutput.relativePath}.`,
+      metadata: {
+        artifactKind: "diagram",
+        outputPath: resolvedOutput.relativePath,
+        filename: basenameFromRelativePath(resolvedOutput.relativePath),
+        format: "mermaid",
+        title,
+        theme,
+        size: rendered.length,
+        contentType: "text/vnd.mermaid; charset=utf-8",
+        previewMode: "mermaid",
+      },
+    };
+  },
+});
+
+registerTool({
   name: "generate_chart_html",
   description:
     "Generate and save an HTML chart report in the workspace. " +
@@ -241,6 +333,18 @@ registerTool({
           required: ["data"],
         },
       },
+      sources: {
+        type: "array",
+        description: "Optional source links to surface alongside the chart artifact for direct preview.",
+        items: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            title: { type: "string" },
+          },
+          required: ["url"],
+        },
+      },
       output_file: {
         type: "string",
         description: "Workspace-relative HTML output path. Defaults to a filename derived from the title.",
@@ -260,6 +364,7 @@ registerTool({
     const overwrite = Boolean(args["overwrite"] ?? true);
     const labels = normalizeStringArray(args["labels"]);
     const series = normalizeChartSeries(args["series"]);
+    const sources = normalizeChartSources(args["sources"]);
 
     if (!chartType) return fail("chart_type must be one of: bar, line, pie, doughnut");
     if (labels.length === 0) return fail("labels must contain at least one entry");
@@ -285,7 +390,7 @@ registerTool({
       // File does not exist yet.
     }
 
-    const rendered = renderChartHtml({ title, summary, chartType, labels, series });
+    const rendered = renderChartHtml({ title, summary, chartType, labels, series, sources });
 
     try {
       await mkdir(dirname(resolvedOutput.resolved), { recursive: true });
@@ -308,6 +413,16 @@ registerTool({
         chartType,
         seriesCount: series.length,
         points: labels.length,
+        sources,
+        artifacts: sources.map((source, index) => ({
+          artifactKind: "external_source",
+          externalUrl: source.url,
+          filename: sourceFilenameFromUrl(source.url, index),
+          title: source.title || sourceTitleFromUrl(source.url),
+          contentType: "text/html; charset=utf-8",
+          previewMode: "html",
+          sourceTool: "source_reference",
+        })),
         size: rendered.length,
         contentType: "text/html; charset=utf-8",
         previewMode: "html",
@@ -335,10 +450,43 @@ function normalizeChartType(value: unknown): ChartType | null {
     : null;
 }
 
+function normalizeChartSources(value: unknown): ChartSource[] {
+  if (!Array.isArray(value)) return [];
+
+  const normalized: ChartSource[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      const url = entry.trim();
+      if (isHttpUrl(url)) normalized.push({ url });
+      continue;
+    }
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const url = String(record["url"] ?? "").trim();
+    const title = optionalString(record["title"]);
+    if (!isHttpUrl(url)) continue;
+    normalized.push(title ? { url, title } : { url });
+  }
+
+  const seen = new Set<string>();
+  return normalized.filter((source) => {
+    if (seen.has(source.url)) return false;
+    seen.add(source.url);
+    return true;
+  });
+}
+
+function normalizeMermaidTheme(value: unknown): MermaidTheme | null {
+  const normalized = String(value ?? "neutral").trim().toLowerCase();
+  return (MERMAID_THEMES as readonly string[]).includes(normalized)
+    ? (normalized as MermaidTheme)
+    : null;
+}
+
 function resolveOutputPath(input: {
   requestedPath: string;
   title: string;
-  format: DocumentFormat | "pdf";
+  format: DocumentFormat | "pdf" | "mermaid";
   workspacePath: string;
 }): { success: true; resolved: string; relativePath: string } | { success: false; error: string } {
   const extension = FORMAT_EXTENSION[input.format];
@@ -429,6 +577,7 @@ function renderChartHtml(input: {
   chartType: ChartType;
   labels: string[];
   series: Array<{ label: string; data: number[]; color: string }>;
+  sources: ChartSource[];
 }): string {
   const safeTitle = escapeHtml(input.title || "Chart Report");
   const safeSummary = escapeHtml(input.summary);
@@ -467,6 +616,21 @@ function renderChartHtml(input: {
     return `        <tr><th scope="row">${escapeHtml(label)}</th>${values}</tr>`;
   }).join("\n");
   const tableHeaders = input.series.map((entry) => `<th scope="col">${escapeHtml(entry.label)}</th>`).join("");
+  const sourceRows = input.sources.map((source) => {
+    const label = escapeHtml(source.title || sourceTitleFromUrl(source.url));
+    const safeUrl = escapeHtml(source.url);
+    return `          <li><a href="${safeUrl}" target="_blank" rel="noreferrer">${label}</a><span>${safeUrl}</span></li>`;
+  }).join("\n");
+  const sourcePanel = input.sources.length > 0
+    ? [
+        '      <section class="panel panel--sources">',
+        '        <div class="panel__title">Sources</div>',
+        '        <ul class="sources">',
+        sourceRows,
+        '        </ul>',
+        '      </section>',
+      ].join("\n")
+    : "";
 
   return [
     "<!doctype html>",
@@ -491,6 +655,13 @@ function renderChartHtml(input: {
     "    th, td { padding: 0.7rem 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }",
     "    th { color: var(--muted); font-weight: 600; }",
     "    tbody th { color: var(--ink); font-weight: 500; }",
+    "    .panel__title { margin: 0 0 12px; font-size: 0.88rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }",
+    "    .panel--sources { margin-top: 24px; }",
+    "    .sources { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }",
+    "    .sources li { display: grid; gap: 4px; padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }",
+    "    .sources a { color: #d9f2ff; text-decoration: none; font-weight: 600; }",
+    "    .sources a:hover { text-decoration: underline; }",
+    "    .sources span { color: var(--muted); font-size: 0.82rem; word-break: break-all; }",
     "    .config { margin-top: 20px; background: rgba(0,0,0,0.22); border-radius: 16px; padding: 14px; overflow: auto; font-size: 0.82rem; color: #c9e8ff; }",
     "    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .chart-wrap { min-height: 320px; } }",
     "  </style>",
@@ -516,6 +687,7 @@ function renderChartHtml(input: {
     "          </tbody>",
     "        </table>",
     '        <pre class="config" aria-label="Chart configuration"></pre>',
+    sourcePanel,
     "      </aside>",
     "    </section>",
     "  </main>",
@@ -531,6 +703,42 @@ function renderChartHtml(input: {
     "</html>",
     "",
   ].join("\n");
+}
+
+function renderMermaidSource(input: { title: string; diagram: string; theme: MermaidTheme }): string {
+  const trimmed = input.diagram.trim();
+  const hasInitBlock = /^%%\{\s*init:/i.test(trimmed);
+  const titleComment = input.title ? `%% ${input.title}\n` : "";
+  const themeBlock = hasInitBlock ? "" : `%%{init: { \"theme\": \"${input.theme}\" }}%%\n`;
+  return `${titleComment}${themeBlock}${ensureTrailingNewline(trimmed)}`;
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function sourceTitleFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const lastSegment = parsed.pathname.split("/").filter(Boolean).pop();
+    return lastSegment ? `${parsed.hostname} / ${decodeURIComponent(lastSegment)}` : parsed.hostname;
+  } catch {
+    return url;
+  }
+}
+
+function sourceFilenameFromUrl(url: string, index: number): string {
+  try {
+    const parsed = new URL(url);
+    const lastSegment = parsed.pathname.split("/").filter(Boolean).pop();
+    if (lastSegment) {
+      return decodeURIComponent(lastSegment);
+    }
+    const hostname = parsed.hostname.replace(/[^a-z0-9.-]+/gi, "-");
+    return `${hostname || `source-${index + 1}`}.html`;
+  } catch {
+    return `source-${index + 1}.html`;
+  }
 }
 
 async function buildPdfDocument(input: { title: string; content: string; pageSize: PdfPageSize }): Promise<Uint8Array> {

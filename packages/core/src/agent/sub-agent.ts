@@ -13,7 +13,7 @@
 
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
@@ -26,6 +26,7 @@ import { createChatProvider, resolveProviderEndpoint } from "../providers/index.
 import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { consumeAgentMessages } from "../swarm/memory.js";
+import { sanitizeTranscriptContent } from "./sanitize-response.js";
 
 const log = childLogger("agent:sub-agent");
 
@@ -191,6 +192,7 @@ function rejectSuspiciousNoToolOutput(
 
   const failureStats: SubAgentExecutionStats = {
     ...stats,
+    outcome: "failure",
     terminalState: "error",
   };
 
@@ -245,9 +247,105 @@ function normalizeSubAgentOutput(content: string | null | undefined): string {
   return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
 }
 
+function formatSwarmProgressForInterruption(state: SwarmState | undefined): string {
+  if (!state) return "";
+  const tasks = Object.values(state.tasks);
+  if (tasks.length === 0) return "";
+
+  const prioritized = [...tasks].sort((left: SwarmTaskState, right: SwarmTaskState) => {
+    const statusRank = (status: string): number => {
+      switch (status) {
+        case "completed": return 0;
+        case "partial": return 1;
+        case "running": return 2;
+        case "failed": return 3;
+        case "blocked": return 4;
+        default: return 5;
+      }
+    };
+    return statusRank(left.status) - statusRank(right.status);
+  });
+
+  const lines = prioritized.slice(0, 6).map((task: SwarmTaskState) => {
+    const latestAttempt = task.attempts[task.attempts.length - 1];
+    const attemptSummary = latestAttempt?.summary?.trim();
+    const summary = attemptSummary || task.error || task.output;
+    const via = task.selectedAgent ? ` via ${task.selectedAgent}` : "";
+    return `- ${task.id} [${task.status}] ${task.title}${via}${summary ? ` | ${summary.replace(/\s+/g, " ").slice(0, 220)}` : ""}`;
+  });
+
+  return lines.join("\n");
+}
+
+function buildInterruptedSubAgentOutput(params: {
+  agentName: string;
+  reason: string;
+  swarmState?: SwarmState;
+  toolNames: string[];
+  toolCount: number;
+  iterations: number;
+  artifacts: Record<string, unknown>[];
+}): string {
+  const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
+  const progressLines: string[] = [];
+
+  if (swarmSummary) {
+    progressLines.push(swarmSummary);
+  }
+
+  if (params.toolCount > 0) {
+    const uniqueToolNames = [...new Set(params.toolNames)].slice(0, 8);
+    progressLines.push(`- Tool calls executed: ${params.toolCount}${uniqueToolNames.length > 0 ? ` (${uniqueToolNames.join(", ")})` : ""}`);
+  }
+
+  if (params.iterations > 0) {
+    progressLines.push(`- Iterations completed: ${params.iterations}`);
+  }
+
+  if (params.artifacts.length > 0) {
+    const artifactHints = params.artifacts
+      .map((artifact) => {
+        const outputPath = typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "";
+        const filename = typeof artifact["filename"] === "string" ? artifact["filename"] : "";
+        const externalUrl = typeof artifact["externalUrl"] === "string" ? artifact["externalUrl"] : "";
+        return outputPath || filename || externalUrl;
+      })
+      .filter(Boolean)
+      .slice(0, 4);
+    progressLines.push(`- Artifacts collected: ${params.artifacts.length}${artifactHints.length > 0 ? ` (${artifactHints.join(", ")})` : ""}`);
+  }
+
+  if (progressLines.length === 0) {
+    return `Sub-agent '${params.agentName}' ${params.reason}`;
+  }
+
+  return `Sub-agent '${params.agentName}' ${params.reason}\nPartial progress before interruption:\n${progressLines.join("\n")}`;
+}
+
+type SubAgentOutcome = "success" | "partial" | "failure";
+
+function classifyInterruptedOutcome(params: {
+  successfulToolCount: number;
+  artifacts: Record<string, unknown>[];
+  swarmState?: SwarmState;
+}): SubAgentOutcome {
+  if (params.successfulToolCount > 0 || params.artifacts.length > 0) {
+    return "partial";
+  }
+
+  const sawSwarmProgress = Object.values(params.swarmState?.tasks ?? {}).some((task) => (
+    task.status === "completed"
+    || task.status === "partial"
+    || task.attempts.some((attempt) => attempt.status === "completed" || attempt.status === "partial")
+  ));
+
+  return sawSwarmProgress ? "partial" : "failure";
+}
+
 /** Strip hallucinated tool-call XML that some models emit in text output. */
 function stripHallucinatedToolTags(text: string): string {
   return text
+    .replace(/<\|channel\>\w+\s*/g, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
     .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
     .replace(/<\/tool_call>/g, "")
@@ -268,6 +366,7 @@ export interface SubAgentRunOptions {
   workspacePath: string;
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  onProgress?: (event: SubAgentProgressEvent) => void;
   humanInLoopSteps?: string[];
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
@@ -278,6 +377,14 @@ export interface SubAgentRunOptions {
   turnTimeoutOverrideMs?: number;
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
   inlineConfig?: import("../config/schema.js").SubAgentConfig;
+}
+
+export interface SubAgentProgressEvent {
+  agentName: string;
+  kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";
+  iteration: number;
+  toolName?: string;
+  summary?: string;
 }
 
 export interface SubAgentExecutionStats {
@@ -296,6 +403,7 @@ export interface SubAgentExecutionStats {
   maxIterations: number;
   model: string;
   capabilities: string[];
+  outcome?: SubAgentOutcome;
   terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config";
   containerColdStartMs?: number;
   containerBootstrapMs?: number;
@@ -305,12 +413,20 @@ export interface SubAgentExecutionStats {
 export interface SubAgentRunResult {
   output: string;
   stats: SubAgentExecutionStats;
+  artifacts?: Record<string, unknown>[];
 }
 
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
   const config = getConfig();
   const agentCfg = opts.inlineConfig ?? config.subAgents[opts.agentName];
   const runStartedAt = Date.now();
+
+  opts.onProgress?.({
+    agentName: opts.agentName,
+    kind: "started",
+    iteration: 0,
+    summary: `Started delegated work in ${opts.agentName}.`,
+  });
 
   if (!agentCfg) {
     return {
@@ -327,16 +443,25 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         maxIterations: DEFAULT_MAX_ITERATIONS,
         model: "",
         capabilities: [],
+        outcome: "failure",
         terminalState: "missing_config",
       },
     };
   }
 
-  const defaultTimeoutMs = agentCfg.turnTimeoutMs ?? config.agents.performance?.subAgentTurnSloMs ?? 60_000;
+  // Coordinator agents (those with run_task_graph / parallel_delegate) orchestrate
+  // nested sub-agents whose cumulative runtime can approach the full turn budget.
+  // Give them a much higher default floor so adaptive timeouts based on *shorter*
+  // prior runs don't prematurely abort in-flight task graphs.
+  const COORDINATOR_TOOL_NAMES = ["run_task_graph", "parallel_delegate"];
+  const isCoordinatorAgent = agentCfg.tools?.some((t: string) => COORDINATOR_TOOL_NAMES.includes(t)) ?? false;
+  const leafDefaultMs = config.agents.performance?.subAgentTurnSloMs ?? 60_000;
+  const coordinatorDefaultMs = Math.round(config.gateway.turnTimeoutMs * 0.85);
+  const defaultTimeoutMs = agentCfg.turnTimeoutMs ?? (isCoordinatorAgent ? coordinatorDefaultMs : leafDefaultMs);
   const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentCfg.turnTimeoutMs === undefined
     ? computeAdaptiveSubAgentTimeoutMs(opts.agentName, opts.workspacePath, defaultTimeoutMs)
     : null;
-  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs;
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs ?? defaultTimeoutMs;
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const timeoutAbort = turnTimeoutMs ? new AbortController() : undefined;
   const timeoutHandle = timeoutAbort
@@ -414,6 +539,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
           model: modelConfig.primary ?? "",
           capabilities: agentCfg.capabilities ?? [],
+          outcome: "success",
           terminalState: "completed",
           containerColdStartMs: containerRun.metrics.containerColdStartMs,
           containerBootstrapMs: containerRun.metrics.containerBootstrapMs,
@@ -483,7 +609,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       const pending = await consumeAgentMessages(subSessionId, opts.agentName);
       if (pending.length > 0) {
         a2aContext = `\n\n## Pending messages from peer agents\n${pending
-          .map((m) => `From ${m.fromAgent} [${m.ts}]: ${m.content}`)
+          .map((m) => {
+            // Sanitize message content to prevent prompt injection from peer agents
+            const safeContent = sanitizeTranscriptContent("user", m.content, false);
+            return `From ${m.fromAgent} [${m.ts}]: ${safeContent}`;
+          })
           .join("\n---\n")}`;
         logAudit("a2a_messages_delivered", {
           agentName: opts.agentName,
@@ -491,8 +621,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
         }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
       }
-    } catch {
-      // Non-fatal — swarm bus or Redis may be unavailable
+    } catch (err) {
+      log.debug({ err, agentName: opts.agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
     }
 
     // Build initial message
@@ -507,6 +637,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       : (opts.maxIterationsOverride ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
     let iterations = 0;
     let toolCount = 0;
+    let successfulToolCount = 0;
+    const artifacts: Record<string, unknown>[] = [];
+    const artifactKeys = new Set<string>();
     const toolNames: string[] = [];
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
@@ -514,7 +647,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
 
-    const buildStats = (terminalState: SubAgentExecutionStats["terminalState"] = "completed"): SubAgentExecutionStats => ({
+    const buildStats = (
+      terminalState: SubAgentExecutionStats["terminalState"] = "completed",
+      outcome: SubAgentOutcome = terminalState === "completed" ? "success" : "failure",
+    ): SubAgentExecutionStats => ({
       agentName: opts.agentName,
       sessionId: subSessionId,
       promptChars: systemPrompt.length,
@@ -526,8 +662,58 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       maxIterations,
       model: modelConfig.primary,
       capabilities: agentCfg.capabilities ?? [],
+      outcome,
       terminalState,
     });
+
+    const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => (
+      artifacts.length > 0
+        ? { ...result, artifacts: artifacts.map((artifact) => ({ ...artifact })) }
+        : result
+    );
+
+    const recordArtifacts = (metadata: unknown, defaults: Record<string, unknown> = {}): void => {
+      if (!metadata) {
+        return;
+      }
+
+      if (Array.isArray(metadata)) {
+        for (const entry of metadata) {
+          recordArtifacts(entry, defaults);
+        }
+        return;
+      }
+
+      if (typeof metadata !== "object") {
+        return;
+      }
+
+      const value = metadata as Record<string, unknown>;
+      const outputPath = typeof value["outputPath"] === "string" ? value["outputPath"] : "";
+      const dataUrl = typeof value["dataUrl"] === "string" ? value["dataUrl"] : "";
+      const externalUrl = typeof value["externalUrl"] === "string" ? value["externalUrl"] : "";
+      if (outputPath || dataUrl || externalUrl) {
+        const artifact = { ...defaults, ...value };
+        const key = [
+          typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "",
+          typeof artifact["dataUrl"] === "string" ? artifact["dataUrl"] : "",
+          typeof artifact["externalUrl"] === "string" ? artifact["externalUrl"] : "",
+          typeof artifact["filename"] === "string" ? artifact["filename"] : "",
+          typeof artifact["sourceTool"] === "string" ? artifact["sourceTool"] : "",
+        ].join("::");
+        if (!artifactKeys.has(key)) {
+          artifactKeys.add(key);
+          artifacts.push(artifact);
+        }
+      }
+
+      const nestedArtifacts = value["artifacts"];
+      if (Array.isArray(nestedArtifacts)) {
+        for (const nestedArtifact of nestedArtifacts) {
+          recordArtifacts(nestedArtifact, defaults);
+        }
+      }
+    };
 
     if (opts.agentName === "mail_agent" && isMailInboxReadTask(sanitizedTask)) {
       const executeTrackedMailTool = async (toolName: string, args: Record<string, unknown>): Promise<import("../tools/registry.js").ToolResult> => {
@@ -595,7 +781,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           },
           { sessionId: subSessionId },
         );
-        return { output: result, stats: buildStats("completed") };
+        return withArtifacts({ output: result, stats: buildStats("completed") });
       }
 
       const unreadResult = await executeTrackedMailTool("mail_list_unread", { accountIds, limit: 5 });
@@ -700,26 +886,69 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         { sessionId: subSessionId },
       );
       log.info({ agentName: opts.agentName, toolCount }, "Sub-agent completed via deterministic inbox check");
-      return { output: result, stats: buildStats("completed") };
+      return withArtifacts({ output: result, stats: buildStats("completed") });
     }
 
     while (iterations < maxIterations) {
       if (signal?.aborted) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
+          const interruptedOutcome = classifyInterruptedOutcome({
+            successfulToolCount,
+            artifacts,
+            swarmState: toolContext.swarmState,
+          });
           appendOutcome(opts.workspacePath, {
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
-            outcome: "failure",
+            outcome: interruptedOutcome,
             iterations,
             totalTokens: usage.totalTokens,
             durationMs: Date.now() - runStartedAt,
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
-          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats("timeout") };
+          return withArtifacts({
+            output: buildInterruptedSubAgentOutput({
+              agentName: opts.agentName,
+              reason: `timed out after ${turnTimeoutMs}ms`,
+              swarmState: toolContext.swarmState,
+              toolNames,
+              toolCount,
+              iterations,
+              artifacts,
+            }),
+            stats: buildStats("timeout", interruptedOutcome),
+          });
         }
-        return { output: "Sub-agent task was cancelled", stats: buildStats("cancelled") };
+        const interruptedOutcome = classifyInterruptedOutcome({
+          successfulToolCount,
+          artifacts,
+          swarmState: toolContext.swarmState,
+        });
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: interruptedOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          error: "cancelled",
+        });
+        return withArtifacts({
+          output: buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: "was cancelled",
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+          }),
+          stats: buildStats("cancelled", interruptedOutcome),
+        });
       }
 
       const messages: LLMMessage[] = [
@@ -727,26 +956,76 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         ...history,
       ];
 
+      opts.onProgress?.({
+        agentName: opts.agentName,
+        kind: "thinking",
+        iteration: iterations + 1,
+        summary: `Planning the next delegated step in ${opts.agentName}.`,
+      });
+
       let response;
       try {
         response = await provider.complete(messages, tools, signal);
       } catch (err) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
+          const interruptedOutcome = classifyInterruptedOutcome({
+            successfulToolCount,
+            artifacts,
+            swarmState: toolContext.swarmState,
+          });
           appendOutcome(opts.workspacePath, {
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
-            outcome: "failure",
+            outcome: interruptedOutcome,
             iterations,
             totalTokens: usage.totalTokens,
             durationMs: Date.now() - runStartedAt,
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
-          return { output: `Sub-agent '${opts.agentName}' timed out after ${turnTimeoutMs}ms`, stats: buildStats("timeout") };
+          return withArtifacts({
+            output: buildInterruptedSubAgentOutput({
+              agentName: opts.agentName,
+              reason: `timed out after ${turnTimeoutMs}ms`,
+              swarmState: toolContext.swarmState,
+              toolNames,
+              toolCount,
+              iterations,
+              artifacts,
+            }),
+            stats: buildStats("timeout", interruptedOutcome),
+          });
         }
         if (opts.signal?.aborted) {
-          return { output: "Sub-agent task was cancelled", stats: buildStats("cancelled") };
+          const interruptedOutcome = classifyInterruptedOutcome({
+            successfulToolCount,
+            artifacts,
+            swarmState: toolContext.swarmState,
+          });
+          appendOutcome(opts.workspacePath, {
+            ts: new Date().toISOString(),
+            agent: opts.agentName,
+            task: opts.task.slice(0, 200),
+            outcome: interruptedOutcome,
+            iterations,
+            totalTokens: usage.totalTokens,
+            durationMs: Date.now() - runStartedAt,
+            timeoutMs: turnTimeoutMs,
+            error: "cancelled",
+          });
+          return withArtifacts({
+            output: buildInterruptedSubAgentOutput({
+              agentName: opts.agentName,
+              reason: "was cancelled",
+              swarmState: toolContext.swarmState,
+              toolNames,
+              toolCount,
+              iterations,
+              artifacts,
+            }),
+            stats: buildStats("cancelled", interruptedOutcome),
+          });
         }
         log.error({ err, agentName: opts.agentName }, "Sub-agent LLM call failed");
         appendOutcome(opts.workspacePath, {
@@ -760,7 +1039,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: String(err).slice(0, 200),
         });
-        return { output: `Sub-agent error: ${String(err)}`, stats: buildStats("error") };
+        return withArtifacts({ output: `Sub-agent error: ${String(err)}`, stats: buildStats("error") });
       }
 
       usage.promptTokens += response.usage.promptTokens;
@@ -782,7 +1061,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           result = outputScan.redacted;
         }
 
-        const stats = buildStats("completed");
+        const semanticOutcome: SubAgentOutcome = /no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
+          ? "partial"
+          : "success";
+        const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
           stats,
@@ -818,12 +1100,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         );
 
         // Detect likely failure patterns from the output text
-        const looksLikeFail = /no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300));
         appendOutcome(opts.workspacePath, {
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
-          outcome: looksLikeFail ? "partial" : "success",
+          outcome: semanticOutcome,
           iterations,
           totalTokens: usage.totalTokens,
           durationMs: Date.now() - runStartedAt,
@@ -831,7 +1112,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         });
 
         log.info({ agentName: opts.agentName, iterations }, "Sub-agent completed");
-        return { output: stripHallucinatedToolTags(result), stats };
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "completed",
+          iteration: iterations,
+          summary: `Completed delegated work in ${opts.agentName}.`,
+        });
+        return withArtifacts({ output: stripHallucinatedToolTags(result), stats });
       }
 
       // Process tool calls — repair any mangled tool names first
@@ -884,6 +1171,14 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           { sessionId: subSessionId }
         );
 
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "tool_start",
+          iteration: iterations + 1,
+          toolName: tc.name,
+          summary: `Running ${tc.name} in ${opts.agentName}.`,
+        });
+
         toolNames.push(tc.name);
 
         // Per-tool call cap — prevent wasteful loops on a single tool
@@ -923,7 +1218,24 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
         const resultContent = result.success ? result.output : `Error: ${result.error ?? "unknown"}`;
+        if (result.success) {
+          successfulToolCount += 1;
+        }
         lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent });
+        recordArtifacts(result.metadata, {
+          sourceAgent: opts.agentName,
+          sourceTool: tc.name,
+        });
+
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "tool_done",
+          iteration: iterations + 1,
+          toolName: tc.name,
+          summary: result.success
+            ? `Finished ${tc.name} in ${opts.agentName}.`
+            : `Encountered an issue while running ${tc.name} in ${opts.agentName}.`,
+        });
 
         toolResults.push({
           role: "tool",
@@ -973,7 +1285,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             );
             result = outputScan.redacted;
           }
-          const stats = buildStats("max_iterations");
+          const stats = buildStats("max_iterations", "partial");
           const suspicious = rejectSuspiciousNoToolOutput(
             opts,
             stats,
@@ -995,7 +1307,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
           });
           log.info({ agentName: opts.agentName, iterations }, "Sub-agent synthesized after max iterations");
-          return { output: stripHallucinatedToolTags(result), stats };
+          opts.onProgress?.({
+            agentName: opts.agentName,
+            kind: "completed",
+            iteration: iterations,
+            summary: `Completed delegated work in ${opts.agentName}.`,
+          });
+          return withArtifacts({ output: stripHallucinatedToolTags(result), stats });
         }
       } catch (synthErr) {
         log.warn({ synthErr, agentName: opts.agentName }, "Synthesis pass after max iterations failed");
@@ -1014,10 +1332,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       error: `max_iterations (${maxIterations}) reached`,
     });
 
-    return {
+    return withArtifacts({
       output: `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
-      stats: buildStats("max_iterations"),
-    };
+      stats: buildStats("max_iterations", "partial"),
+    });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
 

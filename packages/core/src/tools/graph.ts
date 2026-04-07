@@ -52,8 +52,15 @@ registerTool({
 
     const label = String(args["label"] ?? "").replace(/[^a-zA-Z0-9_]/g, "");
     const name = String(args["name"] ?? "").trim().slice(0, 500);
-    const props = typeof args["properties"] === "object" && args["properties"] ? args["properties"] as Record<string, unknown> : {};
+    const rawProps = typeof args["properties"] === "object" && args["properties"] ? args["properties"] as Record<string, unknown> : {};
     const sessionId = args["sessionId"] ? String(args["sessionId"]) : undefined;
+
+    // Sanitize property keys to prevent Cypher injection
+    const props: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(rawProps)) {
+      const safeKey = k.replace(/[^a-zA-Z0-9_]/g, "");
+      if (safeKey) props[safeKey] = v;
+    }
 
     if (!label || !name) return { success: false, output: "", error: "label and name are required" };
 

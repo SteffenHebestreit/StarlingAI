@@ -216,10 +216,10 @@ function emitAction(ctx: ToolContext | undefined, sessionId: string, actionType:
   ctx?.onComputerAction?.({ computerSessionId: sessionId, actionType, ...(extra ?? {}) });
 }
 
-async function maybeAnalyzeSnapshot(snapshot: ComputerSessionSnapshot): Promise<string | null> {
+async function maybeAnalyzeSnapshot(snapshot: ComputerSessionSnapshot, focusHint?: string): Promise<string | null> {
   if (!snapshot.dataUrl) return null;
   try {
-    const analysis = await analyzeScreenshot(decodeDataUrl(snapshot.dataUrl));
+    const analysis = await analyzeScreenshot(decodeDataUrl(snapshot.dataUrl), "image/png", undefined, focusHint);
     return analysis.description;
   } catch (err) {
     log.warn({ error: err instanceof Error ? err.message : String(err) }, "Vision analysis failed — snapshot will lack description");
@@ -301,7 +301,64 @@ function findReusableSession(adapter: ComputerSessionAdapter, nodeId: string | u
   ));
 }
 
+function summarizeSession(session: ComputerSession): string {
+  const primary = session.displayTopology?.monitors?.find((monitor) => monitor.id === session.displayTopology?.primary)
+    ?? session.displayTopology?.monitors?.[0];
+  const display = primary ? `${primary.width}x${primary.height}` : "unknown";
+  return [
+    `• ${session.id}`,
+    `state=${session.state}`,
+    `adapter=${session.adapter}`,
+    session.nodeId ? `node=${session.nodeId}` : null,
+    session.leaseOwner ? `owner=${session.leaseOwner}` : null,
+    `display=${display}`,
+  ].filter(Boolean).join(" | ");
+}
+
 // ── Session Management Tools ──────────────────────────────────────────────────
+
+registerTool({
+  name: "computer_list_sessions",
+  description:
+    "List currently open computer sessions so you can reuse or attach to an existing session instead of opening a new one. " +
+    "Call this before computer_session_start when the task may already have an active desktop session.",
+  parameters: { type: "object", properties: {} },
+  async execute(_args, ctx) {
+    try {
+      requireEnabled();
+      const sessions = computerSessionManager.listActiveSessions();
+      if (sessions.length === 0) {
+        return ok("No active computer sessions. Start one with computer_session_start after checking available nodes.");
+      }
+
+      const owned = sessions.filter((session) => session.leaseOwner === ctx.sessionId);
+      const sameFamily = sessions.filter((session) => (
+        session.leaseOwner !== ctx.sessionId && isSameLeaseFamily(session.leaseOwner, ctx.sessionId)
+      ));
+      const other = sessions.filter((session) => !owned.includes(session) && !sameFamily.includes(session));
+      const lines: string[] = [];
+      if (owned.length > 0) {
+        lines.push("Owned by this controller:");
+        lines.push(...owned.map(summarizeSession));
+      }
+      if (sameFamily.length > 0) {
+        lines.push("Reusable from the same swarm family:");
+        lines.push(...sameFamily.map(summarizeSession));
+      }
+      if (other.length > 0) {
+        lines.push("Open under another controller:");
+        lines.push(...other.map(summarizeSession));
+      }
+
+      return ok(
+        `Active computer sessions:\n${lines.join("\n")}\n\n` +
+        "Prefer computer_session_attach(sessionId: '...') or reuse the existing session before calling computer_session_start.",
+      );
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : String(error));
+    }
+  },
+});
 
 registerTool({
   name: "computer_list_nodes",
@@ -354,6 +411,7 @@ registerTool({
   name: "computer_session_start",
   description:
     "Start a new computer session for desktop/VS Code/remote control. " +
+    "Before opening a new session, prefer computer_list_sessions to check whether a reusable session already exists. " +
     "PREFERRED: Use the 'node' parameter with a name from computer_list_nodes — the protocol (VNC/RDP/SSH) is already configured per node, you do NOT choose it. " +
     "Example: computer_session_start(node: 'win-workstation') connects using whatever protocol that node is configured with. " +
     "Only use 'adapter' or 'host' for ad-hoc connections when no matching node exists. " +
@@ -497,7 +555,7 @@ registerTool({
           `Adapter: ${reused.adapter}\n` +
           `State: ${reused.state}\n` +
           (topology?.monitors?.[0] ? `Primary display: ${topology.monitors[0].width}x${topology.monitors[0].height}\n` : "") +
-          `Use computer_snapshot to capture the current screen state.`,
+            `Next: call computer_list_windows and then computer_snapshot before taking any action.`,
           { sessionId: reused.id, adapter: reused.adapter, requestedAdapter, nodeId: effectiveNodeId, reused: true },
         );
       }
@@ -533,7 +591,7 @@ registerTool({
         `Adapter: ${adapter}\n` +
         `State: active\n` +
         (topology?.monitors?.[0] ? `Primary display: ${topology.monitors[0].width}x${topology.monitors[0].height}\n` : "") +
-        `Use computer_snapshot to capture the initial screen state.`,
+        `Next: call computer_list_windows and then computer_snapshot before taking any action.`,
         { sessionId: session.id, adapter, requestedAdapter, nodeId: effectiveNodeId },
       );
     } catch (error) {
@@ -618,12 +676,14 @@ registerTool({
   description:
     "Capture a screenshot of the current computer session and analyze it with the vision model. " +
     "Returns a textual description of the screen contents. " +
+    "Optional: provide a focus hint such as 'LM Studio loaded models' for task-specific OCR. " +
     "Note: action tools (click, type, hotkey, etc.) already capture screenshots automatically — " +
     "use this only when you need a fresh look without performing an action, or for detailed vision analysis.",
   parameters: {
     type: "object",
     properties: {
       sessionId: { type: "string", description: "Session ID (default: first active)" },
+      focus: { type: "string", description: "Optional analysis focus, e.g. 'LM Studio loaded models'" },
     },
   },
   async execute(args, ctx) {
@@ -631,16 +691,18 @@ registerTool({
       requireEnabled();
       const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined, ctx.sessionId);
       const session = computerSessionManager.getSession(sessionId)!;
+      const focus = typeof args["focus"] === "string" ? args["focus"].trim() : "";
       const snapshot = await captureComputerSessionSnapshot(sessionId);
       emitSnapshot(ctx, sessionId, snapshot);
       logAudit("computer_action", { sessionId, action: "snapshot" });
-      const analysis = await maybeAnalyzeSnapshot(snapshot);
+      const analysis = await maybeAnalyzeSnapshot(snapshot, focus || undefined);
 
       return ok(
         `[Desktop Snapshot — Session ${sessionId}]\n` +
         `Adapter: ${session.adapter}\n` +
         `State: ${session.state}\n` +
         (snapshot.width && snapshot.height ? `Size: ${snapshot.width}x${snapshot.height}\n` : "") +
+        (focus ? `Focus: ${focus}\n` : "") +
         (analysis ? `Analysis: ${analysis}` : "Screenshot captured. No vision summary was available for this turn."),
         { sessionId, frameId: snapshot.frameId, screenshotHash: snapshot.screenshotHash },
       );

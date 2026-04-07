@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSON5 from "json5";
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
 describe("config loader mutable overlay", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
@@ -281,5 +285,40 @@ describe("config loader mutable overlay", () => {
     expect(prompt).toContain("successful delegation/orchestration call in the same turn");
     expect(prompt).toContain("treat that as sufficient and do not ask the user to confirm it again");
     expect(prompt).toContain("Do not invent ad-hoc specialists");
+  });
+
+  it("does not reload single-file config when unrelated runtime data files change", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-watch-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    const mutableConfigPath = join(tempDir, "starlingai.runtime.json");
+    const unrelatedRuntimePath = join(tempDir, "session-store.json");
+
+    writeFileSync(baseConfigPath, JSON.stringify({
+      gateway: { port: 8765 },
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/test-model" },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_MUTABLE_CONFIG_PATH"] = mutableConfigPath;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+    const onChange = vi.fn();
+
+    try {
+      configLoader.loadConfig();
+      configLoader.watchConfig(onChange);
+
+      writeFileSync(unrelatedRuntimePath, JSON.stringify({ turns: 1 }), "utf8");
+      await wait(400);
+
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

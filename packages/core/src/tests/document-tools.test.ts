@@ -124,6 +124,10 @@ describe("generate_chart_html", () => {
         { label: "North", data: [12, 18, 22] },
         { label: "South", data: [9, 15, 19], color: "#f97316" },
       ],
+      sources: [
+        { title: "Regional revenue dashboard", url: "https://example.test/revenue-dashboard" },
+        { url: "https://example.test/revenue-methodology" },
+      ],
       output_file: "reports/quarterly-revenue",
     });
 
@@ -136,6 +140,22 @@ describe("generate_chart_html", () => {
       previewMode: "html",
       chartType: "line",
       seriesCount: 2,
+      sources: [
+        { title: "Regional revenue dashboard", url: "https://example.test/revenue-dashboard" },
+        { url: "https://example.test/revenue-methodology" },
+      ],
+      artifacts: [
+        expect.objectContaining({
+          externalUrl: "https://example.test/revenue-dashboard",
+          previewMode: "html",
+          sourceTool: "source_reference",
+        }),
+        expect.objectContaining({
+          externalUrl: "https://example.test/revenue-methodology",
+          previewMode: "html",
+          sourceTool: "source_reference",
+        }),
+      ],
     });
 
     const outputPath = join(tempDir, "reports", "quarterly-revenue.html");
@@ -144,6 +164,8 @@ describe("generate_chart_html", () => {
     expect(content).toContain("Quarterly Revenue");
     expect(content).toContain("cdn.jsdelivr.net/npm/chart.js");
     expect(content).toContain('"labels": [');
+    expect(content).toContain("Sources");
+    expect(content).toContain("https://example.test/revenue-dashboard");
   });
 
   it("rejects mismatched series lengths", async () => {
@@ -154,6 +176,47 @@ describe("generate_chart_html", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/same length as labels/i);
+  });
+});
+
+describe("generate_mermaid_diagram", () => {
+  it("writes a Mermaid source artifact with preview metadata", async () => {
+    const result = await runTool("generate_mermaid_diagram", {
+      title: "Escalation Flow",
+      diagram: "flowchart TD\n  Start --> Review\n  Review --> Ship",
+      output_file: "artifacts/escalation-flow",
+      theme: "forest",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("artifacts/escalation-flow.mmd");
+    expect(result.metadata).toMatchObject({
+      artifactKind: "diagram",
+      outputPath: "artifacts/escalation-flow.mmd",
+      filename: "escalation-flow.mmd",
+      contentType: "text/vnd.mermaid; charset=utf-8",
+      previewMode: "mermaid",
+      theme: "forest",
+    });
+
+    const outputPath = join(tempDir, "artifacts", "escalation-flow.mmd");
+    expect(existsSync(outputPath)).toBe(true);
+    const content = readFileSync(outputPath, "utf8");
+    expect(content).toContain('%%{init: { "theme": "forest" }}%%');
+    expect(content).toContain("flowchart TD");
+  });
+
+  it("preserves an existing Mermaid init block", async () => {
+    const result = await runTool("generate_mermaid_diagram", {
+      title: "Existing Theme",
+      diagram: "%%{init: { \"theme\": \"dark\" }}%%\nflowchart LR\n  A --> B",
+    });
+
+    expect(result.success).toBe(true);
+    const outputPath = join(tempDir, "existing-theme.mmd");
+    const content = readFileSync(outputPath, "utf8");
+    expect(content.match(/%%\{init:/g)).toHaveLength(1);
+    expect(content).toContain('"dark"');
   });
 });
 

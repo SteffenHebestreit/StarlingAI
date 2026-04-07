@@ -115,10 +115,13 @@ registerTool({
     const sql = String(args["sql"] ?? "").trim();
     if (!sql) return { success: false, output: "", error: "sql is required" };
 
-    // Safety: only SELECT/SHOW/EXPLAIN
+    // Safety: only SELECT/SHOW/EXPLAIN, no statement chaining
     const upper = sql.trimStart().toUpperCase();
     if (!upper.startsWith("SELECT") && !upper.startsWith("SHOW") && !upper.startsWith("EXPLAIN")) {
       return { success: false, output: "", error: "metric_query is read-only. Only SELECT, SHOW, and EXPLAIN are allowed." };
+    }
+    if (sql.includes(";")) {
+      return { success: false, output: "", error: "metric_query does not allow semicolons (no statement chaining)." };
     }
 
     try {
