@@ -1,11 +1,11 @@
 <table border="0" cellpadding="0" cellspacing="0" width="100%">
   <tr>
     <td valign="middle" width="25%">
-      <img src="swarmLogo.svg" alt="StarlingAI logo" width="100%" />
+      <img src="assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="100%" />
     </td>
     <td valign="middle" width="75%">
       <strong style="font-size:1.4em;">StarlingAI</strong><br/>
-      <sub>GUARDED AGENT SWARM &nbsp;&middot;&nbsp; <em>v0.3.0</em></sub>
+      <sub>GUARDED AGENT SWARM &nbsp;&middot;&nbsp; <em>v0.4.1</em></sub>
     </td>
   </tr>
 </table>
@@ -19,6 +19,12 @@
 <a href="http://localhost:3002">Tutorials</a>
 
 ---
+
+## Release Highlights
+
+- **Grounded artifact generation** — HTML charts can now carry explicit source links, Mermaid diagrams are first-class artifacts, and the web UI can preview both directly in chat.
+- **Better live research tooling** — search can fall back through SearXNG, Playwright-backed browser search, and DuckDuckGo; `web_fetch` now prefers rendered browser content for JavaScript-heavy pages.
+- **Operator-facing debug exports** — sessions can be exported as combined Markdown bundles with transcript, raw history, and related audit events for review and incident follow-up.
 
 ## The Starling Swarm — How Biology Inspired This Architecture
 
@@ -105,6 +111,20 @@ Repo-local launchers are available too: use `./sai ...` in Bash/WSL or `./sai ..
 
 Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup tutorials. The gateway listens on `http://localhost:8765`.
 
+## Repository Layout
+
+The repository root is reserved for entrypoints, compose files, top-level docs, and the compiled `starlingai.json` artifact. Ad hoc helper scripts and generated reports should not live at the root.
+
+```text
+artifacts/              # Generated reports, exports, and operator-collected artifacts
+assets/                 # Shared brand assets and static imagery for docs/tutorials
+scripts/                # Maintained CLI and support scripts used by StarlingAI
+scripts/devtools/       # One-off maintenance and debugging helpers
+config/                 # Protected infrastructure configuration
+workspace/              # Durable workspace definitions and runtime overlays
+.starlingai/            # Runtime state, logs, recordings, promoted agents
+```
+
 ### Internal Domain / HAProxy
 
 For an internal domain behind HAProxy or another reverse proxy, publish the web entrypoint on port `3001` and route the domain to that service. The bundled Nginx layer already forwards `/api` and `/ws` to the gateway, so the browser can stay same-origin and the dashboard will auto-use the current host for WebSocket and REST calls.
@@ -161,11 +181,12 @@ config/                  # Infrastructure — you set this up once
 
 workspace/               # Agent-tunable — the swarm self-improves here
   agents/                # Agent definitions, sub-agent prompts & models
+  jobs/                  # Operator-managed reusable job definitions
   scenes/                # Workflow / mission definitions
   runtime/               # runtime.overrides.json (live config changes)
 ```
 
-**The agent cannot modify `config/`.** Only paths under `workspace/` (agents, sub-agents, scenes) are mutable by the config-assistant and dashboard.
+**The agent cannot modify `config/`.** Within `workspace/`, only agent definitions and scene definitions are mutable by the config-assistant. `workspace/jobs/` is durable workspace data, but it is operator-managed rather than agent-writable.
 
 Run `pnpm sai config build` to compile both zones into `starlingai.json` (the artifact Docker mounts). See [config/README.md](config/README.md) and [workspace/README.md](workspace/README.md) for details.
 

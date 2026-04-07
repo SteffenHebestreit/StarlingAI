@@ -22,6 +22,34 @@
         }
       }
     },
+    "browser_inspection": {
+      "description": "Open a website, capture Playwright browser evidence, and summarize what is visible or blocked on the page.",
+      "task": "Use web_task_coordinator first when the page may be JS-rendered, multi-step, or ambiguous. Delegate browser_agent to open the target website, wait for the relevant page state, and capture browser_snapshot plus browser_screenshot evidence when the rendered view matters. Use vision_browser_analyst or evidence_analyst to interpret the captured page evidence, then summarizer to produce a concise grounded inspection result with exact visible text, URLs, blockers, and next steps.",
+      "allowedAgents": [
+        "web_task_coordinator",
+        "browser_agent",
+        "vision_browser_analyst",
+        "evidence_analyst",
+        "summarizer"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials"
+      ],
+      "params": {
+        "targetUrl": {
+          "description": "Website or page URL to open and inspect",
+          "default": ""
+        },
+        "inspectionGoal": {
+          "description": "What should be checked, extracted, or verified on the page",
+          "default": "capture a snapshot and screenshot of the relevant page state, then summarize what is visible"
+        },
+        "captureMode": {
+          "description": "Preferred evidence capture mode",
+          "default": "snapshot plus screenshot when the rendered layout matters"
+        }
+      }
+    },
     "source_backed_paper": {
       "description": "Produce a paper or report grounded in official sources and verified citations.",
       "task": "Use document_intake first when the input includes attached reports or files, citation_researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
@@ -62,6 +90,63 @@
         "freshnessRequirement": {
           "description": "How fresh the evidence needs to be",
           "default": "use the freshest reliable sources available and call out publication dates"
+        }
+      }
+    },
+    "deep_research_dossier": {
+      "description": "Run a multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate.",
+      "task": "Use mission_coordinator first. It should decide whether the request needs independent source gathering, structured evidence indexing, data analysis, chart rendering, diagram generation, and final writing. Prefer citation_researcher and researcher for source collection, research_librarian to persist notes, graph links, and timelines, evidence_analyst to reconcile the ledger, data_analyst when structured numbers matter, chart_designer for HTML charts or tables based on verified numeric evidence, diagram_designer when a structural visual model would clarify the answer, paper_author or summarizer for the final deliverable, and quality_supervisor to decide whether one targeted corrective pass is justified before finalizing.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "citation_researcher",
+        "research_librarian",
+        "document_intake",
+        "evidence_analyst",
+        "data_analyst",
+        "chart_designer",
+        "diagram_designer",
+        "paper_author",
+        "summarizer",
+        "quality_supervisor"
+      ],
+      "params": {
+        "deliverable": {
+          "description": "Requested final deliverable type",
+          "default": "source-backed research dossier with explicit gaps and next actions"
+        },
+        "includeVisuals": {
+          "description": "Whether Mermaid diagrams should be produced when they materially help",
+          "default": "yes when a workflow, relationship map, architecture, or timeline would improve clarity"
+        },
+        "freshnessRequirement": {
+          "description": "How recent the evidence must be",
+          "default": "prefer the freshest reliable sources and preserve publication dates"
+        }
+      }
+    },
+    "research_visual_brief": {
+      "description": "Produce a concise verified research brief plus at least one Mermaid visual when the topic has structure worth diagramming.",
+      "task": "Use mission_coordinator first. Gather sources with researcher and citation_researcher, organize the evidence with research_librarian, reconcile it with evidence_analyst, ask chart_designer for an HTML chart or table when the answer depends on sourced numeric evidence, ask diagram_designer for a Mermaid diagram when the answer has workflow, dependency, timeline, or relationship structure, then use summarizer for the brief and quality_supervisor for the final gate.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "citation_researcher",
+        "research_librarian",
+        "evidence_analyst",
+        "chart_designer",
+        "diagram_designer",
+        "summarizer",
+        "quality_supervisor"
+      ],
+      "params": {
+        "audience": {
+          "description": "Intended audience for the brief",
+          "default": "technical stakeholder"
+        },
+        "visualFocus": {
+          "description": "Preferred visual structure if one is appropriate",
+          "default": "workflow, timeline, or relationship map depending on the evidence"
         }
       }
     },

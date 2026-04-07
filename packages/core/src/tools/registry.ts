@@ -12,7 +12,7 @@ export interface ToolHandler {
 
 export interface SwarmTaskAttempt {
   agentName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "partial" | "failed";
   startedAt: string;
   finishedAt?: string;
   summary?: string;
@@ -24,7 +24,7 @@ export interface SwarmTaskAttempt {
 export interface SwarmTaskState {
   id: string;
   title: string;
-  status: "pending" | "running" | "completed" | "failed" | "blocked";
+  status: "pending" | "running" | "completed" | "partial" | "failed" | "blocked";
   dependsOn: string[];
   signature?: string;
   selectedAgent?: string;
@@ -75,6 +75,16 @@ export interface ToolContext {
    * Internal — populated automatically on first delegation.
    */
   _turnAgentCounts?: Map<string, number>;
+  /**
+   * Optional per-agent repeat-cap overrides for deliberate coordinator fan-out.
+   * Internal — used by orchestration tools to permit repeated specialists on partitioned work.
+   */
+  _turnAgentRepeatLimitOverrides?: Record<string, number>;
+  /**
+   * Optional total delegation budget override for explicit orchestration batches.
+   * Internal — keeps planned fan-out from tripping the default turn budget.
+   */
+  _turnTotalDelegationLimitOverride?: number;
   /**
    * When set, this turn is a tool development session.
    * Iteration limits are lifted and the tool-dev-warden provides oversight instead.

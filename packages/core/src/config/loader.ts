@@ -54,6 +54,12 @@ export function loadConfig(): Config {
     throw new Error("Invalid configuration: " + JSON.stringify(result.error.flatten()));
   }
 
+  // Two-zone layout detected → enforce workspace path from directory detection
+  // so file-writing tools target the workspace/ subdirectory, not the repo root.
+  if (CONFIG_SOURCE.workspacePath) {
+    result.data.workspacePath = CONFIG_SOURCE.workspacePath;
+  }
+
   _config = result.data;
   writeCompiledConfig(_config);
   return _config;
@@ -486,6 +492,10 @@ function getWatchedFilePaths(configSource: ConfigSource): string[] {
 
 function getWatchedDirectoryPaths(configSource: ConfigSource): string[] {
   const watchedDirectories = new Set<string>();
+  if (configSource.baseType !== "directory" && !configSource.workspacePath) {
+    return [];
+  }
+
   const addDirectoryTree = (path: string) => {
     watchedDirectories.add(path);
     if (!existsSync(path) || !isExistingDirectory(path)) return;
@@ -495,11 +505,15 @@ function getWatchedDirectoryPaths(configSource: ConfigSource): string[] {
     }
   };
 
-  addDirectoryTree(configSource.baseType === "directory" ? configSource.basePath : dirname(configSource.basePath));
+  if (configSource.baseType === "directory") {
+    addDirectoryTree(configSource.basePath);
+  }
   if (configSource.workspacePath) {
     addDirectoryTree(configSource.workspacePath);
   }
-  addDirectoryTree(dirname(configSource.mutablePath));
+  if (configSource.baseType === "directory" || configSource.workspacePath) {
+    addDirectoryTree(dirname(configSource.mutablePath));
+  }
   return [...watchedDirectories];
 }
 

@@ -15,6 +15,10 @@
       </div>
     </div>
 
+    <div v-if="error" class="glass-card p-4 mb-5 border border-red-500/30 bg-red-900/20 text-red-200 text-sm">
+      {{ error }}
+    </div>
+
     <div class="settings-grid">
 
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
@@ -270,7 +274,7 @@ async function refresh() {
 
 async function approvePromotion(toolName: string) {
   try {
-    await fetch(`${apiBase()}/api/tools/dynamic/${toolName}/promote`, {
+    await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(toolName)}/promote`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ reviewedBy: "operator" }),
@@ -283,7 +287,7 @@ async function approvePromotion(toolName: string) {
 
 async function rejectPromotion(toolName: string) {
   try {
-    await fetch(`${apiBase()}/api/tools/dynamic/${toolName}/reject-promotion`, {
+    await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(toolName)}/reject-promotion`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ reviewedBy: "operator" }),

@@ -21,6 +21,8 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 
+const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
+
 const log = childLogger("gateway:agui");
 
 // ─── Event helpers ────────────────────────────────────────────────────────────
@@ -84,9 +86,10 @@ export async function handleAguiStream(
     sseEvent(res, {
       type: "RUN_ERROR",
       runId,
-      message: `Turn timed out after ${Math.round(turnTimeoutMs / 60000)} minutes. Session archived.`,
+      message: "Turn exceeded the timeout window and did not finish synthesis. Session archived.",
     });
   };
+  timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
 
   // Handle client disconnect
   res.on("close", () => {

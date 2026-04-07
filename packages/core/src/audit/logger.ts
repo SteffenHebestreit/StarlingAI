@@ -81,7 +81,7 @@ export function registerPostgresSink(fn: (event: AuditEvent) => Promise<void>): 
   });
 }
 
-function resolveAuditLogPath(): string {
+export function resolveAuditLogPath(): string {
   const explicit = process.env["SAI_AUDIT_LOG"];
   if (explicit?.trim()) return resolve(explicit);
 

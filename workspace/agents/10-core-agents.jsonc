@@ -6,8 +6,8 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/gemma-4-e4b-it",
-        "fallback": "lmstudio/gemma-4-e4b-it",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "fallback": "lmstudio/qwen3.5-4b",
         "enableThinking": false,
         "contextWindow": 32768,
         "temperature": 0.2,

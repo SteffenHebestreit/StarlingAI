@@ -93,6 +93,12 @@ const AGGREGATED_NEWS_TOKENS = new Set([
   "news", "updates", "neuigkeiten", "nachrichten", "meldungen", "trends",
 ]);
 
+const SCHEDULING_INTENT_TOKENS = new Set([
+  "schedule", "scheduled", "scheduling", "calendar", "reminder", "reminders",
+  "task", "tasks", "todo", "deadline", "due", "tomorrow", "friday", "monday",
+  "tuesday", "wednesday", "thursday", "saturday", "sunday",
+]);
+
 const TTS_PHRASES: RegExp[] = [
   /\bread\s+(out|aloud)\b/,
   /\btext\s+to\s+speech\b/,
@@ -285,6 +291,13 @@ function isPentestSpecialist(cfg: SubAgentConfig): boolean {
   return /(pentest|penetration test|security|offensive|exploit|vulnerability|cve|sqlmap|nikto|nmap|hydra|metasploit)/.test(combined);
 }
 
+function isComputerUseSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.some((tool) => tool.startsWith("computer_"))
+    || /(computer.?use|desktop.?(control|automation|access)|remote.?desktop|rdp|screen.?control|vnc)/.test(combined);
+}
+
 function isVisualizationSpecialist(cfg: SubAgentConfig): boolean {
   const tools = cfg.tools ?? [];
   const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
@@ -309,8 +322,10 @@ function isExecutionCoordinator(cfg: SubAgentConfig): boolean {
 }
 
 function isCitationResearchSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
   const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
-  return /(citation|bibliograph|paper|report|brief|primary source)/.test(combined);
+  return tools.some((tool) => tool === "web_search" || tool === "web_fetch")
+    && /(citation research|citation-grade|official source lookup|source lookup|primary source|specification discovery|bibliograph)/.test(combined);
 }
 
 function isNarrativeSpecialist(cfg: SubAgentConfig, keywords: string[]): boolean {
@@ -324,6 +339,13 @@ function isChannelOpsSpecialist(cfg: SubAgentConfig): boolean {
   const tags = (cfg.tags ?? []).join(" ").toLowerCase();
   return caps.includes("channel troubleshooting") || caps.includes("delivery diagnosis")
     || tags.includes("channels");
+}
+
+function isSchedulerSpecialist(cfg: SubAgentConfig): boolean {
+  const tools = cfg.tools ?? [];
+  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+  return tools.some((tool) => /(?:add|list|update).*(?:task|calendar)|calendar|reminder/i.test(tool))
+    || /(task scheduling|calendar management|reminders|due dates|scheduler|scheduling|calendar item)/.test(combined);
 }
 
 export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig, keywords: string[]): number {
@@ -452,22 +474,51 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
   const pentestSpecialist = isPentestSpecialist(cfg);
   const visualizationSpecialist = isVisualizationSpecialist(cfg);
   const dataSpecialist = isDataSpecialist(cfg);
+  const schedulerSpecialist = isSchedulerSpecialist(cfg);
   const dataHeavyIntent = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate)\b/i.test(normalizedQuery);
   const visualizationIntent = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalizedQuery);
   const sequentialIntent = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalizedQuery);
   const synthesisIntent = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalizedQuery);
   const externalDataIntent = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|source|sources)\b/i.test(normalizedQuery);
+  const dataPreparationIntent = /\b(clean|structure|format|normalize|normalise|tabulate|reshape|organize|organise)\b/i.test(normalizedQuery)
+    && /\b(data|dataset|json|csv|values?|temperatures?|metrics?|averages?)\b/i.test(normalizedQuery)
+    && !/\b(create|render|generate|produce|visuali[sz]e|plot|diagram|dashboard)\b/i.test(normalizedQuery);
+  const externalDataLookupIntent = externalDataIntent
+    && !navigationIntent
+    && !visualizationIntent
+    && /\b(research|researcher|find|collect|get|gather|retrieve|lookup|look up|historical|monthly|yearly|quarterly|last year|previous year|average|averages|data)\b/i.test(normalizedQuery);
   const securityIntent = /\b(pentest|penetration|security|vulnerability|vulnerabilities|cve|exploit|scan|scanning|attack|attacks|nikto|sqlmap|nmap|hydra|metasploit|authorized scope|target host|target hosts)\b/i.test(normalizedQuery);
   const apiExecutionIntent = /\b(endpoint|endpoints|request|response|responses|payload|headers?|rest|graphql|http|json|validate|call|test)\b/i.test(normalizedQuery);
   const documentationLookupIntent = researchIntent && /\b(documentation|docs|spec|specification|reference|official)\b/i.test(normalizedQuery) && !apiExecutionIntent;
   const browserExecutionIntent = /\b(log ?in|login|sign ?in|fill out|submit|download)\b/i.test(normalizedQuery)
     && /\b(portal|website|site|page|form|invoice|dashboard)\b/i.test(normalizedQuery);
+  const hasDesktopKeyword = /\b(meinem?\s+(?:pc|computer|rechner|desktop|workstation)|my\s+(?:pc|computer|desktop|workstation)|on\s+(?:the\s+)?(?:pc|computer|desktop|machine)\s+at|lokale[mnrs]?\s+(?:pc|computer|rechner|desktop))\b/i.test(normalizedQuery);
+  const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalizedQuery);
+  // Bare IP alone is ambiguous (could be pentest target, browser URL, etc.).
+  // Only treat it as computer-use intent when paired with desktop/app context.
+  const ipWithDesktopContext = hasIpAddress
+    && /\b(rdp|vnc|ssh|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|loaded|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalizedQuery)
+    && !securityIntent && !browserExecutionIntent;
+  const computerUseIntent = (hasDesktopKeyword || ipWithDesktopContext)
+    && !securityIntent;
   const codeGenerationIntent = !codeAnalysisIntent
     && /\b(write|create|implement|build)\b/i.test(normalizedQuery)
     && /\b(function|class|script|module|component|utility|cli|program)\b/i.test(normalizedQuery);
   const sourceGroundedAuthoringIntent = writingIntent
     && /\b(paper|report|brief|review|article)\b/i.test(normalizedQuery)
     && /\b(source|sources|citation|citations|notes|evidence|collected)\b/i.test(normalizedQuery);
+  const citationSourceLookupIntent = /\b(find|locate|lookup|look up|get|collect|gather)\b/i.test(normalizedQuery)
+    && /\b(official|primary|source|sources|citation|citations|reference|references)\b/i.test(normalizedQuery)
+    && /\b(paper|papers|report|reports|brief|briefs)\b/i.test(normalizedQuery)
+    && !writingIntent;
+  const schedulingIntent = hasToken(queryTokens, SCHEDULING_INTENT_TOKENS)
+    || hasPhrase(normalizedQuery, [
+      /schedule\s+(?:a\s+)?reminder/,
+      /add\s+(?:a\s+)?new\s+task/,
+      /due\s+(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/,
+      /calendar\s+(?:item|event|task)/,
+      /remind\s+me/,
+    ]);
   const workspaceLookupIntent = /\b(workspace|project|repository|repo)\b/i.test(normalizedQuery)
     && /\b(search|find|reference|references|mention|mentions|files?|where|all)\b/i.test(normalizedQuery);
   const channelMentions = ["slack", "discord", "telegram", "email", "mail"].filter((channel) => new RegExp(`\\b${channel}\\b`, "i").test(normalizedQuery)).length;
@@ -564,6 +615,29 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     if (researchSpecialist && !browserSpecialist) adjustment -= 0.08;
   }
 
+  // ── Computer-use / remote desktop access ──
+  if (computerUseIntent) {
+    if (isComputerUseSpecialist(cfg)) adjustment += 0.48;
+    if (browserSpecialist && !isComputerUseSpecialist(cfg)) adjustment -= 0.3;
+    if (researchSpecialist && !isComputerUseSpecialist(cfg)) adjustment -= 0.2;
+    if (planningCoordinator && !isComputerUseSpecialist(cfg)) adjustment -= 0.15;
+  }
+
+  if (externalDataLookupIntent) {
+    if (researchSpecialist && !citationResearchSpecialist) adjustment += 0.4;
+    else if (webResearchCoordinator) adjustment += 0.12;
+    if (dataSpecialist && !researchSpecialist) adjustment -= 0.24;
+    if (visualizationSpecialist && !researchSpecialist) adjustment -= 0.28;
+    if (navigationSpecialist) adjustment -= 0.34;
+    if (writingSpecialist && !researchSpecialist) adjustment -= 0.08;
+  }
+
+  if (dataPreparationIntent) {
+    if (dataSpecialist) adjustment += 0.28;
+    if (visualizationSpecialist) adjustment -= 0.24;
+    if (researchSpecialist && !dataSpecialist) adjustment -= 0.08;
+  }
+
   // ── Workflow automation vs channel ops ──
   if (workflowIntent) {
     if (isWorkflowSpecialist(cfg)) adjustment += 0.1;
@@ -578,16 +652,29 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     if (apiSpecialist) adjustment -= 0.08;
   }
 
-  if (gitContext) {
+  if (gitContext && !schedulingIntent) {
     if (dedicatedGitSpecialist) adjustment += 0.2;
     else if (gitSpecialist) adjustment += 0.08;
     if (writingSpecialist && !gitSpecialist) adjustment -= 0.08;
   }
 
   if (sourceGroundedAuthoringIntent) {
-    if (sourceGroundedAuthor) adjustment += 0.22;
-    if (citationResearchSpecialist && !sourceGroundedAuthor) adjustment -= 0.16;
-    if (researchSpecialist && !sourceGroundedAuthor) adjustment -= 0.06;
+    if (sourceGroundedAuthor) adjustment += 0.32;
+    if (writingSpecialist && sourceGroundedAuthor) adjustment += 0.08;
+    if (citationResearchSpecialist && !sourceGroundedAuthor) adjustment -= 0.24;
+    if (researchSpecialist && !sourceGroundedAuthor) adjustment -= 0.1;
+  }
+
+  if (citationSourceLookupIntent) {
+    if (citationResearchSpecialist) adjustment += 0.34;
+    if (sourceGroundedAuthor) adjustment -= 0.22;
+    if (researchSpecialist && !citationResearchSpecialist) adjustment += 0.08;
+  }
+
+  if (schedulingIntent) {
+    if (schedulerSpecialist) adjustment += 0.34;
+    if (gitSpecialist && !schedulerSpecialist) adjustment -= 0.22;
+    if (writingSpecialist && !schedulerSpecialist) adjustment -= 0.06;
   }
 
   // ── Fresh/current news and release updates ──
@@ -618,7 +705,7 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     adjustment -= compositeIntent ? 0.28 : 0.18;
   }
 
-  if (navigationSpecialist && !navigationIntent && (visualizationIntent || dataHeavyIntent || externalDataIntent || compositeIntent)) {
+  if (navigationSpecialist && !navigationIntent && (visualizationIntent || dataHeavyIntent || externalDataIntent || compositeIntent || externalDataLookupIntent)) {
     adjustment -= 0.22;
   }
 
@@ -659,6 +746,7 @@ export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConf
   const dataSpecialist = isDataSpecialist(cfg);
   const researchSpecialist = isResearchSpecialist(cfg, inferredKeywords);
   const narrativeSpecialist = isNarrativeSpecialist(cfg, inferredKeywords);
+  const sourceGroundedAuthor = isSourceGroundedAuthor(cfg);
   const citationResearchSpecialist = isCitationResearchSpecialist(cfg);
 
   const sourceAcquisitionIntent = /\b(official|source|sources|citation|citations|documentation|docs|reference|references|latest|current|recent|today|now|last year)\b/i.test(normalizedQuery);
@@ -670,6 +758,22 @@ export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConf
   const groundedInputIntent = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalizedQuery);
   const citationIntent = /\b(citation|citations|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalizedQuery);
   const newsIntent = /\b(news|update|updates|release|releases|release notes|trend|trends|nachrichten|neuigkeiten|aktuell|aktuelle|aktuellen)\b/i.test(normalizedQuery);
+  const pureStructuredAnalysisIntent = structuredAnalysisIntent
+    && !visualizationIntent
+    && !sourceAcquisitionIntent
+    && !browserIntent;
+  const externalDataResearchIntent = externalDomainIntent
+    && !visualizationIntent
+    && !browserIntent
+    && !groundedInputIntent
+    && /\b(find|collect|get|gather|retrieve|historical|monthly|yearly|quarterly|last year|previous year|average|averages|data)\b/i.test(normalizedQuery);
+  const dataPreparationIntent = pureStructuredAnalysisIntent
+    && /\b(clean|structure|format|normalize|normalise|tabulate|reshape|organize|organise)\b/i.test(normalizedQuery);
+  const evidenceAuthorshipIntent = groundedInputIntent
+    && /\b(write|draft|author|compose|prepare)\b/i.test(normalizedQuery)
+    && /\b(paper|papers|report|reports|brief|briefs|review|article)\b/i.test(normalizedQuery)
+    && /\b(notes|citation|citations|evidence|findings|sources)\b/i.test(normalizedQuery)
+    && !/\b(find|search|look up|lookup|collect|gather|get|fetch)\b/i.test(normalizedQuery);
 
   const renderFromEvidenceIntent = groundedInputIntent
     && visualizationIntent
@@ -680,11 +784,6 @@ export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConf
   const evidenceToArtifactWorkflow = visualizationIntent
     && (sourceAcquisitionIntent || externalDomainIntent || structuredAnalysisIntent)
     && (!renderFromEvidenceIntent || sequentialIntent);
-
-  const pureStructuredAnalysisIntent = structuredAnalysisIntent
-    && !visualizationIntent
-    && !sourceAcquisitionIntent
-    && !browserIntent;
 
   let adjustment = 0;
 
@@ -709,8 +808,32 @@ export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConf
 
   if (pureStructuredAnalysisIntent) {
     if (dataSpecialist) adjustment += 0.12;
+    if (visualizationSpecialist && !dataSpecialist) adjustment -= 0.18;
     if (planningCoordinator) adjustment -= 0.06;
     if (narrativeSpecialist && !dataSpecialist) adjustment -= 0.08;
+  }
+
+  if (externalDataResearchIntent) {
+    if (researchSpecialist && !citationResearchSpecialist) adjustment += 0.24;
+    if (dataSpecialist && !researchSpecialist) adjustment -= 0.18;
+    if (visualizationSpecialist && !researchSpecialist) adjustment -= 0.2;
+    if (planningCoordinator) adjustment -= 0.06;
+    if (narrativeSpecialist && !researchSpecialist) adjustment -= 0.08;
+  }
+
+  if (dataPreparationIntent) {
+    if (dataSpecialist) adjustment += 0.18;
+    if (visualizationSpecialist && !dataSpecialist) adjustment -= 0.18;
+    if (planningCoordinator) adjustment -= 0.04;
+  }
+
+  if (evidenceAuthorshipIntent) {
+    if (sourceGroundedAuthor) adjustment += 0.28;
+    else if (narrativeSpecialist) adjustment += 0.14;
+
+    if (citationResearchSpecialist && !sourceGroundedAuthor) adjustment -= 0.18;
+    if (researchSpecialist && !sourceGroundedAuthor && !citationResearchSpecialist) adjustment -= 0.06;
+    if (planningCoordinator) adjustment -= 0.08;
   }
 
   if (sourceAcquisitionIntent && !visualizationIntent && !structuredAnalysisIntent) {

@@ -42,6 +42,7 @@ services:
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
+      - SAI_WORKSPACE_CONFIG_PATH=/workspace/workspace
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro

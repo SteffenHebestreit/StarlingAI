@@ -293,6 +293,56 @@ describe("multimodal and browser direct tools", () => {
     }
   });
 
+  it("normalizes locale-style STT language codes for transcribe-only backends and retries without language on failure", async () => {
+    writeFileSync(join(tempDir, "transcribe-only-locale.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        stt: { ...realConfig.multimodal.stt, api: "transcribe-only" },
+      },
+    } as typeof realConfig);
+
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const form = init?.body as FormData;
+      const language = form.get("language");
+      if (language === "de") {
+        return new Response(JSON.stringify({ error: "unsupported locale variant" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ text: "retried transcript" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("transcribe_audio");
+
+      const result = await tool!.execute({ path: "transcribe-only-locale.wav", language: "de-DE" }, {
+        sessionId: "session-stt-transcribe-only-locale",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("retried transcript");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstForm = fetchMock.mock.calls[0]?.[1]?.body as FormData;
+      const secondForm = fetchMock.mock.calls[1]?.[1]?.body as FormData;
+      expect(firstForm.get("language")).toBe("de");
+      expect(secondForm.get("language")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("returns failure when the STT service responds with a non-200 error", async () => {
     writeFileSync(join(tempDir, "bad.wav"), Buffer.from([0x52, 0x49, 0x46, 0x46]));
 

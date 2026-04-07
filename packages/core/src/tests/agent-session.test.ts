@@ -80,6 +80,14 @@ describe("AgentSession collapsed history", () => {
     });
     session.addMessage({
       role: "system",
+      content: "[CONTINUE ORCHESTRATION] The latest delegated evidence identifies a concrete follow-up action.",
+    });
+    session.addMessage({
+      role: "system",
+      content: "[USER RESPONSE REQUIRED] The latest delegated evidence requires clarification from the user.",
+    });
+    session.addMessage({
+      role: "system",
       content: "[USER INTERACTION OWNERSHIP] Ask the user for clarification.",
     });
     session.addMessage({
@@ -94,6 +102,8 @@ describe("AgentSession collapsed history", () => {
     const collapsedText = collapsed.map((message) => String(message.content ?? "")).join("\n");
 
     expect(collapsedText).not.toContain("[SYNTHESIS REQUIRED]");
+    expect(collapsedText).not.toContain("[CONTINUE ORCHESTRATION]");
+    expect(collapsedText).not.toContain("[USER RESPONSE REQUIRED]");
     expect(collapsedText).not.toContain("[USER INTERACTION OWNERSHIP]");
     expect(collapsedText).toContain("Bitte präzisieren Sie den Start- und Zielort.");
     expect(collapsedText).toContain("worbis bei leinefelde und dresden in sachsen");
@@ -165,6 +175,8 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).toContain("Do not ask for authorization or scope unless the user explicitly switches to running a real assessment");
     expect(prompt).toContain("swarm_maintainer");
     expect(prompt).toContain("do NOT call search_agents or list_agents first");
+    expect(prompt).toContain("prefer delegate_to_agent(task: \"...\") without agentName first");
+    expect(prompt).toContain("sourced chart, table, or HTML visualization");
     expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");
     expect(prompt).toContain("provide a concise user-facing progress update before triggering the next wave of actions");
     expect(prompt).toContain("Do not waste turns on small talk");

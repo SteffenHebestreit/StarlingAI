@@ -231,8 +231,8 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
             stats.calls++;
             if (result.success) stats.successes++;
             _runtimeStats.set(def.name, stats);
-            // Persist updated stats so they survive gateway restarts
-            persistStats(def.name, stats);
+            // Persist updated stats so they survive gateway restarts (debounced)
+            scheduleStatsPersist(def.name);
             // Auto-nominate if threshold reached and not already nominated
             maybeNominateForPromotion(def.name);
             return result;
@@ -280,8 +280,27 @@ function syncDynamicTools(): void {
     }
 }
 
-/** Persist updated call stats into the tool's JSON file on disk. */
-function persistStats(bareToolName: string, stats: _CallStats): void {
+/** Persist updated call stats into the tool's JSON file on disk (debounced per tool). */
+const _pendingStatsPersist = new Set<string>();
+let _statsFlushTimer: ReturnType<typeof setTimeout> | null = null;
+const STATS_FLUSH_INTERVAL_MS = 30_000;
+
+function scheduleStatsPersist(bareToolName: string): void {
+    _pendingStatsPersist.add(bareToolName);
+    if (_statsFlushTimer) return;
+    _statsFlushTimer = setTimeout(flushPendingStats, STATS_FLUSH_INTERVAL_MS);
+}
+
+function flushPendingStats(): void {
+    _statsFlushTimer = null;
+    for (const name of _pendingStatsPersist) {
+        const stats = _runtimeStats.get(name);
+        if (stats) persistStatsNow(name, stats);
+    }
+    _pendingStatsPersist.clear();
+}
+
+function persistStatsNow(bareToolName: string, stats: _CallStats): void {
     const def = _loadedTools.get(bareToolName);
     if (!def) return;
     def.runtimeCalls = stats.calls;

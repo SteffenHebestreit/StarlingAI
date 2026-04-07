@@ -62,6 +62,176 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("includes partial swarm progress in timeout output when work was already underway", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-progress-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        coordinator_agent: {
+          description: "Coordinator timeout test agent",
+          systemPrompt: "Coordinate the task and use tools.",
+          tools: ["get_swarm_state"],
+          maxIterations: 3,
+          turnTimeoutMs: 1000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "get_swarm_state",
+      description: "Populate swarm progress for timeout testing",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, context) {
+        const startedAt = new Date().toISOString();
+        context.swarmState = {
+          objective: "Build ETF chart",
+          startedAt,
+          updatedAt: startedAt,
+          tasks: {
+            fetch: {
+              id: "fetch",
+              title: "Fetch monthly ETF figures",
+              status: "completed",
+              dependsOn: [],
+              selectedAgent: "researcher",
+              attempts: [{
+                agentName: "researcher",
+                status: "completed",
+                startedAt,
+                finishedAt: startedAt,
+                summary: "Collected monthly MSCI World ETF figures.",
+              }],
+              output: "Collected monthly MSCI World ETF figures.",
+            },
+          },
+        };
+        return { success: true, output: "Progress seeded" };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "seed-1",
+            name: "get_swarm_state",
+            arguments: {},
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coordinator_agent",
+        task: "Coordinate an ETF chart build.",
+        parentSessionId: "parent-progress",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("timed out after 1000ms");
+      expect(result.output).toContain("Partial progress before interruption");
+      expect(result.stats.outcome).toBe("partial");
+      expect(result.output).toContain("fetch [completed] Fetch monthly ETF figures via researcher");
+      expect(result.output).toContain("Tool calls executed: 1 (get_swarm_state)");
+    } finally {
+      unregisterTool("get_swarm_state");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("gives coordinator agents (with run_task_graph) an elevated default timeout floor", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-coordinator-timeout-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const turnTimeoutMs = 900_000; // 15 min gateway turn timeout
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { turnTimeoutMs },
+      subAgents: {
+        coord_agent: {
+          description: "Coordinator that uses run_task_graph",
+          systemPrompt: "Coordinate work.",
+          tools: ["run_task_graph", "parallel_delegate", "delegate_to_agent"],
+          maxIterations: 4,
+          // NO turnTimeoutMs — should get 85% of gateway turn timeout as floor
+        },
+      },
+    }), "utf8");
+
+    // Seed short outcome history so adaptive would normally pick a LOW timeout
+    const stateDir = join(tempDir, ".starlingai");
+    mkdirSync(stateDir, { recursive: true });
+    const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
+    const makeOutcome = (durationMs: number): OutcomeEntry => ({
+      ts: new Date().toISOString(),
+      agent: "coord_agent",
+      task: "simple delegation",
+      outcome: "success",
+      iterations: 2,
+      totalTokens: 100,
+      durationMs,
+      timeoutMs: 60_000,
+    });
+    // 3 short completions that would produce an adaptive timeout of ~45s × 1.5 = 67.5s
+    for (const durationMs of [40_000, 42_000, 45_000]) {
+      appendFileSync(outcomesFile, JSON.stringify(makeOutcome(durationMs)) + "\n");
+    }
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    // Mock LLM to immediately return so we can inspect the audit event
+    completeMock.mockResolvedValue({
+      content: "coordinated",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    // Capture audit events via subscriber
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coord_agent",
+        task: "Run a complex task graph.",
+        parentSessionId: "parent-coord",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toBe("coordinated");
+
+      // The coordinator default floor = 900_000 * 0.85 = 765_000 ms.
+      // Adaptive p95 from history = 45_000 * 1.5 = 67_500, but Math.max(67_500, 765_000) = 765_000.
+      // So the resolved timeout should be >= 765_000 ms (the coordinator floor wins).
+      const startEvent = auditEvents.find(
+        (e) => e.type === "sub_agent_started" && e.data?.agentName === "coord_agent",
+      );
+      expect(startEvent).toBeDefined();
+      // timeoutMs should be at least the coordinator floor (765s), NOT the short adaptive value (67.5s)
+      expect(startEvent!.data.timeoutMs).toBeGreaterThanOrEqual(765_000);
+    } finally {
+      unsubscribe();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("passes an adaptive timeout-derived signal when the agent has enough recent duration history", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-adaptive-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -138,6 +308,7 @@ describe("sub-agent turn timeouts", () => {
           systemPrompt: "Inspect the user's desktop.",
           tools: [
             "computer_list_nodes",
+            "computer_list_sessions",
             "computer_session_start",
             "computer_session_attach",
             "computer_list_windows",
@@ -158,6 +329,7 @@ describe("sub-agent turn timeouts", () => {
     const { registerTool, unregisterTool } = await import("../tools/registry.js");
     const stubToolNames = [
       "computer_list_nodes",
+      "computer_list_sessions",
       "computer_session_start",
       "computer_session_attach",
       "computer_list_windows",

@@ -1,7 +1,7 @@
 # Architecture & Design Philosophy
 
 <p align="center">
-    <img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+    <img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI is a general-purpose AI agent swarm built around four principles borrowed from the murmuration of starlings, extended with an explicit security contract. The system is designed to tackle any task domain by dynamically composing the right specialist agents — not by building one-off pipelines for specific workflows.
@@ -95,7 +95,7 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The system has completed **Stage 7** of the swarm vision (with Stage 8 gap-closure work started in v0.3.2): full multimodal capability, human-in-the-loop approval gates, and intervention diagnostics, on top of the complete distributed swarm infrastructure from Stages 1–6.
+The system has completed **Stage 9** of the swarm vision, with the current `v0.4.1` release focused on artifact generation, browser-backed research fallbacks, and operator-facing debugging/export polish on top of the Stage 9 foundations.
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
@@ -125,6 +125,9 @@ The system has completed **Stage 7** of the swarm vision (with Stage 8 gap-closu
 | **Container opt-out model** | 8 | Implemented (v0.3.2) | `agents.defaultContainerized: true` global flag + per-agent `container.disabled: true` escape hatch; 15 trusted read-only agents pre-opted-out (see GAP-1 in ROADMAP) |
 | **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
 | **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
+| **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |
+| **Browser-backed search and fetch fallback** | 9.1 | Implemented (v0.4.1) | Search can fall back through Playwright when SearXNG is unavailable; `web_fetch` prefers rendered HTML for JavaScript-heavy pages |
+| **Session debug Markdown export** | 9.1 | Implemented (v0.4.1) | REST export combines transcript, raw history, and audit evidence for operator review |
 
 ---
 

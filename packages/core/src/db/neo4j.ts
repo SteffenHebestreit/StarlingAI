@@ -17,9 +17,9 @@ export function getNeo4jDriver(): Driver | null {
 
   const url = process.env["NEO4J_URL"];
   const user = process.env["NEO4J_USER"] ?? "neo4j";
-  const password = process.env["NEO4J_PASSWORD"] ?? "starlingai";
+  const password = process.env["NEO4J_PASSWORD"];
 
-  if (!url) return null;
+  if (!url || !password) return null;
 
   try {
     _driver = neo4j.driver(url, neo4j.auth.basic(user, password), {

@@ -9,7 +9,7 @@ describe("runtime turn guidance", () => {
     expect(guidance?.freshnessSensitive).toBe(true);
     expect(guidance?.sourceSensitive).toBe(true);
     expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
-    expect(guidance?.prompt).toContain("Use delegate_to_agent for simple specialist routing");
+    expect(guidance?.prompt).toContain("Use delegate_to_agent for atomic specialist routing");
     expect(guidance?.prompt).toContain("prefer a coordinator-style agent such as web_task_coordinator");
     expect(guidance?.prompt).toContain("route it through a browser specialist");
     expect(guidance?.prompt).toContain("Do not stop after a browser snapshot");
@@ -223,6 +223,46 @@ describe("runtime turn guidance", () => {
     expect(result).toContain("timed out after 312227ms");
   });
 
+  it("marks partial computer-use delegation as partial progress instead of failure", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      [
+        "Sub-agent 'computer_use_agent' timed out after 1000ms",
+        "Partial progress before interruption:",
+        "- Tool calls executed: 3 (computer_list_nodes, computer_session_start, computer_snapshot)",
+        "- Iterations completed: 1",
+      ].join("\n"),
+      {
+        agentName: "computer_use_agent",
+        attemptedAgents: ["computer_use_agent"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+        routingReason: { confidence: "high" },
+      },
+    );
+
+    expect(result).toContain("Delegated result from computer_use_agent — PARTIAL PROGRESS.");
+    expect(result).toContain("State clearly that the desktop run made progress but was interrupted before full completion");
+    expect(result).toContain("Partial progress before interruption:");
+    expect(result).not.toContain("TASK FAILED");
+  });
+
+  it("marks blocker-style delegated evidence as failed for synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      "Blocker: Raw temperature data for Dresden, Germany, 2025 is unavailable. Please provide the structured JSON data to proceed.",
+      {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        routingReason: { confidence: "medium" },
+      },
+    );
+
+    expect(result).toContain("Delegated result from researcher — TASK FAILED.");
+    expect(result).toContain("Blocker: Raw temperature data for Dresden, Germany, 2025 is unavailable.");
+  });
+
   it("builds a compact model-visible context view for task-graph results", () => {
     const result = buildModelVisibleToolResult(
       "run_task_graph",
@@ -234,11 +274,22 @@ describe("runtime turn guidance", () => {
       },
     );
 
-    expect(result).toContain("Task graph completed");
+    expect(result).toContain("Task graph finished with incomplete status");
     expect(result).toContain("Nodes completed: 1");
     expect(result).toContain("Failed: 1");
     expect(result).toContain("Observed evidence:");
     expect(result).toContain("recon [completed] recon_agent");
+  });
+
+  it("marks search_agents results as routing suggestions rather than executed delegation", () => {
+    const result = buildModelVisibleToolResult(
+      "search_agents",
+      '➡ NEXT ACTION: Call delegate_to_agent(agentName="mission_coordinator", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "financial data chart etf msci world": **mission_coordinator**',
+    );
+
+    expect(result).toContain("Agent routing suggestions only. No delegation has happened yet.");
+    expect(result).toContain("do NOT tell the user that work was routed");
+    expect(result).toContain("mission_coordinator");
   });
 
   it("builds an evidence-preserving model-visible context view for parallel delegation results", () => {

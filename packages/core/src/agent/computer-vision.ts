@@ -53,6 +53,8 @@ export interface ProgressDetection {
   summary: string;
 }
 
+export type ScreenshotAnalysisFocus = "lmstudio_loaded_models";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function resolveVisionModel(): string {
@@ -82,6 +84,45 @@ async function callVision(bytes: Uint8Array, contentType: string, prompt: string
   return analyzeImageBytes(bytes, contentType, model, prompt);
 }
 
+export function normalizeScreenshotAnalysisFocus(focusHint?: string): ScreenshotAnalysisFocus | null {
+  const normalized = focusHint?.trim().toLowerCase() ?? "";
+  if (!normalized) return null;
+  if (/(lm\s*studio|loaded models?|model list|models loaded|geladene modelle|geladene models|welche models)/iu.test(normalized)) {
+    return "lmstudio_loaded_models";
+  }
+  return null;
+}
+
+function buildDefaultScreenshotPrompt(): string {
+  return "You are analyzing a computer screenshot for a desktop automation agent. " +
+    "STEP 1 — IDENTIFY ALL APPLICATIONS: Name every visible application window by its EXACT title bar text or recognizable branding (e.g. 'LM Studio', 'Visual Studio Code', 'OBS Studio', 'Task Manager', 'Chrome'). Do NOT use generic labels like 'monitoring dashboard' or 'settings panel' — always use the application's actual name if ANY branding, logo, or title text is visible. " +
+    "STEP 2 — READ ALL TEXT: Transcribe every piece of readable text on screen — window titles, menu items, labels, status bars, model names, file names, version numbers, IP addresses, and error messages. " +
+    "STEP 3 — DESCRIBE LAYOUT: Describe the full screen layout including left, right, top, bottom, and any secondary-monitor content: all visible windows, dialogs, menus, buttons, text fields, icons, taskbar items, and system tray. " +
+    "For each CLICKABLE element (buttons, input fields, icons, tabs, links), estimate its approximate pixel coordinates as (x, y) from the top-left corner. " +
+    "For text input fields, note whether they appear focused (have a cursor/highlight) and what visible text or placeholder they contain. " +
+    "For chat or messaging UIs, identify the latest visible user message, latest assistant message, whether the input contains draft text, and whether the input appears empty after a send. " +
+    "If text was just submitted and now appears in the conversation while the input is empty or cleared, explicitly say that the message appears submitted. " +
+    "Be precise and concise. Format key findings as: ELEMENT_TYPE 'label' at approximately (x, y).";
+}
+
+function buildLmStudioLoadedModelsPrompt(): string {
+  return "You are analyzing a screenshot of LM Studio with focus on the Loaded Models list. " +
+    "First confirm whether LM Studio is visible and state the app title/version exactly as shown. " +
+    "Then transcribe the Loaded Models section exactly. For EACH visible loaded-model row, extract: status chip text, full model name exactly as shown, any variant/quantization suffix, size, parallel value, and visible action buttons such as Eject. " +
+    "Also report the 'Reachable at' endpoint exactly if visible and the currently selected model in the right sidebar if visible. " +
+    "Do not summarize vaguely. Do not omit rows. Do not rename models. " +
+    "Format the answer as: APP, ENDPOINT, then one bullet per loaded model using exact visible text.";
+}
+
+export function buildScreenshotPrompt(prompt?: string, focusHint?: string): string {
+  if (prompt?.trim()) return prompt;
+  const focus = normalizeScreenshotAnalysisFocus(focusHint);
+  if (focus === "lmstudio_loaded_models") {
+    return buildLmStudioLoadedModelsPrompt();
+  }
+  return buildDefaultScreenshotPrompt();
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -91,16 +132,10 @@ export async function analyzeScreenshot(
   bytes: Uint8Array,
   contentType = "image/png",
   prompt?: string,
+  focusHint?: string,
 ): Promise<ScreenshotAnalysis> {
   const hash = computeScreenshotHash(bytes);
-  const effectivePrompt = prompt ??
-    "You are analyzing a computer screenshot for a desktop automation agent. " +
-    "Describe exactly what you see on the FULL screen, including left, right, top, bottom, and any secondary-monitor content: all visible windows, dialogs, menus, buttons, text fields, icons, and UI state. " +
-    "For each CLICKABLE element (buttons, input fields, icons, tabs, links), estimate its approximate pixel coordinates as (x, y) from the top-left corner. " +
-    "For text input fields, note whether they appear focused (have a cursor/highlight) and what visible text or placeholder they contain. " +
-    "For chat or messaging UIs, identify the latest visible user message, latest assistant message, whether the input contains draft text, and whether the input appears empty after a send. " +
-    "If text was just submitted and now appears in the conversation while the input is empty or cleared, explicitly say that the message appears submitted. " +
-    "Be precise and concise. Format key findings as: ELEMENT_TYPE 'label' at approximately (x, y).";
+  const effectivePrompt = buildScreenshotPrompt(prompt, focusHint);
 
   const description = await callVision(bytes, contentType, effectivePrompt);
 

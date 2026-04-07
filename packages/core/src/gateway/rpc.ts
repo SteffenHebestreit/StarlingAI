@@ -71,6 +71,12 @@ interface PendingApproval {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
+
+interface RpcConnectionCloseOptions {
+  abortInFlightTurns?: boolean;
+}
+
 /**
  * Substitute {{key}} or {{key|default}} placeholders in a task string.
  * Values come from `params`; missing keys fall back to their declared default,
@@ -113,7 +119,7 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
   if (iterMatch) {
     const parsedIterations = parseInt(iterMatch[1]!, 10);
     flags.maxIterationsOverride = parsedIterations === 0
-      ? 0
+      ? 200
       : Math.max(1, Math.min(50, parsedIterations));
     clean = clean.replace(/\s*--iter\s+\d+\b/, "");
   }
@@ -128,7 +134,7 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
   if (timeoutMatch) {
     const parsedTimeoutSec = parseInt(timeoutMatch[1]!, 10);
     flags.turnTimeoutSec = parsedTimeoutSec === 0
-      ? 0
+      ? 7200
       : Math.max(10, Math.min(3600, parsedTimeoutSec));
     clean = clean.replace(/\s*--timeout\s+\d+\b/, "");
   }
@@ -524,13 +530,13 @@ export class RpcConnection {
             data: {
               status: "error",
               requestId,
-              error: `Turn timed out after ${Math.round(effectiveTurnTimeoutMs / 60000)} minutes. Session archived.`,
+              error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
             },
           });
         };
 
         if (effectiveTurnTimeoutMs > 0) {
-          timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs);
+          timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
         }
 
         if (
@@ -690,10 +696,18 @@ export class RpcConnection {
     }
   }
 
-  close(): void {
+  close(options: RpcConnectionCloseOptions = {}): void {
+    const shouldAbortInFlightTurns = options.abortInFlightTurns === true;
     this.auditUnsubscribe?.();
     this.notificationsUnsubscribe?.();
-    const detachedTurns = this.abortControllers.size;
+    for (const [id, controller] of this.abortControllers) {
+      if (shouldAbortInFlightTurns) {
+        controller.abort();
+        log.info({ connId: this.connId, turnId: id }, "Aborted in-flight turn on connection close");
+      } else {
+        log.info({ connId: this.connId, turnId: id }, "Preserved in-flight turn after connection close to allow session recovery");
+      }
+    }
     this.abortControllers.clear();
     // Reject any pending approvals so tool calls unblock immediately
     for (const [, pending] of this.pendingApprovals) {
@@ -701,7 +715,7 @@ export class RpcConnection {
       pending.resolve(false);
     }
     this.pendingApprovals.clear();
-    log.info({ connId: this.connId, detachedTurns }, "RPC connection closed");
+    log.info({ connId: this.connId }, "RPC connection closed");
   }
 
   private sendEvent(event: GatewayEvent): void {

@@ -12,6 +12,8 @@ import { childLogger } from "../logger.js";
 
 const log = childLogger("db:questdb");
 
+const QUESTDB_TIMEOUT_MS = 15_000;
+
 function baseUrl(): string {
   return (process.env["QUESTDB_URL"] ?? "").replace(/\/$/, "");
 }
@@ -35,11 +37,15 @@ export async function questWrite(lines: string | string[]): Promise<void> {
 
   const body = Array.isArray(lines) ? lines.join("\n") : lines;
   try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), QUESTDB_TIMEOUT_MS);
     const res = await fetch(`${url}/write`, {
       method: "POST",
       headers: { "Content-Type": "text/plain; charset=utf-8" },
       body,
+      signal: ac.signal,
     });
+    clearTimeout(timer);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`QuestDB write failed ${res.status}: ${text.slice(0, 200)}`);
@@ -61,10 +67,14 @@ export async function questQuery(sql: string): Promise<Record<string, unknown>[]
   if (!url) return [];
 
   try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), QUESTDB_TIMEOUT_MS);
     const res = await fetch(`${url}/exec?${new URLSearchParams({ query: sql, limit: "1000" })}`, {
       method: "GET",
       headers: { Accept: "application/json" },
+      signal: ac.signal,
     });
+    clearTimeout(timer);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`QuestDB query failed ${res.status}: ${text.slice(0, 200)}`);
@@ -111,6 +121,7 @@ export function escapeLineTag(s: string): string {
  */
 export function escapeSqlString(s: string): string {
   return s
+    .replace(/\/\*[\s\S]*?\*\//g, "")  // strip block comments
     .replace(/--/g, "")        // strip comment starters
     .replace(/;/g, "")         // strip statement terminators
     .replace(/'/g, "''");      // escape single-quotes (standard SQL)

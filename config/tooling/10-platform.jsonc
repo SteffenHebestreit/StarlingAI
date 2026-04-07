@@ -8,6 +8,7 @@
   },
   "computerUse": {
     "enabled": true,
+    "visionModel": "lmstudio/qwen/qwen3.5-35b-a3b",
     "adapters": {
       "local_vscode": {
         "codePath": "code"

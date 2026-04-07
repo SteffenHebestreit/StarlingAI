@@ -1,7 +1,7 @@
 # Security Model
 
 <p align="center">
-	<img src="../swarmLogo.svg" alt="StarlingAI logo" width="180" />
+	<img src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" width="180" />
 </p>
 
 StarlingAI is designed for self-hosted deployment with no assumption of a trusted network. The "Guarded" in StarlingAI reflects a fundamental constraint of the swarm architecture: agents in a starling murmuration are free to move, but StarlingAI agents operate within strict security boundaries. Speed and autonomy never come at the cost of control.

@@ -8,6 +8,7 @@ export type AuditEventType =
   | "tool_call_blocked"
   | "tool_call_completed"
   | "tool_call_failed"
+  | "tool_call_recovered"
   | "tool_output_blocked"
   | "guardrail_blocked"
   | "guardrail_flagged"
@@ -79,6 +80,7 @@ export type AuditEventType =
   | "task_checkpoint_paused"
   | "task_checkpoint_resumed"
   | "task_checkpoint_completed"
+  | "delegate_agent_pinned"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway";
 
