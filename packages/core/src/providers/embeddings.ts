@@ -264,6 +264,7 @@ function isNavigationSpecialist(cfg: SubAgentConfig): boolean {
 }
 
 function isWebResearchCoordinator(cfg: SubAgentConfig): boolean {
+  if (cfg.role === "coordinator" && (cfg.domain === "web" || cfg.domain === "research")) return true;
   const tools = cfg.tools ?? [];
   const caps = (cfg.capabilities ?? []).join(" ").toLowerCase();
   const tags = (cfg.tags ?? []).join(" ").toLowerCase();
@@ -275,6 +276,7 @@ function isWebResearchCoordinator(cfg: SubAgentConfig): boolean {
 }
 
 function isPlanningCoordinator(cfg: SubAgentConfig): boolean {
+  if (cfg.role === "coordinator" || cfg.role === "planner") return true;
   const tools = cfg.tools ?? [];
   const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
   const coordinates = tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
@@ -282,6 +284,7 @@ function isPlanningCoordinator(cfg: SubAgentConfig): boolean {
 }
 
 function isQualitySupervisor(cfg: SubAgentConfig): boolean {
+  if (cfg.role === "supervisor" || cfg.role === "reviewer") return true;
   const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
   return /(quality assurance|quality gate|\bqa\b|acceptance criteria|verification|supervisor|review gate|gap analysis)/.test(combined);
 }

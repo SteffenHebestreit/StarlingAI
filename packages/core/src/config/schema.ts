@@ -394,6 +394,7 @@ export const SubAgentConfigSchema = z.object({
   tags: z.array(z.string()).default([]),           // lightweight product/category tags for discovery
   /** Product domain grouping — research | coding | browser | data | communication | workflow | reliability */
   domain: z.string().optional(),
+  role: z.enum(["coordinator", "specialist", "reviewer", "generator", "supervisor", "planner"]).optional(),
   model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all

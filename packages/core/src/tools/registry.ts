@@ -43,6 +43,8 @@ export interface SwarmState {
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;
+  /** Name of the currently running agent for self-routing guards in orchestration tools. */
+  currentAgentName?: string;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;

@@ -379,6 +379,61 @@ describe("runtime delegated-loop regressions", () => {
     expect(session.getHistory().at(-1)?.content).toBe("synthesized");
   });
 
+  it("rewrites next-turn handoff responses into a direct synthesized answer", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("call_handoff", {
+          agentName: "researcher",
+          task: "Research how StarlingAI can improve itself.",
+        });
+      }
+
+      return createTextStream([
+        "Based on the evidence collected from the delegation attempt, here is the status of your request:",
+        "",
+        "No further tool calls can be made in this turn.",
+        "Would you like me to initiate a new delegation attempt for this research task in the next turn?",
+      ].join("\n"));
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Sub-agent produced no final response.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: false,
+        delegationOutcome: "failure",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Research how StarlingAI can improve itself.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(session.getHistory().at(-1)?.content).toBe("synthesized");
+  });
+
   it("forces synthesis when the model tries to delegate again after synthesis was already required", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

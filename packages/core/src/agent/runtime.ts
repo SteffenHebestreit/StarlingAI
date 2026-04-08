@@ -398,10 +398,13 @@ function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, tool
 
 const CONTINUATION_PROMISE_RE = /\b(i(?:'ll| will)(?:\s+now)?|i am going to|ich werde(?:\s+nun)?|ich beauftrage(?:\s+nun)?|n[äa]chste orchestrierung|next orchestration|next logical step|n[äa]chste logische aktion)\b/i;
 const MISLEADING_EXECUTED_NEXT_STEP_RE = /\b(the next (?:logical )?(?:step|action)|der n[äa]chste(?: logische)?(?: schritt| aktion)|die n[äa]chste(?: logische)? aktion)\b[\s\S]{0,80}\b(which has been executed|has been executed|was executed|has already been executed|wurde(?:\s+bereits)?\s+ausgef[üu]hrt|ist bereits erfolgt)\b/i;
+const NEXT_TURN_HANDOFF_RE = /\b(would you like me to (?:initiate|start|retry)|in the next turn|im n[äa]chsten zug|im n[äa]chsten turn|neue[nr]? delegations(?:strategie|versuch)|new delegation attempt|no further tool calls can be made in this turn|keine weiteren tool calls .* in diesem zug)\b/i;
 
 function shouldRewriteTerminalResponse(value: string, toolIterations: number): boolean {
   if (toolIterations === 0) return false;
-  return CONTINUATION_PROMISE_RE.test(value) || MISLEADING_EXECUTED_NEXT_STEP_RE.test(value);
+  return CONTINUATION_PROMISE_RE.test(value)
+    || MISLEADING_EXECUTED_NEXT_STEP_RE.test(value)
+    || NEXT_TURN_HANDOFF_RE.test(value);
 }
 
 async function rewriteTerminalResponseIfNeeded(
@@ -488,6 +491,7 @@ function stripPresentationFormatting(value: string): string {
 function looksLikeDelegatedFailureEvidence(value: string): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
+  if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
   if (/<\|channel\>\w+/i.test(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted)\b/i.test(preview)
