@@ -109,6 +109,101 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
   }, 30_000);
 
+  it("forwards allowedAgents scope into delegated sub-agent runs", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Coordinate scoped work",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "project_planner",
+      task: "Plan a scoped maintenance task.",
+    }, {
+      sessionId: "session-allowed-scope",
+      workspacePath: "/workspace",
+      swarmState,
+      allowedAgents: ["project_planner", "coder"],
+    });
+
+    expect(result.success).toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+    expect(runSubAgentWithStatsMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "project_planner",
+      allowedAgents: ["project_planner", "coder"],
+    });
+  });
+
+  it("does not let search_agents suggest the invoking coordinator itself", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-search-agents-self-exclude-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: {
+            primary: "mock-model",
+          },
+        },
+      },
+      subAgents: {
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent"],
+        },
+        researcher: {
+          description: "Research specialist for architecture and web analysis.",
+          capabilities: ["research", "web analysis", "architecture review"],
+          tags: ["research", "analysis"],
+          tools: ["read_file"],
+        },
+        evidence_analyst: {
+          description: "Evidence synthesis specialist.",
+          capabilities: ["analysis", "evidence synthesis"],
+          tags: ["analysis"],
+          tools: ["read_file"],
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ getTool }, { resetConfigForTests }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../config/loader.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    resetConfigForTests();
+
+    const searchAgents = getTool("search_agents");
+    expect(searchAgents).toBeDefined();
+
+    const result = await searchAgents!.execute({
+      query: "researcher web analysis architecture",
+    }, {
+      sessionId: "session-self-exclude",
+      workspacePath: tempDir,
+      currentAgentName: "web_task_coordinator",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).not.toContain('delegate_to_agent(agentName="web_task_coordinator"');
+    expect(result.output).toContain("Self excluded from routing suggestions: web_task_coordinator");
+  });
+
   it("treats empty delegated output as failure and uses the fallback agent", async () => {
     runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
       if (agentName === "researcher") return "";
@@ -136,6 +231,86 @@ describe("swarm orchestration tools", () => {
       task: "Find official Model Context Protocol sources",
     }, {
       sessionId: "session-empty-output",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("retrieval_analyst");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("researcher");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("treats placeholder no-response delegated output as failure and uses the fallback agent", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName === "researcher") {
+        return {
+          output: "Sub-agent produced no final response.",
+          stats: {
+            agentName: args.agentName,
+            sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+            promptChars: 0,
+            userContentChars: String(args.task ?? "").length,
+            toolCount: 0,
+            toolNames: [],
+            iterations: 1,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            maxIterations: 5,
+            model: "mock",
+            capabilities: [],
+            outcome: "success",
+            terminalState: "completed",
+          },
+        };
+      }
+
+      return {
+        output: `${args.agentName}:${args.task}:ok`,
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(args.task ?? "").length,
+          toolCount: 0,
+          toolNames: [],
+          iterations: 0,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          outcome: "success",
+          terminalState: "completed",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Research improvements",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      fallbackAgents: ["retrieval_analyst"],
+      task: "Research how StarlingAI can improve itself",
+    }, {
+      sessionId: "session-placeholder-output",
       workspacePath: "/workspace",
       swarmState,
     });

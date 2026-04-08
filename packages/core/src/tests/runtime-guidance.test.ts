@@ -263,6 +263,23 @@ describe("runtime turn guidance", () => {
     expect(result).toContain("Blocker: Raw temperature data for Dresden, Germany, 2025 is unavailable.");
   });
 
+  it("marks placeholder no-response delegated evidence as failed for synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      "Sub-agent produced no final response.",
+      {
+        agentName: "researcher",
+        attemptedAgents: ["swarm_maintainer", "researcher"],
+        delegationSucceeded: true,
+        routingReason: { confidence: "medium" },
+      },
+    );
+
+    expect(result).toContain("Delegated result from researcher — TASK FAILED.");
+    expect(result).toContain("Sub-agent produced no final response.");
+    expect(result).not.toContain("TASK COMPLETED");
+  });
+
   it("builds a compact model-visible context view for task-graph results", () => {
     const result = buildModelVisibleToolResult(
       "run_task_graph",

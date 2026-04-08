@@ -68,6 +68,14 @@ const MAIL_READ_ONLY_TOOLS = new Set<string>([
   "mail_list_unread",
 ]);
 
+const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
+  "list_agents",
+  "search_agents",
+  "delegate_to_agent",
+  "parallel_delegate",
+  "run_task_graph",
+]);
+
 function isComputerObservationOnlyTask(task: string): boolean {
   const normalized = task.toLowerCase();
   if (!normalized.trim()) return false;
@@ -144,6 +152,89 @@ function buildModelExecutionGuidance(modelId: string, enableThinking: boolean | 
       ? "Use deeper reasoning only when reconciling conflicting evidence, extracting exact conclusions from dense output, or choosing between multiple plausible next steps."
       : "Keep reasoning lightweight. Favor direct evidence extraction and deterministic tool sequences over speculative exploration.",
   ].join("\n");
+}
+
+function isOrchestrationCapableRun(toolNames: string[] | undefined): boolean {
+  return toolNames?.some((toolName) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(toolName)) ?? false;
+}
+
+function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
+  const availableTools = toolNames ?? [];
+  if (availableTools.length === 0) {
+    return [
+      "TOOL INVENTORY",
+      "No callable tools are available in this run.",
+      "Do not claim to have used tools you do not have. If the task cannot be completed from the provided context alone, say so explicitly.",
+    ].join("\n");
+  }
+
+  const guidance = [
+    "TOOL INVENTORY",
+    `You may use only these tools in this run: ${availableTools.join(", ")}`,
+    "The runtime provides the real tool schemas separately. Use those exact tool definitions for names and parameters. Do not invent or paraphrase tool names.",
+  ];
+
+  if (availableTools.includes("search_agents")) {
+    guidance.push("If the right specialist is not obvious, call search_agents before delegating.");
+  }
+  if (availableTools.includes("list_agents")) {
+    guidance.push("Call list_agents when you need the full delegate catalog with descriptions and tool access.");
+  }
+  if (availableTools.includes("delegate_to_agent")) {
+    guidance.push("Sub-agent names are not tools. Invoke another specialist only through delegate_to_agent.");
+  }
+  if (availableTools.includes("parallel_delegate")) {
+    guidance.push("Use parallel_delegate only for genuinely independent partitions of work.");
+  }
+  if (availableTools.includes("run_task_graph")) {
+    guidance.push("Use run_task_graph when later steps depend on earlier findings.");
+  }
+
+  return guidance.join("\n");
+}
+
+function buildSubAgentAgentDiscoveryGuidance(agentName: string, allowedAgents: string[] | undefined): string {
+  const config = getConfig();
+  const catalogNames = Object.keys(config.subAgents)
+    .filter((name) => name !== agentName)
+    .filter((name) => !allowedAgents || allowedAgents.includes(name))
+    .sort((left, right) => left.localeCompare(right));
+
+  const header = [
+    "AGENT DISCOVERY",
+    allowedAgents && allowedAgents.length > 0
+      ? `Delegation in this run is restricted to these agents: ${allowedAgents.join(", ")}`
+      : "You may delegate only to configured specialist agents that are visible in this run.",
+    "If the right specialist is not obvious, search first and delegate second.",
+  ];
+
+  if (catalogNames.length === 0) {
+    header.push("No other delegate targets are available in this run.");
+    return header.join("\n");
+  }
+
+  const catalogLines = catalogNames.slice(0, 24).map((name) => {
+    const description = config.subAgents[name]?.description?.trim() ?? "No description available.";
+    return `- ${name}: ${description}`;
+  });
+
+  if (catalogNames.length > 24) {
+    catalogLines.push(`- ${catalogNames.length - 24} more configured agents are available; use list_agents or search_agents to inspect them.`);
+  }
+
+  return [...header, ...catalogLines].join("\n");
+}
+
+function sanitizeSubAgentTask(configuredTools: string[] | undefined, task: string): string {
+  let sanitizedTask = task;
+  if (configuredTools?.some((toolName: string) => toolName.startsWith("computer_"))) {
+    sanitizedTask = sanitizedTask
+      .replace(/(?:using|use|press|hit|with|via)\s+(?:keyboard\s+shortcut\s+)?(?:Ctrl|Alt|Shift|Cmd|Meta|Win)\+[A-Za-z+]+/gi, "using mouse clicks on visible UI elements")
+      .replace(/(?:Ctrl|Alt|Cmd|Meta)\+(?:Shift|Alt)\+[A-Za-z]/gi, "(blocked shortcut — use mouse click)")
+      .replace(/(?:command\s+palette|Ctrl\+Shift\+P)/gi, "visible UI elements")
+      .replace(/(?:keyboard\s+shortcut|shortcut|key\s*(?:combo|combination))\s+(?:to\s+)?(?:open|toggle|show|launch)/gi, "mouse click to open");
+  }
+  return sanitizedTask;
 }
 
 function looksLikeNarratedToolCall(content: string): boolean {
@@ -364,6 +455,8 @@ export interface SubAgentRunOptions {
   context?: string;
   parentSessionId: string;
   workspacePath: string;
+  /** When set, nested delegation from this sub-agent is restricted to these agent names. */
+  allowedAgents?: string[];
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   onProgress?: (event: SubAgentProgressEvent) => void;
@@ -463,6 +556,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     : null;
   const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs ?? defaultTimeoutMs;
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
+  const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
+  const effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
   const timeoutAbort = turnTimeoutMs ? new AbortController() : undefined;
   const timeoutHandle = timeoutAbort
     ? setTimeout(() => timeoutAbort.abort(), turnTimeoutMs)
@@ -478,8 +573,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       "sub_agent_started",
       {
         agentName: opts.agentName,
-        task: opts.task.slice(0, 120),
+        task: sanitizedTask.slice(0, 120),
         capabilities: agentCfg.capabilities,
+        configuredTools: agentCfg.tools ?? [],
+        effectiveTools: effectiveToolNames ?? [],
         tags: agentCfg.tags,
         ...(turnTimeoutMs ? { timeoutMs: turnTimeoutMs } : {}),
         ...(adaptiveTimeout ? {
@@ -550,19 +647,6 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
     const provider = createChatProvider(modelConfig, providerEndpoint);
 
-    // Sanitize task: strip keyboard shortcut instructions that cause wrong-window side effects.
-    // The orchestrator LLM sometimes composes tasks with explicit shortcut instructions
-    // (e.g. "use Ctrl+Shift+P to open Command Palette") which the sub-agent follows
-    // even when its system prompt says not to. Removing them here is the hard guarantee.
-    let sanitizedTask = opts.task;
-    if (agentCfg.tools?.some((t: string) => t.startsWith("computer_"))) {
-      sanitizedTask = sanitizedTask
-        .replace(/(?:using|use|press|hit|with|via)\s+(?:keyboard\s+shortcut\s+)?(?:Ctrl|Alt|Shift|Cmd|Meta|Win)\+[A-Za-z+]+/gi, "using mouse clicks on visible UI elements")
-        .replace(/(?:Ctrl|Alt|Cmd|Meta)\+(?:Shift|Alt)\+[A-Za-z]/gi, "(blocked shortcut — use mouse click)")
-        .replace(/(?:command\s+palette|Ctrl\+Shift\+P)/gi, "visible UI elements")
-        .replace(/(?:keyboard\s+shortcut|shortcut|key\s*(?:combo|combination))\s+(?:to\s+)?(?:open|toggle|show|launch)/gi, "mouse click to open");
-    }
-
     // Build system prompt
     const today = new Date().toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
@@ -580,17 +664,22 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     });
     const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
     const modelExecutionGuidance = buildModelExecutionGuidance(modelConfig.primary, modelConfig.enableThinking);
+    const toolInventoryGuidance = buildSubAgentToolInventory(effectiveToolNames);
+    const agentDiscoveryGuidance = isOrchestrationCapableRun(effectiveToolNames)
+      ? buildSubAgentAgentDiscoveryGuidance(opts.agentName, opts.allowedAgents)
+      : "";
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent
-    const effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
     const tools = getToolsAsLLMDefs(effectiveToolNames);
 
     const toolContext: ToolContext = {
       sessionId: subSessionId,
       workspacePath: opts.workspacePath,
+      currentAgentName: opts.agentName,
+      allowedAgents: opts.allowedAgents,
       approvalCallback: opts.approvalCallback,
       humanInLoopSteps: opts.humanInLoopSteps,
       onComputerAction: opts.onComputerAction,

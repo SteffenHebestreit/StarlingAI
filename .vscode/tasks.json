@@ -547,6 +547,18 @@
 			],
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "core targeted coordinator tests",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location 'F:\\StarlingAI'; & 'C:\\Program Files\\nodejs\\pnpm.cmd' --filter @starlingai/core test -- src/tests/sub-agent-timeout.test.ts src/tests/swarm-orchestration.test.ts"
+			],
+			"isBackground": false,
+			"group": "test"
 		}
 	]
 }

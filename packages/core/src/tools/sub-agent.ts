@@ -267,6 +267,8 @@ export interface AgentRoutingResolution {
   trippedAgents: string[];
   /** True when every result is only "low" confidence — consider ephemeral agent or user clarification. */
   allLowConfidence: boolean;
+  /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
+  excludedAgents?: string[];
 }
 
 interface RoutingSelectionReason {
@@ -402,6 +404,7 @@ export async function resolveAgentRouting(
   opts?: {
     minConfidence?: "high" | "medium" | "low";
     allowedAgents?: string[];
+    excludeAgents?: string[];
   },
 ): Promise<AgentRoutingResolution> {
   const raw = query.trim();
@@ -417,6 +420,10 @@ export async function resolveAgentRouting(
   let entries = [...Object.entries(config.subAgents), ...promotedEntries];
   if (opts?.allowedAgents) {
     entries = entries.filter(([name]) => opts.allowedAgents!.includes(name));
+  }
+  if (opts?.excludeAgents?.length) {
+    const excludedAgents = new Set(opts.excludeAgents);
+    entries = entries.filter(([name]) => !excludedAgents.has(name));
   }
   const availableEntries = new Map(entries);
 
@@ -594,6 +601,7 @@ export async function resolveAgentRouting(
     gated: ranked.length > 0 && gated.length === 0,
     trippedAgents,
     allLowConfidence,
+    excludedAgents: opts?.excludeAgents ? [...opts.excludeAgents] : undefined,
   };
 }
 
@@ -953,6 +961,9 @@ function looksLikePlanningOnlyResult(result: string): boolean {
 export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
+  if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
+    return true;
+  }
   if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
     return true;
   }
@@ -1017,12 +1028,16 @@ function buildDelegationFailureMessage(title: string, detail: string, opts?: { p
 
 async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: string[]): Promise<AgentRoutingCandidate[]> {
   const excluded = new Set(exclude);
+  if (ctx.currentAgentName) {
+    excluded.add(ctx.currentAgentName);
+  }
   const preferMissionCoordinator = shouldPreferMissionCoordinator(query, ctx, exclude);
   const preferWebTaskCoordinator = shouldPreferWebTaskCoordinator(query, ctx, exclude);
   const preferProjectPlanner = shouldPreferProjectPlanner(query, ctx, exclude);
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
+    excludeAgents: [...excluded],
   });
 
   let candidates: AgentRoutingCandidate[] = medium.results;
@@ -1030,6 +1045,7 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
     const low = await resolveAgentRouting(query, {
       minConfidence: "low",
       allowedAgents: ctx.allowedAgents,
+      excludeAgents: [...excluded],
     });
     candidates = [...low.results, ...low.weakCandidates];
 
@@ -1259,6 +1275,7 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
       context: ephemeralSharedCtx ?? undefined,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
+      allowedAgents: ctx.allowedAgents,
       signal: ctx.signal,
       approvalCallback: ctx.approvalCallback,
       humanInLoopSteps: ctx.humanInLoopSteps,
@@ -1592,6 +1609,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         context: enrichedContext,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
+        allowedAgents: ctx.allowedAgents,
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,
         humanInLoopSteps: ctx.humanInLoopSteps,
@@ -1877,6 +1895,7 @@ registerTool({
     const completed = new Set<string>();
     const failed = new Set<string>();
     const blocked = new Set<string>();
+    const inFlight = new Map<string, Promise<{ nodeId: string; result: ToolResult }>>();
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
 
     for (const node of rawNodes) {
@@ -1894,7 +1913,7 @@ registerTool({
       },
     });
 
-    while (remaining.size > 0) {
+    while (remaining.size > 0 || inFlight.size > 0) {
       for (const [nodeId, node] of [...remaining.entries()]) {
         if ((node.dependsOn ?? []).some((dep) => failed.has(dep) || blocked.has(dep))) {
           const task = getOrCreateSwarmTask(ctx, nodeId, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
@@ -1914,6 +1933,14 @@ registerTool({
 
       const ready = [...remaining.values()].filter((node) => (node.dependsOn ?? []).every((dep) => completed.has(dep)));
       if (ready.length === 0) {
+        if (inFlight.size > 0) {
+          const settled = await Promise.race(inFlight.values());
+          inFlight.delete(settled.nodeId);
+          if (settled.result.success) completed.add(settled.nodeId);
+          else failed.add(settled.nodeId);
+          continue;
+        }
+
         for (const [nodeId, node] of remaining.entries()) {
           const task = getOrCreateSwarmTask(ctx, nodeId, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
           task.status = "blocked";
@@ -1944,11 +1971,9 @@ registerTool({
             completedDeps: [...completed],
           },
         });
-      }
 
-      const results = await Promise.all(ready.map(async (node) => ({
-        node,
-        result: await executeDelegationWithFallback({
+        remaining.delete(node.id);
+        inFlight.set(node.id, executeDelegationWithFallback({
           agentName: node.agentName,
           task: node.task,
           context: node.context,
@@ -1958,13 +1983,14 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, delegatedCtx),
-      })));
+        }, delegatedCtx).then((result) => ({ nodeId: node.id, result })));
+      }
 
-      for (const { node, result } of results) {
-        remaining.delete(node.id);
-        if (result.success) completed.add(node.id);
-        else failed.add(node.id);
+      if (inFlight.size > 0) {
+        const settled = await Promise.race(inFlight.values());
+        inFlight.delete(settled.nodeId);
+        if (settled.result.success) completed.add(settled.nodeId);
+        else failed.add(settled.nodeId);
       }
     }
 
@@ -2219,6 +2245,7 @@ registerTool({
     const resolution = await resolveAgentRouting(raw, {
       minConfidence,
       allowedAgents: ctx.allowedAgents,
+      excludeAgents: ctx.currentAgentName ? [ctx.currentAgentName] : undefined,
     });
 
     logAudit("agent_routing_evaluated", {
@@ -2229,12 +2256,16 @@ registerTool({
       weakCount: resolution.weakCandidates.length,
       gated: resolution.gated,
       trippedAgents: resolution.trippedAgents,
+      excludedAgents: resolution.excludedAgents ?? [],
       allLowConfidence: resolution.allLowConfidence,
       topResult: resolution.results[0]?.name ?? null,
     }, { sessionId: ctx.sessionId, channel: "agent-routing" });
 
     const circuitNote = resolution.trippedAgents.length > 0
       ? `\n⚠ Circuit breakers open (excluded from routing): ${resolution.trippedAgents.join(", ")}`
+      : "";
+    const selfExclusionNote = ctx.currentAgentName
+      ? `\nℹ Self excluded from routing suggestions: ${ctx.currentAgentName}`
       : "";
 
     if (resolution.results.length === 0 && resolution.weakCandidates.length === 0) {
@@ -2246,7 +2277,7 @@ registerTool({
       }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
-        output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}`,
+        output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}${selfExclusionNote}`,
       };
     }
 
@@ -2260,7 +2291,7 @@ registerTool({
       }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
-        output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}\n\nTop weak candidates:\n${topCandidates}`,
+        output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
       };
     }
 
@@ -2270,7 +2301,7 @@ registerTool({
       : "";
     return {
       success: true,
-      output: `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}`,
+      output: `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${selfExclusionNote}`,
     };
   },
 });

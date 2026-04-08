@@ -499,6 +499,75 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
+  it("injects explicit tool inventory and delegate catalog guidance for coordinator agents", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-coordinator-guidance-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        mission_coordinator: {
+          description: "Mission coordinator",
+          systemPrompt: "Coordinate the work.",
+          tools: ["list_agents", "search_agents", "delegate_to_agent", "run_task_graph"],
+          maxIterations: 2,
+        },
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research things.",
+          tools: ["read_file"],
+          maxIterations: 1,
+        },
+        coder: {
+          description: "Coding specialist",
+          systemPrompt: "Write code.",
+          tools: ["write_file"],
+          maxIterations: 1,
+        },
+        browser_agent: {
+          description: "Browser specialist",
+          systemPrompt: "Browse pages.",
+          tools: ["browser_navigate"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValue({
+      content: "Coordinator finished.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Coordinate a repo maintenance task.",
+        parentSessionId: "parent-coordinator-guidance",
+        workspacePath: tempDir,
+        allowedAgents: ["researcher", "coder"],
+      });
+
+      expect(completeMock).toHaveBeenCalledTimes(1);
+      const messages = completeMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+      const systemMessage = messages?.find((message) => message.role === "system")?.content ?? "";
+
+      expect(systemMessage).toContain("TOOL INVENTORY");
+      expect(systemMessage).toContain("You may use only these tools in this run: list_agents, search_agents, delegate_to_agent, run_task_graph");
+      expect(systemMessage).toContain("AGENT DISCOVERY");
+      expect(systemMessage).toContain("Delegation in this run is restricted to these agents: researcher, coder");
+      expect(systemMessage).toContain("- researcher: Research specialist");
+      expect(systemMessage).toContain("- coder: Coding specialist");
+      expect(systemMessage).not.toContain("browser_agent");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects narrated tool-call markup when no tool calls were executed", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-narrated-tool-call-"));
     const configPath = join(tempDir, "starlingai.json");
