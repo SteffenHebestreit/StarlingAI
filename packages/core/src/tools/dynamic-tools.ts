@@ -18,6 +18,9 @@ import { registerTool, unregisterTool, type ToolHandler, type ToolContext, type 
 import { executeDynamicTool } from "./dynamic-tool-executor.js";
 import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
+import { getConfig } from "../config/loader.js";
+import { requestApprovalViaChannel } from "../approval/index.js";
+import { recordSelfdevToolSuccess } from "../agent/self-improve.js";
 import type { TestRun } from "../agent/tool-dev-session.js";
 
 const log = childLogger("dynamic-tools");
@@ -235,6 +238,8 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
             scheduleStatsPersist(def.name);
             // Auto-nominate if threshold reached and not already nominated
             maybeNominateForPromotion(def.name);
+            // Post-deployment feedback: track successful uses against the origin gap
+            if (result.success) recordSelfdevToolSuccess(def.name);
             return result;
         },
     };
@@ -322,10 +327,15 @@ function maybeNominateForPromotion(bareToolName: string): void {
 
     const stats = _runtimeStats.get(bareToolName);
     if (!stats) return;
-    if (stats.calls < PROMOTION_MIN_CALLS) return;
 
+    // Use config-driven thresholds, falling back to module-level defaults
+    const config = getConfig();
+    const minCalls = config.selfImprovement?.promotionMinCalls ?? PROMOTION_MIN_CALLS;
+    const minSuccessRate = config.selfImprovement?.promotionMinSuccessRate ?? PROMOTION_MIN_SUCCESS_RATE;
+
+    if (stats.calls < minCalls) return;
     const rate = stats.successes / stats.calls;
-    if (rate < PROMOTION_MIN_SUCCESS_RATE) return;
+    if (rate < minSuccessRate) return;
 
     def.promotionStatus = "pending";
     def.promotionNominatedAt = new Date().toISOString();
@@ -349,6 +359,27 @@ function maybeNominateForPromotion(bareToolName: string): void {
 
     log.info({ toolName: bareToolName, callCount: stats.calls, successRate: rate },
         "Dynamic tool nominated for promotion — awaiting operator review");
+
+    // Fire the configured approval channel if one is set
+    const channelName = config.selfImprovement?.promotionApprovalChannel;
+    if (channelName) {
+        const fullName = `${TOOL_NAME_PREFIX}${bareToolName}`;
+        requestApprovalViaChannel(channelName, "tool_promotion", {
+            toolName: fullName,
+            description: def.description,
+            callCount: stats.calls,
+            successRate: rate,
+            nominatedAt: def.promotionNominatedAt,
+        }).then((approved) => {
+            if (approved) {
+                approvePromotion(bareToolName, `approval_channel:${channelName}`);
+            } else {
+                rejectPromotion(bareToolName, `approval_channel:${channelName}`);
+            }
+        }).catch((err) => {
+            log.warn({ err, toolName: bareToolName }, "Promotion approval channel request failed — nomination stays pending");
+        });
+    }
 }
 
 /** Return all dynamic tools that are candidates for promotion (or have been reviewed). */

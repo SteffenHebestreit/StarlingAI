@@ -1670,6 +1670,144 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("run_workflow");
   });
 
+  it("rejects search_agents detours while an exact workflow retry is required", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use the reusable comparison paper workflow for the requested protocol set.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_then_bad_name_2", "search_workflows", {
+          query: "paper KI-Protokolle MCP A2A AG-UI",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("workflow_bad_name_then_agents_1", "run_workflow", {
+          name: "paper_writer",
+          workflowType: "job",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      if (llmCallCount === 3) {
+        return createToolCallStream("workflow_agents_detour_1", "search_agents", {
+          query: "researcher paper writer synthesis",
+        });
+      }
+      if (llmCallCount === 4) {
+        return createToolCallStream("workflow_exact_retry_after_detour_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I corrected the workflow name instead of detouring into agent discovery.");
+    });
+
+    const workflowMatches = [
+      {
+        name: "protocol_comparison_paper",
+        workflowType: "scene" as const,
+        score: 0.33,
+        matchedTerms: ["paper", "protocol", "mcp"],
+      },
+    ];
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+      metadata: { workflowMatches },
+    }));
+
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: "This should not execute while workflow correction is pending.",
+    }));
+
+    let runWorkflowCallCount = 0;
+    const runWorkflowMock = vi.fn(async () => {
+      runWorkflowCallCount += 1;
+      if (runWorkflowCallCount === 1) {
+        return {
+          success: false,
+          output: "",
+          error: "Workflow not found: paper_writer",
+          metadata: { workflowMatches },
+        };
+      }
+      return {
+        success: true,
+        output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+        metadata: {
+          workflowName: "protocol_comparison_paper",
+          workflowType: "scene",
+          blocked: false,
+        },
+      };
+    });
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_agents",
+      description: "Search agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Schreibe mir bitte ein kurzes Paper zu KI-Protokollen mit Fokus auf MCP, A2A und AG-UI.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(streamMock).toHaveBeenCalledTimes(5);
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(searchAgentsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_correction_required" }),
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_required_after_search" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(3);
+    expect(toolMessages[1]?.content).toContain("Workflow not found: paper_writer");
+    expect(toolMessages[2]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("search_agents");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
   it("skips workflow-catalog enforcement inside active workflow execution turns", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
       scenes: {

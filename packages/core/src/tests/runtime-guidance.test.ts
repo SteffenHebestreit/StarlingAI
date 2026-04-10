@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildDelegationLoopResponse, buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit, shouldDefaultToGermanForMessage } from "../agent/runtime.js";
+import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
+import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage } from "../agent/intent-classifier.js";
 
 describe("runtime turn guidance", () => {
   it("adds web-search guidance for freshness-sensitive requests", () => {

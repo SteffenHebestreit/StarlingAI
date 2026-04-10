@@ -42,6 +42,7 @@ import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
@@ -979,6 +980,33 @@ export function createGateway() {
   }
 
   async function sendTtsRequest(input: {
+    api: "qwen-compatible" | "openai-compatible";
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    text: string;
+    model?: string;
+    language: string;
+    speaker?: string;
+    savedVoiceId?: string;
+    audioExample?: { filename: string; contentType: string; bytes: Uint8Array };
+    referenceText?: string;
+    saveVoiceAs?: string;
+    allowVoiceCloneFallback?: boolean;
+    quality?: string;
+    gender?: string;
+    speed?: number;
+  }): Promise<Response> {
+    if (input.saveVoiceAs) {
+      return sendSingleTtsRequest(input);
+    }
+
+    return sendChunkedTtsRequests(input, {
+      requestChunk: sendSingleTtsRequest,
+    });
+  }
+
+  async function sendSingleTtsRequest(input: {
     api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
     apiKey?: string;

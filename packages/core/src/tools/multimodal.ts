@@ -3,6 +3,7 @@ import { basename, extname, resolve } from "node:path";
 import JSON5 from "json5";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
@@ -1040,6 +1041,33 @@ function normalizeTtsLanguage(language: string, api: "qwen-compatible" | "openai
 }
 
 async function sendTtsRequest(input: {
+  api: "qwen-compatible" | "openai-compatible";
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs: number;
+  text: string;
+  model?: string;
+  language: string;
+  quality?: string;
+  gender?: string;
+  speed?: number;
+  speaker?: string;
+  savedVoiceId?: string;
+  audioExample?: WorkspaceBinaryFile;
+  referenceText?: string;
+  saveVoiceAs?: string;
+  allowVoiceCloneFallback?: boolean;
+}): Promise<Response> {
+  if (input.saveVoiceAs) {
+    return sendSingleTtsRequest(input);
+  }
+
+  return sendChunkedTtsRequests(input, {
+    requestChunk: sendSingleTtsRequest,
+  });
+}
+
+async function sendSingleTtsRequest(input: {
   api: "qwen-compatible" | "openai-compatible";
   baseUrl: string;
   apiKey?: string;
