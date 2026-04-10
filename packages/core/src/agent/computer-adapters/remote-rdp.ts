@@ -140,7 +140,17 @@ export class RdpComputerAdapter implements ComputerAdapter {
       }
     }
 
-    const rawCredentials = this.config.credentials?.trim();
+    function resolveCredentials(cred?: string): string | undefined {
+      if (!cred) return undefined;
+      const stripped = cred.trim();
+      if (stripped.startsWith("$") && !stripped.startsWith("$$")) {
+        const val = process.env[stripped.slice(1)];
+        if (!val) log.warn({ envKey: stripped.slice(1) }, "Env var for RDP credentials is not set");
+        return val;
+      }
+      return stripped.replace(/^\$\$/, "$");
+    }
+    const rawCredentials = resolveCredentials(this.config.credentials);
     if (!rawCredentials) {
       throw new Error("RDP adapter requires credentials in 'username:password' format.");
     }

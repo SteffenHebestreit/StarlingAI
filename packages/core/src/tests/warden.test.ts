@@ -63,6 +63,14 @@ describe("Warden — tool storm detection", () => {
     );
   });
 
+  it("ignores done-phase sub-agent tool events for tool storm counting", () => {
+    for (let i = 0; i < 15; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-done", data: { phase: "done", success: true } });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "tool_storm")).toHaveLength(0);
+  });
+
   it("resets window after firing so it does not re-alert on the same burst", () => {
     for (let i = 0; i < 15; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-2", data: {} });

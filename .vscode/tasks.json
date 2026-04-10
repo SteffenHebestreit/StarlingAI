@@ -559,6 +559,18 @@
 			],
 			"isBackground": false,
 			"group": "test"
+		},
+		{
+			"label": "gateway health inspect temp",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"inspect",
+				"--format",
+				"{{json .State.Health}}",
+				"starlingai-gateway-1"
+			],
+			"isBackground": false
 		}
 	]
 }

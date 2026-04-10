@@ -10,6 +10,46 @@ import {
   type SessionTranscriptMessage,
 } from "./session.js";
 
+export async function buildSessionAuditMarkdown(sessionId: string): Promise<string> {
+  const session = getSessionRecord(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
+  const auditEvents = await readSessionAuditEvents(sessionId, session.getWorkspacePath());
+  const relatedSubSessions = [...new Set(
+    auditEvents
+      .map((event) => event.sessionId)
+      .filter((value): value is string => typeof value === "string" && value.startsWith(`sub:${sessionId}:`)),
+  )];
+
+  const lines: string[] = [
+    "# StarlingAI Session Audit Export",
+    "",
+    `- Session: ${session.id}`,
+    `- Channel: ${session.channel}`,
+    `- User: ${session.userId ?? "(none)"}`,
+    `- Created: ${session.createdAt.toISOString()}`,
+    `- Updated: ${session.getUpdatedAt().toISOString()}`,
+    `- Status: ${session.isArchived() ? `Archived (${session.getArchivedAt()?.toISOString() ?? "unknown"})` : "Active"}`,
+    `- Turns: ${session.getTurnCount()}`,
+    `- Workspace: ${session.getWorkspacePath()}`,
+    `- Audit events: ${auditEvents.length}`,
+    `- Related sub-sessions: ${relatedSubSessions.length > 0 ? relatedSubSessions.join(", ") : "(none)"}`,
+    "",
+    "## Audit Events",
+    "",
+  ];
+
+  if (auditEvents.length === 0) {
+    lines.push("No matching audit events were found.", "");
+  } else {
+    auditEvents.forEach((event, index) => appendAuditEvent(lines, event, index + 1));
+  }
+
+  return lines.join("\n");
+}
+
 export async function buildSessionDebugMarkdown(sessionId: string): Promise<string> {
   const session = getSessionRecord(sessionId);
   if (!session) {
@@ -127,6 +167,14 @@ function appendTranscriptMessage(lines: string[], message: SessionTranscriptMess
       }
       lines.push("");
     }
+  }
+
+  if (message.swarmState) {
+    lines.push("#### Swarm State", "");
+    lines.push("```json");
+    lines.push(safeJson(message.swarmState));
+    lines.push("```");
+    lines.push("");
   }
 
   lines.push("---", "");

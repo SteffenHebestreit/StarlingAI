@@ -272,8 +272,10 @@ describe("event-driven task graph", () => {
       swarmState,
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 20 && invocationOrder.length < 3; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
 
     expect(invocationOrder).toContain("researcher:Slow research");
     expect(invocationOrder).toContain("coder:Fast coding");

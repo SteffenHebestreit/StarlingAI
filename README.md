@@ -5,7 +5,7 @@
     </td>
     <td valign="middle" width="75%">
       <strong style="font-size:1.4em;">StarlingAI</strong><br/>
-      <sub>GUARDED AGENT SWARM &nbsp;&middot;&nbsp; <em>v0.4.1</em></sub>
+      <sub>GUARDED AGENT SWARM &nbsp;&middot;&nbsp; <em>current main</em></sub>
     </td>
   </tr>
 </table>
@@ -20,11 +20,12 @@
 
 ---
 
-## Release Highlights
+## Latest Main-Branch Highlights
 
-- **Grounded artifact generation** — HTML charts can now carry explicit source links, Mermaid diagrams are first-class artifacts, and the web UI can preview both directly in chat.
-- **Better live research tooling** — search can fall back through SearXNG, Playwright-backed browser search, and DuckDuckGo; `web_fetch` now prefers rendered browser content for JavaScript-heavy pages.
-- **Operator-facing debug exports** — sessions can be exported as combined Markdown bundles with transcript, raw history, and related audit events for review and incident follow-up.
+- **Reusable workflow catalog** — coordinators can call `search_workflows` and `run_workflow` to reuse named scenes and multi-step jobs instead of inventing a fresh plan for recurring packets.
+- **Server-aware operations routing** — SSH, Docker, and service-health work now routes to `shell_agent` or `ops_triage` instead of desktop computer-use flows, and `ssh_exec` can resolve configured `remote_ssh` nodes by `nodeName`.
+- **Richer operator review surface** — the dashboard can export audit-only Markdown, show a live shell preview, surface synthetic swarm progress from audit events, and filter tool or sub-agent activity in the Audit view.
+- **Better artifact previews** — Markdown documents now render inline beside HTML, PDF, Mermaid, text, JSON, and audio artifacts in the chat UI.
 
 ## The Starling Swarm — How Biology Inspired This Architecture
 
@@ -83,16 +84,18 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Smart Routing** — Keyword, embedding, and outcome-based ranking surfaces the best specialist for every task. Circuit breakers automatically exclude failing agents.
 - **Ephemeral Agents** — When no specialist fits, the swarm architects and launches a purpose-built agent on demand. Successful ones are promoted to the permanent catalog.
 - **Parallel Delegation** — Independent sub-tasks run concurrently. Task graphs handle complex dependencies with per-node fallbacks.
+- **Reusable Workflows** — Scenes and multi-step jobs can be discovered with `search_workflows` and executed inline with `run_workflow`, so recurring packets do not have to be replanned from scratch.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
 - **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
 - **Multimodal Tools** — Speech-to-text, speech synthesis, image analysis, file-to-markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
+- **Server Operations Routing** — Headless server work such as SSH, Docker, `systemctl`, and log triage is routed to shell and ops specialists with `ssh_exec` support instead of desktop automation.
 - **Credential-Safe Automation** — Stored site credentials never need to enter the LLM context. Agents inspect login metadata with `get_site_credentials` and inject secrets only through `site_fill_credentials` or `computer_type_credential` under approval.
 - **Remote Access Sidecar** — Raw VNC, RDP, and SSH sessions can run through a dedicated `computer-remote` service so native desktop tooling stays isolated from the main gateway.
 - **Human-in-the-Loop** — Approval gates via Slack, outbound webhook, or sync webhook with one-click HTTP callbacks before sensitive actions proceed.
 - **Multi-Channel Messaging** — Webchat, Telegram, Slack, Discord, WhatsApp, and email with consistent delivery SLOs, dead-letter queues, and retry with backoff.
 - **Warden Monitoring** — A background warden detects tool storms, escape attempts, failure spikes, and SLO breaches in real time.
-- **Live Observability** — Token streaming to the dashboard via AG-UI SSE, full per-turn performance telemetry, and a complete audit trail in JSONL + PostgreSQL.
-- **Scenes** — Reusable workflows launchable from chat, the dashboard, or webhooks and tracked as async jobs.
+- **Live Observability** — Token streaming to the dashboard via AG-UI SSE, live shell previews, per-turn performance telemetry, and audit/debug Markdown exports sit on top of the JSONL + PostgreSQL audit trail.
+- **Scenes And Jobs** — Reusable scene templates and multi-step jobs live in the workspace. Scenes remain launchable from chat, the dashboard, or webhooks and are tracked as async jobs.
 - **Penetration Testing** — Full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 
 ---

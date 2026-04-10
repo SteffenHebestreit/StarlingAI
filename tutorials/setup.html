@@ -212,7 +212,8 @@ pnpm --version    # should print 9.x or higher</code></pre>
               <div class="callout-icon">ℹ️</div>
               <div class="callout-body">
                 <strong>Keep LM Studio open and the server running</strong> while using StarlingAI.
-                The gateway container connects to it via <code>http://host.docker.internal:1234/v1</code>.
+                The current compose defaults point the gateway at <code>http://10.10.0.2:1234/v1</code>.
+                Override <code>SAI_LMSTUDIO_URL</code> in <code>.env</code> if your host exposes LM Studio on a different address.
               </div>
             </div>
 
@@ -261,8 +262,8 @@ cd starlingai</code></pre>
             <h3>Review the split config layout</h3>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
-              <pre><code>config/     # infrastructure and service wiring
-workspace/  # agents, scenes, and runtime-tunable definitions</code></pre>
+              <pre><code>config/     # infrastructure, providers, channels, mail, and service wiring
+workspace/  # agent catalog, reusable scenes, reusable jobs, and runtime-tunable definitions</code></pre>
             </div>
 
             <h3>Run the setup command</h3>
@@ -367,15 +368,17 @@ LOG_LEVEL=info</code></pre>
               <tbody>
                 <tr><td><code>gateway</code></td><td>8765</td><td>Core engine — WebSocket API, agent orchestration, channel adapters</td></tr>
                 <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI for managing agents, scenes, and channels</td></tr>
+                <tr><td><code>computer-remote</code></td><td>8890</td><td>Remote access sidecar for SSH, VNC, and RDP-backed computer workflows</td></tr>
                 <tr><td><code>postgres</code></td><td>internal</td><td>Persistent storage for audit logs and configuration</td></tr>
                 <tr><td><code>redis</code></td><td>internal</td><td>Session cache, rate limiting, and inter-service pub/sub</td></tr>
+                <tr><td><code>mail-service</code></td><td>5020</td><td>Mail account sync, drafting support, and inbox automation backend</td></tr>
                 <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP tool)</td></tr>
                 <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
               </tbody>
             </table>
 
             <h3>Optional services</h3>
-            <p>The core stack ships with the dashboard, gateway, file conversion service, and tutorials. Configure external STT, TTS, and image-generation endpoints in Settings when you need them.</p>
+            <p>The default stack now includes the dashboard, gateway, mail-service, computer-remote, file conversion service, and tutorials. External STT, TTS, and image-generation endpoints remain optional and can be configured later in Settings.</p>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
               <pre><code># Start the optional Kali pentest sidecar
@@ -492,8 +495,8 @@ docker compose logs -f gateway</code></pre>
               <li><a href="http://localhost:3001" target="_blank" rel="noopener">Dashboard</a> — <code>http://localhost:3001</code></li>
               <li><a href="http://localhost:3002" target="_blank" rel="noopener">This documentation</a> — <code>http://localhost:3002</code></li>
               <li><a href="channels/index.html">Channels guide</a> — connect a messaging app</li>
-              <li><a href="agents.html">Agents guide</a> — understand the 25 built-in agents</li>
-              <li><a href="scenes.html">Scenes guide</a> — build automated workflows</li>
+              <li><a href="agents.html">Agents guide</a> — review the current 40+ specialist roster and routing model</li>
+              <li><a href="scenes.html">Scenes guide</a> — build reusable scenes, jobs, and workflow packets</li>
             </ul>
 
             <h3>Handy commands</h3>

@@ -1,1 +1,0 @@
-{"text":"Hello frimsekvensbytesmättest.","segments":[{"start":0.0,"end":3.1483125,"text":"Hello frimsekvensbytesmättest.","confidence":1.0}],"language":"Swedish","language_probability":null,"duration":3.1483125,"processing_time":38.183027029037476,"task":"transcribe","model":"qwen3-asr"}

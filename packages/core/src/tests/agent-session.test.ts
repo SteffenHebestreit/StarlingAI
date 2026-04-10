@@ -88,6 +88,10 @@ describe("AgentSession collapsed history", () => {
     });
     session.addMessage({
       role: "system",
+      content: "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence.",
+    });
+    session.addMessage({
+      role: "system",
       content: "[USER INTERACTION OWNERSHIP] Ask the user for clarification.",
     });
     session.addMessage({
@@ -104,6 +108,7 @@ describe("AgentSession collapsed history", () => {
     expect(collapsedText).not.toContain("[SYNTHESIS REQUIRED]");
     expect(collapsedText).not.toContain("[CONTINUE ORCHESTRATION]");
     expect(collapsedText).not.toContain("[USER RESPONSE REQUIRED]");
+    expect(collapsedText).not.toContain("[DELEGATION FAILED]");
     expect(collapsedText).not.toContain("[USER INTERACTION OWNERSHIP]");
     expect(collapsedText).toContain("Bitte präzisieren Sie den Start- und Zielort.");
     expect(collapsedText).toContain("worbis bei leinefelde und dresden in sachsen");
@@ -334,6 +339,82 @@ describe("AgentSession collapsed history", () => {
         filename: "report.html",
         contentType: "text/html; charset=utf-8",
         previewMode: "html",
+      },
+    });
+  });
+
+  it("preserves assistant swarm state in transcript entries for reconnect hydration", () => {
+    const session = new AgentSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "Write the report." });
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_delegate",
+          type: "function",
+          function: {
+            name: "delegate_to_agent",
+            arguments: JSON.stringify({ agentName: "paper_author", task: "Write the report" }),
+          },
+        },
+      ],
+    });
+    session.addMessage({
+      role: "tool",
+      tool_call_id: "call_delegate",
+      content: "Delegated result from paper_author — TASK COMPLETED.",
+    });
+    session.addMessage({
+      role: "assistant",
+      content: "Here is the finished report.",
+      metadata: {
+        swarmState: {
+          objective: "Write the report",
+          startedAt: "2026-04-09T15:28:32.887Z",
+          updatedAt: "2026-04-09T15:32:43.490Z",
+          tasks: {
+            task_1: {
+              id: "task_1",
+              title: "Write the report",
+              status: "completed",
+              dependsOn: [],
+              selectedAgent: "paper_author",
+              attempts: [{
+                agentName: "paper_author",
+                status: "completed",
+                startedAt: "2026-04-09T15:32:04.393Z",
+                finishedAt: "2026-04-09T15:32:43.490Z",
+                toolCount: 3,
+                iterations: 3,
+                toolNames: ["read_shared_facts", "read_file", "generate_document"],
+              }],
+            },
+          },
+        },
+      },
+    });
+
+    const transcript = session.toTranscript();
+
+    expect(transcript).toHaveLength(2);
+    expect(transcript[1]?.swarmState).toMatchObject({
+      objective: "Write the report",
+      tasks: {
+        task_1: {
+          selectedAgent: "paper_author",
+          status: "completed",
+          attempts: [{
+            agentName: "paper_author",
+            toolCount: 3,
+            iterations: 3,
+          }],
+        },
       },
     });
   });

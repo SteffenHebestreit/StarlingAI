@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agents — StarlingAI</title>
+  <title>Agents &amp; Routing — StarlingAI</title>
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
@@ -56,7 +56,7 @@
       <!-- Hero -->
       <div class="page-hero">
         <h1>🤖 Agents</h1>
-        <p class="tagline">StarlingAI ships 25+ specialist agents. The swarm automatically discovers and routes to the right one — like starlings self-organizing without a conductor.</p>
+        <p class="tagline">StarlingAI ships 40+ specialist agents plus ephemeral fallback. The swarm can match reusable workflows first, then route to the right specialist set automatically.</p>
       </div>
 
       <!-- How routing works -->
@@ -64,13 +64,14 @@
         <div class="section-title">How the swarm routes tasks</div>
         <p>
           You never need to address agents directly. Simply send a message — the swarm
-          analyses it, searches for the best matching specialist using hybrid semantic + outcome-weighted scoring,
+          analyses it, checks the workflow catalog for reusable scenes or jobs, searches for the best matching specialist using hybrid semantic + outcome-weighted scoring when needed,
           delegates the task, and returns the result. If the first agent fails, the swarm automatically
           falls back to the next-best candidate — self-healing without human intervention.
         </p>
         <p>
           This is the swarm's emergent execution: each delegation improves future routing through outcome
-          tracking. The swarm gets smarter over time, learning which specialists handle which tasks best.
+          tracking, while coordinator agents keep recurring packets reusable through <code>search_workflows</code>
+          and <code>run_workflow</code> instead of rebuilding the same plan every time.
         </p>
 
         <div class="routing-diagram">
@@ -78,6 +79,11 @@
             <div class="rd-box">Your message</div>
             <div class="rd-arrow">→</div>
             <div class="rd-box primary">Orchestrator</div>
+          </div>
+          <div style="color:var(--muted);font-size:1.1rem;margin:.15rem 0;">↓</div>
+          <div class="rd-row">
+            <div class="rd-box">search_workflows</div>
+            <div class="rd-arrow" style="font-size:.75rem;color:var(--muted);">reusable scenes<br>and jobs first</div>
           </div>
           <div style="color:var(--muted);font-size:1.1rem;margin:.15rem 0;">↓</div>
           <div class="rd-row">
@@ -110,158 +116,103 @@
 
       <!-- Agent reference table -->
       <div class="section">
-        <div class="section-title">Agent reference</div>
-        <p>The swarm ships with 25+ pre-configured specialists covering research, code, automation, communication, and more. You can change the model for any agent via the dashboard or config file, and the swarm can create new ephemeral agents on demand for tasks that no existing specialist covers.</p>
+        <div class="section-title">Representative specialist roster</div>
+        <p>Most default specialists now run on <code>lmstudio/qwen/qwen3.5-35b-a3b</code>. The full catalog lives under <code>workspace/agents</code>; the table below shows representative roles that reflect the current defaults and routing behavior.</p>
 
         <div class="agent-table-wrap">
           <table class="agent-table">
             <thead>
               <tr>
                 <th>Agent</th>
-                <th>Model size</th>
-                <th>What it's good at</th>
+                <th>Typical use</th>
+                <th>Notes</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td><span class="agent-name">researcher</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Web research, fact-checking, topic summaries with citations</td>
+                <td>Fresh web research, documentation lookup, fact-checking</td>
+                <td>SearXNG-first with Playwright and DuckDuckGo fallback; publishes reusable findings</td>
               </tr>
               <tr>
-                <td><span class="agent-name">code_analyst</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Code review, security analysis, architecture assessment</td>
+                <td><span class="agent-name">security_researcher</span></td>
+                <td>CVE lookup, advisories, exploit status, threat intelligence</td>
+                <td>Specialized for NVD, MITRE, vendor bulletins, and patch status research</td>
               </tr>
               <tr>
                 <td><span class="agent-name">shell_agent</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Executing shell commands in a sandboxed container</td>
+                <td>Targeted shell commands, build checks, remote SSH inspection</td>
+                <td>Handles straightforward CLI and server inspection tasks; grounded in exact stdout/stderr</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">ops_triage</span></td>
+                <td>Service health, container/log diagnosis, remote host triage</td>
+                <td>SSH-aware and used when requests are about Docker, health checks, logs, or service state</td>
               </tr>
               <tr>
                 <td><span class="agent-name">browser_agent</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Navigating websites, scraping content, form automation</td>
+                <td>Interactive websites, JS-rendered pages, browser evidence capture</td>
+                <td>Uses Playwright-backed tools and secure credential fill instead of typing secrets directly</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">web_task_coordinator</span></td>
+                <td>Fresh web tasks that mix research, browsing, evidence, and synthesis</td>
+                <td>Workflow-first coordinator for browser inspection, briefs, and source-grounded packets</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">mission_coordinator</span></td>
+                <td>Complex multi-agent missions with dependencies and one final quality gate</td>
+                <td>Prefers reusable workflows first, then delegates the smallest viable specialist plan</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">code_analyst</span></td>
+                <td>Workspace inspection, bug diagnosis, architecture review</td>
+                <td>Read-heavy specialist for pinpointing defects and implementation gaps</td>
               </tr>
               <tr>
                 <td><span class="agent-name">coder</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Writing, refactoring, and debugging code in any language</td>
+                <td>Code changes, refactors, debugging, implementation work</td>
+                <td>Paired with qa_guard when a task needs execution plus verification</td>
               </tr>
               <tr>
-                <td><span class="agent-name">proposal_writer</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Drafting business proposals, RFP responses, pitch decks</td>
+                <td><span class="agent-name">document_intake</span></td>
+                <td>Attachment classification, long-report extraction, normalization</td>
+                <td>Front door for PDF, DOCX, and mixed-attachment workflows</td>
               </tr>
               <tr>
-                <td><span class="agent-name">data_analyst</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Analysing CSV/JSON data, generating reports and visualisations</td>
+                <td><span class="agent-name">paper_author</span></td>
+                <td>Source-grounded reports, papers, and long-form technical writing</td>
+                <td>Used after evidence collection, not as a substitute for evidence gathering</td>
               </tr>
               <tr>
-                <td><span class="agent-name">email_drafter</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Writing professional emails from bullet points or briefs</td>
+                <td><span class="agent-name">quality_supervisor</span></td>
+                <td>Strict acceptance review and rerun gating</td>
+                <td>Approves complete drafts or names one smallest corrective pass</td>
               </tr>
               <tr>
-                <td><span class="agent-name">summarizer</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Condensing long documents, threads, or meeting notes</td>
+                <td><span class="agent-name">infrastructure_agent</span></td>
+                <td>Provisioning, readiness checks, Terraform, Ansible, SSH transfers</td>
+                <td>Used once diagnosis is complete and the task needs actual infrastructure change</td>
               </tr>
               <tr>
-                <td><span class="agent-name">job_scout</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Searching job boards, filtering by criteria, tracking applications</td>
+                <td><span class="agent-name">computer_use_agent</span></td>
+                <td>Desktop UI automation through remote VNC/RDP workflows</td>
+                <td>Reserved for actual desktop interaction; not the first choice for headless server tasks</td>
               </tr>
               <tr>
-                <td><span class="agent-name">cv_generator</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Tailoring CVs and cover letters to specific job descriptions</td>
+                <td><span class="agent-name">mail_agent</span></td>
+                <td>Mailbox triage, drafting, reply support across configured accounts</td>
+                <td>Backed by the dedicated mail-service and approval-gated sending flows</td>
               </tr>
               <tr>
-                <td><span class="agent-name">application_pipeline</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>End-to-end job application automation (scout + CV + submit)</td>
+                <td><span class="agent-name">productivity_agent</span></td>
+                <td>Notes, reminders, timers, and durable memory maintenance</td>
+                <td>Best for lightweight follow-up workflows inside the workspace</td>
               </tr>
               <tr>
-                <td><span class="agent-name">agent_factory</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Dynamically creates new agents from a description</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">scheduler</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Creating and managing cron-scheduled tasks</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">monitor_agent</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Watching URLs, APIs, or files for changes and alerting</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">translator</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Translating text between 100+ languages</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">pdf_analyst</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Extracting, analysing, and summarising PDF documents</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">git_agent</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Git operations: diff, blame, branch management, PR summaries</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">test_runner</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Running test suites, parsing results, suggesting fixes</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">notification_router</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Sending notifications to channels or webhooks based on conditions</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">retrieval_analyst</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>RAG over your documents — semantic search + synthesis</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">incident_responder</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Triaging alerts, runbook execution, incident timeline generation</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">workflow_designer</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Designing and exporting scenes / automation workflows</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">channel_operator</span></td>
-                <td><span class="model-badge">9B</span></td>
-                <td>Managing channel configuration, pairing users, updating dm policy</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">prompt_optimizer</span></td>
-                <td><span class="model-badge">35B</span></td>
-                <td>Improving system prompts and agent instructions</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">media_analyst</span></td>
-                <td><span class="model-badge">Vision</span></td>
-                <td>Analysing images and extracting content from documents (PDF, DOCX, XLSX)</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">transcription_agent</span></td>
-                <td><span class="model-badge">Default</span></td>
-                <td>Transcribing audio files to text using the STT service</td>
-              </tr>
-              <tr>
-                <td><span class="agent-name">voice_narrator</span></td>
-                <td><span class="model-badge">Default</span></td>
-                <td>Converting text to speech and saving audio output via TTS</td>
+                <td><span class="agent-name">agent_architect</span></td>
+                <td>Ephemeral specialist creation when no catalog match clears the threshold</td>
+                <td>Fallback path, not the first option when an existing specialist or workflow already fits</td>
               </tr>
             </tbody>
           </table>
@@ -274,6 +225,7 @@
             <code>browser_agent</code> uses <code>get_site_credentials</code> for metadata and
             <code>site_fill_credentials</code> for secure browser logins, while
             <code>computer_use_agent</code> can use <code>computer_type_credential</code> for desktop login forms.
+            Headless server work should route to <code>shell_agent</code>, <code>ops_triage</code>, or <code>incident_responder</code> with <code>ssh_exec</code> instead of desktop automation.
           </div>
         </div>
       </div>
@@ -291,20 +243,20 @@
           <li>Click <strong>Save</strong></li>
         </ol>
 
-        <h3>Via starlingai.json</h3>
+        <h3>Via workspace/agents</h3>
         <div class="code-block">
-          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <div class="code-block-header"><span class="code-lang">jsonc</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
-  "subAgents": {
-    "researcher": {
-      "model": {
-        "primary": "qwen/qwen3.5-35b-a3b",
-        "fallback": "qwen/qwen3.5-4b"
+  subAgents: {
+    researcher: {
+      model: {
+        primary: "lmstudio/qwen/qwen3.5-35b-a3b"
       }
     },
-    "summarizer": {
-      "model": {
-        "primary": "qwen/qwen3.5-4b"
+    summarizer: {
+      model: {
+        primary: "lmstudio/qwen/qwen3.5-35b-a3b",
+        maxTokens: 2048
       }
     }
   }
@@ -314,8 +266,8 @@
         <div class="callout">
           <div class="callout-icon">ℹ️</div>
           <div class="callout-body">
-            After changing <code>starlingai.json</code>, restart the gateway:
-            <code>docker compose restart gateway</code>
+            Agent config changes under <code>workspace/agents</code> hot-reload into the running gateway.
+            Restart the container only when you change environment variables, container images, or compose wiring.
           </div>
         </div>
       </div>

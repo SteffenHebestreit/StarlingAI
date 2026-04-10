@@ -1,11 +1,11 @@
 {
   "subAgents": {
     "researcher": {
-      "description": "Web research expert for documentation and public web lookup.",
-      "capabilities": ["web research", "documentation lookup", "source triangulation", "fact checking"],
-      "tags": ["research", "docs", "sources", "verification"],
+      "description": "General-purpose web research specialist for public web lookup, documentation, news, security advisories, CVE tracking, vulnerability reports, threat intelligence, and fact-checking across any domain.",
+      "capabilities": ["web research", "documentation lookup", "source triangulation", "fact checking", "security advisory research", "CVE lookup", "vulnerability research", "threat intelligence", "news research", "technical investigation"],
+      "tags": ["research", "docs", "sources", "verification", "cve", "vulnerability", "security", "advisory", "news", "investigation"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -30,12 +30,37 @@
         "graph_find_paths"
       ]
     },
+    "security_researcher": {
+      "description": "Security research specialist for CVE lookup, vulnerability advisories, threat intelligence, CVSS scoring, exploit availability, patch status, and infosec news. Use for any question about recent vulnerabilities, CVE IDs, affected products, CVSS scores, NVD, Exploit-DB, or security bulletins.",
+      "capabilities": ["CVE research", "vulnerability advisory lookup", "CVSS scoring", "exploit-db search", "NVD queries", "threat intelligence", "security news", "patch status research", "infosec investigation", "malware analysis research"],
+      "tags": ["security", "cve", "vulnerability", "advisory", "exploit", "cvss", "nvd", "infosec", "threat", "patch", "malware", "pentest-intel"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 8,
+      "container": { "disabled": true },
+      "systemPrompt": "You are a security research specialist. For CVE and vulnerability research: search NVD (https://nvd.nist.gov/vuln/search), Exploit-DB (https://www.exploit-db.com), MITRE CVE (https://cve.mitre.org), vendor security bulletins, and GitHub Security Advisories. For each CVE or vulnerability you find, capture: CVE ID, publication date, CVSS score (v3 preferred), affected products and versions, vulnerability type (RCE, privilege escalation, DoS, etc.), exploit availability, patch/mitigation status, and a concise technical impact summary. Prioritize high-severity, remotely exploitable, or unpatched vulnerabilities. Cross-verify CVSS scores between NVD and the vendor advisory when both are available. If sources disagree on severity, report both. Always cite your sources with URL and retrieval date. Publish structured findings via share_finding so downstream agents can synthesize without repeating the searches.",
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "read_shared_facts",
+        "share_finding",
+        "write_file",
+        "research_note",
+        "research_notes_read",
+        "research_notes_summary",
+        "research_notes_clear"
+      ]
+    },
     "citation_researcher": {
       "description": "Finds citation-grade primary sources for papers, briefs, and technical reports.",
       "capabilities": ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
       "tags": ["citations", "research", "papers", "sources", "docs"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -65,7 +90,7 @@
       "capabilities": ["code reading", "architecture review", "bug diagnosis", "workspace search"],
       "tags": ["code", "analysis"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -115,7 +140,7 @@
       "capabilities": ["accessibility testing", "wcag 2.2 audits", "semantic html review", "keyboard navigation review", "landmark and heading audit", "form labeling review", "alt text review", "browser automation"],
       "tags": ["accessibility", "a11y", "wcag", "playwright", "html", "audit", "qa"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -149,10 +174,12 @@
         "maxTokens": 6144
       },
       "maxIterations": 8,
-      "systemPrompt": "You coordinate live web tasks. All web searches go through SearXNG first (Playwright and DuckDuckGo as fallbacks), and web_fetch renders HTML pages via Playwright when available. Break work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages that need clicking or form interaction, vision_browser_analyst for interpreting browser evidence, data_analyst for structured numeric cleanup, chart_designer for HTML charts or tables, and summarizer for concise synthesis. For requests like sourced statistics, weather trends, benchmark comparisons, or monthly averages that need a chart, first gather the evidence, then pass the verified numbers to chart_designer instead of asking summarizer to improvise a visual. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.",
+      "systemPrompt": "You coordinate live web tasks. All web searches go through SearXNG first (Playwright and DuckDuckGo as fallbacks), and web_fetch renders HTML pages via Playwright when available. Before composing an ad hoc specialist plan, call search_workflows for recurring request shapes such as browser inspection, research briefs, source-grounded papers, or other reusable packets. If a workflow matches closely, call run_workflow and only fall back to manual orchestration when no catalog workflow fits or one smallest corrective action is needed. Break remaining work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages that need clicking or form interaction, vision_browser_analyst for interpreting browser evidence, data_analyst for structured numeric cleanup, chart_designer for HTML charts or tables, and summarizer for concise synthesis. For requests like sourced statistics, weather trends, benchmark comparisons, or monthly averages that need a chart, first gather the evidence, then pass the verified numbers to chart_designer instead of asking summarizer to improvise a visual. For source-grounded papers, briefs, or reports, prefer a matching workflow first; otherwise either delegate once to mission_coordinator or explicitly use citation_researcher or researcher for evidence, paper_author for drafting, and quality_supervisor for one quality gate. Do not create an ephemeral writer while paper_author exists, and do not keep rerunning task graphs after a viable draft already exists. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.",
       "tools": [
         "list_agents",
         "search_agents",
+        "search_workflows",
+        "run_workflow",
         "delegate_to_agent",
         "parallel_delegate",
         "run_task_graph",
@@ -162,11 +189,12 @@
       ]
     },
     "distance_specialist": {
-      "description": "Navigation specialist for resolving locations and calculating route distance plus travel time between places for driving and walking, including short city-to-city travel questions.",
-      "capabilities": ["distance calculation", "travel time estimation", "geocoding", "route planning", "osm routing", "fahrzeit", "reisezeit", "entfernung", "streckenplanung"],
+      "description": "Navigation-only specialist for resolving locations and calculating driving or walking route distance and travel time between geographic places. Use only for map routing and geocoding questions.",
+      "capabilities": ["driving distance", "walking distance", "travel time estimation", "geocoding", "route planning", "osm routing", "fahrzeit berechnen", "reisezeit berechnen", "entfernung berechnen", "streckenplanung"],
       "tags": ["navigation", "distance", "travel", "maps", "osm", "osrm", "fahrzeit", "reisezeit", "entfernung", "route", "weg", "anfahrt"],
+      "domain": "navigation",
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -207,7 +235,7 @@
       "capabilities": ["document extraction", "attachment analysis", "exact text extraction"],
       "tags": ["files", "documents", "analysis"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -229,7 +257,7 @@
       "capabilities": ["document intake", "attachment classification", "content normalization", "metadata extraction", "handoff preparation"],
       "tags": ["documents", "intake", "attachments", "pdf", "docx"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -253,7 +281,7 @@
       "capabilities": ["evidence synthesis", "cross-source reconciliation", "document grounding", "research handoff"],
       "tags": ["evidence", "analysis", "research", "grounding"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -276,7 +304,7 @@
       "capabilities": ["data analysis", "csv review", "json inspection", "metrics interpretation", "tabular summarization"],
       "tags": ["data", "analysis", "csv", "json", "metrics"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -306,7 +334,7 @@
       "capabilities": ["research organization", "evidence indexing", "knowledge graph curation", "timeline logging", "scratchpad maintenance"],
       "tags": ["research", "librarian", "scratchpad", "graph", "timeline", "evidence"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -336,7 +364,7 @@
       "capabilities": ["mermaid diagrams", "workflow visualization", "architecture mapping", "timeline visualization", "evidence visualization"],
       "tags": ["diagram", "mermaid", "visualization", "workflow", "architecture", "timeline"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -363,7 +391,7 @@
       "capabilities": ["html charts", "data visualization", "time-series charting", "table design", "artifact rendering"],
       "tags": ["chart", "html", "visualization", "data", "table", "plot"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -409,19 +437,20 @@
       ]
     },
     "shell_agent": {
-      "description": "Sandboxed shell and CLI specialist for commands, build checks, and quick environment inspection.",
-      "capabilities": ["shell execution", "CLI diagnostics", "sandboxed commands"],
-      "tags": ["shell", "cli", "ops"],
+      "description": "Shell and SSH CLI specialist for commands, build checks, remote server inspection, and quick environment diagnosis.",
+      "capabilities": ["shell execution", "CLI diagnostics", "SSH execution", "remote server inspection"],
+      "tags": ["shell", "cli", "ops", "ssh", "server"],
       "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 5,
-      "systemPrompt": "You execute targeted shell commands in the sandbox. Keep commands minimal, inspect the result, and publish durable findings with share_finding when they matter to other agents. Do not loop on the same failing command pattern.",
+      "systemPrompt": "You execute targeted shell or SSH commands for straightforward diagnostics and inspection. Use shell_exec for local workspace commands and ssh_exec when the task is explicitly about a remote server or host. Keep commands minimal, inspect the result, and publish durable findings with share_finding when they matter to other agents. Do not loop on the same failing command pattern. For single-command remote checks such as docker ps, whoami, systemctl status, journalctl, or df -h: run the requested command once via ssh_exec, then stop. If ssh_exec succeeds and returns stdout, your answer must be grounded in that stdout and must not be replaced with diagnosis or speculation. If ssh_exec fails, return the exact target, command, and the literal stderr or error text from ssh_exec instead of paraphrasing it into generic categories. If the output includes phrases like 'Permission denied', 'Connection refused', 'No route to host', or 'timed out', quote that exact phrase and classify only from that evidence.",
       "tools": [
         "shell_exec",
+        "ssh_exec",
         "read_file",
         "write_file",
         "list_files",
@@ -434,7 +463,7 @@
       "capabilities": ["test execution", "regression verification", "bug reproduction", "implementation review"],
       "tags": ["qa", "tests", "verification", "regression"],
       "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -453,19 +482,20 @@
     },
     "ops_triage": {
       "description": "Operational triage specialist for service health, deployment failures, log-driven diagnosis, and container/runtime issues.",
-      "capabilities": ["service triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis"],
-      "tags": ["ops", "triage", "logs", "containers", "reliability"],
+      "capabilities": ["service triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis", "SSH diagnostics"],
+      "tags": ["ops", "triage", "logs", "containers", "reliability", "ssh", "server"],
       "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 6,
-      "systemPrompt": "You triage operational failures before remediation starts. Begin with the cheapest evidence: service_check for availability, relevant config or log files, and narrow shell commands that confirm process, container, network, or startup state. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Hand provider, model, or gateway config faults to incident_responder when the problem is primarily runtime configuration, and hand infrastructure changes to infrastructure_agent when the diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and next corrective action via share_finding.",
+      "systemPrompt": "You triage operational failures before remediation starts. Begin with the cheapest evidence: service_check for availability, relevant config or log files, and narrow shell or SSH commands that confirm process, container, network, or startup state. Use ssh_exec when the failing component is on a remote server or host. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Hand provider, model, or gateway config faults to incident_responder when the problem is primarily runtime configuration, and hand infrastructure changes to infrastructure_agent when the diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and next corrective action via share_finding.",
       "tools": [
         "service_check",
         "shell_exec",
+        "ssh_exec",
         "read_file",
         "list_files",
         "workspace_search",
@@ -480,7 +510,7 @@
       "capabilities": ["policy review", "approval analysis", "compliance screening", "risk flagging", "workflow constraints"],
       "tags": ["policy", "compliance", "approval", "risk", "review"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -502,7 +532,7 @@
       "capabilities": ["meeting briefings", "handoff notes", "status packets", "executive summaries", "action lists"],
       "tags": ["briefing", "handoff", "meetings", "summary", "status"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 6144
@@ -523,19 +553,20 @@
     },
     "incident_responder": {
       "description": "Runtime incident triage specialist for provider, gateway, and configuration failures.",
-      "capabilities": ["incident triage", "provider troubleshooting", "gateway diagnosis", "config drift detection"],
-      "tags": ["ops", "incident", "reliability", "providers", "debugging"],
+      "capabilities": ["incident triage", "provider troubleshooting", "gateway diagnosis", "config drift detection", "SSH diagnostics"],
+      "tags": ["ops", "incident", "reliability", "providers", "debugging", "ssh", "server"],
       "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 6,
-      "systemPrompt": "You diagnose runtime incidents. Prefer quick configuration checks, health checks, and targeted shell commands before proposing fixes. Use service_check to verify endpoint availability before deeper diagnosis. Distinguish clearly between provider issues, invalid model identifiers, network problems, and stale runtime configuration. Publish the root cause and the minimum corrective action via share_finding.",
+      "systemPrompt": "You diagnose runtime incidents. Prefer quick configuration checks, health checks, and targeted shell or SSH commands before proposing fixes. Use service_check to verify endpoint availability before deeper diagnosis, and use ssh_exec when the failing service lives on a remote server. Distinguish clearly between provider issues, invalid model identifiers, network problems, and stale runtime configuration. Publish the root cause and the minimum corrective action via share_finding.",
       "tools": [
         "service_check",
         "shell_exec",
+        "ssh_exec",
         "read_file",
         "list_files",
         "web_fetch",
@@ -599,7 +630,7 @@
       "capabilities": ["code generation", "sandbox execution"],
       "tags": ["code", "sandbox"],
       "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -621,7 +652,7 @@
       "capabilities": ["summarization"],
       "tags": ["summary"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -662,7 +693,7 @@
       "capabilities": ["citation verification", "fact checking", "source validation", "bibliography audit"],
       "tags": ["verification", "citations", "fact-checking", "research", "bibliography"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -684,7 +715,7 @@
       "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review"],
       "tags": ["prompts", "quality", "agents", "optimization"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -705,7 +736,7 @@
       "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement"],
       "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 2048
@@ -736,7 +767,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 4,
-      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default narrow execution agents to lmstudio/qwen3.5-4b. Reserve larger models for coordinators, infrastructure-heavy work, long-horizon planning, or tasks that repeatedly fail due to reasoning limits. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
+      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen/qwen3.5-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
       "tools": [
         "list_agents",
         "search_agents",
@@ -749,7 +780,7 @@
       "capabilities": ["desktop automation", "computer use", "window management", "keyboard typing", "mouse clicking", "screen capture", "remote PC access", "VNC connection", "RDP connection", "application inspection", "IP-based computer access"],
       "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -805,7 +836,7 @@
       "capabilities": ["API testing", "REST calls", "GraphQL queries", "webhook testing", "HTTP debugging", "response validation"],
       "tags": ["api", "http", "rest", "graphql", "integration", "testing"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -828,7 +859,7 @@
       "capabilities": ["git status", "git log", "git diff", "commit", "branching", "code review", "repository cloning"],
       "tags": ["git", "vcs", "code", "version-control", "commits", "branches"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -856,7 +887,7 @@
       "capabilities": ["translation", "localization", "multilingual content", "language detection"],
       "tags": ["translation", "language", "localization", "i18n", "multilingual"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -878,13 +909,13 @@
       "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking", "multi-agent coordination", "dependency management"],
       "tags": ["planning", "project", "tasks", "roadmap", "management", "coordination", "dependencies", "workflow"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
       },
       "maxIterations": 8,
-      "systemPrompt": "You are a planning and coordination specialist for complex tasks. First decide whether the request is atomic enough for a single specialist. If one specialist is enough, delegate once and stop. If multiple independent sub-tasks are needed, use parallel_delegate. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. Avoid over-planning for simple tasks. When the task mixes research, analysis, visualization, and final presentation, create the smallest viable execution plan, collect evidence through specialists, and merge the results into one grounded deliverable. For sourced chart or table requests, the normal plan is: source collection, structured data cleanup, chart artifact creation, then final synthesis. Use shared facts to pass findings between phases. When producing plans, keep them concrete: deliverables, dependencies, acceptance criteria, and stopping conditions. Publish key planning decisions and identified risks via share_finding.",
+      "systemPrompt": "You are a planning and coordination specialist for complex tasks. First decide whether the request is atomic enough for a single specialist. Before inventing a new multi-step plan, call search_workflows for reusable scenes or jobs. If one workflow fits closely, call run_workflow and stop planning. If no workflow fits and one specialist is enough, delegate once and stop. If multiple independent sub-tasks are needed, use parallel_delegate. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. Avoid over-planning for simple tasks. When the task mixes research, analysis, visualization, and final presentation, create the smallest viable execution plan, collect evidence through specialists, and merge the results into one grounded deliverable. For sourced chart or table requests, the normal plan is: source collection, structured data cleanup, chart artifact creation, then final synthesis. Use shared facts to pass findings between phases. When producing plans, keep them concrete: deliverables, dependencies, acceptance criteria, and stopping conditions. Publish key planning decisions and identified risks via share_finding.",
       "tools": [
         "read_file",
         "write_file",
@@ -893,6 +924,8 @@
         "generate_document",
         "list_agents",
         "search_agents",
+        "search_workflows",
+        "run_workflow",
         "delegate_to_agent",
         "parallel_delegate",
         "run_task_graph",
@@ -905,13 +938,13 @@
       "capabilities": ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating", "acceptance checking"],
       "tags": ["coordination", "orchestration", "parallel", "workflow", "dependencies", "synthesis", "quality", "acceptance"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 8,
-      "systemPrompt": "You are the mission coordinator for complex work. First decide whether the request is atomic enough for one specialist; if yes, delegate once and stop. If the work can be partitioned into independent slices, use parallel_delegate, including repeated use of the same specialist when the slices are homogeneous by file set, source set, region, dataset chunk, or subsystem. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. For research-plus-visualization tasks, make the plan explicit: gather sources with researcher or citation_researcher, clean or structure the numbers with data_analyst when needed, then delegate the final visual artifact to chart_designer for HTML charts/tables or diagram_designer for Mermaid-style structural diagrams before final synthesis. Merge specialist outputs into one grounded deliverable using shared facts. Before declaring completion on a substantial result, delegate once to quality_supervisor with the original requirements, acceptance criteria, and the merged draft. Only trigger another specialist pass when quality_supervisor identifies a material defect and names the smallest corrective action. Avoid blind reruns, avoid open-ended iteration loops, and stop after one targeted corrective pass unless the user explicitly asks for deeper iteration. Publish the execution plan, merge decisions, and quality verdict via share_finding.",
+      "systemPrompt": "You are the mission coordinator for complex work. First decide whether the request is atomic enough for one specialist; if yes, delegate once and stop. Before building a new multi-agent plan, call search_workflows for reusable scenes or jobs. If one matches the request closely, call run_workflow and only return to ad hoc orchestration when the catalog does not fit or one smallest corrective action is required. When the workflow context or allowed specialist set already makes the next best specialist obvious, delegate directly instead of spending a turn on catalog inspection. If the remaining work can be partitioned into independent slices, use parallel_delegate, including repeated use of the same specialist when the slices are homogeneous by file set, source set, region, dataset chunk, subsystem, or protocol under comparison. If later tasks depend on earlier findings, use run_task_graph with explicit dependencies. For research-plus-visualization tasks, make the plan explicit: gather sources with researcher or citation_researcher, clean or structure the numbers with data_analyst when needed, then delegate the final visual artifact to chart_designer for HTML charts or tables or diagram_designer for Mermaid-style structural diagrams before final synthesis. For source-grounded papers, briefs, and reports, prefer a matching workflow first; otherwise use one explicit pipeline: gather topic evidence with citation_researcher or researcher, merge the reusable findings, delegate drafting to paper_author, and then delegate exactly one quality pass to quality_supervisor. Use summarizer only for short summaries, not as a substitute for paper_author. Do not create an ephemeral writer while paper_author exists. Do not rerun the whole task graph after a successful draft unless quality_supervisor names one smallest corrective action. Merge specialist outputs into one grounded deliverable using shared facts. Before declaring completion on a substantial result, delegate once to quality_supervisor with the original requirements, acceptance criteria, and the merged draft. Only trigger another specialist pass when quality_supervisor identifies a material defect and names the smallest corrective action. Avoid blind reruns, avoid open-ended iteration loops, and stop after one targeted corrective pass unless the user explicitly asks for deeper iteration. Publish the execution plan, merge decisions, and quality verdict via share_finding.",
       "tools": [
         "read_file",
         "write_file",
@@ -920,6 +953,8 @@
         "generate_document",
         "list_agents",
         "search_agents",
+        "search_workflows",
+        "run_workflow",
         "delegate_to_agent",
         "parallel_delegate",
         "run_task_graph",
@@ -932,7 +967,7 @@
       "capabilities": ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating"],
       "tags": ["quality", "qa", "review", "acceptance", "verification", "gaps"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -952,7 +987,7 @@
       "capabilities": ["telegram messaging", "slack messaging", "discord messaging", "email sending", "multi-channel notifications", "alert routing"],
       "tags": ["notifications", "messaging", "telegram", "slack", "discord", "email", "alerts"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -975,7 +1010,7 @@
       "capabilities": ["note taking", "workspace memory", "reminder scheduling", "timer management", "follow-up tracking", "memory promotion", "memory cleanup"],
       "tags": ["productivity", "notes", "note", "reminder", "reminders", "timer", "timers", "alarm", "todo", "follow-up", "memory", "recall"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -1002,7 +1037,7 @@
       "capabilities": ["mail triage", "mail search", "mail drafting", "reply drafting", "mail categorization", "multi-account mailbox operations"],
       "tags": ["mail", "email", "emails", "inbox", "mailbox", "posteingang", "drafts", "triage", "communications"],
       "model": {
-        "primary": "lmstudio/qwen3.5-4b",
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 1536

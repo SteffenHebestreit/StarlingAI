@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>StarlingAI Setup Guide</title>
+  <title>StarlingAI Overview</title>
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
@@ -52,10 +52,10 @@
       <!-- Hero -->
       <div class="page-hero" style="border-bottom:none;margin-bottom:1.5rem;">
         <div style="font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--primary);margin-bottom:.5rem;">StarlingAI</div>
-        <h1>Setup Guide</h1>
-        <p class="tagline">Get your general-purpose AI agent swarm running in 20 minutes.</p>
+        <h1>Overview</h1>
+        <p class="tagline">Launch the swarm, reuse workflow catalog packets, and review grounded results from one self-hosted control plane.</p>
         <div class="badge-row">
-          <span class="tag tag-blue">v0.4.1</span>
+          <span class="tag tag-blue">current main</span>
           <span class="tag tag-green">Self-hosted</span>
           <span class="tag tag-yellow">20 min setup</span>
         </div>
@@ -63,7 +63,7 @@
 
       <!-- Intro paragraph -->
       <p style="color:var(--muted);font-size:.95rem;margin-bottom:2rem;max-width:620px;">
-        StarlingAI is inspired by the murmuration of starlings — thousands of birds that move as one coherent shape without a conductor, using only local rules. This guide walks you through every step to get your own agent swarm running — from installing prerequisites to connecting your first messaging channel, reviewing grounded artifacts, and exporting debug-ready session traces.
+        StarlingAI is inspired by the murmuration of starlings — thousands of birds that move as one coherent shape without a conductor, using only local rules. This overview walks through the current stack: local Qwen-powered orchestration, reusable scenes and jobs via the workflow catalog, grounded artifacts, shell and audit visibility, and the docs you need to operate the swarm safely.
       </p>
 
       <!-- Nav cards grid -->
@@ -85,8 +85,8 @@
         <a class="nav-card" href="scenes.html">
           <div class="card-icon">🎬</div>
           <div class="card-title">Scenes &amp; Automation</div>
-          <div class="card-desc">Create named workflows, schedule tasks, and add human-in-the-loop approval gates.</div>
-          <div class="card-arrow">Build scenes →</div>
+          <div class="card-desc">Define reusable scenes, chain them into jobs, and let coordinators match workflow packets before planning from scratch.</div>
+          <div class="card-arrow">Build workflows →</div>
         </a>
 
         <a class="nav-card" href="channels/index.html">
@@ -176,6 +176,11 @@
           WhatsApp, Email, or the web dashboard) and dynamically routes them to the right specialist agent —
           a researcher, coder, data analyst, browser automator, and more. The swarm can tackle any task
           domain by composing the right specialists at runtime.
+        </p>
+        <p>
+          For recurring request shapes, the orchestrator can also search the local workflow catalog first.
+          Matching scenes and multi-step jobs are executed inline through <code>search_workflows</code> and
+          <code>run_workflow</code>, so recurring paper, research, or browser-inspection packets stay reusable and auditable.
         </p>
         <p>
           Everything runs in Docker containers on your own machine. Your data never leaves your network.

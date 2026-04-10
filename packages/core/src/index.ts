@@ -2,7 +2,8 @@ import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
-import { initProviders } from "./providers/index.js";
+import { buildAgentIndex } from "./providers/embeddings.js";
+import { getEmbeddingProvider, initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
 import { flushAuditLog } from "./audit/logger.js";
 import { createGateway } from "./gateway/index.js";
@@ -27,6 +28,8 @@ import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStor
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeNeo4j } from "./db/neo4j.js";
+import { initGraphSchema } from "./db/graph-schema.js";
+import { startGraphJobs } from "./runtime/graph-jobs.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
 import { loadPersistedGaps } from "./agent/self-improve.js";
 
@@ -43,6 +46,7 @@ import "./tools/proxmox.js";
 import "./tools/terraform.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
+import "./tools/workflow-catalog.js";
 import "./tools/memory.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";
@@ -84,6 +88,9 @@ export async function main() {
 
   // Initialize Postgres audit sink (optional)
   await initPostgresAudit();
+
+  // Bootstrap MemGraph schema (indexes + vector index) — safe to call when unavailable
+  await initGraphSchema();
 
   // Initialize durable scene-job storage before worker startup.
   await initSceneJobStore();
@@ -145,6 +152,9 @@ export async function main() {
   // Start Warden — background anomaly monitor
   startWarden();
 
+  // Start MemGraph background jobs (centrality, community detection, similarity links)
+  startGraphJobs();
+
   // Watch config for hot reload
   watchConfig((newConfig, changedSections) => {
     log.info({ model: newConfig.agents.defaults.model.primary, changedSections }, "Config reloaded");
@@ -153,6 +163,12 @@ export async function main() {
       try {
         if (changedSections.includes("providers") || changedSections.includes("_initial")) {
           await initProviders();
+        }
+        if (!changedSections.includes("providers") && !changedSections.includes("_initial") && (changedSections.includes("agents") || changedSections.includes("subAgents"))) {
+          const embeddingModel = newConfig.agents.defaults.model.embeddingModel;
+          if (embeddingModel) {
+            buildAgentIndex(newConfig.subAgents ?? {}, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+          }
         }
         if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {
           await syncModelEndpointRuntimeStatus();

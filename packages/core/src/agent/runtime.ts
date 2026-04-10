@@ -16,10 +16,22 @@ import { childLogger } from "../logger.js";
 import type { AgentSession } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
-import { loadMainAssistantPersonality } from "../personality/service.js";
+import type { SubAgentProgressEvent } from "./sub-agent.js";
+import { listAllJobs } from "../credentials/jobs.js";
+import { listAllScenes } from "../credentials/scenes.js";
+import {
+  buildDynamicTurnGuidance,
+  buildLanguageAndIdentityTurnGuidance,
+  WORKFLOW_HINT_TERMS,
+  WORKFLOW_ACTION_TERMS,
+  WORKFLOW_DELIVERABLE_HINT_TERMS,
+  WORKFLOW_REQUEST_PATTERNS,
+  WORKFLOW_DISCOVERY_STOP_WORDS,
+} from "./intent-classifier.js";
 
 const log = childLogger("agent:runtime");
 
@@ -27,6 +39,8 @@ const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
   search_agents: 2,
+  search_workflows: 2,
+  run_workflow: 2,
   create_ephemeral_agent: 1,
   computer_session_start: 1,
   computer_focus_window: 2,
@@ -41,104 +55,13 @@ const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
   vscode_focus_panel: 2,
   vscode_run_terminal_command: 3,
 };
-const FRESHNESS_HINT_TERMS = [
-  "aktuell", "aktuelle", "aktuellen", "heute", "jetzt", "live", "neu", "neueste", "neusten",
-  "letzte ziehung", "letzten ziehung", "gewinnzahlen", "zahlen heute",
-  "2025", "2026", "current", "currently", "fresh", "latest", "live", "new", "news", "now",
-  "recent", "recently", "today", "updated", "updates",
-];
-const SOURCE_HINT_TERMS = [
-  "beleg", "belege", "offizielle quelle", "offizielle quellen", "quelle", "quellen",
-  "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
-  "repo", "repository", "roadmap", "source", "sources", "spec", "specification", "standard",
-];
-const WEB_LOOKUP_HINT_TERMS = [
-  "suche online", "such online", "suche im internet", "online suchen", "recherchiere online",
-  "recherchiere im internet", "im internet suchen", "search online", "search the web",
-  "web search", "online search", "look it up", "look this up", "find online", "check online",
-];
-const MAIL_HINT_TERMS = [
-  "e-mail", "e-mails", "email", "emails", "mail", "mails", "testmail",
-  "inbox", "mailbox", "mailboxes", "posteingang", "postfach",
-  "draft", "drafts", "entwurf", "entwürfe", "reply", "replies", "antwort", "antworten",
-];
-const MAIL_TASK_PATTERNS = [
-  /\b(schreib|schreibe|verfass|verfasse|send|sende|versend|versende|draft|entwurf|reply|antworte?)\b[\s\S]{0,60}\b(e-?mail|emails?|mails?)\b/,
-  /\b(lese|lies|zeige|fass zusammen|zusammenfassung|summary|summarize)\b[\s\S]{0,60}\b(e-?mail|emails?|mails?|inbox|posteingang)\b/,
-];
-const PRODUCTIVITY_HINT_TERMS = [
-  "remind", "reminder", "reminders", "timer", "timers", "alarm", "alarms",
-  "note", "notes", "notiz", "notizen", "todo", "todos", "follow-up", "follow up",
-  "remember this", "take a note", "merk dir", "erinnere mich",
-];
-const PRODUCTIVITY_TASK_PATTERNS = [
-  /\b(remind me|set a reminder|set reminder|erinnere mich|erinnerung)\b/,
-  /\b(start|set|create)\b[\s\S]{0,40}\b(timer|alarm)\b/,
-  /\b(cancel|stop|remove|delete)\b[\s\S]{0,40}\b(timer|reminder)\b/,
-  /\b(note|notes|notiz|notizen|remember this|take a note|save this)\b/,
-];
-const COMPUTER_ACCESS_HINT_TERMS = [
-  "use my computer", "access my computer", "my computer", "my pc", "my machine",
-  "remote windows pc", "remote pc", "remote desktop", "rdp", "vnc",
-  "work on it", "work on my", "control my computer", "connect to my pc",
-  "local desktop", "local windows desktop", "lokalen desktop", "localen desktop", "lokaler desktop",
-];
-const OWNED_COMPUTER_ACCESS_PATTERNS = [
-  /\b(my|our)\s+(remote\s+)?(windows\s+|linux\s+|mac\s+|macos\s+)?(pc|computer|machine|workstation|desktop|laptop)\b/,
-  /\b(access|control|connect to|use|work on)\s+(my|our)\s+(remote\s+)?(windows\s+|linux\s+|mac\s+|macos\s+)?(pc|computer|machine|workstation|desktop|laptop)\b/,
-];
-const PENTEST_HINT_TERMS = [
-  "pentest", "pentesting", "penetration test", "penetration testing", "security test", "security assessment", "vulnerability", "vuln", "scan",
-  "nmap", "nikto", "sqlmap", "exploit", "cve", "audit", "hardening",
-];
-const PENTEST_METHODOLOGY_PATTERNS = [
-  /\b(how would you|how do you|what plan|which plan|what schema|which schema|what methodology|which methodology|what workflow|which workflow)\b[\s\S]{0,80}\b(pentest|pentesting|penetration test|penetration testing|security assessment)\b/,
-  /\b(pentest|pentesting|penetration test|penetration testing|security assessment|pentest-agent|pentest agent|pentest_coordinator)\b[\s\S]{0,80}\b(plan|schema|methodology|workflow|playbook|steps|phases|prompt)\b/,
-  /\b(check|inspect|review|read|analyze|ask)\b[\s\S]{0,80}\b(pentest[_ -]?agent|pentest[_ -]?coordinator|prompt)\b/,
-  /\b(do not want to do the pentest|don't want to do the pentest|not asking you to do the pentest|wanna know what schema it follows)\b/,
-];
-const SWARM_MAINTENANCE_HINT_TERMS = [
-  "agent set", "agent-set", "agents-set", "main agent", "main-agent", "sub agent", "sub-agent", "subagent",
-  "tool set", "tool-set", "toolset", "workspace/agents", "config assistant", "self tune", "self-tune",
-  "system prompt", "prompt optimizer", "routing prompt", "swarm", "starlingai itself",
-];
-const SWARM_MAINTENANCE_PATTERNS = [
-  /\b(implement|add|update|improve|change|modify|wire|integrate|refine|fix)\b[\s\S]{0,100}\b(agent|agents|sub-?agents?|toolset|tool set|tools|prompt|system prompt|routing|main agent|main-assistant|swarm)\b/,
-  /\b(toolset|tool set|agent set|agents-set|main agent|main-agent|workspace\/agents|config assistant)\b[\s\S]{0,100}\b(implement|update|improve|change|modify|fix|wire|integrate)\b/,
-  /\b(why|check why|investigate why)\b[\s\S]{0,120}\b(does not want to implement|won't implement|refuses to implement|cannot implement|can not implement)\b/,
-  /\b(not asking you to use the system|asking you to improve the system|improve starlingai|update starlingai|maintain the swarm)\b/,
-];
-const NAVIGATION_HINT_TERMS = [
-  "distance", "travel time", "driving time", "walking time", "route", "routing", "directions",
-  "fahrzeit", "reisezeit", "wegzeit", "strecke", "entfernung", "route", "anfahrt", "fu\u00dfweg",
-];
-const NAVIGATION_PATTERNS = [
-  /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
-  /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
-  /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
-];
-const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
-  "ahoi",
-  "aloha",
-  "bonjour",
-  "ciao",
-  "hello",
-  "hey",
-  "hi",
-  "hallo",
-  "moin",
-  "ok",
-  "okay",
-  "servus",
-  "yo",
-]);
-
 export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   onChunk?: (text: string) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
+  onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
@@ -156,6 +79,8 @@ export interface RunTurnOptions {
   maxIterationsOverride?: number;
   /** When set, this turn is a tool-dev session — iteration limits are lifted. */
   _toolDevSessionId?: string;
+  /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
+  _workflowExecutionStack?: string[];
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
@@ -187,19 +112,6 @@ export interface TurnPerformanceMetrics {
   toolIterations: number;
   finishReason: string;
   blocked: boolean;
-}
-
-export interface DynamicTurnGuidance {
-  prompt: string;
-  sourceSensitive: boolean;
-  freshnessSensitive: boolean;
-  mailSensitive?: boolean;
-  productivitySensitive?: boolean;
-  computerAccessSensitive?: boolean;
-  pentestSensitive?: boolean;
-  pentestMethodologySensitive?: boolean;
-  swarmMaintenanceSensitive?: boolean;
-  navigationSensitive?: boolean;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -294,11 +206,251 @@ const ORCHESTRATION_LAUNCHER_TOOL_NAMES = new Set([
   "delegate_to_agent",
   "parallel_delegate",
   "run_task_graph",
+  "run_workflow",
 ]);
 const AGENT_DISCOVERY_TOOL_NAMES = new Set([
   "search_agents",
   "list_agents",
+  "search_workflows",
 ]);
+
+interface WorkflowCatalogHint {
+  name: string;
+  workflowType: "scene" | "job";
+  searchableText: string;
+}
+
+interface WorkflowCatalogMatch {
+  name: string;
+  workflowType: "scene" | "job";
+  score: number;
+  matchedTerms: string[];
+}
+
+interface WorkflowCatalogSignal {
+  required: boolean;
+  reason: "explicit_request" | "catalog_match" | "hint_terms" | "none";
+  strongestMatch?: WorkflowCatalogMatch;
+}
+
+function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unknown> | undefined): WorkflowCatalogMatch[] {
+  const rawMatches = metadata?.["workflowMatches"];
+  if (!Array.isArray(rawMatches)) return [];
+
+  return rawMatches
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const record = entry as Record<string, unknown>;
+      const name = typeof record["name"] === "string" ? record["name"] : "";
+      const workflowType = record["workflowType"] === "job" ? "job" : (record["workflowType"] === "scene" ? "scene" : null);
+      const score = typeof record["score"] === "number" ? record["score"] : 0;
+      const matchedTerms = Array.isArray(record["matchedTerms"])
+        ? record["matchedTerms"].map(String).filter(Boolean)
+        : [];
+      if (!name || !workflowType) return null;
+      return { name, workflowType, score, matchedTerms } satisfies WorkflowCatalogMatch;
+    })
+    .filter((match): match is WorkflowCatalogMatch => Boolean(match))
+    .sort((left, right) => right.score - left.score);
+}
+
+function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][]): WorkflowCatalogMatch[] {
+  const merged = new Map<string, WorkflowCatalogMatch>();
+
+  for (const group of groups) {
+    for (const match of group) {
+      const key = `${match.workflowType}:${match.name}`;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, {
+          ...match,
+          matchedTerms: [...match.matchedTerms],
+        });
+        continue;
+      }
+
+      merged.set(key, {
+        ...existing,
+        score: Math.max(existing.score, match.score),
+        matchedTerms: [...new Set([...existing.matchedTerms, ...match.matchedTerms])],
+      });
+    }
+  }
+
+  return [...merged.values()].sort((left, right) => {
+    if (right.score !== left.score) return right.score - left.score;
+    if (right.matchedTerms.length !== left.matchedTerms.length) return right.matchedTerms.length - left.matchedTerms.length;
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatalogMatch[]): boolean {
+  const topMatch = matches[0];
+  if (!topMatch) return false;
+  return topMatch.score >= 0.2 || topMatch.matchedTerms.length >= 3;
+}
+
+function formatWorkflowExecutionPromptFromSearch(matches: WorkflowCatalogMatch[]): string {
+  const topMatches = matches.slice(0, 3)
+    .map((match) => `${match.name} [${match.workflowType}] (score ${match.score.toFixed(2)})`)
+    .join(", ");
+
+  return [
+    "COMPLIANCE CORRECTION: search_workflows already returned reusable matches for this request.",
+    topMatches ? `Returned matches: ${topMatches}.` : "",
+    "Do NOT call search_workflows again, and do NOT switch to delegate_to_agent, parallel_delegate, run_task_graph, or direct answering yet.",
+    "Call run_workflow now using the best returned workflow, or another returned match if it fits better.",
+    "Only fall back to ad hoc delegation after a run_workflow attempt proves unsuitable or fails for a concrete reason.",
+  ].filter(Boolean).join(" ");
+}
+
+function isWorkflowNameResolutionFailureMessage(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return normalized.includes("workflow not found:")
+    || (normalized.includes("workflow name '") && normalized.includes("is ambiguous"));
+}
+
+function formatWorkflowExecutionCorrectionPromptFromSearch(matches: WorkflowCatalogMatch[], lastError: string): string {
+  const topMatches = matches.slice(0, 3)
+    .map((match) => `${match.name} [${match.workflowType}]`)
+    .join(", ");
+
+  return [
+    "COMPLIANCE CORRECTION: run_workflow used an invalid or ambiguous workflow name after search_workflows already returned reusable matches.",
+    lastError ? `Last run_workflow error: ${lastError}` : "",
+    topMatches ? `Use one of these exact returned workflow names: ${topMatches}.` : "",
+    "Call run_workflow again now with the exact workflow name and workflowType from the returned catalog results.",
+    "Do NOT call search_workflows again, do NOT call search_agents, and do NOT invent a new workflow name.",
+  ].filter(Boolean).join(" ");
+}
+
+function isWorkflowCatalogToolName(toolName: string): boolean {
+  return toolName === "search_workflows" || toolName === "run_workflow";
+}
+
+function normalizeWorkflowDiscoveryText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_:/.-]+/g, " ")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeWorkflowDiscoveryText(value: string): string[] {
+  return [...new Set(
+    normalizeWorkflowDiscoveryText(value)
+      .split(" ")
+      .filter((token) => token.length >= 2 && !WORKFLOW_DISCOVERY_STOP_WORDS.has(token))
+  )];
+}
+
+function expandWorkflowDiscoveryVariants(token: string): string[] {
+  const variants = new Set<string>([token]);
+  if (token.length > 4 && token.endsWith("es")) variants.add(token.slice(0, -2));
+  if (token.length > 3 && token.endsWith("s")) variants.add(token.slice(0, -1));
+  return [...variants].filter((value) => value.length >= 2);
+}
+
+function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
+  const sceneHints = listAllScenes().map((scene) => ({
+    name: scene.name,
+    workflowType: "scene" as const,
+    searchableText: [scene.name, scene.description, scene.task].filter(Boolean).join("\n"),
+  }));
+  const jobHints = listAllJobs().map((job) => ({
+    name: job.name,
+    workflowType: "job" as const,
+    searchableText: [
+      job.name,
+      job.description,
+      ...(job.steps ?? []).map((step) => `${step.label ?? ""} ${step.scene}`.trim()),
+    ].filter(Boolean).join("\n"),
+  }));
+  return [...sceneHints, ...jobHints];
+}
+
+function scoreWorkflowCatalogHint(query: string, hint: WorkflowCatalogHint): WorkflowCatalogMatch | null {
+  const queryTokens = tokenizeWorkflowDiscoveryText(query);
+  if (queryTokens.length === 0) return null;
+
+  const nameText = normalizeWorkflowDiscoveryText(hint.name);
+  const searchableText = normalizeWorkflowDiscoveryText(hint.searchableText);
+  const matchedTerms = new Set<string>();
+  let score = 0;
+
+  for (const token of queryTokens) {
+    const variants = expandWorkflowDiscoveryVariants(token);
+    let tokenScore = 0;
+    if (variants.some((variant) => nameText.includes(variant))) tokenScore = Math.max(tokenScore, 1);
+    if (variants.some((variant) => searchableText.includes(variant))) tokenScore = Math.max(tokenScore, 0.72);
+    if (tokenScore > 0) {
+      matchedTerms.add(token);
+      score += tokenScore;
+    }
+  }
+
+  if (matchedTerms.size === 0) return null;
+
+  const normalizedScore = Math.min(1, score / Math.min(queryTokens.length, 4));
+  return {
+    name: hint.name,
+    workflowType: hint.workflowType,
+    score: normalizedScore,
+    matchedTerms: [...matchedTerms],
+  };
+}
+
+function detectWorkflowCatalogSignal(userMessage: string): WorkflowCatalogSignal {
+  const normalized = userMessage.toLowerCase();
+  if (!normalized.trim()) {
+    return { required: false, reason: "none" };
+  }
+
+  const explicitWorkflowRequest = WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+  const matchedHints = WORKFLOW_HINT_TERMS.filter((term) => normalized.includes(term));
+  const matchedDeliverableHints = WORKFLOW_DELIVERABLE_HINT_TERMS.filter((term) => normalized.includes(term));
+  const strongestMatch = buildWorkflowCatalogHints()
+    .map((hint) => scoreWorkflowCatalogHint(userMessage, hint))
+    .filter((match): match is WorkflowCatalogMatch => Boolean(match))
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      if (right.matchedTerms.length !== left.matchedTerms.length) return right.matchedTerms.length - left.matchedTerms.length;
+      return left.name.localeCompare(right.name);
+    })[0];
+
+  if (explicitWorkflowRequest) {
+    return { required: true, reason: "explicit_request", strongestMatch };
+  }
+
+  if (strongestMatch && (
+    strongestMatch.score >= 0.6
+    || (matchedDeliverableHints.length > 0 && strongestMatch.score >= 0.32)
+    || (strongestMatch.matchedTerms.length >= 2 && strongestMatch.score >= 0.42)
+  )) {
+    return { required: true, reason: "catalog_match", strongestMatch };
+  }
+
+  if (matchedHints.length >= 2 || (matchedHints.length === 1 && WORKFLOW_ACTION_TERMS.some((term) => normalized.includes(term)))) {
+    return { required: true, reason: "hint_terms", strongestMatch };
+  }
+
+  return { required: false, reason: "none", strongestMatch };
+}
+
+function buildWorkflowCatalogGuidance(signal: WorkflowCatalogSignal): string {
+  if (!signal.required) return "";
+
+  const strongestMatchText = signal.strongestMatch
+    ? ` Strongest current reusable match: ${signal.strongestMatch.name} [${signal.strongestMatch.workflowType}] (score ${signal.strongestMatch.score.toFixed(2)}).`
+    : "";
+
+  return [
+    "Reusable workflow guidance for this turn: check the workflow catalog before inventing an ad hoc coordinator plan when a reusable scene or job may already fit.",
+    strongestMatchText.trim(),
+    "If the match is exact, call run_workflow directly. Otherwise call search_workflows first and then either run_workflow or explain honestly why no reusable workflow fits.",
+  ].filter(Boolean).join(" ");
+}
 
 function collapseMixedOrchestrationLaunchersInResponse(
   toolCalls: LLMResponse["tool_calls"],
@@ -397,14 +549,49 @@ function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, tool
 }
 
 const CONTINUATION_PROMISE_RE = /\b(i(?:'ll| will)(?:\s+now)?|i am going to|ich werde(?:\s+nun)?|ich beauftrage(?:\s+nun)?|n[äa]chste orchestrierung|next orchestration|next logical step|n[äa]chste logische aktion)\b/i;
+const IMPLICIT_CONTINUATION_EXECUTION_RE = /\b(?:i(?:\s+have|'ve)[\s\S]{0,80}\b(?:corrected|fixed|updated|adjusted)\b[\s\S]{0,80}\b(?:am\s+)?(?:now\s+)?(?:running|executing|starting|retrying|restarting)\b|ich\s+habe[\s\S]{0,80}\b(?:korrigiert|angepasst|berichtigt)\b[\s\S]{0,80}\b(?:und\s+)?(?:f(?:[üu]hre|uehre)|starte|versuche|sto(?:ss|ß)e)\b[\s\S]{0,40}\b(?:nun|jetzt)\b[\s\S]{0,20}\b(?:aus|an)\b)/i;
 const MISLEADING_EXECUTED_NEXT_STEP_RE = /\b(the next (?:logical )?(?:step|action)|der n[äa]chste(?: logische)?(?: schritt| aktion)|die n[äa]chste(?: logische)? aktion)\b[\s\S]{0,80}\b(which has been executed|has been executed|was executed|has already been executed|wurde(?:\s+bereits)?\s+ausgef[üu]hrt|ist bereits erfolgt)\b/i;
 const NEXT_TURN_HANDOFF_RE = /\b(would you like me to (?:initiate|start|retry)|in the next turn|im n[äa]chsten zug|im n[äa]chsten turn|neue[nr]? delegations(?:strategie|versuch)|new delegation attempt|no further tool calls can be made in this turn|keine weiteren tool calls .* in diesem zug)\b/i;
 
+function looksLikeContinuationPromise(value: string): boolean {
+  return CONTINUATION_PROMISE_RE.test(value) || IMPLICIT_CONTINUATION_EXECUTION_RE.test(value);
+}
+
 function shouldRewriteTerminalResponse(value: string, toolIterations: number): boolean {
   if (toolIterations === 0) return false;
-  return CONTINUATION_PROMISE_RE.test(value)
+  return looksLikeContinuationPromise(value)
     || MISLEADING_EXECUTED_NEXT_STEP_RE.test(value)
     || NEXT_TURN_HANDOFF_RE.test(value);
+}
+
+function hasRecentUnresolvedDelegatedAction(history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[]): boolean {
+  const recentMessages = [...history].reverse().slice(0, 12);
+
+  for (const message of recentMessages) {
+    if (message.role !== "tool") continue;
+
+    const metadata = message.metadata ?? {};
+    const delegationOutcome = typeof metadata["delegationOutcome"] === "string"
+      ? String(metadata["delegationOutcome"]).toLowerCase()
+      : undefined;
+    const terminalState = typeof metadata["terminalState"] === "string"
+      ? String(metadata["terminalState"]).toLowerCase()
+      : undefined;
+    const content = String(message.content ?? "");
+
+    if (
+      delegationOutcome === "partial"
+      || delegationOutcome === "failure"
+      || terminalState === "max_iterations"
+      || terminalState === "timeout"
+      || terminalState === "cancelled"
+      || /PARTIAL RESULT|max_iterations|timed out|could not complete|delegation limit/i.test(content)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function rewriteTerminalResponseIfNeeded(
@@ -494,16 +681,16 @@ function looksLikeDelegatedFailureEvidence(value: string): boolean {
   if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
   if (/<\|channel\>\w+/i.test(preview)) return true;
   return /^error:/i.test(preview)
-    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted)\b/i.test(preview)
+    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
 }
 
 const CONTINUATION_CUE_RE = /\b(next (logical )?(step|action)|n[äa]chste (logische )?(schritt|aktion)|before summarizing|continue orchestration|continue with|drill down|inspect the contents|fetch the contents|final required action|determine the actual data file format|extract the raw numerical values)\b/i;
 const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval required|needs approval|ask the user|missing .* from the user|which one|which option|clarify|need the user to|authorization reference|approved target scope)\b/i;
 
-type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "none";
+type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "failure" | "none";
 
-function classifyPostOrchestrationDisposition(
+export function classifyPostOrchestrationDisposition(
   toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>,
 ): PostOrchestrationDisposition {
   const orchestrationResults = toolResultMessages.filter((message) => {
@@ -529,13 +716,19 @@ function classifyPostOrchestrationDisposition(
     const terminalState = typeof metadata["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
     const delegationSucceeded = metadata["delegationSucceeded"] !== false;
     const delegationOutcome = typeof metadata["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
+    const delegationPartial = delegationOutcome === "partial";
 
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
     }
 
-    if (!delegationSucceeded || delegationOutcome === "failure" || delegationOutcome === "partial" || (terminalState && terminalState !== "completed") || looksLikeDelegatedFailureEvidence(text)) {
-      return "synthesize";
+    if (
+      !delegationSucceeded
+      || delegationOutcome === "failure"
+      || (!delegationPartial && terminalState && terminalState !== "completed")
+      || (!delegationPartial && looksLikeDelegatedFailureEvidence(text))
+    ) {
+      return "failure";
     }
 
     if (CONTINUATION_CUE_RE.test(text)) {
@@ -669,6 +862,22 @@ export function buildModelVisibleToolResult(
     ].join("\n");
   }
 
+  if (toolName === "run_workflow") {
+    const workflowName = typeof metadata?.["workflowName"] === "string" ? String(metadata["workflowName"]) : "workflow";
+    const workflowType = typeof metadata?.["workflowType"] === "string" ? String(metadata["workflowType"]) : "workflow";
+    const blocked = metadata?.["blocked"] === true;
+    const stepCount = Number(metadata?.["stepCount"] ?? 1);
+    const executedSteps = Number(metadata?.["executedSteps"] ?? stepCount);
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
+      blocked
+        ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
+        : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run.",
+      `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
+    ].join("\n");
+  }
+
   if (toolName === "create_ephemeral_agent") {
     const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "ephemeral agent";
     const rejectedTools = Array.isArray(metadata?.["rejectedTools"]) ? (metadata?.["rejectedTools"] as unknown[]).map(String).filter(Boolean) : [];
@@ -688,6 +897,17 @@ export function buildModelVisibleToolResult(
       "IMPORTANT: Treat this as candidate-selection guidance, not as proof that any task was routed or executed.",
       "If this turn ends without a completed delegate_to_agent call, do NOT tell the user that work was routed to any suggested agent.",
       `Observed evidence:\n${evidence || "No routing suggestions returned."}`,
+    ].join("\n");
+  }
+
+  if (toolName === "search_workflows") {
+    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    return [
+      "Workflow catalog suggestions only. No workflow has been executed yet.",
+      "IMPORTANT: Treat this as reusable-workflow discovery, not as proof that any scene or job ran.",
+      "If this turn ends without a completed run_workflow call, do NOT tell the user that a workflow was executed.",
+      "If concrete matches were returned, prefer run_workflow next instead of delegate_to_agent or other ad hoc orchestration.",
+      `Observed evidence:\n${evidence || "No workflow matches returned."}`,
     ].join("\n");
   }
 
@@ -718,208 +938,6 @@ export function buildTemporalContextPrompt(now: Date = new Date()): string {
   ].join(" ");
 }
 
-export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssistantToolMode = getConfig().agents.mainAssistant.toolMode): DynamicTurnGuidance | null {
-  const normalized = userMessage.trim().toLowerCase();
-  if (!normalized) return null;
-
-  const freshnessSensitive = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
-  const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
-    || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
-  const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
-    || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
-  const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
-    || PRODUCTIVITY_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
-  const computerAccessSensitive = COMPUTER_ACCESS_HINT_TERMS.some((term) => normalized.includes(term))
-    || OWNED_COMPUTER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized));
-  const pentestSensitive = PENTEST_HINT_TERMS.some((term) => normalized.includes(term));
-  const pentestMethodologySensitive = pentestSensitive
-    && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
-  const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
-    || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
-  const navigationSensitive = NAVIGATION_HINT_TERMS.some((term) => normalized.includes(term))
-    || NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
-
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive };
-  if (!Object.values(flags).some(Boolean)) return null;
-
-  const reasons: string[] = [];
-  if (freshnessSensitive) reasons.push("freshness-sensitive");
-  if (sourceSensitive) reasons.push("source-sensitive");
-  if (mailSensitive) reasons.push("mail-task");
-  if (productivitySensitive) reasons.push("productivity-task");
-  if (computerAccessSensitive && !pentestSensitive) reasons.push("owned-computer-access");
-  if (pentestMethodologySensitive) reasons.push("pentest-methodology");
-  if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
-  if (navigationSensitive) reasons.push("navigation-routing");
-
-  const delegateMode = toolMode !== "hybrid";
-  const promptParts: string[] = [];
-
-  if (reasons.length > 0) {
-    promptParts.push(`This turn is ${reasons.join(" and ")}.`);
-  }
-
-  if (computerAccessSensitive && !pentestSensitive) {
-    promptParts.push(
-      "The user is asking you to access or operate their own computer or remote workstation, not to run a security assessment.",
-      "Do not route this request to pentest_set_scope, nmap_scan, or other pentest tools unless the user explicitly asks for scanning, vulnerability testing, or exploitation.",
-      "You MUST use the delegate_to_agent tool with agentName='computer_use_agent' to handle all computer-use and VS Code interaction tasks. Pass the full user request as the task, including any specific targets like window titles, input fields, or text to type. If the user mentions a specific IP or hostname, include it in the task context so the agent can match it to a configured node or create an ad-hoc connection.",
-      "Do NOT attempt to call computer_* or vscode_* tools directly — they are NOT in your tool set. Do NOT call 'computer_use_agent' as a tool name — it is an agent, not a tool. Use delegate_to_agent(agentName='computer_use_agent', task='...') instead.",
-      "The computer_use_agent has access to computer_list_nodes which discovers pre-configured machines. If the user asks for a specific machine by IP, hostname, or description, include that in the delegation context. The agent will match it to a node or create an ad-hoc connection.",
-      "If the user asks for their local desktop or local Windows desktop, include in the task context that the computer_use_agent should prefer adapter 'remote_node' rather than 'local_vscode' unless the user explicitly asked to control the VS Code workbench itself.",
-      "If delegation to computer_use_agent returns a partial or incomplete result, you may retry delegation ONCE with a more specific task description. Do NOT fall back to calling computer_* tools directly — they are NOT in your tool set and will fail.",
-      "CRITICAL: If the computer_use_agent has already failed or been exhausted for this turn, do NOT retry it again. Synthesize from whatever partial results you have and tell the user what happened.",
-      "Do NOT delegate a desktop/remote-PC/screenshot task to browser_agent, researcher, or any other non-computer-use agent. Only computer_use_agent can interact with the user's desktop. If it failed, report the failure honestly instead of routing to an agent that cannot see the desktop.",
-      "Ignore prior pentest-related tool results unless the user explicitly switches back to security testing.",
-    );
-  }
-
-  if (mailSensitive) {
-    promptParts.push(
-      "The user is asking for mailbox access, inbox triage, draft preparation, or sending email.",
-      "Do NOT answer that you cannot access email or send mail if the mail_agent is available. This system has a dedicated mail_agent for those tasks.",
-      "You MUST use the delegate_to_agent tool with agentName='mail_agent' for reading recent emails, searching inboxes, preparing drafts, and mailbox triage.",
-      "If the user asks to send an email, route the task to mail_agent so it can prepare the draft first. Sending itself must go through mail_send_draft and requires explicit per-call approval; do not claim sending is impossible.",
-      "If the target account is ambiguous, have mail_agent inspect the available mail accounts or ask one concise clarification question.",
-    );
-  }
-
-  if (productivitySensitive) {
-    promptParts.push(
-      "The user is asking for note-taking, reminders, timers, or lightweight follow-up tracking.",
-      "Do NOT answer that reminders or timers are unavailable if the productivity_agent is available. This system has a dedicated productivity_agent for those tasks.",
-      "You MUST use the delegate_to_agent tool with agentName='productivity_agent' for saving notes, creating reminders, starting timers, or reviewing and cancelling them.",
-      "Reminder scheduling should go through reminder_create and timer countdowns should go through timer_start inside productivity_agent; do not improvise unsupported scheduling behavior.",
-      "If the timing is ambiguous, have productivity_agent ask one concise clarification question rather than guessing.",
-    );
-  }
-
-  if (navigationSensitive) {
-    promptParts.push(
-      "The user is asking for route distance or travel time between places.",
-      delegateMode
-        ? "You MUST use the delegate_to_agent tool with agentName='distance_specialist' immediately when that agent exists. Pass the full origin/destination request as the task."
-        : "Prefer the dedicated navigation tools or the distance_specialist for route questions instead of answering from memory.",
-      delegateMode
-        ? "Do NOT stop at a generic estimate or a plan to look it up. Delegate the task and then synthesize the concrete result."
-        : "Resolve ambiguous places before answering and include the exact coordinates used.",
-      "If the locations are ambiguous, ask one concise clarification question instead of guessing.",
-      "For route answers, report the travel mode, route distance, estimated travel time, and the coordinates or resolved places used.",
-      "If the user did not specify a mode, prefer driving time by default and say so clearly.",
-    );
-  }
-
-  if (pentestMethodologySensitive) {
-    promptParts.push(
-      "The user is asking about the pentest plan, methodology, configured workflow, or pentest-agent behavior. This is NOT a request to start a live pentest engagement.",
-      "Do NOT ask for authorization, target scope, asset-owner confirmation, or testing windows unless the user explicitly switches to running a real engagement.",
-      delegateMode
-        ? "Use delegation to inspect or explain the configured pentest workflow. Prefer pentest_coordinator in maintenance mode, or another specialist that can inspect local config and docs, instead of treating this as a live assessment request."
-        : "Inspect the local pentest definitions and docs first. Prefer reading workspace/agents/30-subagents-pentest.jsonc and starlingai.example.json before answering.",
-      "Summarize the actual configured phases, approval gates, and specialist handoffs. If a previous answer incorrectly asked for authorization for a methodology question, say that plainly and then give the plan.",
-      "Do not call pentest_set_scope, nmap_scan, nikto_scan, sqlmap_scan, metasploit_exec, pentest_exec, or other active pentest tools for this kind of request.",
-    );
-  }
-
-  if (swarmMaintenanceSensitive) {
-    promptParts.push(
-      "The user is asking you to improve StarlingAI itself: prompts, agents, tool routing, workspace behavior, or swarm configuration.",
-      "Treat this as swarm maintenance inside the current repository, not as an external deployment-only request.",
-      delegateMode
-        ? "You MUST use the delegate_to_agent tool with agentName='swarm_maintainer' immediately when that agent exists. Pass the full user request as the task."
-        : "Inspect the local workspace definitions first and handle the change directly when your tool set allows it.",
-      delegateMode
-        ? "Do NOT call search_agents or list_agents first for this class of request when swarm_maintainer exists. The specialist is already known."
-        : "Do not waste time on agent discovery for this class of request.",
-      delegateMode
-        ? "Prefer swarm_maintainer for the full request; use prompt_optimizer for narrowly prompt-only work and integration_builder or qa_guard only when a more specific implementation specialist is clearly better."
-        : "Inspect the local workspace definitions first. Prefer reading workspace/agents/*, workspace/scenes/*, and starlingai.example.json before answering.",
-      "Do NOT claim that you cannot modify the toolset or agent set when the requested change is achievable through repository edits under workspace/ or other writable project files.",
-      "Protected infrastructure paths under config/ still require proposal-only handling or a clearly scoped manual step; do not rewrite that boundary.",
-      "If the request is to change prompts or routing behavior, make the smallest concrete repo change instead of stopping at a conceptual design.",
-      "After implementing or proposing the change, summarize exactly what changed and what still needs build, apply, or approval steps.",
-    );
-  }
-
-  if (freshnessSensitive || sourceSensitive) {
-    promptParts.push(
-      delegateMode
-        ? "Do not answer from memory. Delegate immediately to a suitable specialist agent for any web lookup, freshness-sensitive fact, or browser-dependent step."
-        : "Use direct web tools before answering if they are available.",
-      "A tool-free answer is invalid unless prior tool results already contain the necessary evidence for this exact request.",
-      delegateMode
-        ? "Use delegate_to_agent for atomic specialist routing. For multi-step specialist collaboration or requests that mix research, analysis, visualization, and synthesis, delegate to a coordinator-style or planning agent first."
-        : "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
-      delegateMode
-        ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists."
-        : "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, gather evidence from multiple sources before drafting the answer. If you choose to delegate, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists.",
-      "For live factual values such as lottery numbers, prices, scores, exchange rates, dates, or schedules, copy the exact value and its associated date from the freshest tool result. Do not substitute prior knowledge or older values.",
-      delegateMode
-        ? "If a page is JS-driven, route it through a browser specialist. If another agent needs the extracted evidence, ensure the browser specialist publishes key facts with share_finding so downstream agents can read them via read_shared_facts."
-        : "If a page appears JS-driven or incomplete in web_fetch, use browser_navigate and then browser_snapshot or browser_wait_for to inspect the rendered page.",
-      delegateMode
-        ? "Do not stop after a browser snapshot. Route the snapshot findings to an evidence-analysis or summarization specialist when interpretation is required."
-        : "Do not claim that a site is unreadable due to JavaScript or dynamic loading unless browser tools were attempted and still failed to reveal the needed data.",
-      "Prefer official specifications, repositories, release notes, and vendor documentation over commentary.",
-      "If the gathered evidence is incomplete, say that clearly and ask a concise follow-up question only when missing information blocks a correct answer.",
-    );
-  }
-
-  return {
-    prompt: promptParts.join(" "),
-    sourceSensitive,
-    freshnessSensitive,
-    mailSensitive,
-    productivitySensitive,
-    computerAccessSensitive,
-    pentestSensitive,
-    pentestMethodologySensitive,
-    swarmMaintenanceSensitive,
-    navigationSensitive,
-  };
-}
-
-export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
-  const profile = loadMainAssistantPersonality();
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  const languageInstruction = compactMessage.length > 0
-    ? buildLanguageInstructionForTurn(compactMessage)
-    : "Reply in German.";
-  const behaviorInstruction = shouldDefaultToGermanForMessage(compactMessage)
-    ? "For short or greeting-only openings, reply with one short, polite sentence and move directly to helping. Do not use small talk. Do not introduce yourself or mention your name unless the user explicitly asks."
-    : "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
-  const nameInstruction = profile.identity.name
-    ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself "StarlingAI" in conversation unless the user is explicitly asking about the product or platform name.`
-    : "Do not use the platform name \"StarlingAI\" as your personal name in conversation. If the user did not ask for your name, reply without naming yourself.";
-  return `Language and identity for this turn: ${languageInstruction} ${behaviorInstruction} ${nameInstruction}`;
-}
-
-export function shouldDefaultToGermanForMessage(userMessage: string): boolean {
-  const compactMessage = userMessage.trim().toLowerCase().replace(/\s+/g, " ");
-  if (!compactMessage) return true;
-
-  const letterCount = Array.from(compactMessage).filter((char) => /\p{L}/u.test(char)).length;
-  if (letterCount > 0 && letterCount <= 2) return true;
-
-  const tokens = compactMessage.match(/\p{L}+/gu) ?? [];
-  if (tokens.length === 0) return true;
-
-  if (tokens.length <= 2 && tokens.every((token) => AMBIGUOUS_SHORT_LANGUAGE_TOKENS.has(token))) {
-    return true;
-  }
-
-  return false;
-}
-
-export function buildLanguageInstructionForTurn(userMessage: string): string {
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  if (!compactMessage) return "Reply in German.";
-  if (shouldDefaultToGermanForMessage(compactMessage)) {
-    return `The user's latest message is ${JSON.stringify(compactMessage)}. Treat this message as language-ambiguous because it is too short or only a generic greeting. Reply in German even if the wording could also look like a short English greeting.`;
-  }
-  return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message. If the message becomes mixed or ambiguous after all, reply in German.`;
-}
-
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then config, then default 15 min.
@@ -932,15 +950,25 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
     : undefined;
 
-  // Merge caller signal with per-turn timeout: either source can cancel the turn.
-  const signal: AbortSignal = opts.signal
-    ? (turnAbort ? AbortSignal.any([opts.signal, turnAbort.signal]) : opts.signal)
-    : (turnAbort?.signal ?? inertAbort.signal);
+  // Warden abort: allows the Warden to cancel this turn mid-flight on severe anomalies.
+  const wardenAbort = new AbortController();
+  const sessionId = opts.session.id;
+  registerSessionAbortController(sessionId, wardenAbort);
+
+  // Merge caller signal + timeout signal + warden signal: any source can cancel the turn.
+  const allSignals: AbortSignal[] = [];
+  if (opts.signal) allSignals.push(opts.signal);
+  if (turnAbort) allSignals.push(turnAbort.signal);
+  allSignals.push(wardenAbort.signal);
+  const signal: AbortSignal = allSignals.length === 1
+    ? allSignals[0]!
+    : AbortSignal.any(allSignals);
 
   try {
     return await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    deregisterSessionAbortController(sessionId);
   }
 }
 
@@ -1023,6 +1051,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : detectedDynamicGuidance;
   const allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
   const allowedToolNameSet = new Set(allowedToolNames);
+  const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
   // When autoApprove is set, wrap the approvalCallback to always return true.
   const resolvedApprovalCallback = opts.autoApprove
@@ -1033,6 +1062,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     approvalCallback: resolvedApprovalCallback,
+    onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
     onComputerSessionState: opts.onComputerSessionState,
@@ -1043,6 +1073,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
     signal,
+    _workflowExecutionStack: opts._workflowExecutionStack,
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),
@@ -1074,6 +1105,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
+  let unresolvedDelegationContinuationRetryUsed = false;
+  let unresolvedDelegationEnforcementPrompt = "";
+  const isWorkflowExecutionTurn = session.channel === "workflow" || (opts._workflowExecutionStack?.length ?? 0) > 0;
+  const workflowCatalogGuidance = !isWorkflowExecutionTurn && workflowCatalogSignal.required
+    ? buildWorkflowCatalogGuidance(workflowCatalogSignal)
+    : "";
+  const workflowCatalogRequired = Boolean(
+    (allowedToolNameSet.has("search_workflows") || allowedToolNameSet.has("run_workflow"))
+    && !isWorkflowExecutionTurn
+    && !initialDynamicGuidance?.pentestMethodologySensitive
+    && !initialDynamicGuidance?.swarmMaintenanceSensitive
+    && workflowCatalogSignal.required,
+  );
+  let workflowCatalogRetryUsed = false;
+  let workflowCatalogEnforcementPrompt = "";
+  let workflowCatalogAttemptedThisTurn = false;
+  let workflowExecutionRetryUsed = false;
+  let workflowExecutionCorrectionRetryUsed = false;
+  let workflowExecutionEnforcementPrompt = "";
+  let workflowSearchMatches: WorkflowCatalogMatch[] = [];
+  let workflowRunCompletedThisTurn = false;
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
@@ -1085,6 +1137,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : (opts.maxIterationsOverride === 0
         ? Number.MAX_SAFE_INTEGER
         : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
+  const blockMissingWorkflowCatalogCheck = (): TurnOutput => blocked(
+    "This request required a workflow catalog check before delegation or a direct answer, but the model skipped the workflow tools.",
+    toolContext.swarmState,
+    buildTurnPerformanceMetrics({
+      turnStartedAt,
+      firstModelResponseMs,
+      llmCalls,
+      llmTimeMs,
+      toolCallsRequested,
+      toolExecutionTimeMs,
+      lastPromptMetrics,
+      completionChars: 0,
+      finishReason: "missing_workflow_catalog_check",
+      blocked: true,
+      toolIterations: iterationCount,
+    }),
+  );
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -1099,7 +1168,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         );
         if (synthesized) {
           const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
-          session.addMessage({ role: "assistant", content: finalResponse });
+          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
           if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt, firstModelResponseMs, llmCalls, llmTimeMs, toolCallsRequested,
@@ -1155,7 +1224,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       { role: "system", content: temporalContext },
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
+      ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
+      ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
+      ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
+      ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
     ];
@@ -1226,6 +1299,83 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
 
+    const workflowCatalogToolRequested = llmResponse.tool_calls.some((toolCall) => isWorkflowCatalogToolName(toolCall.name));
+    const runWorkflowRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "run_workflow");
+    if (workflowCatalogToolRequested) {
+      workflowCatalogAttemptedThisTurn = true;
+    }
+
+    const nonWorkflowOrchestrationRequested = llmResponse.tool_calls.some((toolCall) =>
+      ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "run_workflow"
+    );
+    const nonWorkflowDiscoveryRequested = llmResponse.tool_calls.some((toolCall) =>
+      AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "search_workflows"
+    );
+    const repeatedWorkflowSearchRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "search_workflows");
+    if (
+      shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
+      && !workflowRunCompletedThisTurn
+      && !runWorkflowRequested
+      && (nonWorkflowOrchestrationRequested || nonWorkflowDiscoveryRequested || repeatedWorkflowSearchRequested)
+    ) {
+      if (!workflowExecutionRetryUsed) {
+        workflowExecutionRetryUsed = true;
+        workflowExecutionEnforcementPrompt = formatWorkflowExecutionPromptFromSearch(workflowSearchMatches);
+        guardrailEvents.push({ type: "workflow_required", details: "workflow_run_required_after_search" });
+        logAudit("guardrail_flagged", {
+          type: "workflow_run_required_after_search",
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+          workflowMatches: workflowSearchMatches.slice(0, 3),
+        }, { sessionId: session.id, severity: "warn" });
+        continue;
+      }
+
+      return blocked(
+        "This turn already searched the workflow catalog and found reusable matches, but the model still skipped run_workflow.",
+        toolContext.swarmState,
+        buildTurnPerformanceMetrics({
+          turnStartedAt,
+          firstModelResponseMs,
+          llmCalls,
+          llmTimeMs,
+          toolCallsRequested,
+          toolExecutionTimeMs,
+          lastPromptMetrics,
+          completionChars: 0,
+          finishReason: "missing_required_workflow_execution",
+          blocked: true,
+          toolIterations: iterationCount,
+        }),
+      );
+    }
+
+    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
+      if (!workflowCatalogRetryUsed) {
+        workflowCatalogRetryUsed = true;
+        workflowCatalogEnforcementPrompt = [
+          "COMPLIANCE CORRECTION: This request is workflow-shaped and reusable workflow tools are available.",
+          "Do NOT jump straight to delegate_to_agent or a direct natural-language answer.",
+          "You MUST inspect the workflow catalog first.",
+          ...(workflowCatalogSignal.strongestMatch
+            ? [`Strong reusable match: ${workflowCatalogSignal.strongestMatch.name} [${workflowCatalogSignal.strongestMatch.workflowType}].`]
+            : []),
+          "If the exact reusable scene, job, or workflow is already known, call run_workflow now.",
+          "Otherwise call search_workflows now, then either run_workflow or explain the catalog matches honestly.",
+          "A catalog-free response is invalid for this turn.",
+        ].join(" ");
+        guardrailEvents.push({ type: "workflow_required", details: "workflow_catalog_check_rejected" });
+        logAudit("guardrail_flagged", {
+          type: "workflow_catalog_check_rejected",
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+          strongestMatch: workflowCatalogSignal.strongestMatch,
+          reason: workflowCatalogSignal.reason,
+        }, { sessionId: session.id, severity: "warn" });
+        continue;
+      }
+
+      return blockMissingWorkflowCatalogCheck();
+    }
+
     const synthesisRequiredInHistory = collapsedHistory.some((message) =>
       message.role === "system"
       && typeof message.content === "string"
@@ -1263,6 +1413,88 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // tool_calls in the same response.  Only treat the turn as complete when there
     // are literally zero tool calls to process.
     if (llmResponse.tool_calls.length === 0) {
+      const rawResponse = llmResponse.content ?? "";
+      const unresolvedDelegatedActionInHistory = hasRecentUnresolvedDelegatedAction(session.getHistory());
+      const promisedContinuationWithoutTools = looksLikeContinuationPromise(rawResponse);
+
+      if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
+        if (!workflowCatalogRetryUsed) {
+          workflowCatalogRetryUsed = true;
+          workflowCatalogEnforcementPrompt = [
+            "COMPLIANCE CORRECTION: This request is workflow-shaped and reusable workflow tools are available.",
+            "Do NOT answer from memory or promise delegation before checking the workflow catalog.",
+            ...(workflowCatalogSignal.strongestMatch
+              ? [`Strong reusable match: ${workflowCatalogSignal.strongestMatch.name} [${workflowCatalogSignal.strongestMatch.workflowType}].`]
+              : []),
+            "You MUST call search_workflows or run_workflow now.",
+            "If no reusable workflow matches, explain that only after the catalog check completes.",
+            "A tool-free answer is invalid for this turn.",
+          ].join(" ");
+          guardrailEvents.push({ type: "workflow_required", details: "tool_free_workflow_answer_rejected" });
+          logAudit("guardrail_flagged", {
+            type: "tool_free_workflow_answer_rejected",
+            strongestMatch: workflowCatalogSignal.strongestMatch,
+            reason: workflowCatalogSignal.reason,
+          }, { sessionId: session.id, severity: "warn" });
+          continue;
+        }
+
+        return blockMissingWorkflowCatalogCheck();
+      }
+
+      if (
+        shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
+        && !workflowRunCompletedThisTurn
+      ) {
+        if (!workflowExecutionRetryUsed) {
+          workflowExecutionRetryUsed = true;
+          workflowExecutionEnforcementPrompt = formatWorkflowExecutionPromptFromSearch(workflowSearchMatches);
+          guardrailEvents.push({ type: "workflow_required", details: "tool_free_workflow_run_rejected" });
+          logAudit("guardrail_flagged", {
+            type: "tool_free_workflow_run_rejected",
+            workflowMatches: workflowSearchMatches.slice(0, 3),
+          }, { sessionId: session.id, severity: "warn" });
+          continue;
+        }
+
+        return blocked(
+          "This turn found reusable workflow matches but the model tried to finish without running one.",
+          toolContext.swarmState,
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "missing_required_workflow_execution",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
+
+      if (promisedContinuationWithoutTools && unresolvedDelegatedActionInHistory && !unresolvedDelegationContinuationRetryUsed) {
+        unresolvedDelegationContinuationRetryUsed = true;
+        unresolvedDelegationEnforcementPrompt = [
+          "COMPLIANCE CORRECTION: The session already contains an unfinished delegated action from a previous turn.",
+          "The user's latest message is follow-up guidance for that unfinished work.",
+          "Do NOT write that you will now do something unless this response actually includes the tool call.",
+          "You MUST either call the required tool or orchestration tool now, or explicitly state that no action is being executed in this turn.",
+          "For server administration follow-ups, prefer delegate_to_agent(agentName: \"shell_agent\", task: \"...\") or ops_triage when diagnosis is needed.",
+          "A tool-free continuation promise is invalid for this turn.",
+        ].join(" ");
+        guardrailEvents.push({ type: "delegation_required", details: "tool_free_continuation_promise_rejected" });
+        logAudit("guardrail_flagged", {
+          type: "tool_free_continuation_promise_rejected",
+          serverAccessSensitive: initialDynamicGuidance?.serverAccessSensitive ?? false,
+          computerAccessSensitive: initialDynamicGuidance?.computerAccessSensitive ?? false,
+        }, { sessionId: session.id, severity: "warn" });
+        continue;
+      }
+
       if (requiresDelegatedResearch && !session.getHistory().some((message) => message.role === "tool")) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
@@ -1302,11 +1534,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         );
       }
 
-      const rawResponse = llmResponse.content ?? "";
-
       // Output guardrail scan
       const outputScan = scanOutput(rawResponse);
-      let finalResponse = await finalizeUserFacingAssistantResponse(rawResponse, iterationCount, session, provider, signal);
+      const effectiveToolIterations = promisedContinuationWithoutTools && unresolvedDelegatedActionInHistory
+        ? Math.max(iterationCount, 1)
+        : iterationCount;
+      let finalResponse = await finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
 
       if (!outputScan.safe && outputScan.redacted) {
         finalResponse = outputScan.redacted;
@@ -1314,7 +1547,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         logAudit("output_redacted", { types: outputScan.detectedTypes }, { sessionId: session.id, severity: "warn" });
       }
 
-      session.addMessage({ role: "assistant", content: finalResponse });
+      persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
 
       const performance = buildTurnPerformanceMetrics({
         turnStartedAt,
@@ -1386,6 +1619,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     });
 
     const toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }> = [];
+    let workflowExecutionCorrectionPending = false;
+    let workflowExecutionCorrectionExhausted = false;
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
@@ -1412,7 +1647,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         if (tc.name === "delegate_to_agent") {
           const finalResponse = buildDelegationLoopResponse(_lastToolResultByName.get(tc.name) ?? "", "limit");
-          session.addMessage({ role: "assistant", content: finalResponse });
+          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
 
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
@@ -1614,7 +1849,48 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       let resultText = result.success
         ? result.output
-        : `Error: ${result.error ?? "Unknown error"}`;
+        : (result.error?.trim()
+            ? `Error: ${result.error}`
+            : (result.output.trim() || "Error: Unknown error"));
+
+      const workflowMatchesFromResult = extractWorkflowCatalogMatchesFromMetadata(result.metadata);
+
+      if (tc.name === "search_workflows") {
+        workflowSearchMatches = result.success
+          ? extractWorkflowCatalogMatchesFromMetadata(result.metadata)
+          : [];
+      } else if (tc.name === "run_workflow" && workflowMatchesFromResult.length > 0) {
+        workflowSearchMatches = mergeWorkflowCatalogMatches(workflowSearchMatches, workflowMatchesFromResult);
+      } else if (tc.name === "run_workflow" && result.success) {
+        workflowRunCompletedThisTurn = true;
+      }
+
+      if (
+        tc.name === "run_workflow"
+        && !result.success
+      ) {
+        const workflowCorrectionMatches = mergeWorkflowCatalogMatches(workflowSearchMatches, workflowMatchesFromResult);
+        const workflowErrorText = result.error?.trim() || resultText;
+        if (
+          isWorkflowNameResolutionFailureMessage(workflowErrorText)
+          && shouldRequireWorkflowExecutionAfterSearch(workflowCorrectionMatches)
+        ) {
+          if (!workflowExecutionCorrectionRetryUsed) {
+            workflowExecutionCorrectionRetryUsed = true;
+            workflowExecutionEnforcementPrompt = formatWorkflowExecutionCorrectionPromptFromSearch(workflowCorrectionMatches, workflowErrorText);
+            workflowExecutionCorrectionPending = true;
+            guardrailEvents.push({ type: "workflow_required", details: "workflow_run_correction_required" });
+            logAudit("guardrail_flagged", {
+              type: "workflow_run_correction_required",
+              attemptedWorkflowName: typeof tc.arguments?.["name"] === "string" ? tc.arguments["name"] : undefined,
+              error: workflowErrorText,
+              workflowMatches: workflowCorrectionMatches.slice(0, 3),
+            }, { sessionId: session.id, severity: "warn" });
+          } else {
+            workflowExecutionCorrectionExhausted = true;
+          }
+        }
+      }
 
       _lastToolResultByName.set(tc.name, resultText);
 
@@ -1654,7 +1930,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
           if (tc.name === "delegate_to_agent") {
             const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
-            session.addMessage({ role: "assistant", content: finalResponse });
+            persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
 
             const performance = buildTurnPerformanceMetrics({
               turnStartedAt,
@@ -1759,9 +2035,35 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         tool_call_id: tc.id,
         metadata: result.metadata,
       });
+
+      if (workflowExecutionCorrectionExhausted) {
+        session.addMessages(toolResultMessages);
+        return blocked(
+          "This turn searched the workflow catalog but still failed to call run_workflow with one of the returned workflow names.",
+          toolContext.swarmState,
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "invalid_workflow_name_after_search",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
+
     }
 
     session.addMessages(toolResultMessages);
+
+    if (workflowExecutionCorrectionPending) {
+      continue;
+    }
 
     // ── Post-orchestration synthesis nudge ─────────────────────────────────
     // When orchestration returns grounded evidence, inject a strong nudge
@@ -1792,6 +2094,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           content:
             "[USER RESPONSE REQUIRED] The latest delegated evidence indicates that further progress requires clarification, authorization, approval, or another user decision. " +
             "Ask the user yourself in one concise message and do NOT call more tools until they respond.",
+        });
+      } else if (disposition === "failure") {
+        session.addMessage({
+          role: "system",
+          content:
+            "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
+            "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
         });
       }
 
@@ -1892,7 +2201,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const fallbackMsg = "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
   const finalMsg = await rewriteTerminalResponseIfNeeded(normalizedFinalMsg, iterationCount, session, provider, signal);
-  session.addMessage({ role: "assistant", content: finalMsg });
+  persistAssistantTurnState(session, finalMsg, toolContext.swarmState);
   if (opts.onChunk) opts.onChunk(finalMsg);
 
   const performance = buildTurnPerformanceMetrics({
@@ -1973,6 +2282,19 @@ function blocked(reason: string, swarmState?: SwarmState, performance?: TurnPerf
     swarmState,
     performance,
   };
+}
+
+function persistAssistantTurnState(session: AgentSession, content: string, swarmState?: SwarmState): void {
+  if (swarmState) {
+    session.addMessage({
+      role: "assistant",
+      content,
+      metadata: { swarmState: structuredClone(swarmState) },
+    });
+    return;
+  }
+
+  session.addMessage({ role: "assistant", content });
 }
 
 function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly LLMMessage[]): {

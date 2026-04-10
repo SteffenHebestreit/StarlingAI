@@ -72,7 +72,10 @@ const fixtures = JSON.parse(
 ) as DelegationLoopFixtures;
 const tempConfigDirs: string[] = [];
 
-async function loadFreshRuntimeForToolMode(toolMode: "hybrid" | "orchestration_only") {
+async function loadFreshRuntimeForToolMode(
+  toolMode: "hybrid" | "orchestration_only",
+  extraConfig: Record<string, unknown> = {},
+) {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-runtime-toolmode-"));
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
@@ -82,6 +85,7 @@ async function loadFreshRuntimeForToolMode(toolMode: "hybrid" | "orchestration_o
         toolMode,
       },
     },
+    ...extraConfig,
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = configPath;
   vi.resetModules();
@@ -158,6 +162,8 @@ afterEach(() => {
   resetConfigForTests();
   unregisterTool("delegate_to_agent");
   unregisterTool("search_agents");
+  unregisterTool("search_workflows");
+  unregisterTool("run_workflow");
   streamMock.mockReset();
   completeMock.mockClear();
   resetSessionsForTests();
@@ -490,6 +496,98 @@ describe("runtime delegated-loop regressions", () => {
     expect(completeMock).toHaveBeenCalledTimes(1);
     expect(result.guardrailEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" }),
+    ]));
+  });
+
+  it("rejects tool-free continuation promises after an unfinished delegated server action and forces a retry delegation", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createTextStream("Ich habe den Befehl korrigiert und fuehre den Neustart nun aus.");
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("retry_shell_1", {
+          agentName: "shell_agent",
+          task: "Retry the docker compose restart on n8n-server using the user's corrected CamelCase path hint.",
+        });
+      }
+      return createTextStream("Der Neustart wurde mit der korrigierten Vorgabe erneut angestossen.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from shell_agent — TASK COMPLETED.",
+        "IMPORTANT: Relay ALL specific details from the evidence below.",
+        "Observed evidence:",
+        "Restart command accepted on the remote host.",
+      ].join("\n"),
+      metadata: {
+        agentName: "shell_agent",
+        attemptedAgents: ["shell_agent"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: "prior_delegate_1",
+        type: "function",
+        function: {
+          name: "delegate_to_agent",
+          arguments: JSON.stringify({ agentName: "shell_agent", task: "Restart the n8n container using docker compose." }),
+        },
+      }],
+    } as any);
+    session.addMessage({
+      role: "tool",
+      content: [
+        "Delegated result from shell_agent — PARTIAL RESULT.",
+        "IMPORTANT: Use the evidence below and say clearly that the delegated work was interrupted or incomplete.",
+        "Observed evidence:",
+        "Good, the SSH connection works. Now let me try to find the docker-compose.yml file:",
+      ].join("\n"),
+      tool_call_id: "prior_delegate_1",
+      metadata: {
+        agentName: "shell_agent",
+        delegationOutcome: "partial",
+        terminalState: "max_iterations",
+      },
+    } as any);
+    session.addMessage({
+      role: "assistant",
+      content: "Der Shell-Agent hat die Verbindung hergestellt, aber die Aktion wurde unterbrochen.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "versuche es noch einmal und vergiss nicht \"Steffen\" wird in Camelcase geschrieben",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("korrigierten Vorgabe erneut angestossen");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_continuation_promise_rejected" }),
     ]));
   });
 
@@ -1234,5 +1332,680 @@ describe("runtime delegated-loop regressions", () => {
     const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
     expect(assistantWithTools?.tool_calls).toHaveLength(1);
     expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
+  });
+
+  it("forces a workflow catalog check before delegation on workflow-shaped requests", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("workflow_delegate_1", {
+          agentName: "mission_coordinator",
+          task: "Find and run the right reusable audit workflow.",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("workflow_search_1", "search_workflows", {
+          query: "reusable audit export workflow",
+        });
+      }
+      return createTextStream("I checked the workflow catalog first and found a reusable audit workflow candidate.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "delegate should not run",
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "audit_export_report (scene)\nExports the session audit trail as markdown.",
+      metadata: {
+        matches: [
+          {
+            name: "audit_export_report",
+            type: "scene",
+          },
+        ],
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Find a reusable workflow or scene for the audit export and use the workflow catalog first.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("workflow catalog first");
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
+  });
+
+  it("prefers reusable workflow execution for comparison-paper requests even without explicit workflow wording", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use the reusable comparison paper workflow for the requested protocol set.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("paper_delegate_1", {
+          agentName: "mission_coordinator",
+          task: "Write a source-grounded comparison paper about MCP, A2A, and AG-UI.",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("paper_workflow_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I used the reusable comparison-paper workflow instead of inventing a fresh coordinator plan.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "delegate should not run",
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+      metadata: {
+        workflowName: "protocol_comparison_paper",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Write a source-grounded comparison paper about MCP, A2A, and AG-UI.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("reusable comparison-paper workflow");
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("requires run_workflow after search_workflows returns a viable reusable match", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use the reusable comparison paper workflow for the requested protocol set.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_1", "search_workflows", {
+          query: "paper KI-Protokolle MCP A2A AG-UI",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("paper_delegate_after_search_1", {
+          agentName: "mission_coordinator",
+          task: "Write a source-grounded comparison paper about MCP, A2A, and AG-UI.",
+        });
+      }
+      if (llmCallCount === 3) {
+        return createToolCallStream("paper_workflow_after_search_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I used the reusable comparison-paper workflow after catalog search instead of delegating ad hoc.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "delegate should not run",
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow matches for paper KI-Protokolle MCP A2A AG-UI: protocol_comparison_paper [scene]",
+      metadata: {
+        workflowMatches: [
+          {
+            name: "protocol_comparison_paper",
+            workflowType: "scene",
+            score: 0.33,
+            matchedTerms: ["paper", "protocol", "mcp"],
+          },
+        ],
+      },
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+      metadata: {
+        workflowName: "protocol_comparison_paper",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Kannst du mir bitte ein kurzes Paper zu KI-Protokollen mit Fokus auf MCP, A2A und AG-UI schreiben?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(streamMock).toHaveBeenCalledTimes(4);
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_required_after_search" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
+    expect(toolMessages[1]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("forces an exact workflow retry after an invalid workflow name following catalog search", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use the reusable comparison paper workflow for the requested protocol set.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_then_bad_name_1", "search_workflows", {
+          query: "paper KI-Protokolle MCP A2A AG-UI",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("workflow_bad_name_then_retry_1", "run_workflow", {
+          name: "paper_writer",
+          workflowType: "job",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      if (llmCallCount === 3) {
+        return createToolCallStream("workflow_exact_retry_after_bad_name_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I corrected the workflow name and used the returned catalog match.");
+    });
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+      metadata: {
+        workflowMatches: [
+          {
+            name: "protocol_comparison_paper",
+            workflowType: "scene",
+            score: 0.33,
+            matchedTerms: ["paper", "protocol", "mcp"],
+          },
+        ],
+      },
+    }));
+
+    let runWorkflowCallCount = 0;
+    const runWorkflowMock = vi.fn(async () => {
+      runWorkflowCallCount += 1;
+      if (runWorkflowCallCount === 1) {
+        return {
+          success: false,
+          output: "",
+          error: "Workflow not found: paper_writer",
+        };
+      }
+      return {
+        success: true,
+        output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+        metadata: {
+          workflowName: "protocol_comparison_paper",
+          workflowType: "scene",
+          blocked: false,
+        },
+      };
+    });
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Schreibe mir bitte ein kurzes Paper zu KI-Protokollen mit Fokus auf MCP, A2A und AG-UI.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(streamMock).toHaveBeenCalledTimes(4);
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(runWorkflowMock).toHaveBeenCalledTimes(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_correction_required" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(3);
+    expect(toolMessages[1]?.content).toContain("Workflow not found: paper_writer");
+    expect(toolMessages[2]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("rejects search_agents detours while an exact workflow retry is required", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use the reusable comparison paper workflow for the requested protocol set.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_then_bad_name_2", "search_workflows", {
+          query: "paper KI-Protokolle MCP A2A AG-UI",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("workflow_bad_name_then_agents_1", "run_workflow", {
+          name: "paper_writer",
+          workflowType: "job",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      if (llmCallCount === 3) {
+        return createToolCallStream("workflow_agents_detour_1", "search_agents", {
+          query: "researcher paper writer synthesis",
+        });
+      }
+      if (llmCallCount === 4) {
+        return createToolCallStream("workflow_exact_retry_after_detour_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I corrected the workflow name instead of detouring into agent discovery.");
+    });
+
+    const workflowMatches = [
+      {
+        name: "protocol_comparison_paper",
+        workflowType: "scene" as const,
+        score: 0.33,
+        matchedTerms: ["paper", "protocol", "mcp"],
+      },
+    ];
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+      metadata: { workflowMatches },
+    }));
+
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: "This should not execute while workflow correction is pending.",
+    }));
+
+    let runWorkflowCallCount = 0;
+    const runWorkflowMock = vi.fn(async () => {
+      runWorkflowCallCount += 1;
+      if (runWorkflowCallCount === 1) {
+        return {
+          success: false,
+          output: "",
+          error: "Workflow not found: paper_writer",
+          metadata: { workflowMatches },
+        };
+      }
+      return {
+        success: true,
+        output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+        metadata: {
+          workflowName: "protocol_comparison_paper",
+          workflowType: "scene",
+          blocked: false,
+        },
+      };
+    });
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_agents",
+      description: "Search agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Schreibe mir bitte ein kurzes Paper zu KI-Protokollen mit Fokus auf MCP, A2A und AG-UI.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(streamMock).toHaveBeenCalledTimes(5);
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(searchAgentsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_correction_required" }),
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_required_after_search" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(3);
+    expect(toolMessages[1]?.content).toContain("Workflow not found: paper_writer");
+    expect(toolMessages[2]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("search_agents");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("skips workflow-catalog enforcement inside active workflow execution turns", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare multiple protocols through one reusable comparison paper workflow.",
+          task: "Use mission_coordinator first. Partition the requested protocols into comparison tracks and produce one grounded paper draft.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("workflow_inner_delegate_1", {
+          agentName: "mission_coordinator",
+          task: "Compare MCP, A2A, and AG-UI using the active workflow plan.",
+        });
+      }
+      return createTextStream("I delegated to mission_coordinator inside the active workflow without re-running workflow discovery.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nA grounded comparison plan is in progress.",
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+      },
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow protocol_comparison_paper [scene] completed.",
+      metadata: {
+        workflowName: "protocol_comparison_paper",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "workflow",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Use mission_coordinator first. Partition MCP, A2A, and AG-UI into comparison tracks and draft one grounded paper.",
+      _workflowExecutionStack: ["scene:protocol_comparison_paper"],
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("without re-running workflow discovery");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(searchWorkflowsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).not.toHaveBeenCalled();
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required" }),
+    ]));
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("preserves blocked workflow output instead of flattening it to unknown error", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_fail_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+        });
+      }
+      return createTextStream("I reported the actual workflow failure.");
+    });
+
+    const observedToolResults: string[] = [];
+    const runWorkflowMock = vi.fn(async () => ({
+      success: false,
+      output: "Workflow protocol_comparison_paper [scene] blocked. The workflow tried to answer without delegating to a research specialist first.",
+      metadata: {
+        workflowName: "protocol_comparison_paper",
+        workflowType: "scene",
+        blocked: true,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Run the comparison-paper workflow and use current sources.",
+      onToolResult: (_toolCallId, _name, toolResult) => observedToolResults.push(toolResult),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("actual workflow failure");
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(observedToolResults).toHaveLength(1);
+    expect(observedToolResults[0]).toContain("blocked");
+    expect(observedToolResults[0]).not.toContain("Unknown error");
+
+    freshRuntime.unregisterTool("run_workflow");
   });
 });

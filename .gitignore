@@ -11,23 +11,29 @@ coverage/
 .guardedswarm/
 guardedswarm.json
 starlingai.json
-packages/core/.starlingai/
+config/mail/accounts.json
+
+# Runtime data directories (any location in the repo)
+**/.starlingai/
 
 # Transpiled JS in web source (accidental build artifacts)
 packages/web/src/**/*.js
 
 # Runtime artifacts
-.starlingai/*.log
-.starlingai/*.wav
-.starlingai/*.pid
-.starlingai/*.json
-.starlingai/*.ndjson
-.starlingai/*.jsonl
-.starlingai/recordings/
-.starlingai/pentest-artifacts/
-.starlingai/live-check/
 computer-remote-build.log
 *.deb
+
+# Temporary development/patch scripts in root
+fix.cjs
+fix_parse.cjs
+fix_parse_smart.cjs
+fix_tags.cjs
+patch_*.cjs
+patch_*.mjs
+safe_patch.cjs
+search.mjs
+skip_tests*.js
+skip/
 
 # Agent-mutable runtime overrides (local state)
 workspace/runtime/runtime.overrides.json

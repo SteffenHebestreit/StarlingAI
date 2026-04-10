@@ -151,6 +151,87 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("treats a synthesized max-iteration result as successful when a deliverable artifact was already produced", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-max-iter-artifact-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        writer_agent: {
+          description: "Artifact-producing writer",
+          systemPrompt: "Write the requested report and stop once the document is saved.",
+          tools: ["generate_document"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/document-output.js");
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "doc-1",
+            name: "generate_document",
+            arguments: {
+              title: "Protocol Comparison",
+              content: "# Protocol Comparison\n\nMCP vs A2A",
+              format: "markdown",
+              output_file: "reports/protocol-comparison.md",
+              overwrite: true,
+            },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "The report was written successfully and saved as a markdown artifact.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "writer_agent",
+        task: "Write the protocol comparison report.",
+        parentSessionId: "parent-artifact-success",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("written successfully");
+      expect(result.stats.outcome).toBe("success");
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.artifacts).toEqual([
+        expect.objectContaining({
+          outputPath: "reports/protocol-comparison.md",
+          previewMode: "markdown",
+          sourceTool: "generate_document",
+        }),
+      ]);
+
+      const completionEvent = auditEvents.find((event) => event.type === "sub_agent_completed" && event.data.agentName === "writer_agent");
+      expect(completionEvent).toBeDefined();
+      expect(completionEvent?.data.outcome).toBe("success");
+      expect(completionEvent?.data.completedFromArtifact).toBe(true);
+    } finally {
+      unsubscribe();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("gives coordinator agents (with run_task_graph) an elevated default timeout floor", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-coordinator-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -961,6 +1042,79 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.toolCount).toBe(3);
     } finally {
       unregisterTool("workspace_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns direct ssh_exec output for simple shell remote tasks without letting the model overwrite it", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-direct-remote-cli-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        shell_agent: {
+          description: "Shell and SSH specialist",
+          systemPrompt: "Run direct remote commands.",
+          tools: ["ssh_exec"],
+          maxIterations: 3,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "ssh_exec",
+      description: "Execute SSH command",
+      parameters: { type: "object", properties: { nodeName: { type: "string" }, command: { type: "string" } } },
+      async execute() {
+        return {
+          success: true,
+          output: [
+            "CONTAINER ID   IMAGE                    COMMAND                  CREATED       STATUS       PORTS                                           NAMES",
+            "661979c7e8af   steffen-n8n              \"tini -- /docker-ent…\"   2 weeks ago   Up 12 days   0.0.0.0:80->80/tcp, [::]:80->80/tcp, 5678/tcp   steffen-n8n-1",
+            "2ba1788eef7a   ankane/pgvector:latest   \"docker-entrypoint.s…\"   2 weeks ago   Up 12 days   0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp     steffen-postgres-1",
+          ].join("\n"),
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          { id: "ssh-1", name: "ssh_exec", arguments: { nodeName: "n8n-server", command: "docker ps" } },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "Die Ausfuehrung des Befehls docker ps ist fehlgeschlagen. Moegliche Ursachen ...",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "shell_agent",
+        task: "Pruefe, welche Docker-Container auf dem n8n-Server laufen. Fuehre den Befehl docker ps aus.",
+        parentSessionId: "parent-direct-remote-cli",
+        workspacePath: tempDir,
+        approvalCallback: async () => true,
+      });
+
+      expect(result.output).toContain("steffen-n8n-1");
+      expect(result.output).toContain("steffen-postgres-1");
+      expect(result.output).not.toContain("fehlgeschlagen");
+      expect(completeMock).toHaveBeenCalledTimes(1);
+      expect(result.stats.outcome).toBe("success");
+      expect(result.stats.toolCount).toBe(1);
+    } finally {
+      unregisterTool("ssh_exec");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -73,6 +73,8 @@ export type AuditEventType =
   | "tool_promotion_rejected"
   | "capability_gap_detected"
   | "capability_gap_proposal"
+  | "gap_confirmed_closed"
+  | "self_improvement_dev_started"
   | "self_improvement_completed"
   | "ephemeral_cleanup"
   | "a2a_messages_delivered"

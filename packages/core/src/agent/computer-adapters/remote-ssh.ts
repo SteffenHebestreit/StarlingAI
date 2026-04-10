@@ -57,6 +57,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function resolveCredentials(cred?: string): string | undefined {
+  if (!cred) return undefined;
+  if (cred.startsWith("$") && !cred.startsWith("$$")) {
+    const val = process.env[cred.slice(1)];
+    if (!val) log.warn({ envKey: cred.slice(1) }, "Env var for SSH credentials is not set");
+    return val;
+  }
+  return cred.replace(/^\$\$/, "$");
+}
+
 export class SshComputerAdapter implements ComputerAdapter {
   readonly name = "remote_ssh";
 
@@ -64,6 +74,10 @@ export class SshComputerAdapter implements ComputerAdapter {
   private sshAvailable = false;
 
   constructor(private readonly config: SshAdapterConfig) {}
+
+  private get credentials(): string | undefined {
+    return resolveCredentials(this.config.credentials);
+  }
 
   async initialize(session: ComputerSession): Promise<void> {
     this.session = session;
@@ -79,7 +93,7 @@ export class SshComputerAdapter implements ComputerAdapter {
     // Verify connectivity
     const result = await this.exec("echo starlingai-ssh-ready");
     if (!result.includes("starlingai-ssh-ready")) {
-      throw new Error(`SSH connection to ${this.config.host}:${this.config.port} failed`);
+      throw new Error(`SSH connection to ${this.config.host}:${this.config.port} failed: ${result}`);
     }
 
     log.info({
@@ -251,8 +265,8 @@ export class SshComputerAdapter implements ComputerAdapter {
   private async scpUpload(localPath: string, remotePath?: string): Promise<string> {
     const target = remotePath ?? `/tmp/${localPath.split("/").pop() ?? "upload"}`;
     const sshPortArgs = ["-P", String(this.config.port)];
-    const authArgs = this.config.authMethod === "key" && this.config.credentials
-      ? ["-i", this.config.credentials] : [];
+    const authArgs = this.config.authMethod === "key" && this.credentials
+      ? ["-i", this.credentials] : [];
     const args = [...authArgs, ...sshPortArgs,
       "-o", "StrictHostKeyChecking=accept-new",
       localPath,
@@ -266,8 +280,8 @@ export class SshComputerAdapter implements ComputerAdapter {
   private async scpDownload(remotePath: string, localPath?: string): Promise<string> {
     const target = localPath ?? `/tmp/${remotePath.split("/").pop() ?? "download"}`;
     const sshPortArgs = ["-P", String(this.config.port)];
-    const authArgs = this.config.authMethod === "key" && this.config.credentials
-      ? ["-i", this.config.credentials] : [];
+    const authArgs = this.config.authMethod === "key" && this.credentials
+      ? ["-i", this.credentials] : [];
     const args = [...authArgs, ...sshPortArgs,
       "-o", "StrictHostKeyChecking=accept-new",
       `${this.config.username}@${this.config.host}:${remotePath}`,
@@ -287,17 +301,17 @@ export class SshComputerAdapter implements ComputerAdapter {
       "-o", "BatchMode=yes",
       "-p", String(this.config.port),
     ];
-    if (this.config.authMethod === "key" && this.config.credentials) {
-      args.push("-i", this.config.credentials);
+    if (this.config.authMethod === "key" && this.credentials) {
+      args.push("-i", this.credentials);
     }
     args.push(`${this.config.username}@${this.config.host}`);
     return args;
   }
 
   private buildAuthPrefix(): string {
-    if (this.config.authMethod === "password" && this.config.credentials) {
+    if (this.config.authMethod === "password" && this.credentials) {
       // Use sshpass for password auth
-      const safePw = this.config.credentials.replace(/'/g, "'\\''");
+      const safePw = this.credentials.replace(/'/g, "'\\''");
       return `sshpass -p '${safePw}' `;
     }
     return "";

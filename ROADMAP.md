@@ -1,6 +1,6 @@
 # StarlingAI — Roadmap
 
-> **Last updated:** 2026-04-08 · **Current release:** v0.4.1 (Stage 9 refinement release)
+> **Last updated:** 2026-04-10 · **Current release:** v0.5.0 (Stage 9 workflow and orchestration release)
 
 This roadmap tracks both the completed architecture milestones and the honest gap analysis of where the implementation diverges from the swarm philosophy. It is a living document — the swarm may self-update entries in the `workspace/` area, but the core architecture decisions here are operator-owned.
 
