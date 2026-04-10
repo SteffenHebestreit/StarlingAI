@@ -132,6 +132,28 @@ let _unsubscribeAudit: (() => void) | null = null;
 const ALERT_RING_SIZE = 200;
 const _alertRing: Array<WardenAlert & { ts: string }> = [];
 
+// ── Mid-turn abort registry ───────────────────────────────────────────────────
+// Allows the Warden to abort an in-flight runTurn() when a severe anomaly fires.
+
+/** sessionId → AbortController registered by runTurn for the active turn. */
+const _sessionAbortControllers = new Map<string, AbortController>();
+
+/**
+ * Register an AbortController for the currently running turn in a session.
+ * Called by runTurn() immediately before the turn loop starts.
+ */
+export function registerSessionAbortController(sessionId: string, controller: AbortController): void {
+  _sessionAbortControllers.set(sessionId, controller);
+}
+
+/**
+ * Remove the abort controller registration when a turn completes.
+ * Called in the runTurn() finally block.
+ */
+export function deregisterSessionAbortController(sessionId: string): void {
+  _sessionAbortControllers.delete(sessionId);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
@@ -390,6 +412,7 @@ export function resetWardenForTests(): void {
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
   _configProposalsBySession.clear();
+  _sessionAbortControllers.clear();
   _alertRing.length = 0;
   _alertsEmitted = 0;
 }
@@ -719,6 +742,47 @@ function makeAlert(
   };
 }
 
+/**
+ * Try to extract a sessionId from the alert subject.
+ * Subjects are formatted as "agentName@sessionIdPrefix" or plain sessionId.
+ */
+function extractSessionIdFromSubject(subject: string): string | null {
+  // "agentName@abc12345" — take the part after '@'
+  const atIdx = subject.indexOf("@");
+  if (atIdx !== -1) return subject.slice(atIdx + 1) || null;
+  // Plain session IDs start with "sub:" or are UUID-like
+  if (/^sub:|^[0-9a-f-]{8,}/.test(subject)) return subject;
+  return null;
+}
+
+/**
+ * Abort the active turn for a session if one is registered.
+ * Fires for error-severity alerts that are session-specific.
+ */
+function maybeAbortSession(alert: WardenAlert): void {
+  // Only abort on session-targeting error-level alerts
+  if (alert.severity !== "error") return;
+  if (!["tool_storm", "tool_escape_attempt", "computer_credential_prompt_loop", "computer_clipboard_exfiltration"].includes(alert.type)) return;
+
+  const sessionId = extractSessionIdFromSubject(alert.subject);
+  if (!sessionId) return;
+
+  // Scan the registry: the stored key is the full sessionId but the subject may be a prefix
+  for (const [storedId, controller] of _sessionAbortControllers) {
+    if (storedId === sessionId || storedId.startsWith(sessionId)) {
+      if (!controller.signal.aborted) {
+        controller.abort(`warden:${alert.type}`);
+        log.warn(
+          { sessionId: storedId.slice(0, 20), alertType: alert.type },
+          "Warden aborted active session turn due to anomaly",
+        );
+      }
+      _sessionAbortControllers.delete(storedId);
+      return;
+    }
+  }
+}
+
 function emitAlert(alert: WardenAlert): void {
   _alertsEmitted++;
   // Push to ring buffer for dashboard queries
@@ -736,6 +800,9 @@ function emitAlert(alert: WardenAlert): void {
     { severity: alert.severity, channel: "warden" },
   );
   log[alert.severity]({ alertType: alert.type, subject: alert.subject }, `Warden: ${alert.detail}`);
+
+  // Abort the active session turn if the alert is severe enough
+  maybeAbortSession(alert);
 }
 
 /** Return recent warden alerts (up to last 200) for the operator dashboard. */

@@ -95,6 +95,9 @@ function expandTokenVariants(token: string): string[] {
   return [...variants].filter((value) => value.length >= 2);
 }
 
+/** Module-level cache: key = `${model}\x00${document_text}`, value = embedding vector. */
+const _workflowEmbeddingCache = new Map<string, Float32Array>();
+
 function cosineSimilarity(left: Float32Array, right: Float32Array): number {
   let dot = 0;
   let normLeft = 0;
@@ -207,6 +210,50 @@ function scoreWorkflowKeywordMatch(query: string, entry: WorkflowCatalogEntry): 
   return { score: normalizedScore, matchedTerms: [...matchedTerms] };
 }
 
+function sortWorkflowSearchCandidates(left: WorkflowSearchCandidate, right: WorkflowSearchCandidate): number {
+  if (right.combinedScore !== left.combinedScore) return right.combinedScore - left.combinedScore;
+  if (right.matchedTerms.length !== left.matchedTerms.length) return right.matchedTerms.length - left.matchedTerms.length;
+  return left.entry.name.localeCompare(right.entry.name);
+}
+
+function rankWorkflowReferenceCandidates(
+  query: string,
+  workflowType: WorkflowType | "auto",
+): WorkflowSearchCandidate[] {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) return [];
+
+  return buildWorkflowCatalogEntries()
+    .filter((entry) => workflowType === "auto" || entry.workflowType === workflowType)
+    .map((entry) => {
+      const keyword = scoreWorkflowKeywordMatch(query, entry);
+      return {
+        entry,
+        keywordScore: keyword.score,
+        semanticScore: 0,
+        combinedScore: keyword.score,
+        matchedTerms: keyword.matchedTerms,
+      } satisfies WorkflowSearchCandidate;
+    })
+    .filter((candidate) => candidate.combinedScore >= 0.18)
+    .sort(sortWorkflowSearchCandidates)
+    .slice(0, 5);
+}
+
+function buildWorkflowMatchMetadata(candidates: WorkflowSearchCandidate[]): Array<{
+  name: string;
+  workflowType: WorkflowType;
+  score: number;
+  matchedTerms: string[];
+}> {
+  return candidates.map((candidate) => ({
+    name: candidate.entry.name,
+    workflowType: candidate.entry.workflowType,
+    score: candidate.combinedScore,
+    matchedTerms: candidate.matchedTerms,
+  }));
+}
+
 function combineWorkflowScores(keywordScore: number, semanticScore: number, semanticAvailable: boolean): number {
   if (keywordScore > 0 && semanticScore > 0) {
     return keywordScore * 0.25 + semanticScore * 0.75;
@@ -232,14 +279,35 @@ async function computeSemanticWorkflowScores(
 
   try {
     const provider = getEmbeddingProvider();
-    const texts = [...entries.map(buildWorkflowSearchDocument), `Workflow query: ${query}`];
-    const vectors = await provider.embed(texts, model);
-    const queryVector = vectors.at(-1);
+    const documents = entries.map(buildWorkflowSearchDocument);
+    const docCacheKeys = documents.map((doc) => `${model}\x00${doc}`);
+    const queryCacheKey = `${model}\x00query:${query}`;
+
+    // Embed uncached documents
+    const uncached = docCacheKeys
+      .map((key, index) => ({ key, index }))
+      .filter(({ key }) => !_workflowEmbeddingCache.has(key));
+
+    if (uncached.length > 0) {
+      const textsToEmbed = uncached.map(({ index }) => documents[index]!);
+      const newVectors = await provider.embed(textsToEmbed, model);
+      for (let i = 0; i < uncached.length; i += 1) {
+        const vector = newVectors[i];
+        if (vector) _workflowEmbeddingCache.set(uncached[i]!.key, vector);
+      }
+    }
+
+    // Embed query — cached to avoid repeat embedding for the same query string
+    if (!_workflowEmbeddingCache.has(queryCacheKey)) {
+      const [qv] = await provider.embed([`Workflow query: ${query}`], model);
+      if (qv) _workflowEmbeddingCache.set(queryCacheKey, qv);
+    }
+    const queryVector = _workflowEmbeddingCache.get(queryCacheKey);
     if (!queryVector) return new Map<string, number>();
 
     const scores = new Map<string, number>();
     for (let index = 0; index < entries.length; index += 1) {
-      const vector = vectors[index];
+      const vector = _workflowEmbeddingCache.get(docCacheKeys[index]!);
       if (!vector) continue;
       scores.set(entries[index]!.key, cosineSimilarity(queryVector, vector));
     }
@@ -553,6 +621,7 @@ function resolveWorkflowReference(name: string, workflowType: WorkflowType | "au
   scene: SceneSummary | null;
   job: JobSummary | null;
   ambiguousMatches?: WorkflowCatalogEntry[];
+  suggestedMatches?: WorkflowSearchCandidate[];
 } {
   const exactScene = workflowType === "job" ? null : getScene(name);
   const exactJob = workflowType === "scene" ? null : getJobDefinition(name);
@@ -565,6 +634,8 @@ function resolveWorkflowReference(name: string, workflowType: WorkflowType | "au
   if (!normalizedQuery) {
     return { scene: null, job: null };
   }
+
+  const suggestedMatches = rankWorkflowReferenceCandidates(name, workflowType);
 
   const candidates = buildWorkflowCatalogEntries()
     .filter((entry) => workflowType === "auto" || entry.workflowType === workflowType)
@@ -579,6 +650,7 @@ function resolveWorkflowReference(name: string, workflowType: WorkflowType | "au
     return {
       scene: null,
       job: null,
+      ...(suggestedMatches.length > 0 ? { suggestedMatches } : {}),
       ...(candidates.length > 1 ? { ambiguousMatches: candidates } : {}),
     };
   }
@@ -858,11 +930,7 @@ registerTool({
         } satisfies WorkflowSearchCandidate;
       })
       .filter((candidate) => candidate.combinedScore >= 0.18)
-      .sort((left, right) => {
-        if (right.combinedScore !== left.combinedScore) return right.combinedScore - left.combinedScore;
-        if (right.matchedTerms.length !== left.matchedTerms.length) return right.matchedTerms.length - left.matchedTerms.length;
-        return left.entry.name.localeCompare(right.entry.name);
-      })
+      .sort(sortWorkflowSearchCandidates)
       .slice(0, limit);
 
     if (candidates.length === 0) {
@@ -934,28 +1002,42 @@ registerTool({
     const params = normalizeStringMap(args["params"]);
     const workflowContext = typeof args["context"] === "string" ? String(args["context"]) : undefined;
 
-    const { scene, job, ambiguousMatches } = resolveWorkflowReference(name, workflowType);
+    const { scene, job, ambiguousMatches, suggestedMatches } = resolveWorkflowReference(name, workflowType);
 
     if (workflowType === "auto" && scene && job) {
       return {
         success: false,
         output: "",
         error: `Workflow name '${name}' is ambiguous. Specify workflowType='scene' or workflowType='job'.`,
+        metadata: {
+          workflowMatches: buildWorkflowMatchMetadata(rankWorkflowReferenceCandidates(name, workflowType)),
+        },
       };
     }
 
     if (!scene && !job) {
       if (ambiguousMatches && ambiguousMatches.length > 1) {
+        const workflowMatches = buildWorkflowMatchMetadata(
+          (suggestedMatches ?? []).filter((candidate) => ambiguousMatches.some((entry) => (
+            entry.name === candidate.entry.name && entry.workflowType === candidate.entry.workflowType
+          ))),
+        );
         return {
           success: false,
           output: "",
           error: `Workflow name '${name}' is ambiguous. Matching workflows: ${ambiguousMatches.map((entry) => `${entry.name} [${entry.workflowType}]`).join(", ")}.`,
+          metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
         };
       }
+
+      const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
       return {
         success: false,
         output: "",
-        error: `Workflow not found: ${name}`,
+        error: workflowMatches.length > 0
+          ? `Workflow not found: ${name}. Closest workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
+          : `Workflow not found: ${name}`,
+        metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
       };
     }
 

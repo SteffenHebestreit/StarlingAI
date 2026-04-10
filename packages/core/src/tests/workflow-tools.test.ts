@@ -226,6 +226,73 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  it("run_workflow returns closest workflow matches for unknown aliases", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare protocols with one paper draft and one QA pass.",
+          task: "Compare {{topic}} as a source-grounded paper.",
+        },
+        source_backed_paper: {
+          description: "Draft a source-backed paper for the requested topic.",
+          task: "Draft a source-backed paper about {{topic}}.",
+        },
+      },
+      jobs: {
+        source_grounded_paper_packet: {
+          description: "Collect evidence, then write a paper packet.",
+          params: {
+            topic: { description: "Topic to cover", default: "the requested topic" },
+          },
+          steps: [
+            { scene: "protocol_comparison_paper", label: "Draft comparison paper", params: { topic: "{{topic}}" } },
+          ],
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "paper_writer",
+          workflowType: "auto",
+          params: { topic: "MCP vs A2A" },
+        },
+        {
+          sessionId: "workflow-alias",
+          workspacePath: "/workspace",
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Workflow not found: paper_writer");
+      expect(result.error).toContain("Closest workflows:");
+      expect(result.metadata?.["workflowMatches"]).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "protocol_comparison_paper", workflowType: "scene" }),
+        expect.objectContaining({ name: "source_backed_paper", workflowType: "scene" }),
+        expect.objectContaining({ name: "source_grounded_paper_packet", workflowType: "job" }),
+      ]));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow preserves the original user request when coordinator-first scenes are invoked without params", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {

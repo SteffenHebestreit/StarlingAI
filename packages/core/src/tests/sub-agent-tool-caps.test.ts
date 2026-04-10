@@ -123,3 +123,58 @@ describe("sub-agent research tool caps", () => {
     }
   });
 });
+
+describe("per-agent model config", () => {
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    completeMock.mockReset();
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  it("merges per-agent model override over defaults so stats.model reflects the override", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "default-llm" },
+        },
+      },
+      subAgents: {
+        specialist_agent: {
+          description: "Model override test agent",
+          systemPrompt: "You are a specialist.",
+          tools: [],
+          maxIterations: 1,
+          model: { primary: "overridden-llm" },
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValueOnce({
+      content: "Specialist complete.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "specialist_agent",
+        task: "Do the specialist task.",
+        parentSessionId: "parent-model-override",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.stats.model).toBe("overridden-llm");
+      expect(result.output).toContain("Specialist complete.");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

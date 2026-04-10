@@ -1,8 +1,35 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DEFAULT_TTS_CHUNK_MAX_CHARS } from "../multimodal/tts-chunking.js";
+
+function createPcmWav(sampleCount: number, seed = 0): Uint8Array {
+  const dataSize = sampleCount * 2;
+  const wav = Buffer.alloc(44 + dataSize);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16_000, 24);
+  wav.writeUInt32LE(32_000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(dataSize, 40);
+  for (let index = 0; index < sampleCount; index += 1) {
+    wav.writeInt16LE(seed + index, 44 + (index * 2));
+  }
+  return new Uint8Array(wav);
+}
+
+function readPcmWavDataSize(wav: Buffer): number {
+  return wav.readUInt32LE(40);
+}
 
 const mcpConnections = new Map<string, { client: { callTool: ReturnType<typeof vi.fn> } }>();
 
@@ -452,6 +479,63 @@ describe("multimodal and browser direct tools", () => {
     expect(result.output).toContain("hello.wav");
     expect(result.metadata).toMatchObject({ outputPath: "hello.wav", bytes: fakeWav.byteLength });
     expect(existsSync(join(tempDir, "hello.wav"))).toBe(true);
+  });
+
+  it("splits long OpenAI-compatible TTS requests and merges the WAV output before writing it", async () => {
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const spy = vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      multimodal: {
+        ...realConfig.multimodal,
+        tts: {
+          ...realConfig.multimodal.tts,
+          api: "openai-compatible",
+          model: "openai-compatible/tts-1",
+          defaultSpeaker: "alloy",
+        },
+      },
+    } as typeof realConfig);
+
+    const upstreamInputs: string[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://tts.local/v1/audio/speech");
+      const body = JSON.parse(String(init?.body)) as { input: string; voice: string };
+      upstreamInputs.push(body.input);
+      expect(body.voice).toBe("alloy");
+      expect(body.input.length).toBeLessThanOrEqual(DEFAULT_TTS_CHUNK_MAX_CHARS);
+      return new Response(createPcmWav(upstreamInputs.length + 1, upstreamInputs.length * 50), {
+        status: 200,
+        headers: { "Content-Type": "audio/wav" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const longText = Array.from(
+      { length: 12 },
+      (_, index) => `Sentence ${index + 1} keeps the reply natural while ensuring the text to speech backend receives smaller requests.`,
+    ).join(" ");
+
+    try {
+      const { getTool } = await import("../tools/registry.js");
+      const tool = getTool("synthesize_speech");
+
+      const result = await tool!.execute({ text: longText, outputPath: "chunked-openai.wav" }, {
+        sessionId: "session-tts-openai-chunked",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(upstreamInputs.length).toBeGreaterThan(1);
+      expect(fetchMock).toHaveBeenCalledTimes(upstreamInputs.length);
+
+      const wav = readFileSync(join(tempDir, "chunked-openai.wav"));
+      expect(wav.subarray(0, 4).toString()).toBe("RIFF");
+      expect(readPcmWavDataSize(wav)).toBe(upstreamInputs.reduce((sum, _text, index) => sum + ((index + 2) * 2), 0));
+      expect(result.metadata).toMatchObject({ outputPath: "chunked-openai.wav", bytes: wav.byteLength });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("writes TTS output to a generated path when outputPath is omitted", async () => {
