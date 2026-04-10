@@ -6,6 +6,10 @@
         <select v-model="typeFilter" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
           <option value="">All Events</option>
           <option value="agent_routing_evaluated">Routing</option>
+          <option value="tool_call_requested">Tool Requests</option>
+          <option value="tool_call_completed">Tool Completions</option>
+          <option value="tool_call_failed">Tool Failures</option>
+          <option value="sub_agent_tool_call">Sub-Agent Tools</option>
           <option value="turn_performance">Turn Performance</option>
           <option value="scene_job_completed">Scene Jobs</option>
           <option value="scene_job_failed">Scene Failures</option>
@@ -19,6 +23,13 @@
           <option value="warn">Warn</option>
           <option value="error">Error</option>
         </select>
+        <button
+          @click="exportFilteredAuditMarkdown"
+          :disabled="filteredEvents.length === 0 || auditExporting"
+          class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed rounded text-sm transition-colors"
+        >
+          Export Markdown
+        </button>
         <button @click="audit.clear()" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">
           Clear
         </button>
@@ -120,6 +131,28 @@
             <div class="text-gray-300">Agents: {{ formatAgentList(ev.data.agents) }}</div>
           </div>
 
+          <div v-else-if="isToolActivityEvent(ev)" class="mt-2 grid gap-2 md:grid-cols-2">
+            <div class="rounded-lg border border-sky-900/40 bg-sky-950/20 px-3 py-2">
+              <div class="text-[11px] uppercase tracking-wide text-sky-300">Tool Activity</div>
+              <div class="mt-1 text-gray-300">Tool: {{ toolEventName(ev) }}</div>
+              <div v-if="toolEventAgent(ev)" class="text-gray-300">Agent: {{ toolEventAgent(ev) }}</div>
+              <div v-if="toolEventPhaseLabel(ev)" class="text-gray-400">Phase: {{ toolEventPhaseLabel(ev) }}</div>
+              <div v-if="toolEventQuery(ev)" class="text-gray-300">Query: <span class="text-white">{{ toolEventQuery(ev) }}</span></div>
+              <div v-else-if="toolEventUrl(ev)" class="text-gray-300 break-all">URL: <span class="text-white">{{ toolEventUrl(ev) }}</span></div>
+              <div v-if="toolEventArgsSummary(ev)" class="text-gray-400">Args: {{ toolEventArgsSummary(ev) }}</div>
+            </div>
+            <div class="rounded-lg border border-gray-800 bg-black/20 px-3 py-2">
+              <div class="text-[11px] uppercase tracking-wide text-gray-500">Outcome</div>
+              <div v-if="toolEventMethod(ev)" class="mt-1 text-gray-300">Method: {{ toolEventMethod(ev) }}</div>
+              <div v-else class="mt-1 text-gray-300">Status: {{ toolEventPhaseLabel(ev) || 'n/a' }}</div>
+              <div v-if="toolEventBackend(ev)" class="text-gray-300">Backend: {{ toolEventBackend(ev) }}</div>
+              <div v-if="toolEventOutputChars(ev) !== null" class="text-gray-300">Output chars: {{ toolEventOutputChars(ev) }}</div>
+              <div v-if="toolEventTopResults(ev)" class="text-gray-300">Top hits: {{ toolEventTopResults(ev) }}</div>
+              <div v-if="toolEventError(ev)" class="mt-2 text-red-200">{{ toolEventError(ev) }}</div>
+              <div v-else-if="toolEventResultPreview(ev)" class="mt-2 text-gray-300">{{ toolEventResultPreview(ev) }}</div>
+            </div>
+          </div>
+
           <div v-else-if="ev.type === 'turn_performance'" class="mt-2 grid gap-2 md:grid-cols-2">
             <div :class="['rounded-lg px-3 py-2', performanceDetailCardClass(ev.data)]">
               <div class="text-[11px] uppercase tracking-wide text-emerald-300">Latency</div>
@@ -204,6 +237,7 @@ const PERFORMANCE_THRESHOLDS = {
 const audit = useAuditStore();
 const severityFilter = ref("");
 const typeFilter = ref("");
+const auditExporting = ref(false);
 
 const recentPerformanceEvents = computed(() => audit.events
   .filter((event) => event.type === "turn_performance")
@@ -273,7 +307,175 @@ function formatTs(ts: string): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function isRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
+}
+
+function truncateAuditText(value: string, maxLength = 140): string {
+  return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 3))}...` : value;
+}
+
+function isToolActivityEvent(event: AuditEvent): boolean {
+  return ["tool_call_requested", "tool_call_completed", "tool_call_failed", "sub_agent_tool_call"].includes(event.type);
+}
+
+function toolEventName(event: AuditEvent): string {
+  return String(event.data.tool ?? "unknown");
+}
+
+function toolEventAgent(event: AuditEvent): string | null {
+  return typeof event.data.agentName === "string" && event.data.agentName.trim()
+    ? String(event.data.agentName)
+    : null;
+}
+
+function toolEventArgs(event: AuditEvent): Record<string, unknown> {
+  return isRecord(event.data.args) ?? {};
+}
+
+function toolEventMetadata(event: AuditEvent): Record<string, unknown> | null {
+  return isRecord(event.data.metadata);
+}
+
+function toolEventQuery(event: AuditEvent): string | null {
+  const metadata = toolEventMetadata(event);
+  const args = toolEventArgs(event);
+  const value = metadata?.query ?? metadata?.rewrittenQuery ?? args.query;
+  return typeof value === "string" && value.trim() ? String(value) : null;
+}
+
+function toolEventUrl(event: AuditEvent): string | null {
+  const metadata = toolEventMetadata(event);
+  const args = toolEventArgs(event);
+  const value = metadata?.url ?? args.url;
+  return typeof value === "string" && value.trim() ? String(value) : null;
+}
+
+function toolEventMethod(event: AuditEvent): string | null {
+  const metadata = toolEventMetadata(event);
+  const value = metadata?.fetchMethod;
+  return typeof value === "string" && value.trim() ? String(value) : null;
+}
+
+function toolEventBackend(event: AuditEvent): string | null {
+  const metadata = toolEventMetadata(event);
+  const backend = typeof metadata?.backend === "string" && metadata.backend.trim()
+    ? String(metadata.backend)
+    : typeof metadata?.requestedBackend === "string" && metadata.requestedBackend.trim()
+      ? String(metadata.requestedBackend)
+      : null;
+  const attempted = Array.isArray(metadata?.attemptedBackends)
+    ? metadata?.attemptedBackends.map((entry) => String(entry)).filter(Boolean)
+    : [];
+  if (backend && attempted.length > 0 && !attempted.includes(backend)) {
+    return `${backend} (attempted ${attempted.join(", ")})`;
+  }
+  if (backend) return backend;
+  return attempted.length > 0 ? attempted.join(", ") : null;
+}
+
+function toolEventPhaseLabel(event: AuditEvent): string | null {
+  if (event.type === "tool_call_requested") return "requested";
+  if (event.type === "tool_call_failed") return "failed";
+  if (event.type === "tool_call_completed") {
+    return event.data.cachedResult === true ? "completed from cache" : "completed";
+  }
+
+  const phase = typeof event.data.phase === "string" ? String(event.data.phase).toLowerCase() : "start";
+  if (phase !== "done") return "started";
+  if (typeof event.data.skippedReason === "string" && event.data.skippedReason.trim()) {
+    return event.data.skippedReason.replace(/_/g, " ");
+  }
+  if (event.data.cachedResult === true) return "completed from cache";
+  if (event.data.success === false) return "failed";
+  return "completed";
+}
+
+function formatAuditScalar(value: unknown): string {
+  if (typeof value === "string") return truncateAuditText(value, 100);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return truncateAuditText(value.map((entry) => String(entry)).join(", "), 100);
+  if (value && typeof value === "object") return truncateAuditText(JSON.stringify(value), 100);
+  return String(value ?? "");
+}
+
+function toolEventArgsSummary(event: AuditEvent): string | null {
+  const args = Object.entries(toolEventArgs(event))
+    .filter(([key]) => !["query", "url"].includes(key))
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${formatAuditScalar(value)}`)
+    .filter(Boolean);
+  return args.length > 0 ? args.join(", ") : null;
+}
+
+function toolEventOutputChars(event: AuditEvent): number | null {
+  const value = Number(event.data.outputChars ?? Number.NaN);
+  return Number.isFinite(value) ? value : null;
+}
+
+function toolEventError(event: AuditEvent): string | null {
+  const value = event.data.error ?? event.data.reason;
+  return typeof value === "string" && value.trim() ? truncateAuditText(String(value), 220) : null;
+}
+
+function toolEventResultPreview(event: AuditEvent): string | null {
+  return typeof event.data.resultPreview === "string" && event.data.resultPreview.trim()
+    ? truncateAuditText(String(event.data.resultPreview), 220)
+    : null;
+}
+
+function toolEventTopResults(event: AuditEvent): string | null {
+  const ranking = isRecord(toolEventMetadata(event)?.ranking);
+  const topResults = Array.isArray(ranking?.topResults)
+    ? ranking.topResults
+        .map((entry) => isRecord(entry)?.title)
+        .filter((title): title is string => typeof title === "string" && title.trim().length > 0)
+        .slice(0, 3)
+    : [];
+  return topResults.length > 0 ? topResults.join(" · ") : null;
+}
+
+function summarizeToolActivityEvent(event: AuditEvent): string {
+  const tool = toolEventName(event);
+  const agent = toolEventAgent(event);
+  const query = toolEventQuery(event);
+  const url = toolEventUrl(event);
+  const method = toolEventMethod(event);
+  const target = query
+    ? ` for \"${truncateAuditText(query, 80)}\"`
+    : url
+      ? ` for ${truncateAuditText(url, 80)}`
+      : "";
+  const via = method ? ` via ${method}` : "";
+  const error = toolEventError(event);
+
+  if (event.type === "tool_call_requested") {
+    return `Requested ${tool}${target}.`;
+  }
+  if (event.type === "tool_call_failed") {
+    return `${agent ? `${agent} failed ${tool}` : `${tool} failed`}${target}: ${error ?? "unknown error"}`;
+  }
+  if (event.type === "tool_call_completed") {
+    const cacheSuffix = event.data.cachedResult === true ? " from cache" : "";
+    return `Completed ${tool}${target}${via}${cacheSuffix}.`;
+  }
+
+  const phase = typeof event.data.phase === "string" ? String(event.data.phase).toLowerCase() : "start";
+  if (phase !== "done") {
+    return `${agent ? `${agent} started ${tool}` : `Started ${tool}`}${target}${via}.`;
+  }
+  if (error) {
+    return `${agent ? `${agent} failed ${tool}` : `${tool} failed`}${target}: ${error}`;
+  }
+  const cacheSuffix = event.data.cachedResult === true ? " from cache" : "";
+  return `${agent ? `${agent} finished ` : "Completed "}${tool}${target}${via}${cacheSuffix}.`;
+}
+
 function summarizeEvent(event: AuditEvent): string {
+  if (isToolActivityEvent(event)) {
+    return summarizeToolActivityEvent(event);
+  }
+
   if (event.type === "agent_routing_evaluated") {
     const query = String(event.data.query ?? "");
     const topResult = String(event.data.topResult ?? "no match");
@@ -312,10 +514,6 @@ function summarizeEvent(event: AuditEvent): string {
     return String(event.data.detail ?? "Warden flagged an operational issue.");
   }
 
-  if (event.type === "tool_call_failed") {
-    return `Tool ${String(event.data.tool ?? "unknown")} failed: ${String(event.data.error ?? event.data.reason ?? "unknown error")}`;
-  }
-
   if (event.type === "tool_output_blocked") {
     return `Tool ${String(event.data.tool ?? "unknown")} output was blocked by guardrails.`;
   }
@@ -342,6 +540,55 @@ function formatReasons(value: unknown): string {
 
 function formatEventData(data: Record<string, unknown>): string {
   return JSON.stringify(data, null, 2);
+}
+
+function buildAuditMarkdownExport(events: AuditEvent[]): string {
+  const exportedAt = new Date().toLocaleString();
+  const lines: string[] = [
+    "# StarlingAI Audit Log",
+    "",
+    `- Exported: ${exportedAt}`,
+    `- Event count: ${events.length}`,
+    `- Type filter: ${typeFilter.value || "(all)"}`,
+    `- Severity filter: ${severityFilter.value || "(all)"}`,
+    "",
+    "---",
+    "",
+  ];
+
+  for (const event of events) {
+    lines.push(`## ${event.timestamp} - ${event.type}`);
+    lines.push("");
+    lines.push(`- Severity: ${event.severity}`);
+    lines.push(`- Session: ${event.sessionId ?? "(none)"}`);
+    lines.push(`- Channel: ${event.channel ?? "(none)"}`);
+    lines.push(`- Summary: ${summarizeEvent(event)}`);
+    lines.push("");
+    lines.push("```json");
+    lines.push(formatEventData(event.data));
+    lines.push("```");
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+async function exportFilteredAuditMarkdown(): Promise<void> {
+  if (filteredEvents.value.length === 0) return;
+
+  auditExporting.value = true;
+  try {
+    const content = buildAuditMarkdownExport(filteredEvents.value);
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "starlingai-audit-log.md";
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } finally {
+    auditExporting.value = false;
+  }
 }
 
 function eventIntervention(event: AuditEvent): { summary: string; detail: string } | null {

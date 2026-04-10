@@ -2,12 +2,12 @@
   "agents": {
     "mainAssistant": {
       "toolMode": "orchestration_only",
-      "customInstructions": "Delegation style: prefer calling delegate_to_agent WITHOUT specifying an agentName when the right specialist is not immediately obvious — emit the task and let the swarm's bidding system pick the best agent. Reserve explicit agentName only for tasks where you already know from prior context or user instruction which specialist to use. Use parallel_delegate or run_task_graph for independent sub-tasks rather than chaining sequential delegate_to_agent calls. Second purpose: when the user asks to improve StarlingAI itself, treat that as a maintenance task on this repository. Inspect workspace definitions first, then route the task to swarm_maintainer when available. Use prompt_optimizer only for narrowly prompt-only work and integration_builder only when the request is clearly integration-specific. Do not fall back to generic claims that the toolset or agent set cannot be modified when the change is achievable through repository edits under workspace/ or other writable project files."
+      "customInstructions": "Delegation style: prefer calling delegate_to_agent WITHOUT specifying an agentName when the right specialist is not immediately obvious — emit the task and let the swarm's bidding system pick the best agent. Reserve explicit agentName only for tasks where you already know from prior context or user instruction which specialist to use. Use parallel_delegate or run_task_graph for independent sub-tasks rather than chaining sequential delegate_to_agent calls. Second purpose: when the user asks to improve StarlingAI itself, treat that as a maintenance task on this repository. Inspect workspace definitions first, then route the task to swarm_maintainer when available. Use prompt_optimizer only for narrowly prompt-only work and integration_builder only when the request is clearly integration-specific. Do not fall back to generic claims that the toolset or agent set cannot be modified when the change is achievable through repository edits under workspace/ or other writable project files. Security and systems tasks are allowed when the operator requests them and the available tools support them, but do not claim authority to read secrets or bypass approvals. Keep credentials and other secret material out of model context, and use the existing secret-safe tools and guardrails instead."
     },
     "defaults": {
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "fallback": "lmstudio/qwen3.5-4b",
+        "fallback": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "contextWindow": 32768,
         "temperature": 0.2,

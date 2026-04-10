@@ -108,7 +108,7 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     api: "openai-compatible",
     model: "tts-1",
     defaultLanguage: "English",
-    defaultSpeaker: "alloy",
+    defaultSpeaker: "Luna",
     defaultVoiceId: "",
     voiceSamplePath: "",
     voiceSampleText: "",

@@ -1,14 +1,15 @@
 /**
- * Neo4j graph tools — Stage 9.
+ * MemGraph graph tools — Stage 9.
  *
- * Agents can build, query, and traverse knowledge graphs stored in Neo4j.
+ * Agents can build, query, and traverse knowledge graphs stored in MemGraph.
  * Typical use cases:
  *   - Entity relationship mapping during research
  *   - Dependency graphs for code analysis
  *   - Knowledge bases that persist across sessions
+ *   - Querying the agent shared-memory graph (MemoryRecord nodes)
  *
  * All tools are Tier 1 (write) or Tier 0 (read-only queries).
- * Graph data is durable — it lives until explicitly deleted or Neo4j is reset.
+ * Graph data is durable — it lives until explicitly deleted or the volume is reset.
  */
 
 import { registerTool, type ToolResult } from "./registry.js";
@@ -17,7 +18,7 @@ import { isNeo4jAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 const NOT_AVAILABLE: ToolResult = {
   success: false,
   output: "",
-  error: "Neo4j is not available. Ensure NEO4J_URL is set and the neo4j service is running.",
+  error: "MemGraph is not available. Ensure MEMGRAPH_URL is set and the memgraph service is running.",
 };
 
 // ── graph_upsert_entity ───────────────────────────────────────────────────────

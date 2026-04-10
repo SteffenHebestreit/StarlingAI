@@ -108,7 +108,7 @@ describe("generate_document", () => {
       outputPath: "artifacts/brief.md",
       filename: "brief.md",
       contentType: "text/markdown; charset=utf-8",
-      previewMode: "text",
+      previewMode: "markdown",
     });
   });
 });

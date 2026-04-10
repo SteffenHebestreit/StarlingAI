@@ -388,7 +388,7 @@
                 </div>
                 <div>
                   <label class="field-label">Default {{ multimodalForm.ttsApi === 'openai-compatible' ? 'Voice' : 'Speaker' }}</label>
-                  <input v-model="multimodalForm.ttsDefaultSpeaker" type="text" class="input-box font-mono" :placeholder="multimodalForm.ttsApi === 'openai-compatible' ? 'alloy' : 'Vivian'" />
+                  <input v-model="multimodalForm.ttsDefaultSpeaker" type="text" class="input-box font-mono" :placeholder="multimodalForm.ttsApi === 'openai-compatible' ? 'Luna' : 'Luna'" />
                 </div>
                 <div>
                   <label class="field-label">Default Voice ID <span class="text-gray-600 font-normal">optional</span></label>
@@ -1870,7 +1870,7 @@ const multimodalForm = reactive({
   ttsTimeoutMs: 60_000,
   ttsModel: "tts-1",
   ttsDefaultLanguage: "English",
-  ttsDefaultSpeaker: "alloy",
+  ttsDefaultSpeaker: "Luna",
   ttsDefaultVoiceId: "",
   ttsVoiceSamplePath: "",
   ttsVoiceSampleText: "",

@@ -819,6 +819,74 @@ describe("search_agents tool", () => {
     }
   }, 15000);
 
+  it("prefers security_researcher over distance_specialist for CVE queries even when semantic search favors navigation", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    const subAgents = {
+      security_researcher: {
+        description: "Security research specialist for CVE lookup, vulnerability advisories, threat intelligence, CVSS scoring, exploit availability, patch status, and infosec news.",
+        capabilities: ["CVE research", "vulnerability advisory lookup", "CVSS scoring", "NVD queries"],
+        tags: ["security", "cve", "vulnerability", "advisory", "cvss", "nvd"],
+        tools: ["web_search", "web_fetch"],
+        maxIterations: 6,
+      },
+      distance_specialist: {
+        description: "Navigation specialist for calculating route distance and travel time between places.",
+        capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+        tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+        tools: ["geocode_location", "route_distance_time"],
+        maxIterations: 4,
+      },
+    };
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents,
+    }), "utf8");
+
+    const provider = {
+      embed: vi.fn(async (texts: string[]) => {
+        if (texts.every((text) => text.startsWith("Agent:"))) {
+          return [
+            new Float32Array([0.2, 0.98]),
+            new Float32Array([1, 0]),
+          ];
+        }
+
+        return [new Float32Array([1, 0])];
+      }),
+    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.doMock("../providers/index.js", () => ({
+      getEmbeddingProvider: () => provider,
+    }));
+    vi.resetModules();
+
+    const [embeddingModule, { resolveAgentRouting }] = await Promise.all([
+      import("../providers/embeddings.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      await embeddingModule.buildAgentIndex(subAgents, provider, "lmstudio/qwen-embed");
+
+      const resolution = await resolveAgentRouting("security researcher CVE vulnerability analyst", { minConfidence: "medium" });
+
+      expect(resolution.results[0]?.name).toBe("security_researcher");
+      expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")?.confidence).not.toBe("medium");
+    } finally {
+      embeddingModule.resetEmbeddingSearchStateForTests();
+      vi.doUnmock("../providers/index.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it("routes evidence-to-artifact workflows to mission_coordinator across broader phrasings", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -1044,6 +1112,70 @@ describe("search_agents tool", () => {
     try {
       const resolution = await resolveAgentRouting("write a source-backed technical paper from the collected notes and citations", { minConfidence: "medium" });
       expect(resolution.results[0]?.name).toBe("paper_author");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes source-backed protocol papers to mission_coordinator instead of web_task_coordinator", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        citation_researcher: {
+          description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
+          capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
+          tags: ["citations", "research", "sources", "papers"],
+          tools: ["web_search", "web_fetch", "share_finding"],
+          maxIterations: 8,
+        },
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+          capabilities: ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating"],
+          tags: ["coordination", "parallel", "workflow", "quality"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        paper_author: {
+          description: "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
+          capabilities: ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
+          tags: ["papers", "reports", "citations", "drafting"],
+          tools: ["read_shared_facts", "write_file"],
+          maxIterations: 5,
+        },
+        quality_supervisor: {
+          description: "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified.",
+          capabilities: ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating"],
+          tags: ["quality", "qa", "review", "acceptance", "verification"],
+          tools: ["read_shared_facts", "share_finding"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("write a short technical paper comparing MCP, A2A, and AG-UI using official specifications and current sources", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("mission_coordinator");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

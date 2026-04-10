@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Dependencies — copy manifests first for layer caching
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY package.json pnpm-workspace.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
 RUN pnpm install --no-frozen-lockfile

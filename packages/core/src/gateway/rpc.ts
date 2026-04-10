@@ -230,6 +230,7 @@ export class RpcConnection {
   private auditUnsubscribe: (() => void) | null = null;
   private notificationsUnsubscribe: (() => void) | null = null;
   private abortControllers = new Map<string, AbortController>();
+  private sessionTurnRequestIds = new Map<string, string>();
   private pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(ws: WebSocket) {
@@ -498,8 +499,14 @@ export class RpcConnection {
         const session = getSession(sessionId);
         if (!session) throw new Error(`Session not found: ${sessionId}`);
 
+        const supersededRequestId = this.sessionTurnRequestIds.get(session.id);
+        if (supersededRequestId && supersededRequestId !== requestId) {
+          this.abortControllers.get(supersededRequestId)?.abort();
+        }
+
         const ac = new AbortController();
         this.abortControllers.set(requestId, ac);
+        this.sessionTurnRequestIds.set(session.id, requestId);
 
         let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
         let timedOut = false;
@@ -511,6 +518,9 @@ export class RpcConnection {
             timeoutHandle = null;
           }
           this.abortControllers.delete(requestId);
+          if (this.sessionTurnRequestIds.get(session.id) === requestId) {
+            this.sessionTurnRequestIds.delete(session.id);
+          }
         };
 
         // --agent flag overrides sceneAllowedAgents (narrows to a single agent)
@@ -581,6 +591,37 @@ export class RpcConnection {
                 metadata,
               },
             });
+          },
+          onSubAgentProgress: (event) => {
+            if (event.kind === "tool_start" && event.toolName) {
+              this.sendEvent({
+                type: "agent.tool_start",
+                data: {
+                  requestId,
+                  toolCallId: event.toolCallId ?? `${event.agentName}:${event.toolName}:${event.iteration}`,
+                  name: event.toolName,
+                  args: event.args ?? {},
+                  sourceAgent: event.agentName,
+                  delegated: true,
+                },
+              });
+              return;
+            }
+
+            if (event.kind === "tool_done" && event.toolName) {
+              this.sendEvent({
+                type: "agent.tool_done",
+                data: {
+                  requestId,
+                  toolCallId: event.toolCallId ?? `${event.agentName}:${event.toolName}:${event.iteration}`,
+                  name: event.toolName,
+                  result: String(event.result ?? "").substring(0, 500),
+                  metadata: event.metadata,
+                  sourceAgent: event.agentName,
+                  delegated: true,
+                },
+              });
+            }
           },
           onIntervention: (notice: InterventionNotice) => {
             this.sendEvent({ type: "agent.intervention", data: { requestId, notice } });

@@ -1,13 +1,17 @@
 /**
- * Neo4j connection singleton.
+ * MemGraph connection singleton (Bolt protocol via neo4j-driver).
  *
- * Used by tools/graph.ts for all graph read/write operations.
- * Connects lazily on first use; gracefully unavailable if NEO4J_URL is unset.
+ * MemGraph speaks Bolt identically to Neo4j, so the same driver is used.
+ * Env vars: MEMGRAPH_URL (preferred) or NEO4J_URL (fallback for compat).
+ * Auth is optional — MemGraph runs without credentials by default; set
+ * MEMGRAPH_PASSWORD if your instance has auth enabled.
+ *
+ * Used by tools/graph.ts and memory/graph-service.ts for all graph operations.
  */
 import neo4j, { type Driver, type Session, type QueryResult } from "neo4j-driver";
 import { childLogger } from "../logger.js";
 
-const log = childLogger("db:neo4j");
+const log = childLogger("db:graph");
 
 let _driver: Driver | null = null;
 let _available = false;
@@ -15,11 +19,11 @@ let _available = false;
 export function getNeo4jDriver(): Driver | null {
   if (_driver) return _driver;
 
-  const url = process.env["NEO4J_URL"];
-  const user = process.env["NEO4J_USER"] ?? "neo4j";
-  const password = process.env["NEO4J_PASSWORD"];
+  const url = process.env["MEMGRAPH_URL"] ?? process.env["NEO4J_URL"];
+  const user = process.env["MEMGRAPH_USER"] ?? process.env["NEO4J_USER"] ?? "";
+  const password = process.env["MEMGRAPH_PASSWORD"] ?? process.env["NEO4J_PASSWORD"] ?? "";
 
-  if (!url || !password) return null;
+  if (!url) return null;
 
   try {
     _driver = neo4j.driver(url, neo4j.auth.basic(user, password), {
@@ -29,10 +33,10 @@ export function getNeo4jDriver(): Driver | null {
       logging: { level: "warn", logger: (level, message) => log.warn({ level }, message) },
     });
     _available = true;
-    log.info({ url }, "Neo4j driver created");
+    log.info({ url }, "MemGraph driver created");
     return _driver;
   } catch (err) {
-    log.warn({ err }, "Failed to create Neo4j driver");
+    log.warn({ err }, "Failed to create MemGraph driver");
     return null;
   }
 }
@@ -101,5 +105,6 @@ export async function closeNeo4j(): Promise<void> {
     await _driver.close();
     _driver = null;
     _available = false;
+    log.info("MemGraph driver closed");
   }
 }

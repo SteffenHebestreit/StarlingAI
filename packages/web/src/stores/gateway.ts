@@ -4,6 +4,7 @@ import { useStorage } from "@vueuse/core";
 import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
 import { useNotificationStore } from "./notifications";
+import { useShellStore } from "./shell";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -47,7 +48,7 @@ export interface ChatMessage {
     relativePath?: string;
     externalUrl?: string;
     contentType?: string;
-    previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "mermaid" | "download";
+    previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "download";
     size?: number;
     isDirectory?: boolean;
     title?: string;
@@ -124,6 +125,15 @@ export interface GatewaySessionTranscriptMessage {
   content: string;
   timestamp: string;
   toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
+  swarmState?: SwarmState;
+}
+
+interface GatewayAuditEvent {
+  id: string;
+  timestamp: string;
+  type: string;
+  sessionId?: string;
+  data: Record<string, unknown>;
 }
 
 export interface GatewaySessionTranscript {
@@ -218,7 +228,7 @@ export interface ChatAttachment {
   relativePath?: string;
   externalUrl?: string;
   contentType?: string;
-  previewMode?: "image" | "html" | "pdf" | "text" | "json" | "audio" | "mermaid" | "download";
+  previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "download";
   size?: number;
   isDirectory?: boolean;
   title?: string;
@@ -397,6 +407,7 @@ function inferPreviewMode(contentType: string): ChatAttachment["previewMode"] {
   if (contentType.startsWith("text/html")) return "html";
   if (contentType.startsWith("application/pdf")) return "pdf";
   if (contentType.startsWith("application/json")) return "json";
+  if (contentType.startsWith("text/markdown")) return "markdown";
   if (contentType.startsWith("text/vnd.mermaid")) return "mermaid";
   if (contentType.startsWith("text/")) return "text";
   return "download";
@@ -590,6 +601,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   const pendingRequestId = ref<string | null>(null);
   const streamingText = ref("");
   const liveSwarmState = ref<SwarmState | null>(null);
+  const syntheticSwarmState = ref<SwarmState | null>(null);
   const selectedSwarmRunId = ref<string | null>(null);
   const isStreaming = ref(false);   // true while text chunks are arriving
   const isError = ref(false);       // true when last turn ended in an error
@@ -773,7 +785,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const pendingToolCalls = streamingMessage?.toolCalls?.filter((tc) => tc.result === undefined) ?? [];
     const hasActiveDelegation = pendingToolCalls.some((tc) => DELEGATION_TOOL_NAMES.has(tc.name));
     const hasPendingToolCall = pendingToolCalls.length > 0;
-    const activeSwarmTask = Object.values(liveSwarmState.value?.tasks ?? {}).some((task) => task.status === "running" || task.status === "pending");
+    const activeSwarmTask = Object.values((liveSwarmState.value ?? syntheticSwarmState.value)?.tasks ?? {}).some((task) => task.status === "running" || task.status === "pending");
     return hasActiveDelegation || hasPendingToolCall || activeSwarmTask;
   }
 
@@ -900,6 +912,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingApproval.value = null;
     pendingIntervention.value = null;
     liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
     isStreaming.value = false;
     clearTurnStallTimers();
   }
@@ -1028,6 +1041,239 @@ export const useGatewayStore = defineStore("gateway", () => {
     };
   }
 
+  function toolArgsSignature(args: Record<string, unknown> | undefined): string {
+    try {
+      return JSON.stringify(args ?? {});
+    } catch {
+      return "{}";
+    }
+  }
+
+  function formatSwarmProgressStatus(swarmState: SwarmState): string | null {
+    const tasks = Object.values(swarmState.tasks ?? {});
+    const runningCount = tasks.filter((task) => task.status === "running").length;
+    const pendingCount = tasks.filter((task) => task.status === "pending").length;
+    const completedCount = tasks.filter((task) => task.status === "completed").length;
+    const partialCount = tasks.filter((task) => task.status === "partial").length;
+    const failedCount = tasks.filter((task) => task.status === "failed" || task.status === "blocked").length;
+    const statusParts: string[] = [];
+    if (runningCount > 0) statusParts.push(`${runningCount} running`);
+    if (pendingCount > 0) statusParts.push(`${pendingCount} pending`);
+    if (completedCount > 0) statusParts.push(`${completedCount} done`);
+    if (partialCount > 0) statusParts.push(`${partialCount} partial`);
+    if (failedCount > 0) statusParts.push(`${failedCount} failed`);
+    return statusParts.length > 0 ? `Swarm plan active: ${statusParts.join(" · ")}` : null;
+  }
+
+  function currentTurnObjectiveFallback(): string {
+    for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+      const message = messages.value[index];
+      if (message?.role === "user" && message.content.trim()) {
+        return summarizeTaskTitle(message.content, 140);
+      }
+    }
+    return "Delegated turn in progress";
+  }
+
+  function updateSwarmStatusFromState(swarmState: SwarmState, appendHistory = false): void {
+    const statusText = formatSwarmProgressStatus(swarmState);
+    if (statusText) {
+      updateStreamingStatus(statusText, { appendHistory });
+    }
+  }
+
+  function ensureSyntheticSwarmState(seedObjective?: string): SwarmState {
+    const now = new Date().toISOString();
+    const objective = seedObjective?.trim() || currentTurnObjectiveFallback();
+    if (!syntheticSwarmState.value) {
+      syntheticSwarmState.value = {
+        objective,
+        startedAt: now,
+        updatedAt: now,
+        tasks: {},
+      };
+    } else {
+      syntheticSwarmState.value.updatedAt = now;
+      if (!syntheticSwarmState.value.objective.trim()) {
+        syntheticSwarmState.value.objective = objective;
+      }
+    }
+    attachSwarmStateToMessage("streaming", syntheticSwarmState.value);
+    return syntheticSwarmState.value;
+  }
+
+  function ensureSyntheticSwarmTask(event: GatewayAuditEvent): SwarmTaskState {
+    const agentName = typeof event.data["agentName"] === "string" && event.data["agentName"].trim()
+      ? String(event.data["agentName"])
+      : "sub_agent";
+    const taskText = typeof event.data["task"] === "string" && event.data["task"].trim()
+      ? String(event.data["task"])
+      : agentName;
+    const state = ensureSyntheticSwarmState(taskText);
+    const taskId = event.sessionId ? `audit:${event.sessionId}` : `audit:${event.id}`;
+    const existing = state.tasks[taskId];
+    if (existing) {
+      existing.selectedAgent = existing.selectedAgent ?? agentName;
+      existing.status = existing.status === "completed" ? "completed" : "running";
+      state.updatedAt = event.timestamp;
+      attachSwarmStateToMessage("streaming", state);
+      return existing;
+    }
+
+    state.tasks[taskId] = {
+      id: taskId,
+      title: summarizeTaskTitle(taskText, 120),
+      status: "running",
+      dependsOn: [],
+      selectedAgent: agentName,
+      attempts: [{
+        agentName,
+        status: "running",
+        startedAt: event.timestamp,
+        toolCount: 0,
+        iterations: 0,
+        toolNames: [],
+      }],
+    };
+    state.updatedAt = event.timestamp;
+    attachSwarmStateToMessage("streaming", state);
+    updateSwarmStatusFromState(state, false);
+    return state.tasks[taskId]!;
+  }
+
+  function ensureStreamingToolCall(name: string, args: Record<string, unknown>, toolCallId?: string): void {
+    const streamingMessage = getStreamingMessage();
+    if (!streamingMessage) return;
+    const signature = toolArgsSignature(args);
+    const existing = (streamingMessage.toolCalls ?? []).find((toolCall) =>
+      (toolCallId && toolCall.id === toolCallId)
+      || (toolCall.result === undefined && toolCall.name === name && toolArgsSignature(toolCall.args) === signature)
+    );
+    if (existing) {
+      if (toolCallId && !existing.id) existing.id = toolCallId;
+      return;
+    }
+    streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
+      id: toolCallId,
+      name,
+      args,
+    }];
+  }
+
+  function resolveStreamingToolCall(name: string, result: string, toolCallId?: string): void {
+    const streamingMessage = getStreamingMessage();
+    if (!streamingMessage?.toolCalls) return;
+    const toolCall = toolCallId
+      ? streamingMessage.toolCalls.find((entry) => entry.id === toolCallId)
+      : streamingMessage.toolCalls.find((entry) => entry.name === name && entry.result === undefined);
+    if (toolCall) {
+      toolCall.result = result;
+    }
+  }
+
+  function applyAuditEventFallback(event: GatewayAuditEvent): void {
+    if (!pendingRequestId.value || !currentSessionId.value) return;
+
+    const sessionId = event.sessionId ?? "";
+    const parentSessionId = currentSessionId.value;
+    const isMainSessionEvent = sessionId === parentSessionId;
+    const isSubSessionEvent = sessionId.startsWith(`sub:${parentSessionId}:`);
+    if (!isMainSessionEvent && !isSubSessionEvent) return;
+
+    if (isMainSessionEvent) {
+      if (event.type === "tool_call_requested") {
+        const toolName = typeof event.data["tool"] === "string" ? String(event.data["tool"]) : "";
+        const args = event.data["args"] && typeof event.data["args"] === "object"
+          ? event.data["args"] as Record<string, unknown>
+          : {};
+        if (toolName) {
+          ensureStreamingToolCall(toolName, args, `audit:${event.id}`);
+          updateStreamingStatus(`Running ${toolName}...`, { appendHistory: true });
+        }
+        return;
+      }
+
+      if (event.type === "tool_call_completed") {
+        const toolName = typeof event.data["tool"] === "string" ? String(event.data["tool"]) : "";
+        if (toolName) {
+          resolveStreamingToolCall(toolName, "Completed.");
+        }
+        return;
+      }
+
+      if (event.type === "tool_call_failed") {
+        const toolName = typeof event.data["tool"] === "string" ? String(event.data["tool"]) : "";
+        const errorText = typeof event.data["error"] === "string" && event.data["error"].trim()
+          ? `Error: ${String(event.data["error"])}`
+          : "Error: Tool call failed.";
+        if (toolName) {
+          resolveStreamingToolCall(toolName, errorText);
+        }
+        return;
+      }
+    }
+
+    if (!isSubSessionEvent || liveSwarmState.value) return;
+
+    const task = ensureSyntheticSwarmTask(event);
+    const attempt = task.attempts[task.attempts.length - 1];
+    if (!attempt) return;
+
+    switch (event.type) {
+      case "sub_agent_started": {
+        task.status = "running";
+        attempt.status = "running";
+        break;
+      }
+      case "sub_agent_tool_call": {
+        const phase = typeof event.data["phase"] === "string" ? String(event.data["phase"]).toLowerCase() : "start";
+        const toolName = typeof event.data["tool"] === "string" ? String(event.data["tool"]) : "tool";
+        attempt.status = "running";
+        if (phase !== "done") {
+          attempt.toolCount = (attempt.toolCount ?? 0) + 1;
+          attempt.toolNames = [...(attempt.toolNames ?? []), toolName];
+        }
+        break;
+      }
+      case "sub_agent_completed": {
+        const outcome = typeof event.data["outcome"] === "string" ? String(event.data["outcome"]).toLowerCase() : "success";
+        const terminalState = typeof event.data["terminalState"] === "string" ? String(event.data["terminalState"]).toLowerCase() : "completed";
+        const failed = outcome === "failure" || terminalState === "error" || terminalState === "missing_config";
+        const partial = !failed && (outcome === "partial" || terminalState === "timeout" || terminalState === "cancelled");
+        task.status = failed ? "failed" : partial ? "partial" : "completed";
+        attempt.status = failed ? "failed" : partial ? "partial" : "completed";
+        attempt.finishedAt = event.timestamp;
+        if (typeof event.data["toolCount"] === "number") attempt.toolCount = Number(event.data["toolCount"]);
+        if (typeof event.data["iterations"] === "number") attempt.iterations = Number(event.data["iterations"]);
+        if (typeof event.data["error"] === "string" && event.data["error"].trim()) {
+          task.error = String(event.data["error"]);
+        }
+        const agentLabel = task.selectedAgent ?? attempt.agentName;
+        attempt.summary = failed
+          ? `${agentLabel} failed`
+          : partial
+            ? `${agentLabel} returned a partial result`
+            : `Completed ${agentLabel}`;
+        break;
+      }
+      case "sub_agent_max_iterations": {
+        task.status = "partial";
+        attempt.status = "partial";
+        attempt.finishedAt = event.timestamp;
+        if (typeof event.data["toolCount"] === "number") attempt.toolCount = Number(event.data["toolCount"]);
+        if (typeof event.data["iterations"] === "number") attempt.iterations = Number(event.data["iterations"]);
+        attempt.summary = `${task.selectedAgent ?? attempt.agentName} hit max iterations`;
+        break;
+      }
+      default:
+        return;
+    }
+
+    syntheticSwarmState.value!.updatedAt = event.timestamp;
+    attachSwarmStateToMessage("streaming", syntheticSwarmState.value);
+    updateSwarmStatusFromState(syntheticSwarmState.value!, false);
+  }
+
   function attachSwarmStateToMessage(messageId: string, swarmState: SwarmState | null) {
     if (!swarmState) return;
     const message = messages.value.find((entry) => entry.id === messageId);
@@ -1116,6 +1362,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const idx = messages.value.findIndex(m => m.id === "streaming");
     const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
     const preservedSwarmState = liveSwarmState.value
+      ?? syntheticSwarmState.value
       ?? streamingMessage?.swarmState
       ?? synthesizeSwarmStateFromToolCalls(streamingMessage?.toolCalls, errorText);
     const errorMsg: ChatMessage = {
@@ -1140,6 +1387,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearTurnStallState();
       appendSwarmRun("error", preservedSwarmState);
       liveSwarmState.value = null;
+      syntheticSwarmState.value = null;
     }
 
     isError.value = true;
@@ -1158,6 +1406,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingApproval.value = null;
     pendingIntervention.value = null;
     liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
     isStreaming.value = false;
     selectedSwarmRunId.value = null;
   }
@@ -1171,6 +1420,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         : message.content,
       timestamp: new Date(message.timestamp),
       toolCalls: message.toolCalls,
+      swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
       attachments: (message.toolCalls ?? []).flatMap((toolCall) => extractToolAttachments(toolCall.name, toolCall.metadata)),
     })));
   }
@@ -1396,6 +1646,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingIntervention.value = null;
     notificationsSubscribed.value = false;
     liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
     isStreaming.value = false;
   }
 
@@ -1450,6 +1701,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Parameters<typeof audit.addEvent>[0] | undefined;
       if (data) {
         audit.addEvent(data);
+        applyAuditEventFallback(data as GatewayAuditEvent);
       }
       return;
     }
@@ -1487,13 +1739,14 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
         notePendingTurnActivity();
+        useShellStore().handleToolStart(data);
         const streamingMessage = getStreamingMessage();
         if (streamingMessage) {
-          streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
-            id: typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
-            name: String(data["name"]),
-            args: data["args"] as Record<string, unknown>,
-          }];
+          ensureStreamingToolCall(
+            String(data["name"]),
+            (data["args"] as Record<string, unknown>) ?? {},
+            typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
+          );
         }
         updateStreamingStatus(`Running ${String(data["name"])}...`, { appendHistory: true });
       }
@@ -1507,19 +1760,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         const swarmState = normalizeSwarmState(data["swarmState"]);
         if (swarmState) {
           liveSwarmState.value = swarmState;
+          syntheticSwarmState.value = null;
           attachSwarmStateToMessage("streaming", swarmState);
-
-          const tasks = Object.values(swarmState.tasks ?? {});
-          const runningCount = tasks.filter((task) => task.status === "running").length;
-          const pendingCount = tasks.filter((task) => task.status === "pending").length;
-          const completedCount = tasks.filter((task) => task.status === "completed").length;
-          const statusParts: string[] = [];
-          if (runningCount > 0) statusParts.push(`${runningCount} running`);
-          if (pendingCount > 0) statusParts.push(`${pendingCount} pending`);
-          if (completedCount > 0) statusParts.push(`${completedCount} done`);
-          if (statusParts.length > 0) {
-            updateStreamingStatus(`Swarm plan active: ${statusParts.join(" · ")}`, { appendHistory: false });
-          }
+          updateSwarmStatusFromState(swarmState, false);
         }
       }
       return;
@@ -1577,6 +1820,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
         notePendingTurnActivity();
+        useShellStore().handleToolDone(data);
         const streamingMessage = getStreamingMessage();
         if (streamingMessage?.toolCalls) {
           const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
@@ -1626,9 +1870,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");
         const isBlocked = status === "blocked";
-        const swarmState = normalizeSwarmState(data["swarmState"]) ?? liveSwarmState.value;
-        const rawPerf = data["performance"] as Record<string, unknown> | undefined;
         const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
+        const swarmState = normalizeSwarmState(data["swarmState"]) ?? liveSwarmState.value ?? streamingMessage?.swarmState ?? syntheticSwarmState.value;
+        const rawPerf = data["performance"] as Record<string, unknown> | undefined;
         const finalMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "assistant",
@@ -1660,6 +1904,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         pendingApproval.value = null;
         appendSwarmRun(isBlocked ? "blocked" : "ok", swarmState);
         liveSwarmState.value = null;
+        syntheticSwarmState.value = null;
         if (isBlocked) setTimeout(() => { isError.value = false; }, 3000);
         return;
       }
@@ -1725,6 +1970,31 @@ export const useGatewayStore = defineStore("gateway", () => {
     failPendingTurn("Turn cancelled by user.");
   }
 
+  async function supersedePendingTurn(): Promise<void> {
+    const rid = pendingRequestId.value;
+    if (!rid) return;
+
+    try {
+      await rpc("chat.cancel", { requestId: rid });
+    } catch {
+      // Ignore transport failures here so a replacement turn can still start.
+    }
+
+    const idx = messages.value.findIndex((message) => message.id === "streaming");
+    if (idx >= 0) {
+      messages.value.splice(idx, 1);
+    }
+
+    streamingText.value = "";
+    pendingRequestId.value = null;
+    pendingApproval.value = null;
+    pendingIntervention.value = null;
+    liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
+    isStreaming.value = false;
+    clearTurnStallState();
+  }
+
   async function deleteSession(sessionId: string): Promise<void> {
     if (ws?.readyState === WebSocket.OPEN) {
       try { await rpc("session.delete", { sessionId }); } catch { /* already deleted */ }
@@ -1753,6 +2023,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   async function sendMessage(text: string, enableThinking?: boolean, displayContent?: string, attachments?: Array<{ filename: string; dataUrl: string }>): Promise<void> {
+    if (pendingRequestId.value) {
+      await supersedePendingTurn();
+    }
+
     if (!currentSessionId.value) await createSession();
 
     const userMsg: ChatMessage = {
@@ -1768,6 +2042,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingRequestId.value = requestId;
     streamingText.value = "";
     liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
     pendingIntervention.value = null;
     turnLikelyStalled.value = false;
 
@@ -1931,6 +2206,19 @@ export const useGatewayStore = defineStore("gateway", () => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  async function downloadSessionAuditMarkdown(sessionId: string): Promise<void> {
+    const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/audit-markdown`);
+    const blob = await response.blob();
+    const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
+      ?? `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function summarizeForSpeech(input: {
     text: string;
     maxSentences?: number;
@@ -1972,6 +2260,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     .sort((left, right) => right.lastRecordedAt.localeCompare(left.lastRecordedAt)));
   const visibleSwarmState = computed<SwarmState | null>(() => {
     if (liveSwarmState.value) return liveSwarmState.value;
+    if (syntheticSwarmState.value) return syntheticSwarmState.value;
     if (selectedSwarmRunId.value) {
       const selected = currentSessionSwarmRuns.value.find((run) => run.id === selectedSwarmRunId.value);
       if (selected) return selected.state;
@@ -2033,6 +2322,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     fetchWorkspaceArtifactBlob,
     downloadWorkspaceArtifact,
     downloadSessionDebugMarkdown,
+    downloadSessionAuditMarkdown,
     respondApproval,
     dismissIntervention,
     cancelTurn,

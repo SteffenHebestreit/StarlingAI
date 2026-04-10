@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { getConfig } from "../config/loader.js";
+import type { ComputerUseConfig, NodeEntry } from "../config/computer-use-schema.js";
 import { childLogger } from "../logger.js";
 import {
   formatCliExecutionError,
   isSafeConnectionTarget,
   normalizeExecutionTimeout,
+  resolveSecretRef,
 } from "./infrastructure-shared.js";
 
 const log = childLogger("tool:ssh");
@@ -19,6 +22,10 @@ registerTool({
   parameters: {
     type: "object",
     properties: {
+      nodeName: {
+        type: "string",
+        description: "Optional name of a configured remote_ssh node from computerUse.nodes. When provided, the tool resolves host, port, username, and configured credentials automatically.",
+      },
       host: { type: "string", description: "The hostname or IP address of the target machine." },
       username: { type: "string", description: "The SSH username to connect with.", default: "root" },
       port: { type: "number", description: "Optional SSH port. Defaults to 22." },
@@ -32,18 +39,25 @@ registerTool({
         description: "Optional execution timeout in milliseconds. Defaults to 60000 and is capped at 900000.",
       },
     },
-    required: ["host", "command"],
+    required: ["command"],
   },
   async execute(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
-    const host = String(args["host"] ?? "");
-    const username = String(args["username"] ?? "root");
-    const port = normalizePort(args["port"]);
+    const nodeName = String(args["nodeName"] ?? "").trim();
+    const configuredNode = nodeName ? resolveConfiguredSshNode(nodeName) : null;
+    if (configuredNode?.error) {
+      return { success: false, output: "", error: configuredNode.error };
+    }
+
+    const host = String(args["host"] ?? configuredNode?.host ?? "").trim();
+    const username = String(args["username"] ?? configuredNode?.username ?? "root").trim();
+    const port = normalizePort(args["port"] ?? configuredNode?.port);
     const command = String(args["command"] ?? "");
-    const privateKeyPath = args["privateKeyPath"] ? String(args["privateKeyPath"]) : undefined;
+    const privateKeyPath = resolveSecretRef(args["privateKeyPath"] ? String(args["privateKeyPath"]) : configuredNode?.privateKeyPath);
+    const password = resolveSecretRef(configuredNode?.password);
     const timeoutMs = normalizeExecutionTimeout(args["timeoutMs"], EXEC_TIMEOUT_MS);
 
-    if (!host.trim() || !command.trim()) {
-      return { success: false, output: "", error: "Host and command cannot be empty." };
+    if (!host || !command.trim()) {
+      return { success: false, output: "", error: "Either nodeName or host must be provided, and command cannot be empty." };
     }
 
     if (!isSafeConnectionTarget(host) || !isSafeConnectionTarget(username)) {
@@ -51,11 +65,14 @@ registerTool({
     }
 
     const processArgs: string[] = [
-      "-o", "BatchMode=yes", // Prevent arbitrary prompts that hang the command
       "-o", "StrictHostKeyChecking=accept-new", // Accept new host keys automatically
       "-o", "ConnectTimeout=10",
       "-T", // Do not allocate a pseudo-terminal
     ];
+
+    if (!password) {
+      processArgs.unshift("-o", "BatchMode=yes"); // Prevent arbitrary prompts that hang key-based runs
+    }
 
     if (privateKeyPath) {
       processArgs.push("-i", privateKeyPath);
@@ -66,10 +83,13 @@ registerTool({
     processArgs.push(`${username}@${host}`);
     processArgs.push(command);
 
-    log.debug({ host, port, username, command: command.split(" ")[0] }, "Executing SSH command");
+    log.debug({ host, nodeName: nodeName || undefined, port, username, command: command.split(" ")[0] }, "Executing SSH command");
 
     try {
-      const { stdout, stderr } = await execFileAsync("ssh", processArgs, {
+      const binary = password ? "sshpass" : "ssh";
+      const execArgs = password ? ["-p", password, "ssh", ...processArgs] : processArgs;
+
+      const { stdout, stderr } = await execFileAsync(binary, execArgs, {
         timeout: timeoutMs,
       });
 
@@ -86,7 +106,7 @@ registerTool({
         output: errOutput.trim(),
         error: formatCliExecutionError(
           error,
-          "ssh",
+          password ? "sshpass/ssh" : "ssh",
           "Execution timed out. Ensure the host is reachable and the command completes within the timeout.",
         ),
       };
@@ -105,5 +125,50 @@ function normalizePort(value: unknown): number {
   }
 
   return port;
+}
+
+function resolveConfiguredSshNode(nodeName: string): {
+  host: string;
+  username: string;
+  port: number;
+  privateKeyPath?: string;
+  password?: string;
+  error?: string;
+} | null {
+  const config = getConfig();
+  const computerUse = config.computerUse as Partial<ComputerUseConfig> | undefined;
+  const rawNode = computerUse?.nodes?.[nodeName] as (NodeEntry & Record<string, unknown>) | undefined;
+
+  if (!rawNode) {
+    return { host: "", username: "root", port: 22, error: `Configured SSH node '${nodeName}' was not found.` };
+  }
+  if (rawNode.adapter !== "remote_ssh") {
+    return { host: "", username: "root", port: 22, error: `Configured node '${nodeName}' is not a remote_ssh target.` };
+  }
+
+  const host = typeof rawNode.host === "string" ? rawNode.host.trim() : "";
+  const username = typeof rawNode.username === "string" ? rawNode.username.trim() : "root";
+  const port = normalizePort(rawNode.port);
+  const authMethod = rawNode.authMethod === "key" ? "key" : rawNode.authMethod === "password" ? "password" : undefined;
+  const credentials = typeof rawNode.credentials === "string" ? rawNode.credentials : undefined;
+
+  if (!host) {
+    return { host: "", username, port, error: `Configured SSH node '${nodeName}' is missing its host.` };
+  }
+
+  if (authMethod === "password") {
+    const password = resolveSecretRef(credentials);
+    if (!password) {
+      return { host, username, port, error: `Configured SSH node '${nodeName}' requires a password, but its credential reference could not be resolved.` };
+    }
+    return { host, username, port, password };
+  }
+
+  if (authMethod === "key") {
+    const privateKeyPath = resolveSecretRef(credentials);
+    return { host, username, port, ...(privateKeyPath ? { privateKeyPath } : {}) };
+  }
+
+  return { host, username, port };
 }
 

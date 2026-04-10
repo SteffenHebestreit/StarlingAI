@@ -39,6 +39,10 @@
             :disabled="!gateway.currentSessionId || exportingTranscript"
             class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
             title="Download combined debug markdown with transcript, raw session history, and audit logs">⬇ Debug</button>
+          <button @click="exportAuditMarkdown"
+            :disabled="!gateway.currentSessionId || exportingTranscript"
+            class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
+            title="Download the session audit log as Markdown">⬇ Audit</button>
           <button @click="exportPDF"
             :disabled="gateway.messages.length === 0 || exportingTranscript"
             class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
@@ -61,6 +65,7 @@
                 <span>Live Context</span>
                 <span class="chat-mobile-panels__meta">
                   <span v-if="gateway.visibleSwarmState">Swarm</span>
+                  <span v-if="shellStore.hasEntries">Shell</span>
                   <span v-if="computerStore.sessions.length > 0 || computerStore.loading || gateway.isLoading">Computer</span>
                 </span>
               </summary>
@@ -75,6 +80,7 @@
                   @select-run="gateway.selectSwarmRun"
                   @open-archive="openInSessions"
                 />
+                <ShellSessionPanel v-if="shellStore.hasEntries" />
                 <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
               </div>
             </details>
@@ -121,6 +127,7 @@
               @select-run="gateway.selectSwarmRun"
               @open-archive="openInSessions"
             />
+            <ShellSessionPanel v-if="shellStore.hasEntries" />
             <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
             <div v-if="!hasSidePanels" class="chat-sidebar-placeholder">
               <div class="chat-sidebar-placeholder__eyebrow">Live Context</div>
@@ -713,12 +720,14 @@ import { useJobsStore } from "@/stores/jobs";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
 import { useComputerStore } from "@/stores/computer";
+import { useShellStore } from "@/stores/shell";
 import type { GatewaySessionTranscriptMessage, InterventionAction } from "@/stores/gateway";
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
+import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
 
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
@@ -727,6 +736,7 @@ const jobsStore = useJobsStore();
 const scenesStore = useScenesStore();
 const multimodalStore = useMultimodalStore();
 const computerStore = useComputerStore();
+const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null);
@@ -824,6 +834,14 @@ declare global {
   }
 }
 
+type SpeechLane = "ack" | "progress" | "reply";
+
+const SPEECH_LANE_PRIORITY: Record<SpeechLane, number> = {
+  ack: 1,
+  progress: 2,
+  reply: 3,
+};
+
 let wakeRecognition: BrowserSpeechRecognition | null = null;
 let wakeRestartTimer: number | null = null;
 let mediaRecorder: MediaRecorder | null = null;
@@ -842,6 +860,14 @@ let lastSpokenProgressText = "";
 let lastSpokenProgressAt = 0;
 const recordedChunks: Blob[] = [];
 const lastSpokenAckIndex = new Map<string, number>();
+const speechAudioCache = new Map<string, Blob>();
+const speechSummaryCache = new Map<string, string>();
+const MAX_SPEECH_AUDIO_CACHE_ENTRIES = 24;
+const MAX_SPEECH_SUMMARY_CACHE_ENTRIES = 16;
+let activeSpeechLane: SpeechLane | null = null;
+let activeSpeechToken = 0;
+let activeBrowserSpeechLane: SpeechLane | null = null;
+const lastAutoSpokenAssistantId = ref<string | null>(null);
 
 const SPOKEN_ACKNOWLEDGEMENTS: Record<string, string[]> = {
   "de-DE": [
@@ -967,7 +993,15 @@ const showOptionsDropdown = computed(() => (
   || gateway.scenes.length > 0
   || configuredJobs.value.length > 0
 ));
-const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shellStore.hasEntries || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+
+watch(() => gateway.currentSessionId, () => {
+  shellStore.reset();
+  lastAutoSpokenAssistantId.value = null;
+  stopSendAcknowledgementPlayback();
+  stopProgressPlayback();
+  stopReplySpeechPlayback({ resetPreview: true });
+});
 const runningSceneJobs = computed(() => scenesStore.runningJobs.slice(0, 3));
 const VISIBLE_TAIL = 6;
 const visibleMessages = computed(() => {
@@ -984,15 +1018,16 @@ const lastAssistantVisibleIdx = computed(() => {
   return -1;
 });
 const collapsedMessageCount = computed(() => Math.max(0, displayMessages.value.length - visibleMessages.value.length));
-const latestAssistantText = computed(() => {
+const latestAssistantMessage = computed(() => {
   for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
     const message = gateway.messages[index];
     if (message?.role === "assistant" && !message.blocked && message.content.trim()) {
-      return message.content;
+      return message;
     }
   }
-  return "";
+  return null;
 });
+const latestAssistantText = computed(() => latestAssistantMessage.value?.content ?? "");
 const currentProgressStatus = computed(() => {
   if (!gateway.isLoading) return "";
   for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
@@ -1096,6 +1131,32 @@ function normalizeSpeechLocale(language: string | undefined): string {
   return "en-US";
 }
 
+const GERMAN_SPEECH_MARKERS = [
+  " und ", " der ", " die ", " das ", " nicht ", " ich ", " bitte ", " kann ", " wie ", " ist ", " für ", " mit ", "ü", "ö", "ä", "ß",
+];
+const ENGLISH_SPEECH_MARKERS = [
+  " and ", " the ", " this ", " that ", " you ", " your ", " can ", " how ", " today ", "please", " with ",
+];
+const POLISH_SPEECH_MARKERS = [
+  " i ", " nie ", " jest ", " oraz ", " może ", " jak ", " dla ", " się ", " że ", "cz", "sz", "ł", "ą", "ę",
+];
+
+function detectSpeechLocaleFromText(text: string, fallbackLanguage?: string): string {
+  const normalized = ` ${text.trim().toLowerCase()} `;
+  if (!normalized.trim()) {
+    return normalizeSpeechLocale(fallbackLanguage ?? multimodalStore.config.tts.defaultLanguage);
+  }
+
+  const germanScore = GERMAN_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
+  const englishScore = ENGLISH_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
+  const polishScore = POLISH_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
+
+  if (germanScore > englishScore && germanScore > polishScore) return "de-DE";
+  if (polishScore > germanScore && polishScore > englishScore) return "pl-PL";
+  if (englishScore > germanScore && englishScore > polishScore) return "en-US";
+  return normalizeSpeechLocale(fallbackLanguage ?? multimodalStore.config.tts.defaultLanguage);
+}
+
 function buildTtsLanguage(language: string | undefined): string {
   const locale = normalizeSpeechLocale(language);
   if (locale === "de-DE") return "de";
@@ -1115,7 +1176,134 @@ function buildSpokenAcknowledgement(language: string | undefined): { text: strin
   return { text: variants[nextIndex]!, lang: locale };
 }
 
-function stopSendAcknowledgementPlayback() {
+function rememberSpeechAudio(key: string, blob: Blob): void {
+  if (speechAudioCache.has(key)) {
+    speechAudioCache.delete(key);
+  }
+  speechAudioCache.set(key, blob);
+  while (speechAudioCache.size > MAX_SPEECH_AUDIO_CACHE_ENTRIES) {
+    const oldestKey = speechAudioCache.keys().next().value;
+    if (!oldestKey) break;
+    speechAudioCache.delete(oldestKey);
+  }
+}
+
+function rememberSpeechSummary(key: string, summary: string): void {
+  if (speechSummaryCache.has(key)) {
+    speechSummaryCache.delete(key);
+  }
+  speechSummaryCache.set(key, summary);
+  while (speechSummaryCache.size > MAX_SPEECH_SUMMARY_CACHE_ENTRIES) {
+    const oldestKey = speechSummaryCache.keys().next().value;
+    if (!oldestKey) break;
+    speechSummaryCache.delete(oldestKey);
+  }
+}
+
+function buildSpeechAudioCacheKey(input: {
+  text: string;
+  language?: string;
+  voiceId?: string;
+  speaker?: string;
+  quality?: string;
+  speed?: number;
+}): string {
+  return JSON.stringify({
+    text: input.text,
+    language: input.language ?? "",
+    voiceId: input.voiceId ?? "",
+    speaker: input.speaker ?? "",
+    quality: input.quality ?? "",
+    speed: input.speed ?? 1,
+  });
+}
+
+function buildPreferredSpeechRequest(input: {
+  text: string;
+  language?: string;
+  speed?: number;
+}): {
+  text: string;
+  language: string;
+  voiceId?: string;
+  speaker?: string;
+  quality?: string;
+  speed?: number;
+} {
+  const voiceId = multimodalStore.config.tts.defaultVoiceId?.trim() || undefined;
+  const speaker = voiceId ? undefined : multimodalStore.config.tts.defaultSpeaker?.trim() || undefined;
+  const quality = multimodalStore.config.tts.defaultQuality?.trim() || undefined;
+  const playbackLocale = input.language?.trim()
+    ? normalizeSpeechLocale(input.language)
+    : detectSpeechLocaleFromText(input.text, multimodalStore.config.tts.defaultLanguage);
+  return {
+    text: input.text,
+    language: buildTtsLanguage(playbackLocale),
+    ...(voiceId ? { voiceId } : {}),
+    ...(speaker ? { speaker } : {}),
+    ...(quality ? { quality } : {}),
+    ...(input.speed !== undefined ? { speed: input.speed } : {}),
+  };
+}
+
+async function synthesizePreferredSpeech(input: {
+  text: string;
+  language?: string;
+  speed?: number;
+}): Promise<Blob> {
+  const request = buildPreferredSpeechRequest(input);
+  const cacheKey = buildSpeechAudioCacheKey(request);
+  const cached = speechAudioCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const audioBlob = await gateway.synthesizeSpeech(request);
+  rememberSpeechAudio(cacheKey, audioBlob);
+  return audioBlob;
+}
+
+async function summarizeSpeechText(text: string, maxSentences: number): Promise<string> {
+  const cacheKey = `${maxSentences}:${text}`;
+  const cached = speechSummaryCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const summary = await gateway.summarizeForSpeech({ text, maxSentences });
+  rememberSpeechSummary(cacheKey, summary);
+  return summary;
+}
+
+function cancelBrowserSpeechForLane(lane?: SpeechLane) {
+  if (typeof window === "undefined" || !browserSpeechPlaybackAvailable.value) return;
+  if (lane && activeBrowserSpeechLane !== lane) return;
+  window.speechSynthesis.cancel();
+  if (!lane || activeBrowserSpeechLane === lane) {
+    activeBrowserSpeechLane = null;
+  }
+}
+
+function releaseSpeechLane(lane: SpeechLane, token?: number) {
+  if (token !== undefined && token !== activeSpeechToken) return;
+  if (activeSpeechLane === lane) activeSpeechLane = null;
+  if (activeBrowserSpeechLane === lane) activeBrowserSpeechLane = null;
+}
+
+function stopReplySpeechPlayback(options: { cancelBrowser?: boolean; resetPreview?: boolean } = {}) {
+  const { cancelBrowser = true, resetPreview = false } = options;
+  audioPlayerEl.value?.pause();
+  audioPlaying.value = false;
+  if (resetPreview) {
+    revokeAudioPreview();
+  } else {
+    syncAudioPreviewState();
+  }
+  if (cancelBrowser) {
+    cancelBrowserSpeechForLane("reply");
+  }
+  releaseSpeechLane("reply");
+}
+
+function stopSendAcknowledgementPlayback(cancelBrowser = true) {
   if (sendAckAudio) {
     sendAckAudio.pause();
     sendAckAudio = null;
@@ -1124,12 +1312,13 @@ function stopSendAcknowledgementPlayback() {
     URL.revokeObjectURL(sendAckAudioUrl);
     sendAckAudioUrl = null;
   }
-  if (typeof window !== "undefined" && browserSpeechPlaybackAvailable.value) {
-    window.speechSynthesis.cancel();
+  if (cancelBrowser) {
+    cancelBrowserSpeechForLane("ack");
   }
+  releaseSpeechLane("ack");
 }
 
-function stopProgressPlayback() {
+function stopProgressPlayback(cancelBrowser = true) {
   if (progressAudio) {
     progressAudio.pause();
     progressAudio = null;
@@ -1138,23 +1327,56 @@ function stopProgressPlayback() {
     URL.revokeObjectURL(progressAudioUrl);
     progressAudioUrl = null;
   }
-  if (typeof window !== "undefined" && browserSpeechPlaybackAvailable.value) {
-    window.speechSynthesis.cancel();
+  if (cancelBrowser) {
+    cancelBrowserSpeechForLane("progress");
   }
+  releaseSpeechLane("progress");
+}
+
+function stopSpeechLane(lane: SpeechLane, options: { cancelBrowser?: boolean; resetReplyPreview?: boolean } = {}) {
+  const { cancelBrowser = true, resetReplyPreview = false } = options;
+  if (lane === "ack") {
+    stopSendAcknowledgementPlayback(cancelBrowser);
+    return;
+  }
+  if (lane === "progress") {
+    stopProgressPlayback(cancelBrowser);
+    return;
+  }
+  stopReplySpeechPlayback({ cancelBrowser, resetPreview: resetReplyPreview });
+}
+
+function claimSpeechLane(lane: SpeechLane): number | null {
+  const currentLane = activeSpeechLane;
+  if (currentLane && SPEECH_LANE_PRIORITY[currentLane] > SPEECH_LANE_PRIORITY[lane]) {
+    return null;
+  }
+
+  if (currentLane) {
+    stopSpeechLane(currentLane, { resetReplyPreview: currentLane === "reply" || lane === "reply" });
+  }
+
+  activeSpeechToken += 1;
+  activeSpeechLane = lane;
+  return activeSpeechToken;
+}
+
+function isSpeechLaneCurrent(lane: SpeechLane, token: number): boolean {
+  return activeSpeechLane === lane && activeSpeechToken === token;
 }
 
 function normalizeProgressSpeechText(raw: string): string | null {
   const firstLine = raw.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
   if (!firstLine) return null;
   if (/^working on it/i.test(firstLine)) return null;
-  if (/^running\s+/i.test(firstLine)) {
-    return firstLine.replace(/\.\.\.$/, ".");
-  }
-  if (/^completed\s+/i.test(firstLine)) {
-    return firstLine.replace(/\.\.\.$/, ".");
-  }
+  if (/^running\s+/i.test(firstLine)) return null;
+  if (/^completed\s+/i.test(firstLine)) return null;
   if (/^swarm plan active:/i.test(firstLine)) {
-    return firstLine.replace(/^swarm plan active:/i, "Swarm active:").replace(/·/g, ",");
+    if (!/\b(partial|failed|blocked)\b/i.test(firstLine)) return null;
+    return firstLine.replace(/^swarm plan active:/i, "Swarm update:").replace(/·/g, ",");
+  }
+  if (!/\b(approval|blocked|failed|error|stalled|recovering|reconnecting|timed out|timeout|needs attention|intervention|partial)\b/i.test(firstLine)) {
+    return null;
   }
   return firstLine.length > 140 ? `${firstLine.slice(0, 137).trimEnd()}...` : firstLine;
 }
@@ -1164,33 +1386,27 @@ async function speakProgressUpdate(rawStatus: string): Promise<void> {
 
   const text = normalizeProgressSpeechText(rawStatus);
   if (!text) return;
+  const spokenLocale = detectSpeechLocaleFromText(text, multimodalStore.config.tts.defaultLanguage);
 
   const now = Date.now();
   if (text === lastSpokenProgressText && now - lastSpokenProgressAt < 20_000) return;
   if (now - lastSpokenProgressAt < 4_000) return;
 
+  const laneToken = claimSpeechLane("progress");
+  if (!laneToken) return;
+
   lastSpokenProgressText = text;
   lastSpokenProgressAt = now;
-  stopProgressPlayback();
-
-  if (browserSpeechPlaybackAvailable.value && typeof window !== "undefined") {
-    try {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = multimodalStore.config.tts.defaultLanguage.replace("_", "-");
-      const voice = selectBrowserSpeechVoice(utterance.lang);
-      if (voice) utterance.voice = voice;
-      utterance.rate = 1.03;
-      utterance.pitch = 1;
-      window.speechSynthesis.speak(utterance);
-      return;
-    } catch {
-      stopProgressPlayback();
-    }
-  }
 
   if (ttsAvailable.value) {
     try {
-      const audioBlob = await gateway.synthesizeSpeech({ text });
+      const audioBlob = await synthesizePreferredSpeech({
+        text,
+        language: spokenLocale,
+        speed: 1.03,
+      });
+      if (!isSpeechLaneCurrent("progress", laneToken)) return;
+
       const audioUrl = URL.createObjectURL(audioBlob);
       const audio = new Audio(audioUrl);
       progressAudio = audio;
@@ -1201,6 +1417,7 @@ async function speakProgressUpdate(rawStatus: string): Promise<void> {
           URL.revokeObjectURL(audioUrl);
           progressAudioUrl = null;
         }
+        releaseSpeechLane("progress", laneToken);
       };
       audio.onerror = () => {
         if (progressAudio === audio) progressAudio = null;
@@ -1208,12 +1425,40 @@ async function speakProgressUpdate(rawStatus: string): Promise<void> {
           URL.revokeObjectURL(audioUrl);
           progressAudioUrl = null;
         }
+        releaseSpeechLane("progress", laneToken);
       };
       await audio.play();
+      return;
     } catch {
-      stopProgressPlayback();
+      if (isSpeechLaneCurrent("progress", laneToken)) {
+        stopProgressPlayback();
+      }
+      return;
     }
   }
+
+  if (browserSpeechPlaybackAvailable.value && typeof window !== "undefined") {
+    try {
+      if (!isSpeechLaneCurrent("progress", laneToken)) return;
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = spokenLocale;
+      const voice = selectBrowserSpeechVoice(utterance.lang);
+      if (voice) utterance.voice = voice;
+      utterance.rate = 1.03;
+      utterance.pitch = 1;
+      activeBrowserSpeechLane = "progress";
+      utterance.onend = () => releaseSpeechLane("progress", laneToken);
+      utterance.onerror = () => releaseSpeechLane("progress", laneToken);
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      if (isSpeechLaneCurrent("progress", laneToken)) {
+        stopProgressPlayback();
+      }
+    }
+    return;
+  }
+
+  releaseSpeechLane("progress", laneToken);
 }
 
 function selectBrowserSpeechVoice(language: string | undefined): SpeechSynthesisVoice | null {
@@ -1247,20 +1492,17 @@ function selectBrowserSpeechVoice(language: string | undefined): SpeechSynthesis
 }
 
 async function speakSendAcknowledgement(language: string | undefined): Promise<void> {
+  if (!showSpeechPlayback.value || speakReplyEnabled.value) return;
+
   const { text, lang } = buildSpokenAcknowledgement(language);
-  stopSendAcknowledgementPlayback();
+  const laneToken = claimSpeechLane("ack");
+  if (!laneToken) return;
 
   if (ttsAvailable.value) {
     try {
-      const voiceId = multimodalStore.config.tts.defaultVoiceId?.trim() || undefined;
-      const speaker = voiceId ? undefined : multimodalStore.config.tts.defaultSpeaker?.trim() || undefined;
-      const audioBlob = await gateway.synthesizeSpeech({
-        text,
-        language: buildTtsLanguage(lang),
-        voiceId,
-        speaker,
-        speed: 1.02,
-      });
+      const audioBlob = await synthesizePreferredSpeech({ text, language: lang, speed: 1.02 });
+      if (!isSpeechLaneCurrent("ack", laneToken)) return;
+
       const audioUrl = URL.createObjectURL(audioBlob);
       const audio = new Audio(audioUrl);
       sendAckAudio = audio;
@@ -1271,6 +1513,7 @@ async function speakSendAcknowledgement(language: string | undefined): Promise<v
           URL.revokeObjectURL(audioUrl);
           sendAckAudioUrl = null;
         }
+        releaseSpeechLane("ack", laneToken);
       };
       audio.onerror = () => {
         if (sendAckAudio === audio) sendAckAudio = null;
@@ -1278,24 +1521,38 @@ async function speakSendAcknowledgement(language: string | undefined): Promise<v
           URL.revokeObjectURL(audioUrl);
           sendAckAudioUrl = null;
         }
+        releaseSpeechLane("ack", laneToken);
       };
       await audio.play();
       return;
     } catch {
-      stopSendAcknowledgementPlayback();
+      if (isSpeechLaneCurrent("ack", laneToken)) {
+        stopSendAcknowledgementPlayback();
+      }
+      return;
     }
   }
 
   try {
-    if (!browserSpeechPlaybackAvailable.value || typeof window === "undefined") return;
+    if (!browserSpeechPlaybackAvailable.value || typeof window === "undefined") {
+      releaseSpeechLane("ack", laneToken);
+      return;
+    }
+    if (!isSpeechLaneCurrent("ack", laneToken)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = lang;
     const voice = selectBrowserSpeechVoice(lang);
     if (voice) utterance.voice = voice;
     utterance.rate = 1.02;
     utterance.pitch = 1;
+    activeBrowserSpeechLane = "ack";
+    utterance.onend = () => releaseSpeechLane("ack", laneToken);
+    utterance.onerror = () => releaseSpeechLane("ack", laneToken);
     window.speechSynthesis.speak(utterance);
   } catch {
+    if (isSpeechLaneCurrent("ack", laneToken)) {
+      releaseSpeechLane("ack", laneToken);
+    }
     // Best-effort acknowledgement only.
   }
 }
@@ -1352,16 +1609,24 @@ function handleAudioPreviewEnded() {
   syncAudioPreviewState();
   audioPlaying.value = false;
   audioCurrentTime.value = audioDuration.value;
+  releaseSpeechLane("reply");
 }
 
 async function toggleAudioPreviewPlayback() {
   const player = audioPlayerEl.value;
   if (!player) return;
   if (player.paused || player.ended) {
+    const laneToken = claimSpeechLane("reply");
+    if (!laneToken) return;
     if (player.ended) player.currentTime = 0;
-    await player.play().catch(() => undefined);
+    try {
+      await player.play();
+    } catch {
+      releaseSpeechLane("reply", laneToken);
+    }
   } else {
     player.pause();
+    releaseSpeechLane("reply");
   }
   syncAudioPreviewState();
 }
@@ -1369,8 +1634,14 @@ async function toggleAudioPreviewPlayback() {
 async function restartAudioPreview() {
   const player = audioPlayerEl.value;
   if (!player) return;
+  const laneToken = claimSpeechLane("reply");
+  if (!laneToken) return;
   player.currentTime = 0;
-  await player.play().catch(() => undefined);
+  try {
+    await player.play();
+  } catch {
+    releaseSpeechLane("reply", laneToken);
+  }
   syncAudioPreviewState();
 }
 
@@ -1678,20 +1949,26 @@ async function onAudioSelected(event: Event) {
   }
 }
 
-async function speakLatestAssistant(forceFullText = false) {
-  const text = latestAssistantText.value.trim();
+async function speakLatestAssistant(options: { forceFullText?: boolean; reason?: "manual" | "auto" } = {}) {
+  const latest = latestAssistantMessage.value;
+  const text = latest?.content.trim() ?? "";
   if (!text) return;
-  stopProgressPlayback();
+  if (options.reason === "auto" && latest && lastAutoSpokenAssistantId.value === latest.id) return;
+
+  const laneToken = claimSpeechLane("reply");
+  if (!laneToken) return;
+
   multimodalBusy.value = true;
   lastSpokenSummary.value = null;
   wakeStatus.value = "Summarising reply";
   try {
     // Summarise first unless caller explicitly wants the full text
     let spoken = text;
-    if (!forceFullText && ttsAvailable.value) {
+    if (!options.forceFullText && ttsAvailable.value) {
       try {
         const maxSentences = multimodalStore.config.tts.speakReplySummaryMaxSentences ?? 3;
-        spoken = await gateway.summarizeForSpeech({ text, maxSentences });
+        spoken = await summarizeSpeechText(text, maxSentences);
+        if (!isSpeechLaneCurrent("reply", laneToken)) return;
         lastSpokenSummary.value = spoken;
         audioSummaryExpanded.value = false;
       } catch {
@@ -1701,26 +1978,58 @@ async function speakLatestAssistant(forceFullText = false) {
     }
 
     wakeStatus.value = "Generating speech";
+    const spokenLocale = detectSpeechLocaleFromText(spoken, multimodalStore.config.tts.defaultLanguage);
     if (ttsAvailable.value) {
-      const audioBlob = await gateway.synthesizeSpeech({ text: spoken });
+      const audioBlob = await synthesizePreferredSpeech({
+        text: spoken,
+        language: spokenLocale,
+      });
+      if (!isSpeechLaneCurrent("reply", laneToken)) return;
+
       revokeAudioPreview();
       audioPreviewUrl.value = URL.createObjectURL(audioBlob);
       await nextTick();
-      await audioPlayerEl.value?.play().catch(() => undefined);
+      const player = audioPlayerEl.value;
+      if (player) {
+        try {
+          await player.play();
+          if (options.reason === "auto" && latest) {
+            lastAutoSpokenAssistantId.value = latest.id;
+          }
+        } catch {
+          releaseSpeechLane("reply", laneToken);
+        }
+      } else {
+        releaseSpeechLane("reply", laneToken);
+      }
       wakeStatus.value = "Reply spoken";
     } else if (browserSpeechPlaybackAvailable.value) {
-      window.speechSynthesis.cancel();
+      if (!isSpeechLaneCurrent("reply", laneToken)) return;
+      cancelBrowserSpeechForLane();
       const utterance = new SpeechSynthesisUtterance(spoken);
-      utterance.lang = multimodalStore.config.tts.defaultLanguage.replace("_", "-");
+      utterance.lang = spokenLocale;
+      const voice = selectBrowserSpeechVoice(utterance.lang);
+      if (voice) utterance.voice = voice;
       await new Promise<void>((resolve, reject) => {
-        utterance.onend = () => resolve();
-        utterance.onerror = () => reject(new Error("Browser speech playback failed"));
+        activeBrowserSpeechLane = "reply";
+        utterance.onend = () => {
+          releaseSpeechLane("reply", laneToken);
+          resolve();
+        };
+        utterance.onerror = () => {
+          releaseSpeechLane("reply", laneToken);
+          reject(new Error("Browser speech playback failed"));
+        };
         window.speechSynthesis.speak(utterance);
       });
       lastSpokenSummary.value = spoken;
       audioSummaryExpanded.value = false;
+      if (options.reason === "auto" && latest) {
+        lastAutoSpokenAssistantId.value = latest.id;
+      }
       wakeStatus.value = "Reply spoken in browser";
     } else {
+      releaseSpeechLane("reply", laneToken);
       throw new Error("Speech playback is unavailable in this browser");
     }
   } catch (error) {
@@ -2043,6 +2352,16 @@ async function exportDebugMarkdown(): Promise<void> {
   }
 }
 
+async function exportAuditMarkdown(): Promise<void> {
+  if (!gateway.currentSessionId) return;
+  exportingTranscript.value = true;
+  try {
+    await gateway.downloadSessionAuditMarkdown(gateway.currentSessionId);
+  } finally {
+    exportingTranscript.value = false;
+  }
+}
+
 async function exportPDF(): Promise<void> {
   exportingTranscript.value = true;
   try {
@@ -2139,9 +2458,10 @@ watch(inputText, () => {
 let _wasLoading = false;
 watch(() => gateway.isLoading, (loading) => {
   if (_wasLoading && !loading && speakReplyEnabled.value && showSpeechPlayback.value) {
-    speakLatestAssistant();
+    void speakLatestAssistant({ reason: "auto" });
   }
   if (!loading) {
+    stopSendAcknowledgementPlayback();
     stopProgressPlayback();
   }
   _wasLoading = loading;
@@ -2165,13 +2485,13 @@ onMounted(() => {
 onUnmounted(() => {
   stopSendAcknowledgementPlayback();
   stopProgressPlayback();
+  stopReplySpeechPlayback({ resetPreview: true });
   clearWakeFeedbackTimer();
   stopWakeRecognition();
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
   }
   cleanupRecordingResources();
-  revokeAudioPreview();
 });
 </script>
 

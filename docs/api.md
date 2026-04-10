@@ -160,6 +160,8 @@ For split deployments, run a standalone worker with `pnpm --filter @starlingai/c
 
 If a scene exceeds `gateway.turnTimeoutMs`, the job fails and its scene session is archived.
 
+These scene-job records are runtime execution instances created by `/api/scenes/:name/run`. They are distinct from the reusable workflow `jobs` stored under `workspace/jobs`, which are discovered inside chat with `search_workflows` and executed via `run_workflow`.
+
 ### Approvals
 
 | Method | Path | Notes |
@@ -180,6 +182,7 @@ or `Authorization: Bearer <secret>` with `{ "approved": true }`.
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/sessions/:sessionId/debug-markdown` | authenticated Markdown export with transcript, raw session history, and matching audit events |
+| `GET` | `/api/sessions/:sessionId/audit-markdown` | authenticated Markdown export with focused audit evidence only |
 
 The debug Markdown export is intended for operator review, incident handling, and release validation. It bundles:
 
@@ -187,6 +190,8 @@ The debug Markdown export is intended for operator review, incident handling, an
 - the user-visible transcript, including tool-only assistant turns
 - raw persisted session history with tool call ids and metadata
 - audit events for the session and related sub-agent sessions
+
+The audit-only Markdown export is the lighter-weight companion. It keeps the session metadata and matching audit events for the session plus related sub-agent and workflow sessions, but omits the transcript and raw-history sections.
 
 ### Channels
 

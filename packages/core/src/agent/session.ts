@@ -9,12 +9,14 @@ import { getConfig } from "../config/loader.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
+import type { SwarmState } from "../tools/registry.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[SYNTHESIS REQUIRED]",
   "[CONTINUE ORCHESTRATION]",
   "[USER RESPONSE REQUIRED]",
+  "[DELEGATION FAILED]",
   "[USER INTERACTION OWNERSHIP]",
 ];
 
@@ -57,6 +59,7 @@ export interface SessionTranscriptMessage {
   content: string;
   timestamp: string;
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
+  swarmState?: SwarmState;
 }
 
 export interface SessionTranscriptPage {
@@ -190,7 +193,7 @@ export class AgentSession {
           // Delegation results carry sub-agent evidence that the orchestrator must
           // relay faithfully.  A 500-char cap truncated evidence and caused
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
-          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph)$/.test(call.function.name);
+          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
           const snippetLimit = isDelegation ? 2000 : 500;
           const resultSnippet = result.length > snippetLimit ? result.substring(0, snippetLimit) + "…" : result;
           return `[Tool: ${call.function.name}(${argsStr}) → ${resultSnippet}]`;
@@ -400,6 +403,7 @@ export class AgentSession {
           role: "assistant",
           content: sanitizeTranscriptContent("assistant", message.content ?? "", true),
           timestamp: message.timestamp,
+          swarmState: getTranscriptSwarmState(message.metadata),
           toolCalls: message.tool_calls.map((toolCall) => {
             let args: Record<string, unknown> = {};
             try {
@@ -424,6 +428,7 @@ export class AgentSession {
         role: message.role,
         content: sanitizeTranscriptContent(message.role, message.content ?? "", false),
         timestamp: message.timestamp,
+        swarmState: message.role === "assistant" ? getTranscriptSwarmState(message.metadata) : undefined,
       });
       index += 1;
     }
@@ -439,6 +444,9 @@ export class AgentSession {
         // Combine tool calls
         if (entry.toolCalls?.length) {
           prev.toolCalls = [...(prev.toolCalls ?? []), ...entry.toolCalls];
+        }
+        if (entry.swarmState) {
+          prev.swarmState = entry.swarmState;
         }
         // Keep the last non-empty content (the final synthesis text)
         if (entry.content) {
@@ -501,6 +509,12 @@ function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage
     return sum + Math.ceil(contentLength / 4);
   }, 0);
   return systemPromptTokens + historyTokens;
+}
+
+function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState | undefined {
+  const raw = metadata?.["swarmState"];
+  if (!raw || typeof raw !== "object") return undefined;
+  return structuredClone(raw as SwarmState);
 }
 
 const _sessions = new Map<string, AgentSession>();
@@ -668,7 +682,10 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
   if (agentKeys.length === 0) {
     return "- No specialist agents are configured. Use the direct tools available to you.";
   }
-  return "- Use search_agents to perform a semantic search for the correct specialist for your task. Do NOT assume agent names.";
+  return [
+    "- Use search_workflows first when the request looks like a recurring workflow such as a paper, research packet, browser inspection, review, or broadcast.",
+    "- If no reusable workflow fits, use search_agents to perform a semantic search for the correct specialist for your task. Do NOT assume agent names.",
+  ].join("\n");
 }
 
   function defaultSystemPrompt(workspacePath?: string): string {
@@ -684,6 +701,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
 - Do not invent tool names from memory or from older prompts.
 - ${delegateOnly ? "In this mode, routine direct execution is disabled. Use orchestration tools for work, but assistant_personality_view and assistant_personality_update remain available for self-profile management." : orchestrationOnly ? "In this mode, routine direct execution tools are unavailable. Use orchestration tools for work, but assistant_personality_view and assistant_personality_update remain available for self-profile management." : "In this mode, prefer direct tools for repository inspection, workspace memory, web access, browser steps, multimodal helpers, credential-safe login flows, and self-profile management before delegating."}
 - Use delegate_to_agent only when the task genuinely needs a specialist or a multi-agent workflow.
+- Prefer search_workflows plus run_workflow for recurring workflow shapes before inventing a fresh coordinator plan.
 - Use get_swarm_state when you need runtime progress, not as a substitute for tool discovery.`;
 
   const subAgentEntries = Object.entries(config.subAgents ?? {});
@@ -725,15 +743,18 @@ ${personalityGuidance}
 - ${delegateOnly || orchestrationOnly ? "Use specialist agents as the default execution path. For dependent workflows, route through a coordinator that can sequence agents and shared facts." : "Use direct tools first when they can finish the task."}
 - Use local coordination rules, not giant monolithic plans: split work into small specialist tasks that can succeed independently.
 - Prefer 2-3 focused agents over one oversized pipeline when a task spans research, analysis, implementation, or communication.
+- Before building an ad hoc coordinator plan, check whether search_workflows exposes a reusable scene or job that already matches the request shape.
 - ${delegateOnly || orchestrationOnly ? "If the request mixes multiple domains or deliverables such as research plus analysis, visualization, and final synthesis, prefer a planning/coordinator agent first so it can decide whether one specialist is enough or a graph is needed." : "If the request mixes multiple domains or deliverables, decide explicitly whether it is atomic or needs orchestration before delegating."}
 - ${delegateOnly || orchestrationOnly ? "For sourced chart, table, or HTML visualization requests, prefer a coordinator first so it can sequence source gathering, numeric cleanup, and artifact generation instead of sending the request straight to a single specialist." : "If the deliverable is a sourced chart, table, or HTML visualization, decide the research phase and the rendering phase separately instead of delegating directly to a writer."}
+- When a source-grounded paper, brief, or report needs research, drafting, and review, route it through mission_coordinator instead of sending it straight to researcher or a web-only coordinator.
+- If the evidence is already collected and only the written artifact is missing, prefer paper_author for drafting and quality_supervisor for one acceptance pass instead of creating an ephemeral writer.
 - ${delegateOnly ? "If a task needs multiple specialists, delegate to a coordinator agent that has parallel_delegate or run_task_graph available." : "If two sub-tasks are independent, prefer parallel_delegate so the swarm can work concurrently."}
 - ${delegateOnly ? "For dependency-heavy missions, delegate to a coordinator agent that can run a task graph and pass shared facts across specialists." : "For dependency-heavy missions, prefer run_task_graph so the swarm can schedule ready nodes and respect prerequisites."}
 - If one specialist fails or returns a weak result, immediately route the sub-task to the next best candidate or create a narrowly scoped ephemeral agent.
 - If a delegated agent asks for clarification, authorization, approval, or missing scope details, surface that request to the user yourself once and stop delegating until they answer.
 - Do not let sub-agents interact with the user directly. Convert their needs into one concise question or approval request from the main assistant.
 - When additional work remains after one or more delegated results, summarize the confirmed intermediate results, say what remains open, and then continue orchestration only if another action is justified.
-- For resilient sequential delegation: pass fallbackAgents=["alt1","alt2"] to delegate_to_agent — the runtime will automatically try each fallback before surfacing an error. Use this whenever a task has obvious substitutes.
+- For resilient sequential delegation: pass fallbackAgents=["alt1","alt2"] to delegate_to_agent — the runtime will automatically try each fallback before surfacing an error. Only use configured agent names that were returned by search_agents or are already known from the current catalog; never invent fallback agent names.
 - Preserve swarm cohesion: synthesize partial results into one answer instead of exposing fragmented agent chatter.
 - **Recurring failure detection**: If the same tool or agent has failed with the same error twice in the current turn, STOP trying that approach entirely. Use a different agent, a different tool, or synthesize from partial results instead.
 - **Dead-end recognition**: If you have tried 3+ agents/approaches and all returned errors or empty results, do NOT keep searching. Synthesize what partial data you collected and clearly state what could not be resolved.
@@ -742,6 +763,7 @@ ${personalityGuidance}
 ## Tool Use Discipline (IMPORTANT)
 - ${delegateOnly ? "Use delegate_to_agent for every non-trivial action. Pick a specialist directly when obvious; otherwise route to a coordinator specialist that can break the task down further." : orchestrationOnly ? "Use orchestration tools to route every non-trivial action to specialists. The main assistant is the planner and reviewer, not the worker." : "For routine web lookups, file conversion, browser inspection, speech, or image analysis, call the direct tool yourself instead of delegating."}
 - ${delegateOnly || orchestrationOnly ? "Atomic tasks should go straight to one specialist. Composite tasks with dependencies, intermediate evidence handoff, or merged deliverables should go to a coordinator/planner specialist first." : "Before delegating, distinguish atomic requests from composite ones so you do not over-route simple work or under-plan complex work."}
+- For recurring packets, reports, briefs, browser inspections, or review flows, use run_workflow when search_workflows returns a close match.
 - ${delegateOnly || orchestrationOnly ? "When one agent discovers reusable evidence, ensure it publishes the result with share_finding so sibling agents can read it via read_shared_facts." : "For mixed tasks, do the direct-tool portion first, then delegate only the remaining specialist work."}
 - ${delegateOnly || orchestrationOnly ? "Browser-heavy tasks should go to browser specialists; interpretation-heavy follow-up should go to evidence or summarization specialists, not back to the same browser loop." : "Do NOT delegate just to read repository files, fetch a web page, inspect one screenshot, or navigate a straightforward browser flow."}
 - ${delegateOnly || orchestrationOnly ? "For multi-step web retrieval, prefer a coordinator agent that can combine researcher, browser_agent, and evidence_analyst outputs." : "For simple login or form tasks, use get_site_credentials only for metadata, then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not type stored credentials manually. Delegate browser_agent only for longer or fragile browser workflows."}
@@ -750,6 +772,8 @@ ${personalityGuidance}
 - assistant_personality_view and assistant_personality_update are reserved for durable voice guidance. Use them only for personality changes, never for safety policy or authorization changes.
 - Requests to access, control, or work on the user's own computer, workstation, desktop, editor, or remote Windows PC are computer-use tasks, not pentest tasks.
 - For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.
+- Requests to SSH into the user's server, inspect Docker containers, read logs, check systemd services, or diagnose a headless host are server administration tasks, not desktop computer-use tasks.
+- For those server administration requests, prefer delegate_to_agent(agentName: "shell_agent", task: "...") for straightforward remote commands and delegate_to_agent(agentName: "ops_triage", task: "...") for service failures, unhealthy containers, deployment issues, or log-driven diagnosis.
 - Requests asking how the pentest swarm works, what methodology or plan it follows, how the pentest coordinator would approach an engagement, or whether a prior pentest answer was correct are planning and prompt-analysis tasks, not live pentest engagements.
 - For those pentest methodology or prompt-analysis requests, inspect the local pentest config and docs or delegate to pentest_coordinator in maintenance mode. Do not ask for authorization or scope unless the user explicitly switches to running a real assessment.
 - Requests to improve StarlingAI itself such as changing the main assistant, agent prompts, sub-agent behavior, tool routing, or workspace swarm definitions are maintenance tasks on this repository.
@@ -759,13 +783,15 @@ ${personalityGuidance}
 - If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.
 - If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.
 - For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.
+- If the user asks to access a specific host for SSH, Docker, container, service, or log work, include that host in the delegation context but keep the task on the server CLI path rather than computer_use_agent unless the user explicitly asks for desktop/UI interaction.
 - Do not invent adapter names or switch to alternate adapters just because one call failed. If a computer session is already active, attach to or reuse that same session unless the user explicitly requests a different adapter.
-- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant computer-use path when supported; if the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.
+- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant owned-system path: computer_use_agent for desktop/UI control, or shell_agent/ops_triage for SSH, Docker, logs, and service work. If the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.
 - Maximum 3 delegate_to_agent calls per turn. Plan which agents you need before calling any.
 - Maximum 1 create_ephemeral_agent call per turn, and only when existing agents are clearly insufficient.
 - Simple questions that don't need external data must be answered directly — do NOT delegate.
 - Once you have enough information from delegations, STOP calling tools and write your final answer.
 - Do NOT call list_agents every turn — prefer search_agents for routing. Call list_agents only when the user explicitly wants the full catalog or when you must inspect every configured agent.
+- Do NOT call search_workflows repeatedly for the same request. One discovery pass is enough before choosing run_workflow or agent orchestration.
 - Call get_swarm_state when you need to inspect current swarm progress instead of re-planning from scratch.
 - When unsure which agent handles a task, prefer delegate_to_agent(task: "...") without agentName first. The runtime uses autonomous bidding plus semantic routing to choose the specialist. Use search_agents only when you need to inspect or justify the candidate set explicitly.
 - Exception: for known maintenance requests about improving StarlingAI itself, skip search_agents and delegate directly to swarm_maintainer when it exists.
