@@ -357,6 +357,17 @@ export class VncComputerAdapter implements ComputerAdapter {
     baseDelay?: number,
     timeoutMs?: number,
   ): Promise<void> {
+    function resolveCredentials(cred?: string): string | undefined {
+      if (!cred) return undefined;
+      const stripped = cred.trim();
+      if (stripped.startsWith("$") && !stripped.startsWith("$$")) {
+        const val = process.env[stripped.slice(1)];
+        if (!val) log.warn({ envKey: stripped.slice(1) }, "Env var for VNC credentials is not set");
+        return val;
+      }
+      return stripped.replace(/^\$\$/, "$");
+    }
+
     const retries = maxRetries ?? this.reconnectAttempts;
     const delay = baseDelay ?? this.reconnectDelayMs;
     const connTimeout = timeoutMs ?? 15_000;
@@ -366,7 +377,7 @@ export class VncComputerAdapter implements ComputerAdapter {
         await this.client.connect({
           host: this.config.host,
           port: this.config.port,
-          password: this.config.credentials,
+          password: resolveCredentials(this.config.credentials),
           connectTimeoutMs: connTimeout,
         });
         return;

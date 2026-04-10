@@ -412,6 +412,66 @@ describe("infrastructure tools", () => {
     expect(args).toContain("deploy@vm.internal");
   });
 
+  it("resolves configured password-backed SSH nodes via sshpass", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ssh-node-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      computerUse: {
+        nodes: {
+          "n8n-server": {
+            adapter: "remote_ssh",
+            host: "n8n.k2o",
+            port: 22,
+            username: "Steffen",
+            authMethod: "password",
+            credentials: "$SAI_N8N_SSH_PASSWORD",
+          },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_N8N_SSH_PASSWORD"] = "super-secret";
+
+    execFileMock.mockImplementation((_file, _args, options, callback) => {
+      callback(null, { stdout: "remote ok", stderr: "" });
+    });
+
+    try {
+      const [{ getTool }, ] = await Promise.all([
+        import("./registry.js"),
+        import("./ssh.js"),
+      ]);
+
+      const tool = getTool("ssh_exec");
+      const result = await tool!.execute({
+        nodeName: "n8n-server",
+        command: "docker ps",
+      }, {
+        sessionId: "session-ssh-node",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.success).toBe(true);
+      expect(execFileMock).toHaveBeenCalledTimes(1);
+      const [binary, args] = execFileMock.mock.calls[0] as [string, string[]];
+      expect(binary).toBe("sshpass");
+      expect(args).toEqual(expect.arrayContaining([
+        "-p",
+        "super-secret",
+        "ssh",
+        "-T",
+        "-p",
+        "22",
+        "Steffen@n8n.k2o",
+        "docker ps",
+      ]));
+      expect(args).not.toContain("BatchMode=yes");
+    } finally {
+      delete process.env["SAI_N8N_SSH_PASSWORD"];
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unsafe SSH host values before execution", async () => {
     const [{ getTool }, ] = await Promise.all([
       import("./registry.js"),

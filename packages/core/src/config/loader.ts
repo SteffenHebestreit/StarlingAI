@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, watchFile, unwatchFile, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema, type Config } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
@@ -302,6 +302,11 @@ function isExistingDirectory(path: string): boolean {
   }
 }
 
+function isPathContainedBy(rootPath: string, candidatePath: string): boolean {
+  const relativePath = relative(rootPath, candidatePath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
 /**
  * Compare two Config objects and return a list of top-level section names that differ.
  * Used to avoid unnecessary subscriber notifications when only whitespace/formatting changed.
@@ -511,8 +516,13 @@ function getWatchedDirectoryPaths(configSource: ConfigSource): string[] {
   if (configSource.workspacePath) {
     addDirectoryTree(configSource.workspacePath);
   }
-  if (configSource.baseType === "directory" || configSource.workspacePath) {
-    addDirectoryTree(dirname(configSource.mutablePath));
+  const mutableDirectoryPath = dirname(configSource.mutablePath);
+  const mutableDirectoryWithinConfigTree =
+    (configSource.baseType === "directory" && isPathContainedBy(configSource.basePath, mutableDirectoryPath))
+    || (configSource.workspacePath !== null && isPathContainedBy(configSource.workspacePath, mutableDirectoryPath));
+  if (mutableDirectoryWithinConfigTree) {
+    // Avoid watching unrelated runtime-data roots like /data when the mutable overlay lives outside the config tree.
+    addDirectoryTree(mutableDirectoryPath);
   }
   return [...watchedDirectories];
 }

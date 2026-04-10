@@ -166,7 +166,10 @@ export function startWarden(): void {
 
     // ── Tool call accumulation ───────────────────────────────────────────────
     if (
-      (event.type === "tool_call_requested" || event.type === "sub_agent_tool_call") &&
+      (
+        event.type === "tool_call_requested"
+        || (event.type === "sub_agent_tool_call" && event.data["phase"] !== "done")
+      ) &&
       event.sessionId
     ) {
       const hits = _toolCallsBySession.get(event.sessionId) ?? [];

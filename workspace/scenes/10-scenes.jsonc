@@ -50,18 +50,44 @@
         }
       }
     },
+    "protocol_comparison_paper": {
+      "description": "Compare protocols through coordinated evidence gathering and a grounded paper draft.",
+      "task": "Use mission_coordinator first to compare {{topic}} with evidence-backed research, consolidate the findings, draft the paper, and run one final quality pass before finishing.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "citation_researcher",
+        "researcher",
+        "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
+        "summarizer"
+      ],
+      "params": {
+        "topic": {
+          "description": "Protocols, standards, or systems to compare",
+          "default": "the requested protocols"
+        },
+        "outputStyle": {
+          "description": "Requested comparison format",
+          "default": "grounded comparison paper with explicit citations and tradeoffs"
+        }
+      }
+    },
     "source_backed_paper": {
       "description": "Produce a paper or report grounded in official sources and verified citations.",
-      "task": "Use document_intake first when the input includes attached reports or files, citation_researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "task": "When attachments or prior reports are provided, start with document_intake. If the evidence base is still thin or uneven, use mission_coordinator to coordinate the smallest viable evidence-gathering pass with citation_researcher or researcher, then consolidate the reusable findings with research_librarian or evidence_analyst. Draft only from collected evidence with paper_author, use source_verifier only to validate citations or claim-level gaps, and run exactly one final quality pass with quality_supervisor before finalizing. Do not create an ephemeral writer and do not rerun the whole paper pipeline after a viable draft already exists unless the quality pass names one smallest corrective action.",
       "allowedAgents": [
+        "mission_coordinator",
         "document_intake",
         "citation_researcher",
         "evidence_analyst",
+        "research_librarian",
         "paper_author",
         "source_verifier",
         "researcher",
         "summarizer",
-        "qa_guard"
+        "qa_guard",
+        "quality_supervisor"
       ],
       "params": {
         "outputStyle": {

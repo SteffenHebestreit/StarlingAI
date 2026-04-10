@@ -888,8 +888,10 @@ function contentTypeForDocumentFormat(format: DocumentFormat): string {
   }
 }
 
-function previewModeForFormat(format: DocumentFormat): "html" | "text" | "json" {
+function previewModeForFormat(format: DocumentFormat): "html" | "text" | "json" | "markdown" {
   switch (format) {
+    case "markdown":
+      return "markdown";
     case "html":
       return "html";
     case "json":

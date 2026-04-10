@@ -1,0 +1,563 @@
+/**
+ * Graph Memory Service — MemGraph-backed enhancement layer.
+ *
+ * Augments the flat-file memory service (memory/service.ts) with a MemGraph graph
+ * for richer retrieval, reranking, and quality management. Every operation
+ * degrades gracefully — if MemGraph is unavailable the caller falls back to
+ * flat-file behaviour without error.
+ *
+ * Responsibilities:
+ *   - Write-through: mirror MemoryRecord writes as graph nodes with relationships
+ *   - L0 always-loaded layer: decisions + preferences injected unconditionally
+ *   - Graph reranking: centrality / feedback scores re-order search candidates
+ *   - Outlier detection: surface orphaned or stale nodes for review
+ *   - FACT promotion: persist extracted agent facts as durable graph nodes
+ *   - MAGE background jobs: betweenness centrality + community detection
+ *   - Similarity links: SIMILAR_TO edges via MemGraph vector_search
+ *
+ * Graph schema (MemGraph nodes / relationships):
+ *   (:MemoryRecord)  ← primary memory nodes
+ *   (:Agent)         ← named agents
+ *   (:Session)       ← execution sessions
+ *   (:Topic)         ← subject classification
+ *   (:Entity)        ← extracted named entities
+ *
+ *   (Agent)-[:WROTE {scope, ts}]->(MemoryRecord)
+ *   (Session)-[:PRODUCED {taskId}]->(MemoryRecord)
+ *   (MemoryRecord)-[:ABOUT {relevance}]->(Topic)
+ *   (MemoryRecord)-[:SIMILAR_TO {similarity, method}]->(MemoryRecord)
+ *   (MemoryRecord)-[:SUPERSEDES {ts, reason}]->(MemoryRecord)
+ *   (MemoryRecord)-[:CONTRADICTS {detectedAt, confidence}]->(MemoryRecord)
+ *   (Agent)-[:RETRIEVED {ts, sessionId, rank, wasUseful}]->(MemoryRecord)
+ */
+
+import { isNeo4jAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
+import type { MemoryRecord } from "./service.js";
+import { childLogger } from "../logger.js";
+import { getConfig } from "../config/loader.js";
+import { getEmbeddingProvider } from "../providers/index.js";
+
+const log = childLogger("memory:graph");
+
+export const VECTOR_INDEX_NAME = "memory_embedding";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export interface GraphOutlier {
+  id: string;
+  content: string;
+  kind: string;
+  domain: string;
+  ageDays: number;
+  outlierType: "orphan" | "stale";
+  accessCount: number;
+}
+
+// ── Write-through upsert ──────────────────────────────────────────────────────
+
+/**
+ * Mirror a MemoryRecord into the graph as a :MemoryRecord node.
+ * Optionally creates :Agent + WROTE and :Session + PRODUCED relationships.
+ *
+ * Callers should fire-and-forget: upsertMemoryToGraph(...).catch(() => {})
+ */
+export async function upsertMemoryToGraph(
+  record: MemoryRecord,
+  agentName?: string,
+  sessionId?: string,
+): Promise<void> {
+  if (!isNeo4jAvailable()) return;
+
+  // Derive domain (wing) and topic (room) from existing MemoryRecord fields
+  const domain = record.ownerType === "agent"
+    ? record.ownerId
+    : (agentName ?? record.scope);
+  const topic = record.kind;
+
+  try {
+    await runCypher(`
+      MERGE (m:MemoryRecord {id: $id})
+      SET m.content     = $content,
+          m.kind        = $kind,
+          m.scope       = $scope,
+          m.domain      = $domain,
+          m.topic       = $topic,
+          m.importance  = coalesce(m.importance, 0.5),
+          m.accessCount = coalesce(m.accessCount, 0),
+          m.updatedAt   = $updatedAt,
+          m.createdAt   = coalesce(m.createdAt, $createdAt)
+    `, {
+      id: record.id,
+      content: record.content.slice(0, 2000),
+      kind: record.kind,
+      scope: record.scope,
+      domain,
+      topic,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    }, { write: true });
+  } catch (err) {
+    log.warn({ err, id: record.id }, "Graph MemoryRecord upsert failed");
+    return;
+  }
+
+  if (agentName) {
+    const writeScope = record.scope === "agent" ? "private" : "shared";
+    try {
+      await runCypher(`
+        MERGE (a:Agent {name: $agentName})
+        WITH a
+        MATCH (m:MemoryRecord {id: $id})
+        MERGE (a)-[w:WROTE]->(m)
+        SET w.scope = $writeScope, w.ts = $now
+      `, {
+        agentName,
+        id: record.id,
+        writeScope,
+        now: new Date().toISOString(),
+      }, { write: true });
+    } catch (err) {
+      log.debug({ err }, "WROTE relationship upsert failed");
+    }
+  }
+
+  if (sessionId) {
+    try {
+      await runCypher(`
+        MERGE (s:Session {id: $sessionId})
+        WITH s
+        MATCH (m:MemoryRecord {id: $id})
+        MERGE (s)-[:PRODUCED]->(m)
+      `, { sessionId, id: record.id }, { write: true });
+    } catch (err) {
+      log.debug({ err }, "PRODUCED relationship upsert failed");
+    }
+  }
+
+  // Compute and store embedding so the vector index and similarity jobs can use it
+  void computeAndStoreEmbedding(record.id, record.content);
+}
+
+async function computeAndStoreEmbedding(id: string, content: string): Promise<void> {
+  if (!isNeo4jAvailable()) return;
+
+  try {
+    const embeddingModel = getConfig().agents.defaults.model.embeddingModel;
+    if (!embeddingModel) return;
+
+    const provider = getEmbeddingProvider();
+    const [vector] = await provider.embed([content.slice(0, 512)], embeddingModel);
+    if (!vector || vector.length === 0) return;
+
+    await runCypher(
+      `MATCH (m:MemoryRecord {id: $id}) SET m.embedding = $embedding`,
+      { id, embedding: Array.from(vector) },
+      { write: true },
+    );
+  } catch (err) {
+    log.debug({ err, id }, "Embedding write failed — vector similarity for this record unavailable");
+  }
+}
+
+// ── L0 always-loaded critical layer ──────────────────────────────────────────
+
+/**
+ * Query decisions and preferences from the graph — records that should always
+ * appear in context regardless of query relevance.
+ *
+ * Returns a formatted section string ready to prepend to memory guidance,
+ * or "" when the graph is empty / unavailable.
+ */
+export async function graphL0Layer(
+  domain?: string,
+  maxChars = 600,
+): Promise<string> {
+  if (!isNeo4jAvailable()) return "";
+
+  try {
+    const result = await runCypher(`
+      MATCH (m:MemoryRecord)
+      WHERE m.kind IN ['decision', 'preference']
+        AND m.scope IN ['workspace', 'user']
+        AND (m.validTo IS NULL OR m.validTo > $now)
+        AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
+      RETURN m.id AS id, m.kind AS kind, m.content AS content
+      ORDER BY m.importance DESC, m.updatedAt DESC
+      LIMIT 5
+    `, { domain: domain ?? null, now: new Date().toISOString() });
+
+    if (!result) return "";
+    const rows = toPlainRecords(result);
+    if (rows.length === 0) return "";
+
+    const lines: string[] = [];
+    let totalChars = "## Critical Memory".length + 1;
+
+    for (const row of rows) {
+      const content = String(row["content"] ?? "").replace(/\s+/g, " ").trim();
+      const kind = String(row["kind"] ?? "note");
+      const line = `- [${kind}] ${content.slice(0, 220)}`;
+      if (totalChars + line.length + 1 > maxChars) break;
+      lines.push(line);
+      totalChars += line.length + 1;
+    }
+
+    if (lines.length === 0) return "";
+    return ["## Critical Memory", ...lines].join("\n");
+  } catch (err) {
+    log.debug({ err }, "L0 layer query failed");
+    return "";
+  }
+}
+
+// ── Graph reranking ───────────────────────────────────────────────────────────
+
+/**
+ * Compute graph-based scores for a set of candidate MemoryRecord IDs.
+ * Returns Map<id, graphScore> where graphScore is 0.0–1.0.
+ *
+ * Callers blend this with their text score:
+ *   finalScore = textScore * 0.55 + graphScore * 0.45
+ *
+ * Scoring factors:
+ *   +centrality      — well-connected nodes surface more related context
+ *   +importance      — explicit importance weighting
+ *   +usefulRetrievals — feedback loop from past retrievals marked useful
+ *   −newerVersionCount — hard penalty when a SUPERSEDES edge exists pointing away
+ *   −supersededCount  — soft penalty when the record itself supersedes old facts
+ */
+export async function graphRerank(candidateIds: string[]): Promise<Map<string, number>> {
+  const scores = new Map<string, number>();
+  if (!isNeo4jAvailable() || candidateIds.length === 0) return scores;
+
+  try {
+    const result = await runCypher(`
+      MATCH (m:MemoryRecord) WHERE m.id IN $ids
+      OPTIONAL MATCH (m)-[:SIMILAR_TO]-(peer:MemoryRecord)
+      OPTIONAL MATCH (m)-[:SUPERSEDES]->(older:MemoryRecord)
+      OPTIONAL MATCH (m)<-[:SUPERSEDES]-(newer:MemoryRecord)
+      OPTIONAL MATCH ()-[ret:RETRIEVED {wasUseful: true}]->(m)
+      RETURN
+        m.id                           AS id,
+        coalesce(m.importance, 0.5)    AS importance,
+        coalesce(m.centrality, 0.0)    AS centrality,
+        coalesce(m.accessCount, 0)     AS accessCount,
+        count(DISTINCT peer)           AS peerCount,
+        count(DISTINCT older)          AS supersededCount,
+        count(DISTINCT newer)          AS newerVersionCount,
+        count(DISTINCT ret)            AS usefulRetrievals
+    `, { ids: candidateIds });
+
+    if (!result) return scores;
+
+    for (const row of toPlainRecords(result)) {
+      const id = String(row["id"] ?? "");
+      if (!id) continue;
+
+      const importance        = clamp(asFloat(row["importance"], 0.5));
+      const centrality        = clamp(asFloat(row["centrality"], 0.0) * 10); // normalise
+      const usefulRetrievals  = asInt(row["usefulRetrievals"], 0);
+      const newerVersionCount = asInt(row["newerVersionCount"], 0);
+      const supersededCount   = asInt(row["supersededCount"], 0);
+
+      const raw =
+        centrality * 0.20
+        + importance * 0.20
+        + clamp(usefulRetrievals * 0.1) * 0.25
+        - (newerVersionCount > 0 ? 0.50 : 0)   // has been superseded → deprioritise
+        - (supersededCount    > 0 ? 0.15 : 0);  // references older facts → mild penalty
+
+      scores.set(id, clamp(raw));
+    }
+  } catch (err) {
+    log.debug({ err }, "Graph rerank query failed");
+  }
+
+  return scores;
+}
+
+// ── Retrieval tracking ────────────────────────────────────────────────────────
+
+/**
+ * Record that an agent retrieved a memory. Increments accessCount and
+ * creates a RETRIEVED relationship used by the reranking feedback loop.
+ */
+export async function graphTrackRetrieval(
+  memoryId: string,
+  agentName: string,
+  sessionId: string,
+  rank: number,
+): Promise<void> {
+  if (!isNeo4jAvailable()) return;
+
+  try {
+    await runCypher(`
+      MATCH (m:MemoryRecord {id: $id})
+      MERGE (a:Agent {name: $agentName})
+      CREATE (a)-[:RETRIEVED {
+        ts:        $now,
+        sessionId: $sessionId,
+        rank:      $rank,
+        wasUseful: null
+      }]->(m)
+      SET m.accessCount = coalesce(m.accessCount, 0) + 1
+    `, {
+      id: memoryId,
+      agentName,
+      sessionId,
+      rank,
+      now: new Date().toISOString(),
+    }, { write: true });
+  } catch (err) {
+    log.debug({ err }, "Retrieval tracking failed");
+  }
+}
+
+// ── FACT auto-promotion ───────────────────────────────────────────────────────
+
+/**
+ * Promote a FACT: key = value extracted from agent output into a durable
+ * :MemoryRecord node. Creates a SUPERSEDES edge if a previous version of
+ * the same fact exists, marking the old one as expired.
+ *
+ * Facts written here outlive the 4-hour Redis TTL of the swarm memory layer.
+ */
+export async function graphPromoteFact(
+  key: string,
+  value: string,
+  agentName: string,
+  sessionId: string,
+): Promise<void> {
+  if (!isNeo4jAvailable()) return;
+
+  // Stable ID: same agent + same key always resolves to the same node
+  const id = `fact:${agentName}:${key.toLowerCase().replace(/\s+/g, "_").slice(0, 60)}`;
+  const now = new Date().toISOString();
+  const content = `${key} = ${value}`.slice(0, 1000);
+
+  try {
+    // Check for an existing valid fact to create a SUPERSEDES chain
+    const existingResult = await runCypher(`
+      MATCH (m:MemoryRecord {id: $id})
+      WHERE m.validTo IS NULL OR m.validTo > $now
+      RETURN m.id AS existingId, m.content AS existingContent
+    `, { id, now });
+
+    const existing = existingResult ? toPlainRecords(existingResult) : [];
+    const hadPrevious = existing.length > 0 && String(existing[0]?.["existingContent"] ?? "") !== content;
+
+    // Upsert the fact node
+    await runCypher(`
+      MERGE (m:MemoryRecord {id: $id})
+      SET m.content     = $content,
+          m.kind        = 'fact',
+          m.scope       = 'workspace',
+          m.domain      = $agentName,
+          m.topic       = $key,
+          m.importance  = 0.7,
+          m.accessCount = coalesce(m.accessCount, 0),
+          m.validTo     = null,
+          m.updatedAt   = $now,
+          m.createdAt   = coalesce(m.createdAt, $now)
+      WITH m
+      MERGE (a:Agent {name: $agentName})
+      MERGE (a)-[w:WROTE]->(m)
+      SET w.scope = 'shared', w.ts = $now
+      WITH m
+      MERGE (s:Session {id: $sessionId})
+      MERGE (s)-[:PRODUCED]->(m)
+    `, { id, content, agentName, key, sessionId, now }, { write: true });
+
+    // If the content changed, record the supersession
+    if (hadPrevious) {
+      await runCypher(`
+        MATCH (newFact:MemoryRecord {id: $id})
+        MATCH (oldFact:MemoryRecord {id: $id})
+        WHERE newFact.updatedAt = $now AND oldFact.updatedAt <> $now
+        MERGE (newFact)-[:SUPERSEDES {ts: $now, reason: 'fact updated by agent'}]->(oldFact)
+        SET oldFact.validTo = $now
+      `, { id, now }, { write: true });
+    }
+  } catch (err) {
+    log.warn({ err, key, agentName }, "FACT graph promotion failed");
+  }
+}
+
+// ── Outlier detection ─────────────────────────────────────────────────────────
+
+/**
+ * Return memory candidates that look like outliers:
+ *   orphan — no similarity links, no topic, low access, older than 7 days
+ *   stale  — a newer SUPERSEDES version exists
+ *
+ * Results are returned for human review — this function never deletes anything.
+ */
+export async function graphDetectOutliers(): Promise<GraphOutlier[]> {
+  if (!isNeo4jAvailable()) return [];
+
+  try {
+    const result = await runCypher(`
+      MATCH (m:MemoryRecord)
+      WHERE m.scope IN ['workspace', 'user']
+        AND (m.validTo IS NULL OR m.validTo > $now)
+      WITH m, duration.inDays(m.createdAt, $now).days AS ageDays
+      OPTIONAL MATCH (m)-[:SIMILAR_TO]-()
+      OPTIONAL MATCH (m)-[:ABOUT]->(:Topic)
+      OPTIONAL MATCH ()-[ret:RETRIEVED]->(m)
+        WHERE ret.ts > $cutoff
+      OPTIONAL MATCH (m)<-[:SUPERSEDES]-(:MemoryRecord)
+      WITH m, ageDays,
+        count(DISTINCT sim)          AS simLinks,
+        count(DISTINCT topicRel)     AS topicLinks,
+        count(DISTINCT ret)          AS recentRetrievals,
+        count(DISTINCT supersededBy) AS newerVersions
+      WHERE ageDays > 7
+        AND coalesce(m.accessCount, 0) < 3
+        AND simLinks = 0
+        AND topicLinks = 0
+        AND recentRetrievals = 0
+      RETURN
+        m.id                          AS id,
+        m.content                     AS content,
+        m.kind                        AS kind,
+        coalesce(m.domain, '')        AS domain,
+        ageDays,
+        newerVersions,
+        coalesce(m.accessCount, 0)    AS accessCount
+      ORDER BY ageDays DESC
+      LIMIT 50
+    `, {
+      now: new Date().toISOString(),
+      cutoff: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+    });
+
+    if (!result) return [];
+
+    return toPlainRecords(result)
+      .map(row => ({
+        id:           String(row["id"] ?? ""),
+        content:      String(row["content"] ?? "").slice(0, 200),
+        kind:         String(row["kind"] ?? "note"),
+        domain:       String(row["domain"] ?? ""),
+        ageDays:      asInt(row["ageDays"], 0),
+        outlierType:  asInt(row["newerVersions"], 0) > 0 ? ("stale" as const) : ("orphan" as const),
+        accessCount:  asInt(row["accessCount"], 0),
+      }))
+      .filter(o => o.id !== "");
+  } catch (err) {
+    log.warn({ err }, "Outlier detection query failed");
+    return [];
+  }
+}
+
+// ── MAGE background jobs ──────────────────────────────────────────────────────
+
+/**
+ * Run MAGE betweenness_centrality across all MemoryRecord nodes and write
+ * the scores back as node properties. Used by reranking to boost hub memories.
+ * Returns the number of nodes updated.
+ */
+export async function graphUpdateCentrality(): Promise<number> {
+  if (!isNeo4jAvailable()) return 0;
+
+  try {
+    const result = await runCypher(`
+      CALL betweenness_centrality.get(False, True)
+      YIELD node, betweenness_centrality
+      WITH node, betweenness_centrality
+      WHERE 'MemoryRecord' IN labels(node)
+      SET node.centrality = betweenness_centrality
+      RETURN count(node) AS updated
+    `, {}, { write: true });
+
+    const updated = asInt(toPlainRecords(result ?? null as never)[0]?.["updated"], 0);
+    if (updated > 0) log.info({ updated }, "Graph centrality updated");
+    return updated;
+  } catch (err) {
+    log.warn({ err }, "Centrality update failed");
+    return 0;
+  }
+}
+
+/**
+ * Run MAGE community_detection (Louvain) and write community IDs back to nodes.
+ * Nodes in the same community share topic/domain clusters, enabling
+ * cluster-aware search and batch outlier analysis.
+ * Returns the number of nodes updated.
+ */
+export async function graphUpdateCommunities(): Promise<number> {
+  if (!isNeo4jAvailable()) return 0;
+
+  try {
+    const result = await runCypher(`
+      CALL community_detection.get()
+      YIELD node, community_id
+      WITH node, community_id
+      WHERE 'MemoryRecord' IN labels(node)
+      SET node.communityId = community_id
+      RETURN count(node) AS updated
+    `, {}, { write: true });
+
+    const updated = asInt(toPlainRecords(result ?? null as never)[0]?.["updated"], 0);
+    if (updated > 0) log.info({ updated }, "Graph communities updated");
+    return updated;
+  } catch (err) {
+    log.warn({ err }, "Community detection failed");
+    return 0;
+  }
+}
+
+/**
+ * Build SIMILAR_TO edges between MemoryRecord nodes using MemGraph's native
+ * vector_search module. Only processes nodes that have embeddings stored.
+ *
+ * Pass newRecordIds to process only recently-written nodes (incremental mode).
+ * Omit to process all nodes written in the past 24 hours (scheduled batch mode).
+ *
+ * Returns the number of SIMILAR_TO edges created.
+ */
+export async function graphBuildSimilarityLinks(newRecordIds?: string[]): Promise<number> {
+  if (!isNeo4jAvailable()) return 0;
+
+  const matchClause = newRecordIds && newRecordIds.length > 0
+    ? "MATCH (m:MemoryRecord) WHERE m.id IN $ids AND m.embedding IS NOT NULL"
+    : "MATCH (m:MemoryRecord) WHERE m.embedding IS NOT NULL AND m.updatedAt > $cutoff";
+
+  try {
+    const result = await runCypher(`
+      ${matchClause}
+      CALL vector_search.search("${VECTOR_INDEX_NAME}", 10, m.embedding)
+      YIELD node AS candidate, similarity
+      WHERE candidate.id <> m.id AND similarity > 0.82
+      MERGE (m)-[s:SIMILAR_TO]->(candidate)
+      SET s.similarity = similarity, s.method = 'embedding'
+      RETURN count(s) AS created
+    `, {
+      ids: newRecordIds ?? [],
+      cutoff: new Date(Date.now() - 86_400_000).toISOString(),
+    });
+
+    const created = asInt(toPlainRecords(result ?? null as never)[0]?.["created"], 0);
+    if (created > 0) log.info({ created }, "Similarity links built");
+    return created;
+  } catch (err) {
+    log.debug({ err }, "Similarity link building failed — vector index may not be populated yet");
+    return 0;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function asFloat(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asInt(value: unknown, fallback: number): number {
+  const n = Math.trunc(Number(value));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value));
+}

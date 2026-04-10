@@ -5,6 +5,10 @@ import { join, resolve } from "node:path";
 import { readRecentOutcomes } from "../agent/outcomes.js";
 import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
+import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("memory:service");
 
 const MEMORY_SUBDIR = ".starlingai/memory";
 const CONTENT_MERGE_MAX_CHARS = 560;
@@ -156,13 +160,40 @@ export async function searchMemoryRecords(
     return scoreRecord(record, normalizedQuery, tokens) > 0;
   });
 
-  return filtered
-    .map((record) => ({
-      ...record,
-      score: scoreRecord(record, normalizedQuery, tokens),
-    }))
+  // Pre-score all candidates
+  const textScored = filtered.map((record) => ({
+    ...record,
+    score: scoreRecord(record, normalizedQuery, tokens),
+  }));
+
+  // Graph reranking: blend text score (55%) with graph score (45%)
+  // Falls back to text-only if MemGraph is unavailable or the query is empty
+  const limit = Math.max(1, Math.min(50, Math.trunc(opts.limit ?? 10)));
+  const graphScores = await graphRerank(textScored.map(r => r.id));
+
+  const finalScored = graphScores.size > 0
+    ? textScored.map(record => ({
+        ...record,
+        score: (record.score ?? 0) * 0.55 + (graphScores.get(record.id) ?? 0.5) * 0.45,
+      }))
+    : textScored;
+
+  const sorted = finalScored
     .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, Math.max(1, Math.min(50, Math.trunc(opts.limit ?? 10))));
+    .slice(0, limit);
+
+  // Track retrievals in the graph for the feedback loop (fire-and-forget)
+  if (opts.sessionId && sorted.length > 0) {
+    const agentName = opts.targetAgent ?? "orchestrator";
+    for (let i = 0; i < sorted.length; i++) {
+      const record = sorted[i];
+      if (record) {
+        graphTrackRetrieval(record.id, agentName, opts.sessionId, i + 1).catch(() => {});
+      }
+    }
+  }
+
+  return sorted;
 }
 
 export async function formatScopedMemoryGuidance(
@@ -170,12 +201,17 @@ export async function formatScopedMemoryGuidance(
   query: string,
   opts: SearchMemoryOptions & { maxChars?: number } = {},
 ): Promise<string> {
-  const records = await searchMemoryRecords(workspacePath, query, opts);
-  if (records.length === 0) return "";
-
   const maxChars = Math.max(200, Math.min(4_000, Math.trunc(opts.maxChars ?? 1_200)));
+
+  // L0: always-loaded decisions + preferences from the graph — independent of query relevance
+  const [records, l0Section] = await Promise.all([
+    searchMemoryRecords(workspacePath, query, opts),
+    graphL0Layer(opts.targetAgent, Math.round(maxChars * 0.35)),
+  ]);
+
   const lines: string[] = [];
-  let totalChars = "## Relevant Memory".length + 1;
+  // Budget remaining for ranked results after L0 consumes its share
+  let totalChars = "## Relevant Memory".length + 1 + (l0Section ? l0Section.length + 2 : 0);
 
   for (const record of records) {
     const line = `- [${record.scope}/${record.kind}] ${truncate(record.subject, 120)}: ${truncate(singleLine(record.content), 220)}`;
@@ -184,8 +220,11 @@ export async function formatScopedMemoryGuidance(
     totalChars += line.length + 1;
   }
 
-  if (lines.length === 0) return "";
-  return ["## Relevant Memory", ...lines].join("\n");
+  const sections: string[] = [];
+  if (l0Section) sections.push(l0Section);
+  if (lines.length > 0) sections.push(["## Relevant Memory", ...lines].join("\n"));
+
+  return sections.join("\n\n");
 }
 
 export async function promoteMemoryRecords(
@@ -349,7 +388,12 @@ function storeDurableMemoryRecord(scope: DurableMemoryScope, workspacePath: stri
   };
 
   writeFileSync(filePath, JSON.stringify(stored, null, 2), "utf-8");
-  return workspaceStoredToRecord(stored);
+  const result = workspaceStoredToRecord(stored);
+
+  // Fire-and-forget graph write-through — MemGraph enhances search but is not critical path
+  upsertMemoryToGraph(result).catch(err => log.debug({ err }, "Graph write-through failed"));
+
+  return result;
 }
 
 async function readSessionMemoryRecords(sessionId: string): Promise<MemoryRecord[]> {

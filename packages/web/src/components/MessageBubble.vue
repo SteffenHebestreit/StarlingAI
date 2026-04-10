@@ -258,6 +258,7 @@
             <div class="artifact-preview-mermaid__canvas" v-html="artifactPreview.svg" />
             <pre v-if="artifactPreview.text">{{ artifactPreview.text }}</pre>
           </div>
+          <div v-else-if="artifactPreview.kind === 'markdown'" class="artifact-preview-markdown prose-content" v-html="artifactPreview.html" />
           <pre v-else-if="artifactPreview.kind === 'text'">{{ artifactPreview.text }}</pre>
           <audio v-else-if="artifactPreview.kind === 'audio'" :src="artifactPreview.url" controls class="artifact-preview-audio" />
         </div>
@@ -289,9 +290,10 @@ interface ExecutionItem {
 interface ArtifactPreviewState {
   title: string;
   filename: string;
-  kind: "html" | "pdf" | "text" | "audio" | "mermaid";
+  kind: "html" | "pdf" | "text" | "markdown" | "audio" | "mermaid";
   url?: string;
   text?: string;
+  html?: string;
   svg?: string;
   sandbox?: string;
 }
@@ -392,9 +394,10 @@ const blockLabel = computed((): string => {
   if (/prompt injection|secret scan|output guardrail/i.test(details)) return "⛔ Blocked by guardrails";
   return "⚠ Request blocked";
 });
+const swarmTasks = computed(() => Object.values(props.message.swarmState?.tasks ?? {}));
 
 // ── Execution history label ──────────────────────────────────────────────────
-const swarmExecutionItems = computed<ExecutionItem[]>(() => Object.values(props.message.swarmState?.tasks ?? {})
+const swarmExecutionItems = computed<ExecutionItem[]>(() => swarmTasks.value
   .flatMap((task) => task.attempts.flatMap((attempt, index) => {
     const status = mapExecutionStatus(attempt.status);
     const items: ExecutionItem[] = [{
@@ -457,13 +460,37 @@ const executionItems = computed<ExecutionItem[]>(() => {
   return toolExecutionItems.value;
 });
 
-const executionHistoryHeader = computed(() => swarmExecutionItems.value.length > 0 ? "Sub-Agent Actions" : "Tool Execution Steps");
-
-const swarmToolCallCount = computed(() => Object.values(props.message.swarmState?.tasks ?? {})
-  .flatMap((task) => task.attempts)
-  .reduce((total, attempt) => total + (attempt.toolCount ?? 0), 0));
+const executionHistoryHeader = computed(() => swarmExecutionItems.value.length > 0 ? "Swarm Task Timeline" : "Tool Execution Steps");
 
 const activeExecutionLabel = computed(() => {
+  if (swarmExecutionItems.value.length > 0) {
+    const runningTaskCount = swarmTasks.value.filter((task) => task.status === "running" || task.status === "pending").length;
+    const runningAttempt = swarmTasks.value
+      .flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })))
+      .find(({ attempt }) => attempt.status === "running");
+
+    if (runningAttempt) {
+      return runningTaskCount > 1
+        ? `${runningTaskCount} swarm task${runningTaskCount === 1 ? "" : "s"} running`
+        : `${runningAttempt.attempt.agentName} working…`;
+    }
+
+    const completedCount = swarmTasks.value.filter((task) => task.status === "completed").length;
+    const partialCount = swarmTasks.value.filter((task) => task.status === "partial").length;
+    const failedCount = swarmTasks.value.filter((task) => task.status === "failed" || task.status === "blocked").length;
+    const parts: string[] = [];
+
+    if (completedCount > 0) parts.push(`${completedCount} task${completedCount === 1 ? "" : "s"} done`);
+    if (partialCount > 0) parts.push(`${partialCount} partial`);
+    if (failedCount > 0) parts.push(`${failedCount} failed`);
+
+    if (parts.length > 0) {
+      return parts.join(" · ");
+    }
+
+    return `${swarmTasks.value.length} swarm task${swarmTasks.value.length === 1 ? "" : "s"}`;
+  }
+
   const items = executionItems.value;
   if (!items.length) return "";
 
@@ -488,9 +515,7 @@ const activeExecutionLabel = computed(() => {
       : `${partialCount} tool call${partialCount !== 1 ? "s" : ""} partial`;
   }
 
-  return swarmExecutionItems.value.length > 0
-    ? `${items.filter((item) => item.kind === "subagent").length} sub-agent action${items.filter((item) => item.kind === "subagent").length !== 1 ? "s" : ""} completed${swarmToolCallCount.value > 0 ? ` · ${swarmToolCallCount.value} tool call${swarmToolCallCount.value === 1 ? "" : "s"}` : ""}`
-    : `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
+  return `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
 
 watch(
@@ -540,6 +565,8 @@ function attachmentLabel(attachment: ChatAttachment): string {
       return "Audio artifact";
     case "mermaid":
       return "Mermaid diagram";
+    case "markdown":
+      return "Markdown artifact";
     case "json":
       return "JSON artifact";
     case "text":
@@ -558,7 +585,7 @@ function formatAttachmentSize(bytes?: number): string {
 
 function isPreviewable(attachment: ChatAttachment): boolean {
   return Boolean(attachment.relativePath || attachment.externalUrl)
-    && ["html", "pdf", "text", "json", "audio", "mermaid"].includes(attachment.previewMode ?? "download");
+    && ["html", "pdf", "text", "markdown", "json", "audio", "mermaid"].includes(attachment.previewMode ?? "download");
 }
 
 function ensureMermaidInitialized(): void {
@@ -643,6 +670,18 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
         kind: "mermaid",
         text: source,
         svg: await renderMermaidSvg(source, filename),
+      };
+      return;
+    }
+
+    if (attachment.previewMode === "markdown") {
+      const text = await blob.text();
+      artifactPreview.value = {
+        title: attachment.title || filename,
+        filename,
+        kind: "markdown",
+        text,
+        html: renderMarkdown(text),
       };
       return;
     }
@@ -1027,6 +1066,12 @@ onBeforeUnmount(() => {
   color: #d7efff;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.artifact-preview-markdown {
+  max-height: 68vh;
+  overflow: auto;
+  padding-right: 0.25rem;
 }
 
 .artifact-preview-mermaid {

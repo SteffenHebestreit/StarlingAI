@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDelegationLoopResponse, buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, getPerTurnToolCallLimit, shouldDefaultToGermanForMessage } from "../agent/runtime.js";
+import { buildDelegationLoopResponse, buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit, shouldDefaultToGermanForMessage } from "../agent/runtime.js";
 
 describe("runtime turn guidance", () => {
   it("adds web-search guidance for freshness-sensitive requests", () => {
@@ -14,6 +14,16 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("route it through a browser specialist");
     expect(guidance?.prompt).toContain("Do not stop after a browser snapshot");
     expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
+  });
+
+  it("adds mission-coordinator guidance for source-grounded papers and reports", () => {
+    const guidance = buildDynamicTurnGuidance("Write a short paper comparing MCP, A2A, and AG-UI using official sources and the latest specifications.", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+    expect(guidance?.freshnessSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("prefer mission_coordinator");
+    expect(guidance?.prompt).toContain("quality gate");
   });
 
   it("adds web-search guidance for German freshness-sensitive requests", () => {
@@ -50,6 +60,18 @@ describe("runtime turn guidance", () => {
     expect(guidance).not.toBeNull();
     expect(guidance?.computerAccessSensitive).toBe(true);
     expect(guidance?.prompt).toContain("prefer adapter 'remote_node' rather than 'local_vscode'");
+  });
+
+  it("routes SSH and Docker server tasks away from computer-use routing", () => {
+    const guidance = buildDynamicTurnGuidance("ssh into my n8n-server and tell me which docker containers are running");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.serverAccessSensitive).toBe(true);
+    expect(guidance?.computerAccessSensitive).toBe(false);
+    expect(guidance?.prompt).toContain("headless server");
+    expect(guidance?.prompt).toContain("Do NOT route this request to computer_use_agent");
+    expect(guidance?.prompt).toContain("agentName='shell_agent'");
+    expect(guidance?.prompt).toContain("agentName='ops_triage'");
   });
 
   it("routes mail drafting and sending requests to mail_agent", () => {
@@ -248,6 +270,30 @@ describe("runtime turn guidance", () => {
     expect(result).not.toContain("TASK FAILED");
   });
 
+  it("classifies partial delegated evidence for synthesis instead of failure", () => {
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: [
+          "Delegated result from computer_use_agent — PARTIAL PROGRESS.",
+          "Observed evidence:",
+          "Sub-agent 'computer_use_agent' timed out after 1000ms",
+          "Partial progress before interruption:",
+          "- Tool calls executed: 3 (computer_list_nodes, computer_session_start, computer_snapshot)",
+        ].join("\n"),
+        metadata: {
+          agentName: "computer_use_agent",
+          delegationSucceeded: true,
+          delegationOutcome: "partial",
+          terminalState: "timeout",
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("synthesize");
+  });
+
   it("marks blocker-style delegated evidence as failed for synthesis", () => {
     const result = buildModelVisibleToolResult(
       "delegate_to_agent",
@@ -261,6 +307,43 @@ describe("runtime turn guidance", () => {
 
     expect(result).toContain("Delegated result from researcher — TASK FAILED.");
     expect(result).toContain("Blocker: Raw temperature data for Dresden, Germany, 2025 is unavailable.");
+  });
+
+  it("marks placeholder no-response delegated evidence as failed for synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      "Sub-agent produced no final response.",
+      {
+        agentName: "researcher",
+        attemptedAgents: ["swarm_maintainer", "researcher"],
+        delegationSucceeded: true,
+        routingReason: { confidence: "medium" },
+      },
+    );
+
+    expect(result).toContain("Delegated result from researcher — TASK FAILED.");
+    expect(result).toContain("Sub-agent produced no final response.");
+    expect(result).not.toContain("TASK COMPLETED");
+  });
+
+  it("treats blocked workflow evidence as failed research rather than completed drafting input", () => {
+    const result = buildModelVisibleToolResult(
+      "run_workflow",
+      "Workflow deep_research_dossier [scene] blocked via mission_coordinator bootstrap.\n\nAll candidate agents failed for task 'Decide whether the request needs independent source gathering'.\nSub-agent produced no final response.",
+      {
+        workflowName: "deep_research_dossier",
+        workflowType: "scene",
+        blocked: true,
+        stepCount: 1,
+        executedSteps: 1,
+        bootstrapAgent: "mission_coordinator",
+      },
+    );
+
+    expect(result).toContain("Workflow deep_research_dossier [scene] blocked.");
+    expect(result).toContain("did not complete");
+    expect(result).toContain("Do NOT jump straight to drafting-only agents like paper_author or summarizer");
+    expect(result).toContain("Sub-agent produced no final response.");
   });
 
   it("builds a compact model-visible context view for task-graph results", () => {

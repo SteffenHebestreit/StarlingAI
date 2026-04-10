@@ -229,4 +229,60 @@ describe("event-driven task graph", () => {
 
     unsub();
   }, 15_000);
+
+  it("starts dependent nodes as soon as their own prerequisites complete without waiting for unrelated slow nodes", async () => {
+    let releaseSlowNode: (() => void) | null = null;
+    const invocationOrder: string[] = [];
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => {
+      invocationOrder.push(`${agentName}:${task}`);
+      if (agentName === "researcher") {
+        await new Promise<void>((resolve) => {
+          releaseSlowNode = resolve;
+        });
+      }
+      return `${agentName}:${task}:done`;
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const runTaskGraph = getTool("run_task_graph");
+    expect(runTaskGraph).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Incremental scheduling test",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const execution = runTaskGraph!.execute({
+      objective: "Incremental scheduling graph",
+      nodes: [
+        { id: "slow", agentName: "researcher", task: "Slow research" },
+        { id: "fast", agentName: "coder", task: "Fast coding" },
+        { id: "after-fast", agentName: "summarizer", task: "Summarize fast result", dependsOn: ["fast"] },
+      ],
+    }, {
+      sessionId: "graph-session-incremental",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    for (let attempt = 0; attempt < 20 && invocationOrder.length < 3; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(invocationOrder).toContain("researcher:Slow research");
+    expect(invocationOrder).toContain("coder:Fast coding");
+    expect(invocationOrder).toContain("summarizer:Summarize fast result");
+
+    releaseSlowNode?.();
+    const result = await execution;
+    expect(result.success).toBe(true);
+  }, 15_000);
 });

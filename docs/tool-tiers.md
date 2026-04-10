@@ -18,11 +18,13 @@ See also: [Security Model](security.md) · [Architecture & Design](architecture.
 |------|------|-----------|
 | **0** | Read-only | Always allowed. No side effects. No approval required. |
 | **1** | Write | Workspace-scoped writes. No approval required but all writes are audited. |
-| **2** | Execute | Requires per-call approval. Shell execution always in Docker sandbox. |
+| **2** | Execute | Execution-tier actions. Internal swarm orchestration is auto-allowed; external execution still requires per-call approval. Shell execution always stays in Docker sandbox. |
 | **3** | Privileged | Requires per-call approval + generates audit entry with full args. |
 | **4** | Blocked | Never executed. Hard-coded reject. |
 
 **Philosophy:** Tier 0 tools can never cause harm — they only read information the agent already has access to. Each tier above adds a capability (network egress, filesystem writes, process execution, external service calls) and a corresponding control. Tier 4 tools represent actions that would give an agent uncontained access to the host environment; they are removed from the tool registry entirely.
+
+Tier 2 is intentionally split. Orchestration-only tools such as `delegate_to_agent`, `parallel_delegate`, `run_task_graph`, and `run_workflow` stay inside the guarded swarm runtime and do not require human approval. Command execution, scripts, HTTP requests, and git mutations remain approval-gated, and shell/script execution still runs only inside the Docker sandbox.
 
 This tier model is also the hard boundary for self-improvement. The swarm may refine prompts, memory, agent definitions, and approved tool assignments for specialists, but it may not use self-improvement to reclassify tools, weaken approvals, expose secrets, or bypass the guarded contract. Credential-bearing actions remain secret-safe tool calls, never plain-text reads into model context.
 
@@ -36,6 +38,7 @@ This tier model is also the hard boundary for self-improvement. The swarm may re
 |------|-------------|
 | `list_agents` | List all registered sub-agents and their capabilities |
 | `search_agents` | Score agents against a query using hybrid routing |
+| `search_workflows` | Search reusable scenes and jobs in the workflow catalog |
 | `read_file` | Read a file from the workspace |
 | `list_files` | List files in a workspace directory |
 | `export_workspace_artifact` | Surface an existing workspace file or folder as a downloadable chat artifact |
@@ -66,17 +69,24 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `n8n_mark_applied` | Mark a lead as applied in n8n | None |
 | `webhook__<name>` | Any auto-registered webhook tool | None (auto-classified Tier 1) |
 
-### Tier 2 — Execute (Per-Call Approval, Docker Sandbox)
+### Tier 2 — Execute (Execution-Tier, Approval Depends On Tool)
 
 | Tool | Description | Approval | Sandbox |
 |------|-------------|---------|---------|
-| `delegate_to_agent` | Delegate a task to a named sub-agent via A2A | Per-call | No |
-| `create_ephemeral_agent` | Create a temporary sub-agent from a spec | Per-call | No |
-| `parallel_delegate` | Run up to 5 agents concurrently | Per-call | No |
+| `delegate_to_agent` | Delegate a task to a named or auto-routed sub-agent via A2A | None | No |
+| `create_ephemeral_agent` | Create a temporary sub-agent from a spec | None | No |
+| `parallel_delegate` | Run up to 5 agents concurrently | None | No |
+| `run_task_graph` | Execute a dependency-aware swarm task graph | None | No |
+| `run_workflow` | Execute a reusable scene or job inline in a temporary workflow session | None | No |
 | `shell_exec` | Execute a shell command | Per-call | Yes — Docker container |
 | `run_script` | Run a script file | Per-call | Yes — Docker container |
+| `http_request` | Make an outbound HTTP request | Per-call | No |
+| `git_commit` | Stage files and create a git commit | Per-call | Yes — Docker container |
+| `git_checkout` | Switch or create branches, restore files | Per-call | Yes — Docker container |
 | `site_fill_credentials` | Securely fill stored credentials into browser login fields | Per-call | No |
 | `computer_type_credential` | Securely type stored credentials into a desktop login form | Per-call | No |
+
+Internal orchestration tools stay inside the guarded runtime, so they do not need per-call approval even though they are execution-tier. Tools that execute commands, mutate git state, or reach outside the workspace remain approval-gated.
 
 `shell_exec` and `run_script` **always** run inside the Docker sandbox container. There is no code path that can execute these on the host.
 
@@ -94,7 +104,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `ansible_playbook` | Run an Ansible playbook for privileged infrastructure changes | Per-call + audit |
 | `ansible_task` | Run a single Ansible ad-hoc task against remote inventory | Per-call + audit |
 | `service_check` | Check remote infrastructure readiness from the host | Per-call + audit |
-| `ssh_exec` | Run a remote SSH command on a target host | Per-call + audit |
+| `ssh_exec` | Run a remote SSH command on a target host, optionally via a configured `remote_ssh` `nodeName` | Per-call + audit |
 | `ssh_upload` | Upload files or directories to a remote host | Per-call + audit |
 | `ssh_download` | Download files or directories from a remote host | Per-call + audit |
 | `mcp__<server>__<tool>` (unlisted) | Any MCP tool not explicitly listed in Tier 0 | Per-call + audit |
