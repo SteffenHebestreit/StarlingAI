@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Dependencies — copy manifests first for layer caching
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY package.json pnpm-workspace.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
 COPY packages/mail-service/package.json ./packages/mail-service/
@@ -32,7 +32,7 @@ RUN cd /app/packages/core \
 # Shared runtime filesystem
 FROM node:22-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl docker.io \
+    curl docker.io openssh-client sshpass \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -60,8 +60,7 @@ CMD ["node", "packages/core/dist/index.js"]
 # Remote access sidecar runtime
 FROM runtime-base AS computer-remote-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        xvfb freerdp2-x11 xdotool imagemagick \
-        openssh-client sshpass \
+    xvfb freerdp2-x11 xdotool imagemagick \
         && rm -rf /var/lib/apt/lists/*
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \

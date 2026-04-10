@@ -6,6 +6,8 @@
 
 StarlingAI is a general-purpose AI agent swarm built around four principles borrowed from the murmuration of starlings, extended with an explicit security contract. The system is designed to tackle any task domain by dynamically composing the right specialist agents — not by building one-off pipelines for specific workflows.
 
+Recurring task shapes can also be encoded as reusable scenes and jobs in the workflow catalog, discovered with `search_workflows`, and executed inline with `run_workflow` before the swarm invents a fresh coordinator plan.
+
 This document explains how the system implements each swarm principle at the code level, describes the full runtime architecture, and maps the flow from user message to final response.
 
 See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md)
@@ -30,8 +32,10 @@ This applies to any task domain — whether the swarm is analyzing market data, 
 
 At the code level this means:
 - The orchestrator model runs in `packages/core/src/agent/` and communicates with sub-agents exclusively via `delegate_to_agent` / `parallel_delegate` tool calls.
+- Reusable scenes and jobs act as local rules too: the orchestrator can search the workflow catalog with `search_workflows` and execute a matched reusable flow with `run_workflow` instead of rebuilding the same plan turn after turn.
 - Sub-agents are isolated at the tool and session boundary. They do not coordinate directly with each other; delegation always flows back through the orchestrator tool layer. Some agents run in ephemeral containers with full heartbeat lifecycle management.
 - Config hot-reload updates local rule sets (system prompts, model parameters, tool policies) without restarting the cluster.
+- Heuristic routing now separates headless server administration from desktop automation: SSH, Docker, `systemctl`, `journalctl`, and log-triage requests prefer `shell_agent` or `ops_triage`, while desktop/UI work still prefers `computer_use_agent`.
 - The swarm bus (`swarm/bus.ts`) extends local-rule coordination to an event-driven pub/sub layer: agents emit `task_announced` events and peers respond with ranked `task_bid` offers, enabling autonomous peer discovery without a central planner.
 - A default tool registry (`agent/default-tools.ts`) defines two canonical tool sets: `DIRECT_MAIN_TOOL_NAMES` (20 tools for direct-response agents) and `ORCHESTRATION_TOOL_NAMES` (7 tools for orchestrators), so each agent role follows a consistent local ruleset.
 
@@ -39,7 +43,7 @@ At the code level this means:
 
 ### 2. Emergenz (The Whole Is More Than the Sum of Its Parts)
 
-Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not have a hard-coded handler for this. Instead it can chain `citation_researcher` → `paper_author` → `source_verifier` dynamically, using the hybrid routing layer to find the best agent for each step. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
+Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not need a hard-coded handler for this. It can first reuse a matching workflow such as `protocol_comparison_paper` or `source_grounded_paper_packet` via the workflow catalog, and if no reusable fit exists it can still chain `citation_researcher` → `paper_author` → `source_verifier` dynamically using the hybrid routing layer. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
 
 This emergence is reproducible and auditable: every delegation is recorded in the audit log with inputs, outputs, and token counts. Outcome-weighted routing means the swarm continuously improves its specialist selection without manual tuning.
 
@@ -95,7 +99,7 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The system has completed **Stage 9** of the swarm vision, with the current `v0.4.1` release focused on artifact generation, browser-backed research fallbacks, and operator-facing debugging/export polish on top of the Stage 9 foundations.
+The system has completed **Stage 9** of the swarm vision. The current codebase extends the `v0.5.0` release line with workflow-catalog reuse, server-aware ops routing, richer session and audit exports, and inline Markdown artifact previews.
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
@@ -128,6 +132,10 @@ The system has completed **Stage 9** of the swarm vision, with the current `v0.4
 | **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |
 | **Browser-backed search and fetch fallback** | 9.1 | Implemented (v0.4.1) | Search can fall back through Playwright when SearXNG is unavailable; `web_fetch` prefers rendered HTML for JavaScript-heavy pages |
 | **Session debug Markdown export** | 9.1 | Implemented (v0.4.1) | REST export combines transcript, raw history, and audit evidence for operator review |
+| **Workflow catalog reuse** | 9.2 | Implemented | `search_workflows` and `run_workflow` let coordinators reuse scenes/jobs before inventing new orchestration for recurring packets |
+| **Server-aware SSH and ops routing** | 9.2 | Implemented | Headless server tasks prefer `shell_agent` / `ops_triage`; `ssh_exec` can resolve configured `remote_ssh` nodes, including password-backed targets |
+| **Markdown artifact previews + audit-only exports** | 9.2 | Implemented | Markdown artifacts render inline in chat; sessions can export focused audit-only Markdown alongside the full debug bundle |
+| **Live shell preview and synthetic swarm status** | 9.2 | Implemented | The dashboard can surface shell/SSH activity and keep showing swarm progress from audit events even when explicit swarm-state updates lag |
 
 ---
 
@@ -136,7 +144,8 @@ The system has completed **Stage 9** of the swarm vision, with the current `v0.4
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Clients                                                             │
-│  Vue 3 Dashboard (WebSocket / SSE)  ·  REST  ·  Message Channels    │
+│  Vue 3 Dashboard (WebSocket / SSE, audit export, shell preview)     │
+│  ·  REST  ·  Message Channels                                       │
 └────────────────────────┬────────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────────┐
@@ -167,7 +176,8 @@ The system has completed **Stage 9** of the swarm vision, with the current `v0.4
 ┌────────────────────────▼────────────────────────────────────────────┐
 │  Orchestrator Agent  (packages/core/src/agent/)                      │
 │  LLM: configurable model via LM Studio / Anthropic                  │
-│  Tools: search_agents, delegate_to_agent, parallel_delegate         │
+│  Tools: search_agents, search_workflows, run_workflow,              │
+│         delegate_to_agent, parallel_delegate                        │
 │         + all Tier 0–3 tools + multimodal tools + browser tools     │
 └────────┬───────────────┬──────────────────────────┬────────────────┘
          │               │ task_announced (bus)      │ parallel_delegate

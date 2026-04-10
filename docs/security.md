@@ -151,6 +151,8 @@ Every event in StarlingAI is recorded to the audit log:
 
 - User messages (content, session ID, channel, sender)
 - Tool calls (tool name, arguments, result summary, tier, approval decision)
+- Workflow execution events (`search_workflows`, `run_workflow`, workflow-scoped sessions)
+- Sub-agent tool lifecycle events used for live shell previews and richer operator review
 - Guardrail events (scanner matches, blocks, redactions)
 - Auth events (login attempts, token validation failures, rate limit hits)
 - Channel events (delivery, retry, dead-letter)
@@ -167,6 +169,8 @@ Default resolution:
 **PostgreSQL sink (optional):** when Postgres is configured, the gateway also writes audit events to `audit_events`.
 
 **Real-time stream:** subscribe via WebSocket (`audit.subscribe` method) or view in the dashboard under the **Audit** tab. The stream delivers events as they are written.
+
+The dashboard can filter tool activity, sub-agent tool events, and related audit categories, then export the filtered view as Markdown. Session-level audit bundles are also available through `GET /api/sessions/:sessionId/audit-markdown`, while `debug-markdown` remains the fuller transcript + history + audit export.
 
 Secrets are redacted in audit entries using the same scanner as Layer 3/4 before the entry is written — the audit log itself never contains plain-text credentials.
 

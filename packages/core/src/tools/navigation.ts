@@ -3,7 +3,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 
 const log = childLogger("tool:navigation");
 
-const NAVIGATION_USER_AGENT = "StarlingAI/0.4.1 (navigation tools)";
+const NAVIGATION_USER_AGENT = "StarlingAI/0.5.0 (navigation tools)";
 const GEOCODE_TIMEOUT_MS = 15_000;
 const ROUTE_TIMEOUT_MS = 20_000;
 

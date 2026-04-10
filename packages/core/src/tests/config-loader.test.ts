@@ -11,7 +11,9 @@ function wait(ms: number): Promise<void> {
 describe("config loader mutable overlay", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_WORKSPACE_CONFIG_PATH"];
     delete process.env["SAI_MUTABLE_CONFIG_PATH"];
+    vi.restoreAllMocks();
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
@@ -317,6 +319,52 @@ describe("config loader mutable overlay", () => {
       await wait(400);
 
       expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reload directory config when unrelated files change under an external mutable data directory", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-directory-watch-"));
+    const configDir = join(tempDir, "config");
+    const workspaceDir = join(tempDir, "workspace");
+    const mutableDataDir = join(tempDir, "data");
+    const mutableConfigPath = join(mutableDataDir, "starlingai.runtime.json");
+    const unrelatedRuntimePath = join(mutableDataDir, "audit.jsonl");
+
+    mkdirSync(join(configDir, "gateway"), { recursive: true });
+    mkdirSync(join(workspaceDir, "agents"), { recursive: true });
+    mkdirSync(mutableDataDir, { recursive: true });
+
+    writeFileSync(join(configDir, "gateway", "10-gateway.json"), JSON.stringify({
+      gateway: { port: 8765 },
+    }, null, 2), "utf8");
+
+    writeFileSync(join(workspaceDir, "agents", "10-defaults.json"), JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/test-model" },
+        },
+      },
+    }, null, 2), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    process.env["SAI_WORKSPACE_CONFIG_PATH"] = workspaceDir;
+    process.env["SAI_MUTABLE_CONFIG_PATH"] = mutableConfigPath;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      configLoader.loadConfig();
+      configLoader.watchConfig(() => undefined);
+      await wait(250);
+
+      const stableConfig = configLoader.getConfig();
+      writeFileSync(unrelatedRuntimePath, '{"event":"audit"}\n', "utf8");
+      await wait(400);
+
+      expect(configLoader.getConfig()).toBe(stableConfig);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -710,6 +710,28 @@ export const SelfImprovementSchema = z.object({
   maxConcurrentProposals: z.number().int().min(1).max(3).default(1),
   /** If true, skip initial capability-gap approval and start dev session directly. */
   autoStartDevSession: z.boolean().default(false),
+  /**
+   * Named approval channel (from approvalChannels config) to notify when a selfdev__ tool
+   * reaches the promotion threshold and is awaiting operator sign-off.
+   * When omitted, nominations are logged and queryable but no external notification fires.
+   */
+  promotionApprovalChannel: z.string().min(1).optional(),
+  /**
+   * Number of successful selfdev__ tool calls required before the tool is nominated
+   * for promotion review. Mirrors dynamic-tools PROMOTION_MIN_CALLS default (10).
+   */
+  promotionMinCalls: z.number().int().min(1).max(500).default(10),
+  /**
+   * Minimum success-rate (0–1) required to nominate a selfdev__ tool for promotion.
+   * Mirrors dynamic-tools PROMOTION_MIN_SUCCESS_RATE default (0.8).
+   */
+  promotionMinSuccessRate: z.number().min(0).max(1).default(0.8),
+  /**
+   * Number of successful selfdev__ tool invocations required to consider the
+   * originating capability gap confirmed-closed (post-deployment feedback loop).
+   * Kept separate from promotionMinCalls, which governs promotion eligibility.
+   */
+  gapClosureConfirmationCount: z.number().int().min(1).max(500).default(5),
 });
 
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;

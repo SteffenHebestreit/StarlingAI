@@ -13,7 +13,7 @@
 
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
@@ -43,6 +43,10 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_list_windows: 3,
   computer_focus_window: 3,
   computer_snapshot: 8,
+  web_search: 12,
+  web_fetch: 12,
+  search_workflows: 2,
+  run_workflow: 2,
   computer_click: 6,
   computer_type: 4,
   computer_hotkey: 4,
@@ -71,7 +75,9 @@ const MAIL_READ_ONLY_TOOLS = new Set<string>([
 const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "list_agents",
   "search_agents",
+  "search_workflows",
   "delegate_to_agent",
+  "run_workflow",
   "parallel_delegate",
   "run_task_graph",
 ]);
@@ -123,6 +129,25 @@ function buildTaskModeGuidance(agentName: string, task: string): string {
         "Do not draft, update, send, categorize, or delegate for this task.",
       ].join("\n");
     }
+    if (agentName === "shell_agent" && /\b(ssh|server|host|docker|container|containers|systemctl|journalctl|kubectl|n8n-server)\b/i.test(task)) {
+      return [
+        "TASK MODE - DIRECT REMOTE CLI EXECUTION.",
+        "This task asks for a concrete server-side command or inventory result, not exploratory repo inspection.",
+        "If the context names a configured SSH target, call ssh_exec with nodeName immediately instead of searching local files for connection details.",
+        "For one-shot checks like docker ps, systemctl status, journalctl, or df -h, prefer a single decisive remote command and then summarize the actual output.",
+        "If ssh_exec returns command output, treat that output as the answer. Do not override successful stdout with diagnosis, fallback theories, or a contradictory failure summary.",
+        "If the remote command fails, report the exact ssh_exec error or approval blocker verbatim. Quote the literal failing phrase such as 'Permission denied', 'Connection refused', or 'timed out' instead of paraphrasing it into generic possibilities.",
+        "Do not replace concrete stderr with speculative text like 'might be authentication or network'. If the evidence is only an SSH error, return that exact SSH error.",
+      ].join("\n");
+    }
+    if (agentName === "ops_triage" && /\b(ssh|server|host|docker|container|containers|systemctl|journalctl|kubectl|n8n-server)\b/i.test(task)) {
+      return [
+        "TASK MODE - REMOTE INCIDENT TRIAGE.",
+        "Start with one or two high-signal remote checks using ssh_exec or service_check, not a broad workspace search.",
+        "If the context names a configured SSH target, prefer ssh_exec with nodeName before looking for local config files.",
+        "Report concrete failure signals first. Avoid exploratory narration that does not produce evidence.",
+      ].join("\n");
+    }
     return "";
   }
 
@@ -134,6 +159,14 @@ function buildTaskModeGuidance(agentName: string, task: string): string {
     "Do NOT click, type, use hotkeys, scroll, drag, open apps, or launch dialogs for this task.",
     "If the current desktop does not already show the requested evidence, report that limitation explicitly instead of probing blindly.",
   ].join("\n");
+}
+
+function isDirectRemoteCliTask(agentName: string, task: string): boolean {
+  if (agentName !== "shell_agent") {
+    return false;
+  }
+  return /\b(docker\s+ps|whoami|systemctl(?:\s+status)?|journalctl|df\s+-h|uname\s+-a|ps\s+aux)\b/i.test(task)
+    && /\b(ssh|server|host|docker|container|containers|n8n-server)\b/i.test(task);
 }
 
 function buildModelExecutionGuidance(modelId: string, enableThinking: boolean | undefined): string {
@@ -177,6 +210,9 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
   if (availableTools.includes("search_agents")) {
     guidance.push("If the right specialist is not obvious, call search_agents before delegating.");
   }
+  if (availableTools.includes("search_workflows")) {
+    guidance.push("If the request looks like a recurring packet, paper, review, or other reusable flow, call search_workflows before inventing a new plan.");
+  }
   if (availableTools.includes("list_agents")) {
     guidance.push("Call list_agents when you need the full delegate catalog with descriptions and tool access.");
   }
@@ -188,6 +224,9 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
   }
   if (availableTools.includes("run_task_graph")) {
     guidance.push("Use run_task_graph when later steps depend on earlier findings.");
+  }
+  if (availableTools.includes("run_workflow")) {
+    guidance.push("Use run_workflow when a scene or job already matches the task shape closely.");
   }
 
   return guidance.join("\n");
@@ -312,6 +351,8 @@ function rejectSuspiciousNoToolOutput(
       usage: stats.usage,
       model: stats.model,
       durationMs: Date.now() - runStartedAt,
+      outcome: failureStats.outcome,
+      terminalState: failureStats.terminalState,
       suspiciousNoToolOutput: true,
       suspiciousNoToolReason: reason,
     },
@@ -336,6 +377,138 @@ function rejectSuspiciousNoToolOutput(
 function normalizeSubAgentOutput(content: string | null | undefined): string {
   const normalized = typeof content === "string" ? content.trim() : "";
   return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
+}
+
+function truncateToolAuditText(value: string | null | undefined, maxLength = 280): string | undefined {
+  const normalized = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  if (!normalized) return undefined;
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(0, maxLength - 3))}...`
+    : normalized;
+}
+
+function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!metadata) return undefined;
+
+  const summary: Record<string, unknown> = {};
+  for (const key of [
+    "query",
+    "rewrittenQuery",
+    "resultCount",
+    "backend",
+    "requestedBackend",
+    "attemptedBackends",
+    "url",
+    "fetchMethod",
+    "contentType",
+    "contentLength",
+    "outputPath",
+    "filename",
+    "previewMode",
+  ]) {
+    if (key in metadata) {
+      summary[key] = metadata[key];
+    }
+  }
+
+  const ranking = metadata["ranking"];
+  if (ranking && typeof ranking === "object") {
+    const rankingRecord = ranking as Record<string, unknown>;
+    const topResults = Array.isArray(rankingRecord["topResults"])
+      ? rankingRecord["topResults"]
+          .slice(0, 3)
+          .map((entry) => {
+            if (typeof entry !== "object" || entry === null) {
+              return entry;
+            }
+            const value = entry as Record<string, unknown>;
+            return {
+              title: typeof value["title"] === "string" ? value["title"] : undefined,
+              url: typeof value["url"] === "string" ? value["url"] : undefined,
+              score: typeof value["score"] === "number" ? value["score"] : undefined,
+            };
+          })
+      : [];
+    if (topResults.length > 0) {
+      summary["ranking"] = { topResults };
+    }
+  }
+
+  if (Array.isArray(metadata["artifacts"])) {
+    summary["artifactCount"] = metadata["artifacts"].length;
+  }
+  if (Array.isArray(metadata["accounts"])) {
+    summary["accountCount"] = metadata["accounts"].length;
+  }
+  if (Array.isArray(metadata["messages"])) {
+    summary["messageCount"] = metadata["messages"].length;
+  }
+
+  const message = metadata["message"];
+  if (message && typeof message === "object") {
+    const value = message as Record<string, unknown>;
+    const messageSummary: Record<string, unknown> = {};
+    for (const key of ["accountId", "mailbox", "uid", "subject", "from", "date"]) {
+      if (key in value) {
+        messageSummary[key] = value[key];
+      }
+    }
+    if (Object.keys(messageSummary).length > 0) {
+      summary["message"] = messageSummary;
+    }
+  }
+
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function buildSubAgentToolAuditPayload(params: {
+  agentName: string;
+  tool: string;
+  phase: "start" | "done";
+  args?: Record<string, unknown>;
+  toolCallId?: string;
+  deterministic?: boolean;
+  result?: ToolResult;
+  errorText?: string;
+  resultPreview?: string;
+  cachedResult?: boolean;
+  skippedReason?: string;
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    agentName: params.agentName,
+    tool: params.tool,
+    phase: params.phase,
+  };
+
+  if (params.toolCallId) payload["toolCallId"] = params.toolCallId;
+  if (params.deterministic) payload["deterministic"] = true;
+  if (params.args && Object.keys(params.args).length > 0) payload["args"] = params.args;
+  if (params.cachedResult) payload["cachedResult"] = true;
+  if (params.skippedReason) payload["skippedReason"] = params.skippedReason;
+
+  if (params.phase === "done") {
+    const success = params.result ? params.result.success : !params.errorText;
+    payload["success"] = success;
+
+    const error = truncateToolAuditText(params.result?.error ?? params.errorText, 220);
+    if (error) payload["error"] = error;
+
+    const metadata = params.result?.metadata && typeof params.result.metadata === "object"
+      ? summarizeToolAuditMetadata(params.result.metadata)
+      : undefined;
+    if (metadata) payload["metadata"] = metadata;
+
+    const outputChars = params.result?.output.length;
+    if (typeof outputChars === "number") payload["outputChars"] = outputChars;
+
+    const preview = params.resultPreview
+      ?? (params.result?.success
+        ? truncateToolAuditText(params.result.output)
+        : truncateToolAuditText(params.result?.error ?? params.errorText));
+    if (preview) payload["resultPreview"] = preview;
+  }
+
+  return payload;
 }
 
 function formatSwarmProgressForInterruption(state: SwarmState | undefined): string {
@@ -415,6 +588,60 @@ function buildInterruptedSubAgentOutput(params: {
 
 type SubAgentOutcome = "success" | "partial" | "failure";
 
+function looksLikePlanningOnlyResult(result: string): boolean {
+  const preview = result.slice(0, 600).trim();
+  if (!preview) return false;
+
+  const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
+  if (!startsLikePlanning) return false;
+
+  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create)\b/i.test(preview);
+  if (!planningAction) return false;
+
+  const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
+  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|failed|error|could not|did not)\b/i.test(preview);
+  return !terminalMarker && (unresolvedMarker || preview.length <= 220);
+}
+
+function looksLikeFailureResult(result: string): boolean {
+  if (!result.trim()) return true;
+  const preview = result.slice(0, 600);
+  if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
+    return true;
+  }
+  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
+    return true;
+  }
+
+  if (/\b(i can(?:not|'t) access|i do not have access|i can(?:not|'t) retrieve|cannot retrieve the latest|cannot access real[- ]time|knowledge cutoff|my knowledge is based on the data i was trained on)\b/i.test(preview)) {
+    return true;
+  }
+
+  if (/\b(need to start a session|no computer_session_start|not available in my tool list|available tools are only|missing tool|cannot complete because .*tool)\b/i.test(preview)) {
+    return true;
+  }
+
+  return looksLikePlanningOnlyResult(preview);
+}
+
+function hasDeliverableArtifact(artifacts: Record<string, unknown>[]): boolean {
+  return artifacts.some((artifact) => {
+    const sourceTool = typeof artifact["sourceTool"] === "string" ? artifact["sourceTool"] : "";
+    const previewMode = typeof artifact["previewMode"] === "string" ? artifact["previewMode"] : "";
+    const contentType = typeof artifact["contentType"] === "string" ? artifact["contentType"] : "";
+
+    if (["generate_document", "generate_pdf", "generate_chart_html", "generate_mermaid_diagram", "export_workspace_artifact"].includes(sourceTool)) {
+      return true;
+    }
+
+    return ["html", "pdf", "markdown", "json", "text", "mermaid"].includes(previewMode)
+      || contentType.startsWith("text/markdown")
+      || contentType.startsWith("text/html")
+      || contentType.startsWith("application/pdf")
+      || contentType.startsWith("application/json");
+  });
+}
+
 function classifyInterruptedOutcome(params: {
   successfulToolCount: number;
   artifacts: Record<string, unknown>[];
@@ -431,6 +658,28 @@ function classifyInterruptedOutcome(params: {
   ));
 
   return sawSwarmProgress ? "partial" : "failure";
+}
+
+function buildArtifactCompletionOutput(params: {
+  agentName: string;
+  maxIterations: number;
+  artifacts: Record<string, unknown>[];
+}): string {
+  const artifactHints = params.artifacts
+    .map((artifact) => {
+      const outputPath = typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "";
+      const filename = typeof artifact["filename"] === "string" ? artifact["filename"] : "";
+      const externalUrl = typeof artifact["externalUrl"] === "string" ? artifact["externalUrl"] : "";
+      return outputPath || filename || externalUrl;
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return [
+    `Sub-agent '${params.agentName}' produced a deliverable artifact before reaching the maximum number of tool-call iterations (${params.maxIterations}).`,
+    artifactHints.length > 0 ? `Saved artifacts: ${artifactHints.join(", ")}.` : "",
+    "Use the saved artifact as the completed delegated output.",
+  ].filter(Boolean).join("\n");
 }
 
 /** Strip hallucinated tool-call XML that some models emit in text output. */
@@ -455,7 +704,6 @@ export interface SubAgentRunOptions {
   context?: string;
   parentSessionId: string;
   workspacePath: string;
-  /** When set, nested delegation from this sub-agent is restricted to these agent names. */
   allowedAgents?: string[];
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -468,6 +716,18 @@ export interface SubAgentRunOptions {
   maxIterationsOverride?: number;
   /** Override the agent's timeout for this invocation in ms. 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
+  /** Shared orchestration state for nested delegated runs. Internal. */
+  swarmState?: SwarmState;
+  /** Optional live callback whenever nested swarm state changes. Internal. */
+  onSwarmState?: (state: SwarmState) => void;
+  /** Shared turn-local delegation counters for nested runs. Internal. */
+  _turnAgentCounts?: Map<string, number>;
+  /** Shared per-agent delegation repeat-cap overrides for nested runs. Internal. */
+  _turnAgentRepeatLimitOverrides?: Record<string, number>;
+  /** Shared total delegation budget override for nested runs. Internal. */
+  _turnTotalDelegationLimitOverride?: number;
+  /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
+  _workflowExecutionStack?: string[];
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
   inlineConfig?: import("../config/schema.js").SubAgentConfig;
 }
@@ -477,6 +737,10 @@ export interface SubAgentProgressEvent {
   kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";
   iteration: number;
   toolName?: string;
+  toolCallId?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  metadata?: Record<string, unknown>;
   summary?: string;
 }
 
@@ -546,7 +810,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
   // nested sub-agents whose cumulative runtime can approach the full turn budget.
   // Give them a much higher default floor so adaptive timeouts based on *shorter*
   // prior runs don't prematurely abort in-flight task graphs.
-  const COORDINATOR_TOOL_NAMES = ["run_task_graph", "parallel_delegate"];
+  const COORDINATOR_TOOL_NAMES = ["run_task_graph", "parallel_delegate", "run_workflow"];
   const isCoordinatorAgent = agentCfg.tools?.some((t: string) => COORDINATOR_TOOL_NAMES.includes(t)) ?? false;
   const leafDefaultMs = config.agents.performance?.subAgentTurnSloMs ?? 60_000;
   const coordinatorDefaultMs = Math.round(config.gateway.turnTimeoutMs * 0.85);
@@ -612,36 +876,39 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       } finally {
         releaseSlot(opts.agentName);
       }
+      const stats: SubAgentExecutionStats = {
+        agentName: opts.agentName,
+        sessionId: subSessionId,
+        promptChars: 0,
+        userContentChars: opts.task.length + (opts.context?.length ?? 0),
+        toolCount: 0,
+        toolNames: [],
+        iterations: 0,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+        model: modelConfig.primary ?? "",
+        capabilities: agentCfg.capabilities ?? [],
+        outcome: "success",
+        terminalState: "completed",
+        containerColdStartMs: containerRun.metrics.containerColdStartMs,
+        containerBootstrapMs: containerRun.metrics.containerBootstrapMs,
+        containerRuntimeMs: containerRun.metrics.containerRuntimeMs,
+      };
       logAudit(
         "sub_agent_completed",
         {
           agentName: opts.agentName,
-          containerized: true,
           resultLength: containerRun.output.length,
+          outcome: stats.outcome,
+          terminalState: stats.terminalState,
+          containerized: true,
           ...containerRun.metrics,
         },
-        { sessionId: subSessionId }
+        { sessionId: subSessionId },
       );
       return {
         output: containerRun.output,
-        stats: {
-          agentName: opts.agentName,
-          sessionId: subSessionId,
-          promptChars: 0,
-          userContentChars: opts.task.length + (opts.context?.length ?? 0),
-          toolCount: 0,
-          toolNames: [],
-          iterations: 0,
-          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-          maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-          model: modelConfig.primary ?? "",
-          capabilities: agentCfg.capabilities ?? [],
-          outcome: "success",
-          terminalState: "completed",
-          containerColdStartMs: containerRun.metrics.containerColdStartMs,
-          containerBootstrapMs: containerRun.metrics.containerBootstrapMs,
-          containerRuntimeMs: containerRun.metrics.containerRuntimeMs,
-        },
+        stats,
       };
     }
 
@@ -685,6 +952,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       onComputerAction: opts.onComputerAction,
       onComputerScreenshot: opts.onComputerScreenshot,
       onComputerSessionState: opts.onComputerSessionState,
+      swarmState: opts.swarmState,
+      onSwarmState: opts.onSwarmState,
+      _turnAgentCounts: opts._turnAgentCounts,
+      _turnAgentRepeatLimitOverrides: opts._turnAgentRepeatLimitOverrides,
+      _turnTotalDelegationLimitOverride: opts._turnTotalDelegationLimitOverride,
+      _workflowExecutionStack: opts._workflowExecutionStack,
       signal,
     };
 
@@ -761,6 +1034,38 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         : result
     );
 
+    const logSubAgentCompletionAudit = (
+      stats: SubAgentExecutionStats,
+      output: string,
+      extra: Record<string, unknown> = {},
+      severity: "info" | "warn" | "error" = "info",
+    ): void => {
+      logAudit(
+        "sub_agent_completed",
+        {
+          agentName: opts.agentName,
+          iterations: stats.iterations,
+          resultLength: output.length,
+          promptChars: stats.promptChars,
+          userContentChars: stats.userContentChars,
+          toolCount: stats.toolCount,
+          usage: stats.usage,
+          model: stats.model,
+          durationMs: Date.now() - runStartedAt,
+          outcome: stats.outcome,
+          terminalState: stats.terminalState,
+          ...extra,
+        },
+        { sessionId: subSessionId, severity },
+      );
+    };
+
+    const emitSubAgentToolAudit = (params: Parameters<typeof buildSubAgentToolAuditPayload>[0]): void => {
+      const payload = buildSubAgentToolAuditPayload(params);
+      const isWarn = params.phase === "done" && (payload["success"] === false || typeof payload["skippedReason"] === "string");
+      logAudit("sub_agent_tool_call", payload, { sessionId: subSessionId, severity: isWarn ? "warn" : "info" });
+    };
+
     const recordArtifacts = (metadata: unknown, defaults: Record<string, unknown> = {}): void => {
       if (!metadata) {
         return;
@@ -808,12 +1113,23 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       const executeTrackedMailTool = async (toolName: string, args: Record<string, unknown>): Promise<import("../tools/registry.js").ToolResult> => {
         toolCount += 1;
         toolNames.push(toolName);
-        logAudit(
-          "sub_agent_tool_call",
-          { agentName: opts.agentName, tool: toolName, deterministic: true },
-          { sessionId: subSessionId },
-        );
-        return executeTool(toolName, args, toolContext);
+        emitSubAgentToolAudit({
+          agentName: opts.agentName,
+          tool: toolName,
+          phase: "start",
+          args,
+          deterministic: true,
+        });
+        const result = await executeTool(toolName, args, toolContext);
+        emitSubAgentToolAudit({
+          agentName: opts.agentName,
+          tool: toolName,
+          phase: "done",
+          args,
+          deterministic: true,
+          result,
+        });
+        return result;
       };
 
       const accountsResult = await executeTrackedMailTool("mail_list_accounts", {});
@@ -829,9 +1145,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: accountsResult.error ?? "mail_list_accounts failed",
         });
+        const output = `Sub-agent error: ${accountsResult.error ?? "mail_list_accounts failed"}`;
+        const stats = buildStats("error");
+        logSubAgentCompletionAudit(stats, output, {
+          deterministicMailCheck: true,
+          error: accountsResult.error ?? "mail_list_accounts failed",
+        }, "warn");
         return {
-          output: `Sub-agent error: ${accountsResult.error ?? "mail_list_accounts failed"}`,
-          stats: buildStats("error"),
+          output,
+          stats,
         };
       }
 
@@ -854,23 +1176,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           durationMs: Date.now() - runStartedAt,
           timeoutMs: turnTimeoutMs,
         });
-        logAudit(
-          "sub_agent_completed",
-          {
-            agentName: opts.agentName,
-            iterations,
-            resultLength: result.length,
-            promptChars: systemPrompt.length,
-            userContentChars: userContent.length,
-            toolCount,
-            usage,
-            model: modelConfig.primary,
-            durationMs: Date.now() - runStartedAt,
-            deterministicMailCheck: true,
-          },
-          { sessionId: subSessionId },
-        );
-        return withArtifacts({ output: result, stats: buildStats("completed") });
+        const stats = buildStats("completed");
+        logSubAgentCompletionAudit(stats, result, { deterministicMailCheck: true });
+        return withArtifacts({ output: result, stats });
       }
 
       const unreadResult = await executeTrackedMailTool("mail_list_unread", { accountIds, limit: 5 });
@@ -886,9 +1194,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: unreadResult.error ?? "mail_list_unread failed",
         });
+        const output = `Sub-agent error: ${unreadResult.error ?? "mail_list_unread failed"}`;
+        const stats = buildStats("error");
+        logSubAgentCompletionAudit(stats, output, {
+          deterministicMailCheck: true,
+          error: unreadResult.error ?? "mail_list_unread failed",
+        }, "warn");
         return {
-          output: `Sub-agent error: ${unreadResult.error ?? "mail_list_unread failed"}`,
-          stats: buildStats("error"),
+          output,
+          stats,
         };
       }
 
@@ -958,24 +1272,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         durationMs: Date.now() - runStartedAt,
         timeoutMs: turnTimeoutMs,
       });
-      logAudit(
-        "sub_agent_completed",
-        {
-          agentName: opts.agentName,
-          iterations,
-          resultLength: result.length,
-          promptChars: systemPrompt.length,
-          userContentChars: userContent.length,
-          toolCount,
-          usage,
-          model: modelConfig.primary,
-          durationMs: Date.now() - runStartedAt,
-          deterministicMailCheck: true,
-        },
-        { sessionId: subSessionId },
-      );
+      const stats = buildStats("completed");
+      logSubAgentCompletionAudit(stats, result, { deterministicMailCheck: true });
       log.info({ agentName: opts.agentName, toolCount }, "Sub-agent completed via deterministic inbox check");
-      return withArtifacts({ output: result, stats: buildStats("completed") });
+      return withArtifacts({ output: result, stats });
     }
 
     while (iterations < maxIterations) {
@@ -997,17 +1297,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
+          const output = buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: `timed out after ${turnTimeoutMs}ms`,
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+          });
+          const stats = buildStats("timeout", interruptedOutcome);
+          logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
           return withArtifacts({
-            output: buildInterruptedSubAgentOutput({
-              agentName: opts.agentName,
-              reason: `timed out after ${turnTimeoutMs}ms`,
-              swarmState: toolContext.swarmState,
-              toolNames,
-              toolCount,
-              iterations,
-              artifacts,
-            }),
-            stats: buildStats("timeout", interruptedOutcome),
+            output,
+            stats,
           });
         }
         const interruptedOutcome = classifyInterruptedOutcome({
@@ -1026,17 +1329,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: "cancelled",
         });
+        const output = buildInterruptedSubAgentOutput({
+          agentName: opts.agentName,
+          reason: "was cancelled",
+          swarmState: toolContext.swarmState,
+          toolNames,
+          toolCount,
+          iterations,
+          artifacts,
+        });
+        const stats = buildStats("cancelled", interruptedOutcome);
+        logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
         return withArtifacts({
-          output: buildInterruptedSubAgentOutput({
-            agentName: opts.agentName,
-            reason: "was cancelled",
-            swarmState: toolContext.swarmState,
-            toolNames,
-            toolCount,
-            iterations,
-            artifacts,
-          }),
-          stats: buildStats("cancelled", interruptedOutcome),
+          output,
+          stats,
         });
       }
 
@@ -1073,17 +1379,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) reached`,
           });
+          const output = buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: `timed out after ${turnTimeoutMs}ms`,
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+          });
+          const stats = buildStats("timeout", interruptedOutcome);
+          logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
           return withArtifacts({
-            output: buildInterruptedSubAgentOutput({
-              agentName: opts.agentName,
-              reason: `timed out after ${turnTimeoutMs}ms`,
-              swarmState: toolContext.swarmState,
-              toolNames,
-              toolCount,
-              iterations,
-              artifacts,
-            }),
-            stats: buildStats("timeout", interruptedOutcome),
+            output,
+            stats,
           });
         }
         if (opts.signal?.aborted) {
@@ -1103,17 +1412,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             timeoutMs: turnTimeoutMs,
             error: "cancelled",
           });
+          const output = buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: "was cancelled",
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+          });
+          const stats = buildStats("cancelled", interruptedOutcome);
+          logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
           return withArtifacts({
-            output: buildInterruptedSubAgentOutput({
-              agentName: opts.agentName,
-              reason: "was cancelled",
-              swarmState: toolContext.swarmState,
-              toolNames,
-              toolCount,
-              iterations,
-              artifacts,
-            }),
-            stats: buildStats("cancelled", interruptedOutcome),
+            output,
+            stats,
           });
         }
         log.error({ err, agentName: opts.agentName }, "Sub-agent LLM call failed");
@@ -1128,7 +1440,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           timeoutMs: turnTimeoutMs,
           error: String(err).slice(0, 200),
         });
-        return withArtifacts({ output: `Sub-agent error: ${String(err)}`, stats: buildStats("error") });
+        const output = `Sub-agent error: ${String(err)}`;
+        const stats = buildStats("error");
+        logSubAgentCompletionAudit(stats, output, { error: String(err).slice(0, 200) }, "warn");
+        return withArtifacts({ output, stats });
       }
 
       usage.promptTokens += response.usage.promptTokens;
@@ -1167,25 +1482,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
         history.push({ role: "assistant", content: result });
 
-        logAudit(
-          "sub_agent_completed",
-          {
-            agentName: opts.agentName,
-            iterations,
-            resultLength: result.length,
-            promptChars: systemPrompt.length,
-            userContentChars: userContent.length,
-            toolCount,
-            usage,
-            model: modelConfig.primary,
-            durationMs: Date.now() - runStartedAt,
-            ...(adaptiveTimeout ? {
-              adaptiveTimeoutMs: adaptiveTimeout.timeoutMs,
-              adaptiveTimeoutBaselineMs: adaptiveTimeout.baselineMs,
-              adaptiveTimeoutSamples: adaptiveTimeout.sampleSize,
-            } : {}),
-          },
-          { sessionId: subSessionId }
+        logSubAgentCompletionAudit(
+          stats,
+          result,
+          adaptiveTimeout ? {
+            adaptiveTimeoutMs: adaptiveTimeout.timeoutMs,
+            adaptiveTimeoutBaselineMs: adaptiveTimeout.baselineMs,
+            adaptiveTimeoutSamples: adaptiveTimeout.sampleSize,
+          } : {},
+          semanticOutcome === "success" ? "info" : "warn",
         );
 
         // Detect likely failure patterns from the output text
@@ -1224,6 +1529,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       });
 
       const toolResults: LLMMessage[] = [];
+      let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
+      let decisiveDirectRemoteToolName: string | null = null;
 
       for (const tc of response.tool_calls) {
         if (signal?.aborted) break;
@@ -1254,17 +1561,21 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           continue;
         }
 
-        logAudit(
-          "sub_agent_tool_call",
-          { agentName: opts.agentName, tool: tc.name },
-          { sessionId: subSessionId }
-        );
+        emitSubAgentToolAudit({
+          agentName: opts.agentName,
+          tool: tc.name,
+          phase: "start",
+          args: tc.arguments,
+          toolCallId: tc.id,
+        });
 
         opts.onProgress?.({
           agentName: opts.agentName,
           kind: "tool_start",
           iteration: iterations + 1,
           toolName: tc.name,
+          toolCallId: tc.id,
+          args: tc.arguments,
           summary: `Running ${tc.name} in ${opts.agentName}.`,
         });
 
@@ -1278,6 +1589,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             { agentName: opts.agentName, tool: tc.name, count: priorCount, cap: toolCap },
             "Sub-agent exceeded per-tool call cap",
           );
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: `Tool '${tc.name}' has been called ${priorCount} times this run (limit: ${toolCap}). You must proceed without calling it again. Work with the results you already have.`,
+            skippedReason: "per_tool_cap",
+          });
           toolResults.push({
             role: "tool",
             content: `Tool '${tc.name}' has been called ${priorCount} times this run (limit: ${toolCap}). You must proceed without calling it again. Work with the results you already have.`,
@@ -1297,6 +1617,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
           );
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            resultPreview: prev.result,
+            cachedResult: true,
+          });
           toolResults.push({
             role: "tool",
             content: prev.result + "\n\n[Note: This is a cached result — you already called this tool with identical arguments. Move on to the next step.]",
@@ -1306,9 +1635,25 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         }
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
+        emitSubAgentToolAudit({
+          agentName: opts.agentName,
+          tool: tc.name,
+          phase: "done",
+          args: tc.arguments,
+          toolCallId: tc.id,
+          result,
+        });
         const resultContent = result.success ? result.output : `Error: ${result.error ?? "unknown"}`;
         if (result.success) {
           successfulToolCount += 1;
+        }
+        if (
+          response.tool_calls.length === 1
+          && tc.name === "ssh_exec"
+          && isDirectRemoteCliTask(opts.agentName, sanitizedTask)
+        ) {
+          decisiveDirectRemoteToolResult = result;
+          decisiveDirectRemoteToolName = tc.name;
         }
         lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent });
         recordArtifacts(result.metadata, {
@@ -1321,6 +1666,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           kind: "tool_done",
           iteration: iterations + 1,
           toolName: tc.name,
+          toolCallId: tc.id,
+          result: resultContent,
+          metadata: result.metadata,
           summary: result.success
             ? `Finished ${tc.name} in ${opts.agentName}.`
             : `Encountered an issue while running ${tc.name} in ${opts.agentName}.`,
@@ -1331,6 +1679,43 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           content: resultContent,
           tool_call_id: tc.id,
         });
+      }
+
+      if (decisiveDirectRemoteToolResult) {
+        let directResult = decisiveDirectRemoteToolResult.success
+          ? decisiveDirectRemoteToolResult.output
+          : `Error: ${decisiveDirectRemoteToolResult.error ?? (decisiveDirectRemoteToolResult.output || "unknown")}`;
+
+        const outputScan = scanOutput(directResult);
+        if (!outputScan.safe && outputScan.redacted) {
+          logAudit(
+            "output_redacted",
+            { agentName: opts.agentName, types: outputScan.detectedTypes },
+            { sessionId: subSessionId, severity: "warn" }
+          );
+          directResult = outputScan.redacted;
+        }
+
+        iterations += 1;
+        const directOutcome: SubAgentOutcome = decisiveDirectRemoteToolResult.success ? "success" : "partial";
+        const stats = buildStats("completed", directOutcome);
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: directOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          ...(decisiveDirectRemoteToolResult.success ? {} : { error: directResult.slice(0, 200) }),
+        });
+        logSubAgentCompletionAudit(stats, directResult, {
+          deterministicDirectRemoteCli: true,
+          tool: decisiveDirectRemoteToolName,
+        }, directOutcome === "success" ? "info" : "warn");
+        log.info({ agentName: opts.agentName, tool: decisiveDirectRemoteToolName }, "Sub-agent completed via direct remote CLI shortcut");
+        return withArtifacts({ output: stripHallucinatedToolTags(directResult), stats });
       }
 
       history.push(...toolResults);
@@ -1374,7 +1759,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             );
             result = outputScan.redacted;
           }
-          const stats = buildStats("max_iterations", "partial");
+          const completedFromArtifact = hasDeliverableArtifact(artifacts) && !looksLikeFailureResult(result);
+          const stats = completedFromArtifact
+            ? buildStats("completed", "success")
+            : buildStats("max_iterations", "partial");
           const suspicious = rejectSuspiciousNoToolOutput(
             opts,
             stats,
@@ -1389,13 +1777,23 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
-            outcome: "partial",
+            outcome: completedFromArtifact ? "success" : "partial",
             iterations,
             totalTokens: usage.totalTokens,
             durationMs: Date.now() - runStartedAt,
             timeoutMs: turnTimeoutMs,
           });
-          log.info({ agentName: opts.agentName, iterations }, "Sub-agent synthesized after max iterations");
+          logSubAgentCompletionAudit(
+            stats,
+            result,
+            {
+              synthesizedAfterMaxIterations: true,
+              completedFromArtifact,
+              artifactCount: artifacts.length,
+            },
+            completedFromArtifact ? "info" : "warn",
+          );
+          log.info({ agentName: opts.agentName, iterations, completedFromArtifact }, "Sub-agent synthesized after max iterations");
           opts.onProgress?.({
             agentName: opts.agentName,
             kind: "completed",
@@ -1413,17 +1811,34 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       ts: new Date().toISOString(),
       agent: opts.agentName,
       task: opts.task.slice(0, 200),
-      outcome: "partial",
+      outcome: hasDeliverableArtifact(artifacts) ? "success" : "partial",
       iterations,
       totalTokens: usage.totalTokens,
       durationMs: Date.now() - runStartedAt,
       timeoutMs: turnTimeoutMs,
-      error: `max_iterations (${maxIterations}) reached`,
+      ...(hasDeliverableArtifact(artifacts) ? {} : { error: `max_iterations (${maxIterations}) reached` }),
     });
 
+    const completedFromArtifact = hasDeliverableArtifact(artifacts);
+    const maxIterationsOutput = completedFromArtifact
+      ? buildArtifactCompletionOutput({
+          agentName: opts.agentName,
+          maxIterations,
+          artifacts,
+        })
+      : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`;
+    const maxIterationsStats = completedFromArtifact
+      ? buildStats("completed", "success")
+      : buildStats("max_iterations", "partial");
+    logSubAgentCompletionAudit(maxIterationsStats, maxIterationsOutput, {
+      synthesizedAfterMaxIterations: false,
+      completedFromArtifact,
+      artifactCount: artifacts.length,
+    }, completedFromArtifact ? "info" : "warn");
+
     return withArtifacts({
-      output: `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
-      stats: buildStats("max_iterations", "partial"),
+      output: maxIterationsOutput,
+      stats: maxIterationsStats,
     });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);

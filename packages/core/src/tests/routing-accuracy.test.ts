@@ -252,6 +252,7 @@ const ROUTING_CASES: Array<{ query: string; expected: string; description: strin
   { query: "turn this roadmap into milestones, dependencies, and deliverables for the next quarter", expected: "project_planner", description: "project planning" },
   { query: "collect official monthly benchmark figures, normalize the data, and produce an html chart with a grounded summary", expected: "mission_coordinator", description: "multi-stage evidence workflow" },
   { query: "generate a chart showing the performance of the MSCI World ETF over the last 12 months", expected: "mission_coordinator", description: "market data chart workflow" },
+  { query: "write a short technical paper comparing MCP, A2A, and AG-UI using official specifications and current sources", expected: "mission_coordinator", description: "source-backed protocol paper workflow" },
   { query: "using the verified monthly figures already collected, create an html chart and table", expected: "chart_designer", description: "render from verified evidence" },
   { query: "schedule a reminder for the team standup at 9am tomorrow", expected: "scheduler", description: "task scheduling" },
   { query: "add a new task: review pull requests, due Friday", expected: "scheduler", description: "calendar task" },

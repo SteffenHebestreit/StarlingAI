@@ -491,6 +491,7 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     && !visualizationIntent
     && /\b(research|researcher|find|collect|get|gather|retrieve|lookup|look up|historical|monthly|yearly|quarterly|last year|previous year|average|averages|data)\b/i.test(normalizedQuery);
   const securityIntent = /\b(pentest|penetration|security|vulnerability|vulnerabilities|cve|exploit|scan|scanning|attack|attacks|nikto|sqlmap|nmap|hydra|metasploit|authorized scope|target host|target hosts)\b/i.test(normalizedQuery);
+  const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(normalizedQuery);
   const apiExecutionIntent = /\b(endpoint|endpoints|request|response|responses|payload|headers?|rest|graphql|http|json|validate|call|test)\b/i.test(normalizedQuery);
   const documentationLookupIntent = researchIntent && /\b(documentation|docs|spec|specification|reference|official)\b/i.test(normalizedQuery) && !apiExecutionIntent;
   const browserExecutionIntent = /\b(log ?in|login|sign ?in|fill out|submit|download)\b/i.test(normalizedQuery)
@@ -616,6 +617,15 @@ export function computeAgentIntentAdjustment(query: string, cfg: SubAgentConfig,
     if (browserSpecialist) adjustment += 0.22;
     if (webResearchCoordinator) adjustment -= 0.14;
     if (researchSpecialist && !browserSpecialist) adjustment -= 0.08;
+  }
+
+  if (vulnerabilityResearchIntent) {
+    if (pentestSpecialist) adjustment += 0.24;
+    else if (researchSpecialist) adjustment += 0.12;
+
+    if (navigationSpecialist) adjustment -= 0.9;
+    if (mailSpecialist) adjustment -= 0.18;
+    if (writingSpecialist && !pentestSpecialist && !researchSpecialist) adjustment -= 0.14;
   }
 
   // ── Computer-use / remote desktop access ──
@@ -868,13 +878,20 @@ const QUERY_CACHE_MAX_ENTRIES = 64;
 const EMBEDDING_RETRY_INITIAL_DELAY_MS = 15_000;
 const EMBEDDING_RETRY_MAX_DELAY_MS = 120_000;
 const SEARCH_STOP_WORDS = new Set<string>([
-  "a", "an", "and", "any", "are", "can", "check", "could", "do", "does", "for", "from",
-  "give", "i", "in", "is", "it", "me", "my", "of", "on", "ones", "our", "please", "show",
-  "each", "every", "last",
+  // English functional / auxiliary words
+  "a", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by",
+  "can", "check", "could", "do", "does", "for", "from",
+  "get", "give", "has", "have", "how", "i", "if", "in", "is", "it",
+  "its", "me", "most", "my", "no", "not", "of", "on", "ones", "or", "our",
+  "please", "set", "show", "so", "such", "that", "top", "up",
+  "each", "every", "last", "used", "via", "was", "what", "when", "where",
   "tell", "the", "their", "them", "these", "this", "those", "to", "us", "we", "with", "you",
+  // German functional words
   "de", "der", "die", "das", "dem", "den", "des", "ein", "eine", "einer", "eines", "und",
   "für", "fuer", "im", "in", "ist", "kann", "kannst", "meine", "meinen", "meiner", "meines",
-  "mir", "uns", "zeige",
+  "mir", "uns", "zeige", "alle", "auch", "auf", "aus", "bei", "bis", "du", "er", "es",
+  "hat", "hier", "ich", "ihm", "ihn", "ihr", "kein", "keine", "noch", "nur", "oder",
+  "sei", "seit", "sie", "so", "von", "vor", "war", "wie", "wo", "zu", "zum", "zur",
 ]);
 
 function normalizeSearchText(value: string): string {

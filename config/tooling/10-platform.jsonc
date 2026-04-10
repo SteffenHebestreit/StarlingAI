@@ -34,9 +34,18 @@
         "host": "10.10.0.2",
         "port": 3389,
         "protocol": "rdp",
-        "credentials": "steffen:w778323",
+        "credentials": "$SAI_WIN_WORKSTATION_RDP_CREDENTIALS",
         "displayResolution": "1920x1080",
         "label": "Windows PC (10.10.0.2)"
+      },
+      "n8n-server": {
+        "adapter": "remote_ssh",
+        "host": "n8n.k2o",
+        "port": 22,
+        "username": "Steffen",
+        "authMethod": "password",
+        "credentials": "$SAI_N8N_SSH_PASSWORD",
+        "label": "n8n-server"
       }
     },
     "recordingEnabled": true

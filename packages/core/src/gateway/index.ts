@@ -15,7 +15,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
-import { buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
+import { buildSessionAuditMarkdown, buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
@@ -42,6 +42,7 @@ import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
@@ -979,6 +980,33 @@ export function createGateway() {
   }
 
   async function sendTtsRequest(input: {
+    api: "qwen-compatible" | "openai-compatible";
+    baseUrl: string;
+    apiKey?: string;
+    timeoutMs: number;
+    text: string;
+    model?: string;
+    language: string;
+    speaker?: string;
+    savedVoiceId?: string;
+    audioExample?: { filename: string; contentType: string; bytes: Uint8Array };
+    referenceText?: string;
+    saveVoiceAs?: string;
+    allowVoiceCloneFallback?: boolean;
+    quality?: string;
+    gender?: string;
+    speed?: number;
+  }): Promise<Response> {
+    if (input.saveVoiceAs) {
+      return sendSingleTtsRequest(input);
+    }
+
+    return sendChunkedTtsRequests(input, {
+      requestChunk: sendSingleTtsRequest,
+    });
+  }
+
+  async function sendSingleTtsRequest(input: {
     api: "qwen-compatible" | "openai-compatible";
     baseUrl: string;
     apiKey?: string;
@@ -2132,6 +2160,30 @@ export function createGateway() {
     try {
       const markdown = await buildSessionDebugMarkdown(sessionId);
       const filename = `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
+      return c.body(markdown, 200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": buildContentDisposition(filename, "attachment"),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Session not found")) {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/audit-markdown", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) {
+      return c.json({ error: "sessionId is required" }, 400);
+    }
+
+    try {
+      const markdown = await buildSessionAuditMarkdown(sessionId);
+      const filename = `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
       return c.body(markdown, 200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": buildContentDisposition(filename, "attachment"),

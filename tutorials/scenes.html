@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Scenes &amp; Automation — StarlingAI</title>
+  <title>Scenes, Jobs &amp; Automation — StarlingAI</title>
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
@@ -48,39 +48,46 @@
       <nav class="breadcrumb">
         <a href="index.html">Home</a>
         <span class="sep">›</span>
-        <span class="current">Scenes &amp; Automation</span>
+        <span class="current">Scenes, Jobs &amp; Automation</span>
       </nav>
     </header>
 
     <div class="content">
       <!-- Hero -->
       <div class="page-hero">
-        <h1>🎬 Scenes &amp; Automation</h1>
-        <p class="tagline">Define workflows once — let the swarm execute them using the right specialists automatically.</p>
+        <h1>🎬 Scenes, Jobs &amp; Automation</h1>
+        <p class="tagline">Define reusable scenes, chain them into jobs, and let workflow-aware coordinators execute the right packet automatically.</p>
       </div>
 
       <!-- What is a scene -->
       <div class="section">
-        <div class="section-title">What is a scene?</div>
+        <div class="section-title">What is a workflow?</div>
         <p>
           A <strong>scene</strong> is a named, reusable task template that the swarm executes autonomously.
-          Each scene defines a task and optionally constrains which agents can participate, what approval
-          gates apply, and what webhooks to trigger. The swarm dynamically discovers the best specialists
-          to handle each part of the task — you define the goal, not the step-by-step execution.
+          A <strong>job</strong> chains multiple scenes into a reusable multi-step packet. Together they form
+          the workflow catalog that coordinators can search with <code>search_workflows</code> and execute
+          inline with <code>run_workflow</code> before they invent a brand-new plan.
+        </p>
+        <p>
+          Scenes define the task, participating agents, optional approval gates, and webhook triggers.
+          Jobs add sequencing for recurring packets like deep-research dossiers, source-grounded papers,
+          or visual briefings. You define the goal and the reusable boundaries; the swarm still decides
+          the best specialist execution inside those boundaries.
         </p>
         <div class="callout">
           <div class="callout-icon">💡</div>
           <div class="callout-body">
-            <strong>Think of scenes as missions for the swarm.</strong> You define the objective and constraints,
-            then the swarm composes the right specialists to accomplish it — like a flock of starlings
-            responding to a signal.
+            <strong>Think of scenes as missions and jobs as mission packets.</strong>
+            Examples in the default workspace include <code>browser_inspection</code>,
+            <code>source_backed_paper</code>, and the multi-step job
+            <code>source_grounded_paper_packet</code>.
           </div>
         </div>
       </div>
 
       <!-- How to create -->
       <div class="section">
-        <div class="section-title">How to create a scene</div>
+        <div class="section-title">How to create a reusable workflow</div>
 
         <h3>Via the dashboard</h3>
         <ol>
@@ -92,25 +99,23 @@
           <li>Click <strong>Save</strong></li>
         </ol>
 
-        <h3>Via starlingai.json</h3>
-        <p>Declare scenes in your config file for version-controlled automation:</p>
+        <h3>Via workspace files</h3>
+        <p>Declare reusable scenes under <code>workspace/scenes</code> and reusable jobs under <code>workspace/jobs</code> for version-controlled automation:</p>
         <div class="code-block">
-          <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
+          <div class="code-block-header"><span class="code-lang">jsonc</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
-  "scenes": {
-    "daily_report": {
-      "description": "Compile a concise daily AI news digest",
-      "task": "Use researcher to gather the top {{topN|5}} AI news items from today, then ask summarizer to turn them into an email-ready digest for {{recipientEmail}}.",
-      "allowedAgents": ["researcher", "summarizer"],
-      "params": {
-        "recipientEmail": {
-          "description": "Where the digest should be sent"
-        },
-        "topN": {
-          "description": "How many stories to include",
-          "default": "5"
-        }
-      }
+  scenes: {
+    browser_inspection: {
+      description: "Open a website, capture evidence, and summarize what is visible",
+      task: "Use web_task_coordinator first when the page may be JS-rendered, multi-step, or ambiguous. Delegate browser_agent to capture browser evidence, then use vision_browser_analyst or evidence_analyst and finish with summarizer.",
+      allowedAgents: [
+        "web_task_coordinator",
+        "browser_agent",
+        "vision_browser_analyst",
+        "evidence_analyst",
+        "summarizer"
+      ],
+      humanInLoopSteps: ["site_fill_credentials"]
     }
   }
 }</code></pre>
@@ -120,16 +125,26 @@
       <!-- Triggering -->
       <div class="section">
         <div class="section-title">Triggering a scene</div>
-        <p>Scenes can be triggered in three ways:</p>
+        <p>Reusable workflows can be triggered in three ways:</p>
 
         <h3>1. From chat</h3>
-        <p>Send a message to the bot with the <code>/run</code> command:</p>
+        <p>Ask for the outcome in plain language and the coordinator can match a reusable workflow automatically. You can still run a specific scene explicitly with <code>/run</code>:</p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">chat</span><button class="copy-btn">Copy</button></div>
-          <pre><code>/run daily_report
+          <pre><code>Create a source-grounded paper comparing the latest MCP and A2A protocol guidance.
+
+/run browser_inspection
 
 # With variables:
-/run daily_report recipientEmail=steffen@example.com</code></pre>
+/run browser_inspection targetUrl=https://example.com inspectionGoal="verify the login form and capture evidence"</code></pre>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">ℹ️</div>
+          <div class="callout-body">
+            Plain-language requests can be matched against scenes and jobs in the workflow catalog.
+            Explicit <code>/run</code> commands remain useful when you already know the exact reusable scene you want.
+          </div>
         </div>
 
         <h3>2. Via the REST API</h3>
@@ -159,25 +174,57 @@
 
       <!-- Example scene -->
       <div class="section">
-        <div class="section-title">Example: daily report scene</div>
+        <div class="section-title">Example: source-backed paper scene</div>
         <p>
-          Here's a fuller scene definition that constrains delegation, exposes a webhook trigger,
-          and lets the swarm build the report autonomously from a single task statement.
+          Here's a fuller scene definition that constrains delegation, preserves evidence-first drafting,
+          and keeps the final quality pass explicit.
         </p>
 
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   scenes: {
-    daily_report: {
-      description: "Daily AI news digest",
-      task: "Use researcher to gather the top {{topN|5}} AI news items published today with source URLs, then ask summarizer to turn them into a concise digest for {{recipientEmail}}.",
-      webhookKey: "$SCENE_DAILY_REPORT_KEY",
-      allowedAgents: ["researcher", "summarizer"],
+    source_backed_paper: {
+      description: "Produce a paper or report grounded in official sources and verified citations",
+      task: "If evidence is still thin or uneven, use mission_coordinator to coordinate the smallest viable evidence-gathering pass with citation_researcher or researcher, consolidate findings, draft only from collected evidence with paper_author, and run exactly one final quality pass with quality_supervisor before finalizing.",
+      allowedAgents: [
+        "mission_coordinator",
+        "citation_researcher",
+        "researcher",
+        "paper_author",
+        "quality_supervisor"
+      ],
       params: {
-        recipientEmail: { description: "Destination email address" },
-        topN: { description: "How many stories to include", default: "5" }
+        outputStyle: { description: "Requested style or citation format", default: "technical report with inline references" }
       }
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Jobs chain scenes together</div>
+        <p>
+          Jobs live under <code>workspace/jobs</code> and sequence multiple scenes into a reusable packet.
+          They are the right tool when a request always needs the same multi-phase flow.
+        </p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
+          <pre><code>{
+  jobs: {
+    source_grounded_paper_packet: {
+      description: "Collect evidence, then draft a source-grounded paper",
+      steps: [
+        {
+          scene: "deep_research_dossier",
+          label: "Collect and reconcile evidence"
+        },
+        {
+          scene: "source_backed_paper",
+          label: "Draft source-grounded paper"
+        }
+      ]
     }
   }
 }</code></pre>

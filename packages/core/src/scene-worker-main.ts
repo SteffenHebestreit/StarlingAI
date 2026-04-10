@@ -26,6 +26,7 @@ import "./tools/proxmox.js";
 import "./tools/terraform.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
+import "./tools/workflow-catalog.js";
 import "./tools/memory.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";

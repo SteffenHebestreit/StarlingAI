@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 WORKDIR /app
 
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY package.json pnpm-workspace.yaml ./
 COPY packages/mail-service/package.json ./packages/mail-service/
 RUN pnpm install --no-frozen-lockfile
 

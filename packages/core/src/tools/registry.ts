@@ -43,12 +43,23 @@ export interface SwarmState {
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;
-  /** Name of the currently running agent for self-routing guards in orchestration tools. */
-  currentAgentName?: string;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  onSubAgentProgress?: (event: {
+    agentName: string;
+    kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";
+    iteration: number;
+    toolName?: string;
+    toolCallId?: string;
+    args?: Record<string, unknown>;
+    result?: string;
+    metadata?: Record<string, unknown>;
+    summary?: string;
+  }) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
+  /** Name of the currently running agent when invoked from a sub-agent context. */
+  currentAgentName?: string;
   /** When set by a scene, only these sub-agent names may be delegated to */
   allowedAgents?: string[];
   /**
@@ -88,6 +99,11 @@ export interface ToolContext {
    */
   _turnTotalDelegationLimitOverride?: number;
   /**
+   * Active reusable workflow execution stack for nested workflow/self-reentry guards.
+   * Internal — propagated by run_workflow into nested turns and delegations.
+   */
+  _workflowExecutionStack?: string[];
+  /**
    * When set, this turn is a tool development session.
    * Iteration limits are lifted and the tool-dev-warden provides oversight instead.
    */
@@ -95,6 +111,7 @@ export interface ToolContext {
 }
 
 export interface ToolResult {
+  status?: "success" | "failure" | "needs_info";
   success: boolean;
   output: string;
   error?: string;

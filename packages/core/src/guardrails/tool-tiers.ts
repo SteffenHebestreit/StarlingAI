@@ -40,6 +40,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  search_workflows: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search reusable scenes and jobs in the workflow catalog",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   get_swarm_state: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Read the current turn-local swarm task state and progress",
@@ -150,7 +156,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   graph_query: {
     tier: ToolTier.ZERO_READ_ONLY,
-    description: "Run read-only Cypher queries against the Neo4j knowledge graph",
+    description: "Run read-only Cypher queries against the MemGraph knowledge graph",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -362,7 +368,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   graph_upsert_entity: {
     tier: ToolTier.ONE_WRITE,
-    description: "Create or update a node in the Neo4j knowledge graph",
+    description: "Create or update a node in the MemGraph knowledge graph",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -374,7 +380,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   graph_delete_node: {
     tier: ToolTier.ONE_WRITE,
-    description: "Delete a node and its relationships from the Neo4j knowledge graph",
+    description: "Delete a node and its relationships from the MemGraph knowledge graph",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -425,6 +431,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   run_task_graph: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Execute a dependency-aware swarm task graph with parallel ready nodes and fallback delegation",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  run_workflow: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Execute a reusable scene or job inline inside a temporary workflow session",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

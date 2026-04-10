@@ -109,6 +109,7 @@
                 </span>
                 <button class="transcript-panel__action" @click="exportTranscriptMarkdown">Export Markdown</button>
                 <button class="transcript-panel__action" @click="exportDebugMarkdown">Debug Markdown</button>
+                <button class="transcript-panel__action" @click="exportAuditMarkdown">Audit Markdown</button>
                 <button class="transcript-panel__action" @click="exportTranscriptPDF">Export PDF</button>
               </div>
             </div>
@@ -513,6 +514,12 @@ async function exportDebugMarkdown(): Promise<void> {
   const transcript = await getTranscriptForExport();
   if (!transcript) return;
   await gateway.downloadSessionDebugMarkdown(transcript.session.id);
+}
+
+async function exportAuditMarkdown(): Promise<void> {
+  const transcript = await getTranscriptForExport();
+  if (!transcript) return;
+  await gateway.downloadSessionAuditMarkdown(transcript.session.id);
 }
 
 async function exportTranscriptPDF(): Promise<void> {

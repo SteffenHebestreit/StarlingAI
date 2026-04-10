@@ -346,6 +346,63 @@ describe("rpc timeout cleanup", () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 
+  it("supersedes an older in-flight turn when a newer message arrives for the same session", async () => {
+    let firstSignal: AbortSignal | undefined;
+    let secondSignal: AbortSignal | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ userMessage, signal }: { userMessage: string; signal: AbortSignal }) => {
+        if (userMessage === "first") {
+          firstSignal = signal;
+          return new Promise(() => {});
+        }
+
+        secondSignal = signal;
+        return new Promise(() => {});
+      }),
+    }));
+
+    const ws = {
+      readyState: 1,
+      send() {
+        // No-op for this regression test.
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-first",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-first",
+        message: "first",
+      },
+    }));
+
+    expect(firstSignal?.aborted).toBe(false);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-second",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-second",
+        message: "second",
+      },
+    }));
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(secondSignal?.aborted).toBe(false);
+  });
+
   it("blocks flag-only chat submissions before calling the provider", async () => {
     const sent: Array<Record<string, unknown>> = [];
     const ws = {

@@ -4,6 +4,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import WebSocket from "ws";
+import { DEFAULT_TTS_CHUNK_MAX_CHARS } from "../multimodal/tts-chunking.js";
+
+function createPcmWav(sampleCount: number, seed = 0): Buffer {
+  const dataSize = sampleCount * 2;
+  const wav = Buffer.alloc(44 + dataSize);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(22_050, 24);
+  wav.writeUInt32LE(44_100, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(dataSize, 40);
+  for (let index = 0; index < sampleCount; index += 1) {
+    wav.writeInt16LE(seed + index, 44 + (index * 2));
+  }
+  return wav;
+}
+
+function readPcmWavDataSize(wav: Buffer): number {
+  return wav.readUInt32LE(40);
+}
 
 describe("gateway HTTP bridge", () => {
   const gatewayTestTimeoutMs = 45_000;
@@ -1802,6 +1829,125 @@ describe("gateway HTTP bridge", () => {
       expect(ttsResponse.headers.get("content-type")).toContain("audio/wav");
       const ttsBytes = Buffer.from(await ttsResponse.arrayBuffer());
       expect(ttsBytes.subarray(0, 4).toString()).toBe("RIFF");
+    } finally {
+      await gateway.stop();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("splits long qwen TTS requests into smaller synth calls and merges the WAV output", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-chunked-"));
+    const port = 25700 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 26700 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const upstreamTexts: string[] = [];
+
+    upstreamServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.url === "/health" || req.url === "/api/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "healthy" }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          models: {
+            "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "custom_voice"] },
+          },
+          current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/load_model") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/tts") {
+        let rawBody = "";
+        req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+        req.on("end", () => {
+          const body = JSON.parse(rawBody) as { text: string; speaker: string };
+          upstreamTexts.push(body.text);
+          expect(body.speaker).toBe("Vivian");
+          expect(body.text.length).toBeLessThanOrEqual(DEFAULT_TTS_CHUNK_MAX_CHARS);
+          const wav = createPcmWav(upstreamTexts.length + 2, upstreamTexts.length * 100);
+          res.writeHead(200, { "Content-Type": "audio/wav" });
+          res.end(wav);
+        });
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "j".repeat(32),
+      },
+      multimodal: {
+        tts: {
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          api: "qwen-compatible",
+          model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+          defaultLanguage: "English",
+          defaultSpeaker: "Vivian",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const longText = Array.from(
+      { length: 12 },
+      (_, index) => `Sentence ${index + 1} explains how StarlingAI should keep each text to speech request small enough to avoid CUDA memory spikes.`,
+    ).join(" ");
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const response = await fetch(`${baseUrl}/api/multimodal/tts`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: longText }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstreamTexts.length).toBeGreaterThan(1);
+      const wav = Buffer.from(await response.arrayBuffer());
+      expect(wav.subarray(0, 4).toString()).toBe("RIFF");
+      expect(readPcmWavDataSize(wav)).toBe(upstreamTexts.reduce((sum, _text, index) => sum + ((index + 3) * 2), 0));
     } finally {
       await gateway.stop();
       rmSync(tempDir, { recursive: true, force: true });

@@ -36,6 +36,11 @@ export interface TestRun {
   durationMs: number;
 }
 
+export interface PlannedTestCase {
+  input: Record<string, unknown>;
+  expectedOutput?: string;
+}
+
 export interface ToolDevSession {
   id: string;
   toolName: string;
@@ -49,7 +54,10 @@ export interface ToolDevSession {
   startedAt: string;
   lastActivityAt: string;
   lastHeartbeatAt: string;
+  /** Initial code seeded from the LLM proposal. The dev agent refines this. */
   code: string;
+  /** Test cases derived from the LLM proposal, before the tool has been run. */
+  plannedTestCases: PlannedTestCase[];
   testResults: TestRun[];
   approvalId?: string;
   sessionId: string;
@@ -69,6 +77,10 @@ export function createToolDevSession(opts: {
   parametersSchema: Record<string, unknown>;
   sessionId: string;
   agentName?: string;
+  /** Initial code from the LLM proposal to seed development. */
+  starterCode?: string;
+  /** Planned test cases from the LLM proposal, before execution. */
+  plannedTestCases?: PlannedTestCase[];
 }): ToolDevSession {
   const now = new Date().toISOString();
   const session: ToolDevSession = {
@@ -84,7 +96,8 @@ export function createToolDevSession(opts: {
     startedAt: now,
     lastActivityAt: now,
     lastHeartbeatAt: now,
-    code: "",
+    code: opts.starterCode ?? "",
+    plannedTestCases: opts.plannedTestCases ?? [],
     testResults: [],
     sessionId: opts.sessionId,
     agentName: opts.agentName,
