@@ -18,7 +18,7 @@ const log = childLogger("tool:web");
 // their own sub:… sessionId) share the degraded counter and don't independently
 // re-discover a broken backend.
 const SEARCH_DEGRADED_THRESHOLD = 3;
-const SEARCH_HARD_BLOCK_THRESHOLD = 6;
+const SEARCH_HARD_BLOCK_THRESHOLD = 4;
 const sessionZeroResultStreak = new Map<string, number>();
 
 /**
