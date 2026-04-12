@@ -54,7 +54,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_list_windows: 3,
   computer_focus_window: 3,
   computer_snapshot: 8,
-  web_search: 12,
+  web_search: 6,
   web_fetch: 12,
   search_workflows: 2,
   run_workflow: 2,
@@ -952,7 +952,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent
-    const tools = getToolsAsLLMDefs(effectiveToolNames);
+    let tools = getToolsAsLLMDefs(effectiveToolNames);
 
     const toolContext: ToolContext = {
       sessionId: subSessionId,
@@ -1359,19 +1359,31 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       }
 
       // ── Iteration budget awareness ──────────────────────────────────────
-      // Inject a budget warning when running low so the agent synthesizes
-      // its answer instead of burning remaining iterations on more tool calls.
+      // When running low on iterations, take increasingly aggressive
+      // measures to force the agent to synthesize instead of tool-calling.
       const remaining = maxIterations - iterations;
       let effectiveSystemPrompt = systemPrompt;
-      if (remaining <= 2 && toolCount > 0) {
-        const budgetWarning =
-          remaining === 1
-            ? "\n\n⚠️ CRITICAL: This is your LAST iteration. You MUST produce your complete final answer NOW. " +
-              "Do NOT call any more tools. Synthesize everything you have gathered and respond with your full output."
-            : `\n\n⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
-              "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
-              "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
-        effectiveSystemPrompt += budgetWarning;
+      let effectiveTools = tools;
+
+      if (remaining === 1 && toolCount > 0) {
+        // HARD: last iteration — strip ALL tools so the LLM *cannot* make
+        // any more tool calls and is forced to produce a text answer.
+        effectiveTools = [];
+        effectiveSystemPrompt +=
+          "\n\n⚠️ FINAL ITERATION — NO MORE TOOLS AVAILABLE. " +
+          "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
+          "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
+          "URLs, facts, and extracts verbatim. Do NOT summarize away details. " +
+          "Your response is the ONLY output the coordinator will receive from you.";
+        log.info(
+          { agentName: opts.agentName, iterations, maxIterations, toolCount },
+          "Last iteration reached — stripping tools to force synthesis",
+        );
+      } else if (remaining === 2 && toolCount > 0) {
+        effectiveSystemPrompt +=
+          `\n\n⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
+          "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
+          "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
       }
 
       const messages: LLMMessage[] = [
@@ -1388,7 +1400,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
       let response;
       try {
-        response = await provider.complete(messages, tools, signal);
+        response = await provider.complete(messages, effectiveTools, signal);
       } catch (err) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
           const interruptedOutcome = classifyInterruptedOutcome({
@@ -1725,6 +1737,20 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           decisiveDirectRemoteToolName = tc.name;
         }
         lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent });
+
+        // When web_search reports degraded/hard-blocked, remove it from the
+        // tools array so the LLM cannot call it on subsequent iterations.
+        if (tc.name === "web_search" && result.metadata?.searchDegraded && !result.success) {
+          const beforeLen = tools.length;
+          tools = tools.filter(t => t.name !== "web_search");
+          if (tools.length < beforeLen) {
+            log.info(
+              { agentName: opts.agentName, iterations },
+              "Removed web_search from tools — search backend degraded",
+            );
+          }
+        }
+
         recordArtifacts(result.metadata, {
           sourceAgent: opts.agentName,
           sourceTool: tc.name,
@@ -1785,6 +1811,16 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         }, directOutcome === "success" ? "info" : "warn");
         log.info({ agentName: opts.agentName, tool: decisiveDirectRemoteToolName }, "Sub-agent completed via direct remote CLI shortcut");
         return withArtifacts({ output: stripHallucinatedToolTags(directResult), stats });
+      }
+
+      // Append a budget nudge to the last tool result when on the
+      // penultimate iteration, so the agent sees it in the most recent
+      // context (not just the system prompt which it may overlook).
+      if (remaining === 2 && toolCount > 0 && toolResults.length > 0) {
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content += "\n\n[⚠️ BUDGET: You have 1 iteration left after this one. " +
+          "On your next turn you will have NO tools available. " +
+          "Produce your COMPLETE final answer NOW or on the very next turn.]";
       }
 
       history.push(...toolResults);
