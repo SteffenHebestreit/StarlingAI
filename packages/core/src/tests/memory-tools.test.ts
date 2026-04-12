@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendOutcome } from "../agent/outcomes.js";
-import { resetSharedMemoryForTests, writeSharedFact } from "../swarm/memory.js";
+import { readAllFacts, resetSharedMemoryForTests, writeSharedFact } from "../swarm/memory.js";
 
 describe("memory tools", () => {
   const dirs: string[] = [];
@@ -107,6 +107,124 @@ describe("memory tools", () => {
 
     expect(searchResult.success).toBe(true);
     expect(searchResult.output).toContain("[workspace/fact]");
+  });
+
+  it("stores source metadata and validation scores through share_finding", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    const result = await executeTool("share_finding", {
+      key: "mcp_origin_fact",
+      value: "Anthropic introduced the Model Context Protocol.",
+      claim: "Anthropic introduced the Model Context Protocol.",
+      sourceTitle: "Introducing the Model Context Protocol",
+      sourceUrl: "https://www.anthropic.com/news/model-context-protocol",
+      publisher: "Anthropic",
+      publishedAt: "2024-11-25",
+      retrievedAt: "2026-04-11",
+      evidenceType: "official",
+      accuracyScore: 1,
+      trustworthinessScore: 1,
+      corroborationScore: 0.9,
+      validationStatus: "validated",
+      notes: "Official announcement source",
+    }, {
+      sessionId: "sub:parent-session:researcher:1",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+
+    const facts = await readAllFacts("sub:parent-session");
+    expect(facts["mcp_origin_fact"]).toContain("Anthropic introduced the Model Context Protocol.");
+    expect(facts["mcp_origin_fact"]).toContain("source_title: Introducing the Model Context Protocol");
+    expect(facts["mcp_origin_fact"]).toContain("source_url: https://www.anthropic.com/news/model-context-protocol");
+    expect(facts["mcp_origin_fact"]).toContain("validation_status: validated");
+    expect(facts["mcp_origin_fact"]).toContain("trustworthiness_score: 1");
+  });
+
+  it("requires full provenance and scores through share_evidence", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    const result = await executeTool("share_evidence", {
+      key: "mcp_origin_validated",
+      value: "Anthropic introduced the Model Context Protocol.",
+      claim: "Anthropic introduced the Model Context Protocol.",
+      sourceTitle: "Introducing the Model Context Protocol",
+      sourceUrl: "https://www.anthropic.com/news/model-context-protocol",
+      publisher: "Anthropic",
+      publishedAt: "2024-11-25",
+      retrievedAt: "2026-04-11",
+      evidenceType: "official",
+      accuracyScore: 1,
+      trustworthinessScore: 1,
+      corroborationScore: 0.9,
+      validationStatus: "validated",
+      notes: "Official announcement source",
+    }, {
+      sessionId: "sub:parent-session:researcher:1",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+
+    const facts = await readAllFacts("sub:parent-session");
+    expect(facts["mcp_origin_validated"]).toContain("record_type: evidence");
+    expect(facts["mcp_origin_validated"]).toContain("source_title: Introducing the Model Context Protocol");
+    expect(facts["mcp_origin_validated"]).toContain("validation_status: validated");
+  });
+
+  it("exports a validated evidence ledger artifact and publishes its path", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-evidence-ledger-"));
+    dirs.push(workspacePath);
+
+    const { executeTool } = await import("../tools/registry.js");
+    const result = await executeTool("export_evidence_ledger", {
+      title: "MCP Validation Ledger",
+      format: "json",
+      output_file: "artifacts/reports/mcp-validation-ledger.json",
+      entries: [
+        {
+          key: "mcp_origin_validated",
+          finding: "Anthropic introduced the Model Context Protocol.",
+          claim: "Anthropic introduced the Model Context Protocol.",
+          sourceTitle: "Introducing the Model Context Protocol",
+          sourceUrl: "https://www.anthropic.com/news/model-context-protocol",
+          publisher: "Anthropic",
+          publishedAt: "2024-11-25",
+          retrievedAt: "2026-04-11",
+          evidenceType: "official",
+          accuracyScore: 1,
+          trustworthinessScore: 1,
+          corroborationScore: 0.9,
+          validationStatus: "validated",
+          notes: "Official announcement source",
+        },
+      ],
+    }, {
+      sessionId: "sub:parent-session:source_verifier:1",
+      workspacePath,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata).toMatchObject({
+      artifactKind: "evidence_ledger",
+      outputPath: "artifacts/reports/mcp-validation-ledger.json",
+      format: "json",
+      entryCount: 1,
+    });
+
+    const ledgerPath = join(workspacePath, "artifacts", "reports", "mcp-validation-ledger.json");
+    expect(existsSync(ledgerPath)).toBe(true);
+
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as { entries: Array<{ key: string; validationStatus: string }> };
+    expect(ledger.entries[0]).toMatchObject({
+      key: "mcp_origin_validated",
+      validationStatus: "validated",
+    });
+
+    const facts = await readAllFacts("sub:parent-session");
+    expect(facts["validated_evidence_ledger_path"]).toBe("artifacts/reports/mcp-validation-ledger.json");
+    expect(facts["validated_evidence_ledger_format"]).toBe("json");
   });
 
   it("compacts paraphrased durable memory through memory_compact", async () => {

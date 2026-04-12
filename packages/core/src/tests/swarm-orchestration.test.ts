@@ -1679,7 +1679,7 @@ describe("swarm orchestration tools", () => {
     expect(result.output).toContain("CVE-2026-0001");
     expect(result.metadata?.["agentName"]).toBe("security_researcher");
     expect(result.metadata?.["delegationOutcome"]).toBe("partial");
-    expect(result.metadata?.["attemptedAgents"]).toEqual(["security_researcher", "distance_specialist"]);
+    expect(result.metadata?.["attemptedAgents"]).toEqual(["security_researcher"]);
 
     const tasks = Object.values(swarmState.tasks);
     expect(tasks).toHaveLength(1);

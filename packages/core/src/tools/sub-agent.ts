@@ -1109,6 +1109,16 @@ function shouldAcceptPartialDelegation(
     return true;
   }
 
+  // Accept research-type agents that made meaningful tool progress
+  // (used web_search, web_fetch, or similar) — research agents that fetch
+  // content but hit max_iterations should be treated as partial successes.
+  const hasResearchTools = stats.toolNames.some((name) =>
+    name === "web_search" || name === "web_fetch" || name === "read_shared_facts"
+  );
+  if (hasResearchTools && stats.toolCount >= 2) {
+    return true;
+  }
+
   const looksComputerUse = agentName === "computer_use_agent" || analyzeHeuristicRoutingQuery(task).looksComputerUse;
   if (!looksComputerUse) {
     return false;
@@ -1919,7 +1929,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       attempt.summary = summarizeText(output);
 
       if (weak) {
-        const partial = delegationOutcome === "partial";
+        // Use stats.outcome as fallback — <final_answer> tag parsing can
+        // override delegationOutcome to "failure" even when the sub-agent
+        // runner classified the result as "partial" (max_iterations with content).
+        const partial = delegationOutcome === "partial"
+          || (stats?.outcome === "partial" && delegationOutcome !== "success");
         attempt.status = partial ? "partial" : "failed";
         taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
         taskState.status = partial ? "partial" : "failed";

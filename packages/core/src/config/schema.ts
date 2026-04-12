@@ -271,7 +271,7 @@ export const RetrievalRerankerSchema = z.object({
 export const RetrievalSearchSchema = z.object({
   backend: z.enum(["auto", "searxng", "playwright", "duckduckgo"]).default("auto"),
   searxngBaseUrl: z.string().url().optional(),
-  timeoutMs: z.number().int().min(1000).max(60000).default(12000),
+  timeoutMs: z.number().int().min(1000).max(60000).default(15000),
 });
 
 export const RetrievalSchema = z.object({

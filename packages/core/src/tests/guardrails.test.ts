@@ -119,6 +119,10 @@ describe("tool-tiers", () => {
     expect(getToolTier("generate_chart_html").requiresPerCallApproval).toBe(false);
     expect(getToolTier("generate_pdf").tier).toBe(ToolTier.ONE_WRITE);
     expect(getToolTier("generate_pdf").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("share_evidence").tier).toBe(ToolTier.ONE_WRITE);
+    expect(getToolTier("share_evidence").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("export_evidence_ledger").tier).toBe(ToolTier.ONE_WRITE);
+    expect(getToolTier("export_evidence_ledger").requiresPerCallApproval).toBe(false);
   });
 
   it("keeps browser mutation tools and credential injection approval-gated", () => {

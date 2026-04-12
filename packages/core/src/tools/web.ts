@@ -8,6 +8,55 @@ import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("tool:web");
 
+// ─── Per-session consecutive zero-result search tracker ──────────────────────
+// After SEARCH_DEGRADED_THRESHOLD consecutive zero-result searches within the
+// same root session, the output message changes to tell the agent the backend
+// appears degraded and it should stop searching and use web_fetch, shared
+// facts, or model knowledge instead.
+// At SEARCH_HARD_BLOCK_THRESHOLD the tool refuses to execute entirely.
+// The tracker uses the ROOT session ID so parallel sub-agents (which each get
+// their own sub:… sessionId) share the degraded counter and don't independently
+// re-discover a broken backend.
+const SEARCH_DEGRADED_THRESHOLD = 3;
+const SEARCH_HARD_BLOCK_THRESHOLD = 6;
+const sessionZeroResultStreak = new Map<string, number>();
+
+/**
+ * Extract the root session UUID from a potentially nested sub-agent session ID.
+ * sub:sub:ROOT:coord:ts:researcher:ts → ROOT
+ * sub:ROOT:agent:ts                   → ROOT
+ * ROOT                                → ROOT
+ */
+function getRootSessionId(sessionId: string): string {
+  const stripped = sessionId.replace(/^(?:sub:)+/, "");
+  // The root session is always the first colon-delimited segment (a UUID)
+  const idx = stripped.indexOf(":");
+  return idx === -1 ? stripped : stripped.slice(0, idx);
+}
+
+/** Increment the zero-result streak for a session and return the new count. */
+function recordZeroResultSearch(sessionId: string): number {
+  const rootId = getRootSessionId(sessionId);
+  const count = (sessionZeroResultStreak.get(rootId) ?? 0) + 1;
+  sessionZeroResultStreak.set(rootId, count);
+  return count;
+}
+
+/** Reset the zero-result streak for a session (called on any successful search). */
+function resetZeroResultStreak(sessionId: string): void {
+  sessionZeroResultStreak.delete(getRootSessionId(sessionId));
+}
+
+/** Get the current zero-result streak for a session. */
+function getZeroResultStreak(sessionId: string): number {
+  return sessionZeroResultStreak.get(getRootSessionId(sessionId)) ?? 0;
+}
+
+/** Clean up session tracking to avoid memory leaks. */
+export function clearSearchSessionState(sessionId: string): void {
+  sessionZeroResultStreak.delete(getRootSessionId(sessionId));
+}
+
 type SearchBackend = "searxng" | "playwright" | "duckduckgo";
 
 interface ResolvedSearchBackendConfig {
@@ -28,13 +77,29 @@ registerTool({
     },
     required: ["query"],
   },
-  async execute(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "");
     const maxResults = Math.min(10, Math.max(1, Number(args["maxResults"] ?? 5)));
     const searchConfig = resolveSearchBackendConfig();
+    const sessionId = ctx.sessionId;
 
     if (!query.trim()) {
       return { success: false, output: "", error: "Search query cannot be empty" };
+    }
+
+    // Hard-block: if the root session has already hit the hard block threshold,
+    // refuse to execute at all — saves network round-trips and iteration budget.
+    const currentStreak = getZeroResultStreak(sessionId);
+    if (currentStreak >= SEARCH_HARD_BLOCK_THRESHOLD) {
+      log.warn({ sessionId, streak: currentStreak, query }, "web_search hard-blocked — backend offline for this session");
+      return {
+        success: false,
+        output: "",
+        error: `The search backend is offline for this session (${currentStreak} consecutive zero-result queries). ` +
+          "Do NOT call web_search again. Use web_fetch for known URLs, read_shared_facts for sibling findings, " +
+          "or answer from the content and knowledge you already have.",
+        metadata: { searchDegraded: true, hardBlocked: true, consecutiveZeroResults: currentStreak },
+      };
     }
 
     if (searchConfig.requestedBackend === "searxng" && !searchConfig.searxngBaseUrl) {
@@ -68,9 +133,24 @@ registerTool({
           : "";
 
         if (results.length === 0) {
+          const streak = recordZeroResultSearch(sessionId);
+          const degraded = streak >= SEARCH_DEGRADED_THRESHOLD;
+
+          let output = `No results found for "${query}" from the ${backend} backend.${queryNote}`;
+          if (degraded) {
+            output += `\n⚠ The search backend appears degraded (${streak} consecutive queries returned zero results). ` +
+              "STOP calling web_search — further attempts will likely fail the same way. " +
+              "Instead: use web_fetch to retrieve known URLs directly, check read_shared_facts for evidence from sibling agents, " +
+              "or synthesize your answer from the information you already have and clearly state that live search data was unavailable.";
+            log.warn({ sessionId, streak, query, backend }, "Search backend appears degraded — consecutive zero-result streak");
+          } else {
+            output += "\nTry rephrasing or use different keywords.";
+          }
+
           return {
-            success: true,
-            output: `No results found for "${query}" from the ${backend} backend.${queryNote}\nTry rephrasing or use different keywords.`,
+            success: !degraded,
+            output: degraded ? "" : output,
+            error: degraded ? output : undefined,
             metadata: {
               query,
               rewrittenQuery,
@@ -78,9 +158,14 @@ registerTool({
               attemptedBackends,
               requestedBackend: searchConfig.requestedBackend,
               ranking,
+              consecutiveZeroResults: streak,
+              searchDegraded: degraded,
             },
           };
         }
+
+        // Successful results — reset the streak
+        resetZeroResultStreak(sessionId);
 
         const formatted = results
           .map(r => `**${r.title}**\n${r.url}\n${r.snippet}`)
@@ -136,9 +221,13 @@ registerTool({
     },
     required: ["url"],
   },
-  async execute(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const url = String(args["url"] ?? "");
     const maxLength = Math.min(32000, Math.max(500, Number(args["maxLength"] ?? 8000)));
+    const isSubAgent = !!ctx.currentAgentName;
+    const shareSuffix = isSubAgent
+      ? "\n\n💡 If this content is useful for your task, call share_finding now to publish key facts for sibling agents before your iteration budget runs out."
+      : "";
 
     if (!url.match(/^https?:\/\//i)) {
       return { success: false, output: "", error: "URL must start with http:// or https://" };
@@ -198,7 +287,7 @@ registerTool({
         }
         return {
           success: true,
-          output: `**Content from:** ${url}\n\n${text}`,
+          output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
           metadata: { url, contentLength: text.length, contentType, fetchMethod: "native" },
         };
       }
@@ -215,7 +304,7 @@ registerTool({
           }
           return {
             success: true,
-            output: `**Content from:** ${url}\n\n${text}`,
+            output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
             metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright" },
           };
         } catch (playwrightErr) {
@@ -251,7 +340,7 @@ registerTool({
 
       return {
         success: true,
-        output: `**Content from:** ${url}\n\n${text}`,
+        output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
         metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback" },
       };
     } catch (err) {
