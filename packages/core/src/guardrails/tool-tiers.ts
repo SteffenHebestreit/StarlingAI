@@ -396,6 +396,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  share_evidence: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Publish a source-backed evidence record into shared swarm memory for sibling agents",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  export_evidence_ledger: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write a validated evidence ledger artifact into the workspace and share its path",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   send_agent_message: {
     tier: ToolTier.ONE_WRITE,
     description: "Queue a direct message for another agent in the current swarm session",

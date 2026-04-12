@@ -27,6 +27,17 @@ import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { consumeAgentMessages } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
+// Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
+// load time, which would re-register web_search/web_fetch and break tests
+// that register their own mocks before importing this module.
+let _clearSearchSessionState: ((sessionId: string) => void) | undefined;
+async function getSearchCleanup(): Promise<(sessionId: string) => void> {
+  if (!_clearSearchSessionState) {
+    const web = await import("../tools/web.js");
+    _clearSearchSessionState = web.clearSearchSessionState;
+  }
+  return _clearSearchSessionState;
+}
 
 const log = childLogger("agent:sub-agent");
 
@@ -830,8 +841,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     ? AbortSignal.any([opts.signal, timeoutAbort.signal])
     : opts.signal ?? timeoutAbort?.signal;
 
+  const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+
   try {
-    const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
 
     logAudit(
       "sub_agent_started",
@@ -1346,8 +1358,24 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         });
       }
 
+      // ── Iteration budget awareness ──────────────────────────────────────
+      // Inject a budget warning when running low so the agent synthesizes
+      // its answer instead of burning remaining iterations on more tool calls.
+      const remaining = maxIterations - iterations;
+      let effectiveSystemPrompt = systemPrompt;
+      if (remaining <= 2 && toolCount > 0) {
+        const budgetWarning =
+          remaining === 1
+            ? "\n\n⚠️ CRITICAL: This is your LAST iteration. You MUST produce your complete final answer NOW. " +
+              "Do NOT call any more tools. Synthesize everything you have gathered and respond with your full output."
+            : `\n\n⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
+              "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
+              "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
+        effectiveSystemPrompt += budgetWarning;
+      }
+
       const messages: LLMMessage[] = [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: effectiveSystemPrompt },
         ...history,
       ];
 
@@ -1453,6 +1481,47 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
         let result = normalizeSubAgentOutput(response.content);
+
+        // Recovery: if the agent used tools (gathered real content) but returned
+        // an empty final response, force one synthesis pass so the fetched data
+        // isn't lost.  This catches a common Qwen pattern where the model emits
+        // tool calls on every iteration then returns content: "" on the last.
+        const emptyAfterWork = result === "Sub-agent produced no final response." && toolCount > 0;
+        if (emptyAfterWork && !signal?.aborted) {
+          log.warn(
+            { agentName: opts.agentName, iterations, toolCalls: toolCount },
+            "Sub-agent returned empty response after tool use — forcing synthesis pass",
+          );
+          try {
+            const rescueMessages: LLMMessage[] = [
+              {
+                role: "system",
+                content: systemPrompt +
+                  "\n\nYou returned an empty response but you have already gathered content from previous tool calls. " +
+                  "DO NOT call any more tools. " +
+                  "Produce your COMPLETE final answer now. Include ALL content you retrieved — URLs, facts, and extracts. " +
+                  "Your response is the ONLY output the coordinator will receive from you.",
+              },
+              ...history,
+            ];
+            const rescueResponse = await provider.complete(rescueMessages, [], signal);
+            usage.promptTokens += rescueResponse.usage.promptTokens;
+            usage.completionTokens += rescueResponse.usage.completionTokens;
+            usage.totalTokens += rescueResponse.usage.totalTokens;
+            if (rescueResponse.tool_calls.length === 0) {
+              const rescued = normalizeSubAgentOutput(rescueResponse.content);
+              if (rescued !== "Sub-agent produced no final response.") {
+                result = rescued;
+                log.info(
+                  { agentName: opts.agentName, rescuedLength: result.length },
+                  "Empty-response synthesis rescue succeeded",
+                );
+              }
+            }
+          } catch (rescueErr) {
+            log.warn({ rescueErr, agentName: opts.agentName }, "Empty-response synthesis rescue failed");
+          }
+        }
 
         // Scan for secrets before returning to parent session
         const outputScan = scanOutput(result);
@@ -1739,7 +1808,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             content: systemPrompt +
               "\n\nYou have exhausted your tool-call budget. " +
               "DO NOT call any more tools. " +
-              "Synthesize everything you have gathered so far and return your final answer now.",
+              "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
+              "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
+              "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
+              "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
+              "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
           },
           ...history,
         ];
@@ -1750,6 +1823,42 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
         if (synthResponse.tool_calls.length === 0) {
           let result = normalizeSubAgentOutput(synthResponse.content);
+
+          // ── Empty-response rescue for synthesis path ─────────────────────
+          // Qwen models sometimes return empty content even in the synthesis
+          // pass. If the agent used tools, retry once with an emphatic prompt.
+          if (result === "Sub-agent produced no final response." && toolCount > 0 && !signal?.aborted) {
+            try {
+              log.warn({ agentName: opts.agentName, toolCount }, "Synthesis returned empty — attempting rescue");
+              const rescueMessages: LLMMessage[] = [
+                {
+                  role: "system",
+                  content:
+                    "You returned an empty response but you have already gathered content from " +
+                    toolCount + " tool calls during this session. " +
+                    "Review your conversation history — you MUST have information from web_fetch, " +
+                    "read_file, or other tools. Produce your COMPLETE final answer now. " +
+                    "Include ALL content you retrieved — URLs, facts, and extracts verbatim. " +
+                    "Do NOT call any tools. Do NOT return an empty response.",
+                },
+                ...history,
+              ];
+              const rescueResponse = await provider.complete(rescueMessages, [], signal);
+              usage.promptTokens += rescueResponse.usage.promptTokens;
+              usage.completionTokens += rescueResponse.usage.completionTokens;
+              usage.totalTokens += rescueResponse.usage.totalTokens;
+              const rescueResult = normalizeSubAgentOutput(rescueResponse.content);
+              if (rescueResult !== "Sub-agent produced no final response.") {
+                log.info({ agentName: opts.agentName, rescueLength: rescueResult.length }, "Synthesis rescue succeeded");
+                result = rescueResult;
+              } else {
+                log.warn({ agentName: opts.agentName }, "Synthesis rescue also returned empty");
+              }
+            } catch (rescueErr) {
+              log.warn({ rescueErr, agentName: opts.agentName }, "Synthesis rescue failed");
+            }
+          }
+
           const outputScan = scanOutput(result);
           if (!outputScan.safe && outputScan.redacted) {
             logAudit(
@@ -1842,6 +1951,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    // Clean up per-session search circuit-breaker state to avoid memory leaks.
+    const clearSearch = await getSearchCleanup();
+    clearSearch(subSessionId);
 
     // Transfer any computer sessions the sub-agent created back to the parent
     // so the orchestrator can reuse them if it falls back to direct tool calls.

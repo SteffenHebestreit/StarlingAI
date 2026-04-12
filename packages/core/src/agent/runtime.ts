@@ -695,11 +695,13 @@ export function classifyPostOrchestrationDisposition(
 ): PostOrchestrationDisposition {
   const orchestrationResults = toolResultMessages.filter((message) => {
     const text = typeof message.content === "string" ? message.content : "";
+    const isWorkflowExecutionResult = /^Workflow\s+.+\s+\[[^\]]+\]\s+(blocked|completed)\./i.test(text);
     return text.includes("Observed evidence:")
       && (
         text.includes("Delegated result from")
         || text.includes("Parallel delegation completed")
         || text.includes("Task graph completed")
+        || isWorkflowExecutionResult
         || text.includes("Ephemeral agent ")
       );
   });
@@ -817,10 +819,10 @@ export function buildModelVisibleToolResult(
     }
     if (delegationPartial) {
       const parts = [
-        `Delegated result from ${agentName} — PARTIAL RESULT.`,
+        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL).`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
         routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        "IMPORTANT: Use the evidence below and say clearly that the delegated work was interrupted or incomplete.",
+        "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent toolsilure. Proceed with any dependent tools.",
         `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
       ].filter(Boolean);
       return parts.join("\n");
@@ -873,7 +875,7 @@ export function buildModelVisibleToolResult(
       `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
       blocked
         ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
-        : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run.",
+        : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.",
       `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
     ].join("\n");
   }

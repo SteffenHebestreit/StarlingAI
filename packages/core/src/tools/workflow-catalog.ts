@@ -48,6 +48,7 @@ const COORDINATOR_BOOTSTRAP_ALLOWED_TOOL_NAMES = new Set([
   "run_task_graph",
   "read_shared_facts",
   "share_finding",
+  "share_evidence",
 ]);
 
 const WORKFLOW_BOOTSTRAP_BLOCKED_TOOL_NAMES = new Set([
@@ -574,7 +575,11 @@ function buildCoordinatorBootstrapContext(
     "This workflow is already selected. Execute it directly.",
     "Do NOT call search_workflows or run_workflow from inside this bootstrap coordinator.",
     allowedAgents?.length ? `Allowed specialists for this workflow: ${allowedAgents.join(", ")}.` : "",
-    "For source-grounded deliverables, gather evidence with researcher or citation_researcher and publish reusable findings via share_finding before drafting.",
+    "For source-grounded deliverables, gather evidence with researcher or citation_researcher and publish reusable source-backed findings via share_evidence before drafting.",
+    "For source-grounded deliverables, require scored findings with exact source metadata such as title, canonical URL, publisher, dates, validation status, and trust/corroboration scores before those findings are treated as reusable evidence.",
+    allowedAgents?.includes("source_verifier")
+      ? "Before drafting or final synthesis, run source_verifier to validate the cited sources, export a normalized validated evidence ledger artifact, and mark doubtful or fabricated references as disputed instead of letting them flow upward."
+      : "Before drafting or final synthesis, validate that the cited sources are real and correctly matched to the claims instead of letting unverified evidence flow upward.",
     "If read_shared_facts is empty or insufficient, do NOT stop with a plan-only response. Delegate or gather evidence before returning.",
     workflowContext?.trim() ? `Workflow context:\n${workflowContext.trim()}` : "",
   ].filter(Boolean).join("\n");
@@ -590,6 +595,7 @@ function sceneRequiresCoordinatorEvidence(scene: SceneSummary): boolean {
     || taskText.includes("official")
     || taskText.includes("current")
     || taskText.includes("share_finding")
+    || taskText.includes("share_evidence")
     || (scene.allowedAgents?.some((agentName) => [
       "researcher",
       "citation_researcher",

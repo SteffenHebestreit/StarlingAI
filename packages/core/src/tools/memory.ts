@@ -8,6 +8,8 @@
  * memory_search — full-text substring search across keys, content, and tags
  */
 import { randomUUID } from "node:crypto";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
@@ -35,6 +37,7 @@ import {
   updateMainAssistantPersonality,
   type MainAssistantPersonalityUpdate,
 } from "../personality/service.js";
+import { resolvePathWithinWorkspace } from "./workspace-path.js";
 
 const log = childLogger("tool:memory");
 
@@ -47,6 +50,44 @@ export async function shareFinding(sessionId: string, key: string, value: string
   const sanitizedKey = key.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 80);
   await writeSharedFact(parentSessionId, sanitizedKey, value.trim());
 }
+
+type SharedFindingMetadata = {
+  claim?: string;
+  sourceTitle?: string;
+  sourceUrl?: string;
+  publisher?: string;
+  publishedAt?: string;
+  retrievedAt?: string;
+  evidenceType?: string;
+  accuracyScore?: number;
+  trustworthinessScore?: number;
+  corroborationScore?: number;
+  validationStatus?: string;
+  notes?: string;
+};
+
+type EvidenceLedgerFormat = "json" | "markdown";
+
+type EvidenceEntry = {
+  key: string;
+  finding: string;
+  claim: string;
+  sourceTitle: string;
+  sourceUrl: string;
+  publisher?: string;
+  publishedAt?: string;
+  retrievedAt?: string;
+  evidenceType: string;
+  accuracyScore: number;
+  trustworthinessScore: number;
+  corroborationScore: number;
+  validationStatus: string;
+  notes?: string;
+  supportingKeys?: string[];
+};
+
+const EVIDENCE_LEDGER_FORMATS = new Set<EvidenceLedgerFormat>(["json", "markdown"]);
+const EVIDENCE_VALIDATION_STATUSES = new Set(["unverified", "tentative", "validated", "disputed"]);
 
 function deriveSharedSessionId(sessionId: string): string {
   const parts = sessionId.split(":");
@@ -97,6 +138,198 @@ function resolveBroadcastTargets(fromAgent: string, args: Record<string, unknown
 
 function safeKey(raw: string): string {
   return raw.trim().replace(/[^a-z0-9_-]/gi, "_").slice(0, 100);
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeUnitScore(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${fieldName} must be a number between 0 and 1`);
+  }
+  if (value < 0 || value > 1) {
+    throw new Error(`${fieldName} must be between 0 and 1`);
+  }
+  return Number(value);
+}
+
+function normalizeEvidenceUrl(value: unknown, fieldName: string): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) throw new Error(`${fieldName} is required`);
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${fieldName} must be a valid http(s) URL`);
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`${fieldName} must be a valid http(s) URL`);
+  }
+
+  return parsed.toString();
+}
+
+function normalizeEvidenceStatus(value: unknown): string {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) throw new Error("validationStatus is required");
+  if (!EVIDENCE_VALIDATION_STATUSES.has(normalized)) {
+    throw new Error("validationStatus must be one of: unverified, tentative, validated, disputed");
+  }
+  return normalized;
+}
+
+function normalizeEvidenceEntry(input: Record<string, unknown>, fallbackKey?: string): EvidenceEntry {
+  const key = safeKey(String(input["key"] ?? fallbackKey ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_"));
+  const finding = String(input["finding"] ?? input["value"] ?? "").trim();
+  const claim = String(input["claim"] ?? "").trim();
+  const sourceTitle = String(input["sourceTitle"] ?? "").trim();
+  const publisher = optionalString(input["publisher"]);
+  const publishedAt = optionalString(input["publishedAt"]);
+  const retrievedAt = optionalString(input["retrievedAt"]);
+  const evidenceType = String(input["evidenceType"] ?? "").trim().toLowerCase();
+  const notes = optionalString(input["notes"]);
+  const supportingKeys = Array.isArray(input["supportingKeys"])
+    ? input["supportingKeys"].map((entry) => safeKey(String(entry))).filter(Boolean)
+    : undefined;
+
+  if (!key) throw new Error("key is required");
+  if (!finding) throw new Error("finding/value is required");
+  if (!claim) throw new Error("claim is required");
+  if (!sourceTitle) throw new Error("sourceTitle is required");
+  if (!evidenceType) throw new Error("evidenceType is required");
+
+  return {
+    key,
+    finding,
+    claim,
+    sourceTitle,
+    sourceUrl: normalizeEvidenceUrl(input["sourceUrl"], "sourceUrl"),
+    publisher,
+    publishedAt,
+    retrievedAt,
+    evidenceType,
+    accuracyScore: normalizeUnitScore(input["accuracyScore"], "accuracyScore"),
+    trustworthinessScore: normalizeUnitScore(input["trustworthinessScore"], "trustworthinessScore"),
+    corroborationScore: normalizeUnitScore(input["corroborationScore"], "corroborationScore"),
+    validationStatus: normalizeEvidenceStatus(input["validationStatus"]),
+    notes,
+    supportingKeys,
+  };
+}
+
+function formatEvidenceValue(entry: EvidenceEntry): string {
+  return [
+    entry.finding,
+    "",
+    "record_type: evidence",
+    `claim: ${entry.claim}`,
+    `source_title: ${entry.sourceTitle}`,
+    `source_url: ${entry.sourceUrl}`,
+    entry.publisher ? `publisher: ${entry.publisher}` : "",
+    entry.publishedAt ? `published_at: ${entry.publishedAt}` : "",
+    entry.retrievedAt ? `retrieved_at: ${entry.retrievedAt}` : "",
+    `evidence_type: ${entry.evidenceType}`,
+    `accuracy_score: ${entry.accuracyScore}`,
+    `trustworthiness_score: ${entry.trustworthinessScore}`,
+    `corroboration_score: ${entry.corroborationScore}`,
+    `validation_status: ${entry.validationStatus}`,
+    entry.supportingKeys && entry.supportingKeys.length > 0 ? `supporting_keys: ${entry.supportingKeys.join(", ")}` : "",
+    entry.notes ? `notes: ${entry.notes}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function normalizeEvidenceLedgerFormat(value: unknown): EvidenceLedgerFormat | null {
+  const normalized = String(value ?? "json").trim().toLowerCase() as EvidenceLedgerFormat;
+  return EVIDENCE_LEDGER_FORMATS.has(normalized) ? normalized : null;
+}
+
+function resolveEvidenceLedgerOutputPath(input: {
+  requestedPath?: string;
+  title?: string;
+  format: EvidenceLedgerFormat;
+  workspacePath: string;
+}): { resolved: string; relativePath: string } {
+  const extension = input.format === "json" ? ".json" : ".md";
+  const fallbackName = safeKey(input.title || "validated_evidence_ledger") || "validated_evidence_ledger";
+  const requestedPath = input.requestedPath?.trim() || `artifacts/reports/${fallbackName}${extension}`;
+  const withExtension = extname(requestedPath)
+    ? requestedPath
+    : `${requestedPath}${extension}`;
+
+  if (extname(withExtension).toLowerCase() !== extension) {
+    throw new Error(`output_file must use the ${extension} extension for ${input.format} ledgers`);
+  }
+
+  return resolvePathWithinWorkspace(withExtension, input.workspacePath);
+}
+
+function renderEvidenceLedger(entrySet: EvidenceEntry[], format: EvidenceLedgerFormat, title: string): string {
+  if (format === "json") {
+    return JSON.stringify({
+      title,
+      generatedAt: new Date().toISOString(),
+      entryCount: entrySet.length,
+      entries: entrySet,
+    }, null, 2);
+  }
+
+  const sections = entrySet.map((entry, index) => {
+    const lines = [
+      `## ${index + 1}. ${entry.key}`,
+      `- Finding: ${entry.finding}`,
+      `- Claim: ${entry.claim}`,
+      `- Source: ${entry.sourceTitle}`,
+      `- URL: ${entry.sourceUrl}`,
+      entry.publisher ? `- Publisher: ${entry.publisher}` : "",
+      entry.publishedAt ? `- Published: ${entry.publishedAt}` : "",
+      entry.retrievedAt ? `- Retrieved: ${entry.retrievedAt}` : "",
+      `- Evidence Type: ${entry.evidenceType}`,
+      `- Validation Status: ${entry.validationStatus}`,
+      `- Accuracy Score: ${entry.accuracyScore}`,
+      `- Trustworthiness Score: ${entry.trustworthinessScore}`,
+      `- Corroboration Score: ${entry.corroborationScore}`,
+      entry.supportingKeys && entry.supportingKeys.length > 0 ? `- Supporting Keys: ${entry.supportingKeys.join(", ")}` : "",
+      entry.notes ? `- Notes: ${entry.notes}` : "",
+    ].filter(Boolean);
+    return lines.join("\n");
+  });
+
+  return [`# ${title}`, "", ...sections].join("\n\n");
+}
+
+function formatSharedFindingValue(value: string, metadata: SharedFindingMetadata): string {
+  const trimmedValue = value.trim();
+  const lines = [trimmedValue];
+  const metadataLines: string[] = [];
+
+  const pushLine = (label: string, entry: string | number | undefined): void => {
+    if (entry === undefined) return;
+    const text = String(entry).trim();
+    if (!text) return;
+    metadataLines.push(`${label}: ${text}`);
+  };
+
+  pushLine("claim", metadata.claim);
+  pushLine("source_title", metadata.sourceTitle);
+  pushLine("source_url", metadata.sourceUrl);
+  pushLine("publisher", metadata.publisher);
+  pushLine("published_at", metadata.publishedAt);
+  pushLine("retrieved_at", metadata.retrievedAt);
+  pushLine("evidence_type", metadata.evidenceType);
+  pushLine("accuracy_score", metadata.accuracyScore);
+  pushLine("trustworthiness_score", metadata.trustworthinessScore);
+  pushLine("corroboration_score", metadata.corroborationScore);
+  pushLine("validation_status", metadata.validationStatus);
+  pushLine("notes", metadata.notes);
+
+  if (metadataLines.length === 0) return trimmedValue;
+  lines.push("", ...metadataLines);
+  return lines.join("\n");
 }
 
 registerTool({
@@ -650,6 +883,7 @@ registerTool({
     "Publish a key finding to the session's shared memory so other agents in this swarm session can read it. " +
     "Use this for facts that other agents will need: resolved hostnames, fetched credentials, computed values, " +
     "API responses that shouldn't be re-fetched, or conclusions another agent should build on. " +
+    "Use share_evidence instead of this tool for source-backed research findings that must carry required provenance, validation state, and trust scores. " +
     "Format: share a concise key (snake_case) and the finding value. " +
     "Example: key='resolved_base_url', value='https://api.example.com/v2'",
   parameters: {
@@ -663,15 +897,78 @@ registerTool({
         type: "string",
         description: "The finding value — keep concise (max 2000 chars)",
       },
+      claim: {
+        type: "string",
+        description: "Optional exact claim or fact statement that this finding supports",
+      },
+      sourceTitle: {
+        type: "string",
+        description: "Optional source title for source-backed findings",
+      },
+      sourceUrl: {
+        type: "string",
+        description: "Optional canonical source URL for source-backed findings",
+      },
+      publisher: {
+        type: "string",
+        description: "Optional publisher, maintainer, or organization behind the source",
+      },
+      publishedAt: {
+        type: "string",
+        description: "Optional publication or last-updated date exactly as observed",
+      },
+      retrievedAt: {
+        type: "string",
+        description: "Optional retrieval date for the source-backed finding",
+      },
+      evidenceType: {
+        type: "string",
+        description: "Optional evidence type such as primary, official, secondary, observed, or derived",
+      },
+      accuracyScore: {
+        type: "number",
+        description: "Optional accuracy score from 0 to 1 for this finding",
+      },
+      trustworthinessScore: {
+        type: "number",
+        description: "Optional trustworthiness score from 0 to 1 for the source",
+      },
+      corroborationScore: {
+        type: "number",
+        description: "Optional corroboration score from 0 to 1 based on independent confirmation",
+      },
+      validationStatus: {
+        type: "string",
+        description: "Optional validation state such as unverified, validated, tentative, or disputed",
+      },
+      notes: {
+        type: "string",
+        description: "Optional short note about caveats, disagreements, or why the score is not perfect",
+      },
     },
     required: ["key", "value"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const key = String(args["key"] ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 80);
-    const value = String(args["value"] ?? "").trim();
+    const rawValue = String(args["value"] ?? "").trim();
+    const metadata: SharedFindingMetadata = {
+      claim: typeof args["claim"] === "string" ? String(args["claim"]).trim() : undefined,
+      sourceTitle: typeof args["sourceTitle"] === "string" ? String(args["sourceTitle"]).trim() : undefined,
+      sourceUrl: typeof args["sourceUrl"] === "string" ? String(args["sourceUrl"]).trim() : undefined,
+      publisher: typeof args["publisher"] === "string" ? String(args["publisher"]).trim() : undefined,
+      publishedAt: typeof args["publishedAt"] === "string" ? String(args["publishedAt"]).trim() : undefined,
+      retrievedAt: typeof args["retrievedAt"] === "string" ? String(args["retrievedAt"]).trim() : undefined,
+      evidenceType: typeof args["evidenceType"] === "string" ? String(args["evidenceType"]).trim() : undefined,
+      accuracyScore: typeof args["accuracyScore"] === "number" ? Number(args["accuracyScore"]) : undefined,
+      trustworthinessScore: typeof args["trustworthinessScore"] === "number" ? Number(args["trustworthinessScore"]) : undefined,
+      corroborationScore: typeof args["corroborationScore"] === "number" ? Number(args["corroborationScore"]) : undefined,
+      validationStatus: typeof args["validationStatus"] === "string" ? String(args["validationStatus"]).trim() : undefined,
+      notes: typeof args["notes"] === "string" ? String(args["notes"]).trim() : undefined,
+    };
+    const value = formatSharedFindingValue(rawValue, metadata);
 
     if (!key) return { success: false, output: "", error: "key is required" };
-    if (!value) return { success: false, output: "", error: "value is required" };
+    if (!rawValue) return { success: false, output: "", error: "value is required" };
 
     // Derive parent session ID from sub-agent sessionId (format: sub:parentId:agentName:ts)
     const parentSessionId = deriveSharedSessionId(ctx.sessionId);
@@ -688,11 +985,263 @@ registerTool({
 });
 
 registerTool({
+  name: "share_evidence",
+  description:
+    "Publish a source-backed evidence record to the session's shared memory with required provenance, validation state, and trust scores. " +
+    "Use this for research findings, citations, factual claims, benchmarks, and sourced statistics that downstream agents may draft from.",
+  parameters: {
+    type: "object",
+    properties: {
+      key: {
+        type: "string",
+        description: "Short snake_case identifier for this evidence record",
+      },
+      value: {
+        type: "string",
+        description: "Concise finding text or observed fact value",
+      },
+      claim: {
+        type: "string",
+        description: "Exact claim supported by the source",
+      },
+      sourceTitle: {
+        type: "string",
+        description: "Exact source title",
+      },
+      sourceUrl: {
+        type: "string",
+        description: "Canonical http(s) source URL",
+      },
+      publisher: {
+        type: "string",
+        description: "Publisher, maintainer, or organization behind the source",
+      },
+      publishedAt: {
+        type: "string",
+        description: "Publication or last-updated date exactly as observed",
+      },
+      retrievedAt: {
+        type: "string",
+        description: "Retrieval date for the source-backed evidence",
+      },
+      evidenceType: {
+        type: "string",
+        description: "Evidence type such as official, primary, secondary, observed, or derived",
+      },
+      accuracyScore: {
+        type: "number",
+        description: "Accuracy score from 0 to 1",
+      },
+      trustworthinessScore: {
+        type: "number",
+        description: "Trustworthiness score from 0 to 1",
+      },
+      corroborationScore: {
+        type: "number",
+        description: "Corroboration score from 0 to 1",
+      },
+      validationStatus: {
+        type: "string",
+        description: "One of: unverified, tentative, validated, disputed",
+      },
+      notes: {
+        type: "string",
+        description: "Optional caveat or short reviewer note",
+      },
+      supportingKeys: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional shared-fact keys that corroborate this evidence entry",
+      },
+    },
+    required: [
+      "key",
+      "value",
+      "claim",
+      "sourceTitle",
+      "sourceUrl",
+      "evidenceType",
+      "accuracyScore",
+      "trustworthinessScore",
+      "corroborationScore",
+      "validationStatus",
+    ],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    let entry: EvidenceEntry;
+    try {
+      entry = normalizeEvidenceEntry(args);
+    } catch (err) {
+      return { success: false, output: "", error: String(err instanceof Error ? err.message : err) };
+    }
+
+    const parentSessionId = deriveSharedSessionId(ctx.sessionId);
+    const value = formatEvidenceValue(entry);
+
+    await writeSharedFact(parentSessionId, entry.key, value);
+    log.info({ key: entry.key, parentSessionId }, "Shared evidence published");
+
+    return {
+      success: true,
+      output: `Evidence published to shared session memory: '${entry.key}' from ${entry.sourceTitle}`,
+      metadata: {
+        key: entry.key,
+        parentSessionId,
+        recordType: "evidence",
+        validationStatus: entry.validationStatus,
+        sourceUrl: entry.sourceUrl,
+      },
+    };
+  },
+});
+
+registerTool({
+  name: "export_evidence_ledger",
+  description:
+    "Write a normalized validated evidence ledger artifact to the workspace and publish its path to shared session memory. " +
+    "Use this after source verification so downstream agents can draft from one explicit validated ledger instead of scattered raw facts.",
+  parameters: {
+    type: "object",
+    properties: {
+      title: {
+        type: "string",
+        description: "Optional artifact title",
+      },
+      format: {
+        type: "string",
+        enum: ["json", "markdown"],
+        default: "json",
+        description: "Output format for the evidence ledger",
+      },
+      output_file: {
+        type: "string",
+        description: "Workspace-relative output path for the ledger artifact",
+      },
+      overwrite: {
+        type: "boolean",
+        description: "When false, fail instead of overwriting an existing file",
+        default: true,
+      },
+      entries: {
+        type: "array",
+        description: "Normalized evidence entries to persist in the validated ledger",
+        items: {
+          type: "object",
+          properties: {
+            key: { type: "string" },
+            finding: { type: "string" },
+            value: { type: "string" },
+            claim: { type: "string" },
+            sourceTitle: { type: "string" },
+            sourceUrl: { type: "string" },
+            publisher: { type: "string" },
+            publishedAt: { type: "string" },
+            retrievedAt: { type: "string" },
+            evidenceType: { type: "string" },
+            accuracyScore: { type: "number" },
+            trustworthinessScore: { type: "number" },
+            corroborationScore: { type: "number" },
+            validationStatus: { type: "string" },
+            notes: { type: "string" },
+            supportingKeys: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          required: [
+            "key",
+            "claim",
+            "sourceTitle",
+            "sourceUrl",
+            "evidenceType",
+            "accuracyScore",
+            "trustworthinessScore",
+            "corroborationScore",
+            "validationStatus",
+          ],
+        },
+      },
+    },
+    required: ["entries"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const format = normalizeEvidenceLedgerFormat(args["format"]);
+    if (!format) return { success: false, output: "", error: "format must be either 'json' or 'markdown'" };
+
+    if (!Array.isArray(args["entries"]) || args["entries"].length === 0) {
+      return { success: false, output: "", error: "entries must be a non-empty array" };
+    }
+
+    let entries: EvidenceEntry[];
+    try {
+      entries = args["entries"].map((entry, index) => {
+        if (!entry || typeof entry !== "object") {
+          throw new Error(`entries[${index}] must be an object`);
+        }
+        return normalizeEvidenceEntry(entry as Record<string, unknown>);
+      });
+    } catch (err) {
+      return { success: false, output: "", error: String(err instanceof Error ? err.message : err) };
+    }
+
+    const overwrite = Boolean(args["overwrite"] ?? true);
+    const title = optionalString(args["title"]) ?? "Validated Evidence Ledger";
+
+    let resolvedOutput: { resolved: string; relativePath: string };
+    try {
+      resolvedOutput = resolveEvidenceLedgerOutputPath({
+        requestedPath: optionalString(args["output_file"]),
+        title,
+        format,
+        workspacePath: ctx.workspacePath,
+      });
+    } catch (err) {
+      return { success: false, output: "", error: String(err instanceof Error ? err.message : err) };
+    }
+
+    try {
+      if (!overwrite) {
+        await stat(resolvedOutput.resolved);
+        return { success: false, output: "", error: `Refusing to overwrite existing file: ${resolvedOutput.relativePath}` };
+      }
+    } catch {
+      // File does not exist yet.
+    }
+
+    const content = renderEvidenceLedger(entries, format, title);
+
+    try {
+      await mkdir(dirname(resolvedOutput.resolved), { recursive: true });
+      await writeFile(resolvedOutput.resolved, content, "utf8");
+    } catch (err) {
+      return { success: false, output: "", error: `Failed to write evidence ledger: ${String(err)}` };
+    }
+
+    const parentSessionId = deriveSharedSessionId(ctx.sessionId);
+    await writeSharedFact(parentSessionId, "validated_evidence_ledger_path", resolvedOutput.relativePath);
+    await writeSharedFact(parentSessionId, "validated_evidence_ledger_format", format);
+
+    return {
+      success: true,
+      output: `Evidence ledger saved to ${resolvedOutput.relativePath} as ${format}.`,
+      metadata: {
+        artifactKind: "evidence_ledger",
+        outputPath: resolvedOutput.relativePath,
+        format,
+        entryCount: entries.length,
+        contentType: format === "json" ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8",
+        previewMode: format === "json" ? "text" : "markdown",
+      },
+    };
+  },
+});
+
+registerTool({
   name: "read_shared_facts",
   description:
     "Read all shared facts published by other agents in this swarm session. " +
     "Use this at the start of a task to avoid duplicating work already done by a sibling agent. " +
-    "Returns all key/value pairs stored via share_finding or FACT: lines in previous agent outputs.",
+    "Returns all key/value pairs stored via share_finding, share_evidence, or FACT: lines in previous agent outputs, including any source metadata, validation states, ledger paths, and trust scores captured with the finding.",
   parameters: {
     type: "object",
     properties: {

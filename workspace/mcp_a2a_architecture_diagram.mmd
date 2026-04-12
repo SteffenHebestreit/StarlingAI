@@ -1,0 +1,37 @@
+%% MCP und A2A Architektur - Two-Protocol Stack
+%%{init: { "theme": "neutral" }}%%
+flowchart TB
+    subgraph MCP_Arch["MCP Architektur (Vertikal)"]
+        direction TB
+        Host["Host"]
+        Client["Client"]
+        Server["Server"]
+        Host --> Client
+        Client --> Server
+    end
+
+    subgraph A2A_Arch["A2A Architektur (Horizontal)"]
+        direction LR
+        Agent1["Agent 1"]
+        Agent2["Agent 2"]
+        Agent1 <-->|Kommunikation| Agent2
+    end
+
+    subgraph Two_Protocol_Stack["Two-Protocol Stack"]
+        direction TB
+        MCP_Arch
+        A2A_Arch
+        MCP_Arch -.->|Ergänzt| A2A_Arch
+    end
+
+    subgraph KI_Infrastruktur["KI-Agenten-Infrastruktur"]
+        direction LR
+        Two_Protocol_Stack
+        Infrastructure["KI-Agenten-Infrastruktur"]
+        Two_Protocol_Stack --> Infrastructure
+    end
+
+    style MCP_Arch fill:#e1f5fe,stroke:#01579b
+    style A2A_Arch fill:#fff3e0,stroke:#e65100
+    style Two_Protocol_Stack fill:#f3e5f5,stroke:#4a148c
+    style KI_Infrastruktur fill:#e8f5e9,stroke:#1b5e20
