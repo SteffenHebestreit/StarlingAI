@@ -10,6 +10,7 @@ describe("filesystem tools", () => {
     mkdirSync(join(tempDir, "uploads"), { recursive: true });
     writeFileSync(join(tempDir, "uploads", "screenshot.png"), Buffer.from("89504e470d0a1a0a", "hex"));
     writeFileSync(join(tempDir, "workspace-config.jsonc"), "{\n  // pentest shard comment\n  \"enabled\": true\n}\n");
+    writeFileSync(join(tempDir, "protocol-map.mmd"), "graph TD\n  MCP --> Tools\n");
     await import("../tools/filesystem.js");
   });
 
@@ -27,6 +28,23 @@ describe("filesystem tools", () => {
     expect(result.metadata).toMatchObject({
       path: "workspace-config.jsonc",
       ext: ".jsonc",
+    });
+  });
+
+  it("reads Mermaid source artifacts as plain text", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("read_file");
+
+    const result = await tool!.execute({ path: "protocol-map.mmd" }, {
+      sessionId: "session-read-mmd",
+      workspacePath: tempDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("graph TD");
+    expect(result.metadata).toMatchObject({
+      path: "protocol-map.mmd",
+      ext: ".mmd",
     });
   });
 

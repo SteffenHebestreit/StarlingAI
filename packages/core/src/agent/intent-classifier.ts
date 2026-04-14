@@ -148,8 +148,8 @@ export const WORKFLOW_DISCOVERY_STOP_WORDS = new Set<string>([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how",
   "i", "if", "in", "into", "is", "it", "me", "my", "of", "on", "or", "please",
   "show", "that", "the", "these", "this", "to", "use", "using", "with", "write", "you",
-  "das", "der", "die", "ein", "eine", "für", "fuer", "im", "in", "ist", "mit",
-  "oder", "schreib", "schreibe", "und", "von", "wie", "zu", "zum", "zur",
+  "bitte", "das", "der", "die", "dir", "du", "ein", "eine", "für", "fuer", "hier", "im", "in", "ist", "jetzt", "kann", "kannst", "mir", "mit",
+  "oder", "schreib", "schreibe", "thema", "und", "von", "wie", "zu", "zum", "zur",
 ]);
 
 export const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([

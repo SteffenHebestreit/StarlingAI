@@ -10,7 +10,7 @@
  *   --security-opt no-new-privileges
  *   --cap-drop ALL
  *   --pids-limit 64
- *   --network none        unless the agent needs internet (researcher/citation_researcher/source_verifier/browser_agent)
+ *   --network none        unless the agent needs internet (researcher/source_verifier/browser_agent)
  *
  * Heartbeat protocol:
  *   The container entrypoint writes "HEARTBEAT:<ms>\n" to stderr every 15 s.
@@ -72,7 +72,7 @@ export type ContainerDiagnosticEvent =
   | { type: "ready"; bootstrapMs?: number };
 
 // Tools that need internet access — these agents run with --network=bridge
-const NEEDS_INTERNET = new Set(["researcher", "citation_researcher", "source_verifier", "browser_agent"]);
+const NEEDS_INTERNET = new Set(["researcher", "source_verifier", "browser_agent"]);
 
 /** Send SIGTERM, then SIGKILL after grace period, swallowing errors if already gone. */
 function gracefulKill(pid: number | undefined, proc: ReturnType<typeof spawn>): void {

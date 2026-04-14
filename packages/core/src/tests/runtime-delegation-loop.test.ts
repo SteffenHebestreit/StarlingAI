@@ -50,6 +50,7 @@ vi.mock("../audit/logger.js", () => ({
 }));
 
 import { AgentSession, resetSessionsForTests } from "../agent/session.js";
+import { logAudit } from "../audit/logger.js";
 import { runTurn } from "../agent/runtime.js";
 import { resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
@@ -166,6 +167,7 @@ afterEach(() => {
   unregisterTool("run_workflow");
   streamMock.mockReset();
   completeMock.mockClear();
+  vi.mocked(logAudit).mockClear();
   resetSessionsForTests();
 });
 
@@ -1721,6 +1723,138 @@ describe("runtime delegated-loop regressions", () => {
     expect(toolMessages[1]?.content).toContain("Workflow not found: paper_writer");
     expect(toolMessages[2]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
 
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("does not let short German politeness tokens misroute comparison-paper workflow detection", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare MCP and A2A through one reusable comparison paper workflow for AI protocol requests.",
+          task: "Use the reusable comparison paper workflow for the requested MCP and A2A protocol set.",
+        },
+        api_test_suite: {
+          description: "Test and validate API endpoints with structured request/response analysis and documentation.",
+          task: "Use api_integrator to execute HTTP requests against the target API and produce a structured test report.",
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("paper_delegate_polite_1", {
+          agentName: "mission_coordinator",
+          task: "Write a short comparison paper about MCP, A2A, and AG-UI.",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("paper_workflow_search_polite_1", "search_workflows", {
+          query: "paper KI-Protokolle MCP A2A AG-UI",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 3) {
+        return createToolCallStream("paper_workflow_run_polite_1", "run_workflow", {
+          name: "protocol_comparison_paper",
+          workflowType: "scene",
+          params: {
+            topic: "MCP, A2A, and AG-UI",
+          },
+        });
+      }
+      return createTextStream("I used the reusable comparison-paper workflow for the requested protocol paper.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "delegate should not run",
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+      metadata: {
+        workflowMatches: [
+          {
+            name: "protocol_comparison_paper",
+            workflowType: "scene",
+            score: 0.34,
+            matchedTerms: ["paper", "mcp", "a2a"],
+          },
+          {
+            name: "api_test_suite",
+            workflowType: "scene",
+            score: 0.2,
+            matchedTerms: ["api"],
+          },
+        ],
+      },
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow protocol_comparison_paper [scene] completed.\n\nReusable comparison workflow finished.",
+      metadata: {
+        workflowName: "protocol_comparison_paper",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Kannst du mir jetzt bitte ein kurzes Paper zum Thema KI-Protokolle schreiben? Hier im Schwerpunkt MCP, A2A und AG-UI.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+
+    const guardrailAudit = vi.mocked(logAudit).mock.calls.find((call) => (
+      call[0] === "guardrail_flagged"
+      && typeof call[1] === "object"
+      && call[1] !== null
+      && (call[1] as { type?: string }).type === "workflow_catalog_check_rejected"
+    ));
+
+    expect(guardrailAudit).toBeDefined();
+    expect((guardrailAudit?.[1] as { strongestMatch?: { name?: string } }).strongestMatch?.name).toBe("protocol_comparison_paper");
+    expect((guardrailAudit?.[1] as { strongestMatch?: { name?: string } }).strongestMatch?.name).not.toBe("api_test_suite");
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
+    expect(toolMessages[1]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
+
+    freshRuntime.unregisterTool("delegate_to_agent");
     freshRuntime.unregisterTool("search_workflows");
     freshRuntime.unregisterTool("run_workflow");
   });

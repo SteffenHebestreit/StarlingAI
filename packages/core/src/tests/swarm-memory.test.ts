@@ -7,6 +7,7 @@ import {
   readAllFacts,
   appendPartialResult,
   readPartialResults,
+  searchPartialResults,
   formatSharedContextForPrompt,
   extractFactsFromOutput,
   searchSharedFacts,
@@ -86,6 +87,29 @@ describe("Collective Memory — partial results", () => {
     const results = await readPartialResults("sess-r3");
     expect(results[0]!.content).toBe("first");
     expect(results[1]!.content).toBe("second");
+  });
+
+  it("searches partial results by keyword relevance", async () => {
+    await appendPartialResult({
+      sessionId: "sess-r4",
+      taskId: "task_a2a",
+      agentName: "researcher",
+      content: "A2A official specification: https://a2a-protocol.org/latest/specification/ maintained by the A2A Project.",
+      ts: new Date().toISOString(),
+    });
+    await appendPartialResult({
+      sessionId: "sess-r4",
+      taskId: "task_misc",
+      agentName: "researcher",
+      content: "General UI notes unrelated to protocols.",
+      ts: new Date().toISOString(),
+    });
+
+    const matches = await searchPartialResults("sess-r4", "A2A official specification", { maxResults: 2 });
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.taskId).toBe("task_a2a");
+    expect(matches[0]?.agentName).toBe("researcher");
+    expect(matches[0]?.score).toBeGreaterThan(0);
   });
 });
 

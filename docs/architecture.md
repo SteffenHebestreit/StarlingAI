@@ -43,7 +43,7 @@ At the code level this means:
 
 ### 2. Emergenz (The Whole Is More Than the Sum of Its Parts)
 
-Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not need a hard-coded handler for this. It can first reuse a matching workflow such as `protocol_comparison_paper` or `source_grounded_paper_packet` via the workflow catalog, and if no reusable fit exists it can still chain `citation_researcher` → `paper_author` → `source_verifier` dynamically using the hybrid routing layer. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
+Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not need a hard-coded handler for this. It can first reuse a matching workflow such as `protocol_comparison_paper` or `source_grounded_paper_packet` via the workflow catalog, and if no reusable fit exists it can still chain `researcher` → `paper_author` → `source_verifier` dynamically using the hybrid routing layer. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
 
 This emergence is reproducible and auditable: every delegation is recorded in the audit log with inputs, outputs, and token counts. Outcome-weighted routing means the swarm continuously improves its specialist selection without manual tuning.
 

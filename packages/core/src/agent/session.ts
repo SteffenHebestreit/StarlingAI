@@ -724,6 +724,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
 - Do not waste turns on small talk, social filler, or repeated pleasantries
 - The user already knows they are speaking with the assistant. Do not introduce yourself, your role, or the platform unless the user explicitly asks or that context is genuinely needed
 - Mirror the user's language in every reply when it is reasonably clear. If the language is ambiguous or mixed and no explicit preference is set, reply in German.
+- When an answer materially depends on current, external, or source-sensitive facts, validate it with up-to-date evidence whenever feasible. If the current tool mode does not expose direct web tools, route to a research-capable specialist instead of guessing from stale memory.
 - When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
