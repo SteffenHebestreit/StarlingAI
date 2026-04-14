@@ -68,8 +68,8 @@ const SEARCH_STOP_WORDS = new Set<string>([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how",
   "i", "if", "in", "is", "it", "me", "my", "of", "on", "or", "please", "that",
   "the", "these", "this", "to", "use", "using", "with", "you",
-  "das", "der", "die", "ein", "eine", "für", "fuer", "im", "in", "ist", "mit",
-  "oder", "und", "von", "wie", "zu", "zum", "zur",
+  "bitte", "das", "der", "die", "dir", "du", "ein", "eine", "für", "fuer", "hier", "im", "in", "ist", "jetzt", "kann", "kannst", "mir", "mit",
+  "oder", "thema", "und", "von", "wie", "zu", "zum", "zur",
 ]);
 
 function normalizeSearchText(value: string): string {
@@ -85,7 +85,7 @@ function tokenizeSearchText(value: string): string[] {
   return [...new Set(
     normalizeSearchText(value)
       .split(" ")
-      .filter((token) => token.length >= 2 && !SEARCH_STOP_WORDS.has(token))
+      .filter((token) => (token.length >= 3 || /\d/.test(token)) && !SEARCH_STOP_WORDS.has(token))
   )];
 }
 
@@ -93,7 +93,7 @@ function expandTokenVariants(token: string): string[] {
   const variants = new Set<string>([token]);
   if (token.length > 4 && token.endsWith("es")) variants.add(token.slice(0, -2));
   if (token.length > 3 && token.endsWith("s")) variants.add(token.slice(0, -1));
-  return [...variants].filter((value) => value.length >= 2);
+  return [...variants].filter((value) => (value.length >= 3 || /\d/.test(value)));
 }
 
 /** Module-level cache: key = `${model}\x00${document_text}`, value = embedding vector. */
@@ -575,7 +575,7 @@ function buildCoordinatorBootstrapContext(
     "This workflow is already selected. Execute it directly.",
     "Do NOT call search_workflows or run_workflow from inside this bootstrap coordinator.",
     allowedAgents?.length ? `Allowed specialists for this workflow: ${allowedAgents.join(", ")}.` : "",
-    "For source-grounded deliverables, gather evidence with researcher or citation_researcher and publish reusable source-backed findings via share_evidence before drafting.",
+    "For source-grounded deliverables, gather evidence with researcher and publish reusable source-backed findings via share_evidence before drafting.",
     "For source-grounded deliverables, require scored findings with exact source metadata such as title, canonical URL, publisher, dates, validation status, and trust/corroboration scores before those findings are treated as reusable evidence.",
     allowedAgents?.includes("source_verifier")
       ? "Before drafting or final synthesis, run source_verifier to validate the cited sources, export a normalized validated evidence ledger artifact, and mark doubtful or fabricated references as disputed instead of letting them flow upward."
@@ -598,10 +598,6 @@ function sceneRequiresCoordinatorEvidence(scene: SceneSummary): boolean {
     || taskText.includes("share_evidence")
     || (scene.allowedAgents?.some((agentName) => [
       "researcher",
-      "citation_researcher",
-      "research_librarian",
-      "evidence_analyst",
-      "source_verifier",
     ].includes(agentName)) ?? false);
 }
 

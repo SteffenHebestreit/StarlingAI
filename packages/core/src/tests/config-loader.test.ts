@@ -289,6 +289,40 @@ describe("config loader mutable overlay", () => {
     expect(prompt).toContain("Do not invent ad-hoc specialists");
   });
 
+  it("ships writer-style workspace agents that escalate missing evidence instead of drafting placeholders", () => {
+    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
+    const raw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string; tools?: string[] }>;
+    };
+
+    const paperAuthor = raw.subAgents?.["paper_author"];
+    const summarizer = raw.subAgents?.["summarizer"];
+    const meetingBriefingAgent = raw.subAgents?.["meeting_briefing_agent"];
+
+    expect(paperAuthor?.tools).toEqual(expect.arrayContaining(["search_agents", "delegate_to_agent"]));
+    expect(summarizer?.tools).toEqual(expect.arrayContaining(["search_agents", "delegate_to_agent"]));
+    expect(meetingBriefingAgent?.tools).toEqual(expect.arrayContaining(["search_agents", "delegate_to_agent"]));
+
+    expect(paperAuthor?.systemPrompt).toContain("do not draft a placeholder paper or generic report");
+    expect(paperAuthor?.systemPrompt).toContain("evidence must be collected before drafting can begin");
+    expect(summarizer?.systemPrompt).toContain("do not improvise a summary from assumptions");
+    expect(meetingBriefingAgent?.systemPrompt).toContain("do not invent status updates or placeholder conclusions");
+  });
+
+  it("ships coordinator and review prompts that treat missing artifact access as a review-input issue", () => {
+    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
+    const raw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string }>;
+    };
+
+    const missionCoordinator = raw.subAgents?.["mission_coordinator"];
+    const qualitySupervisor = raw.subAgents?.["quality_supervisor"];
+
+    expect(missionCoordinator?.systemPrompt).toContain("If a draft, diagram, or other artifact already exists and the blocker is missing path or read access to that artifact");
+    expect(qualitySupervisor?.systemPrompt).toContain("Use any artifact paths or filenames present in shared facts, partial results, or task context before guessing filenames");
+    expect(qualitySupervisor?.systemPrompt).toContain("Do not recommend new research or fresh evidence gathering when the failure is missing review input rather than missing evidence");
+  });
+
   it("does not reload single-file config when unrelated runtime data files change", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-watch-"));
     const baseConfigPath = join(tempDir, "starlingai.json");

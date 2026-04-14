@@ -19,17 +19,10 @@ const ROUTING_FIXTURE = {
   agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
   subAgents: {
     researcher: {
-      description: "Finds facts, documentation, and public information on the web. Summarizes sources.",
-      capabilities: ["web research", "documentation lookup", "fact finding", "source summarization"],
-      tags: ["research", "web", "docs"],
+      description: "Finds facts, documentation, and public information on the web. Collects citation-grade primary sources for papers and reports. Summarizes sources.",
+      capabilities: ["web research", "documentation lookup", "fact finding", "source summarization", "official source lookup", "citation research"],
+      tags: ["research", "web", "docs", "citations", "sources"],
       tools: ["web_search", "web_fetch"],
-      maxIterations: 8,
-    },
-    citation_researcher: {
-      description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
-      capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
-      tags: ["citations", "research", "sources", "papers"],
-      tools: ["web_search", "web_fetch", "share_finding"],
       maxIterations: 8,
     },
     coder: {
@@ -229,7 +222,7 @@ const ROUTING_FIXTURE = {
 const ROUTING_CASES: Array<{ query: string; expected: string; description: string }> = [
   { query: "search the web for the latest Node.js LTS release notes", expected: "researcher", description: "web research" },
   { query: "find official documentation for the Anthropic API tool_use parameter", expected: "researcher", description: "documentation lookup" },
-  { query: "find official sources and citations for a paper on MCP and A2A", expected: "citation_researcher", description: "citation-grade source lookup" },
+  { query: "find official sources and citations for a paper on MCP and A2A", expected: "researcher", description: "citation-grade source lookup" },
   { query: "write a TypeScript function that parses ISO dates", expected: "coder", description: "code writing" },
   { query: "create a Python script that reads a CSV and computes averages", expected: "data_analyst", description: "code + data (data_analyst wins on CSV keywords)" },
   { query: "explain what this source file does and describe its structure", expected: "code_analyst", description: "code explanation" },

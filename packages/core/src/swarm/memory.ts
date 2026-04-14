@@ -31,6 +31,69 @@ const _results = new Map<string, PartialResult[]>();
 const _messages = new Map<string, AgentMessage[]>();
 const _factEmbeddingCache = new Map<string, { signature: string; vectors: Array<{ key: string; value: string; vector: Float32Array }> }>();
 
+const SEARCH_TOKEN_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "aktuell",
+  "aktuelle",
+  "collect",
+  "current",
+  "das",
+  "dem",
+  "den",
+  "der",
+  "die",
+  "ein",
+  "eine",
+  "einem",
+  "einen",
+  "for",
+  "find",
+  "gather",
+  "im",
+  "in",
+  "latest",
+  "mit",
+  "of",
+  "on",
+  "recent",
+  "sammle",
+  "search",
+  "summarize",
+  "the",
+  "to",
+  "und",
+  "use",
+  "vom",
+  "von",
+  "with",
+  "zum",
+  "zur",
+  "zitierfahige",
+  "zitierfaehige",
+]);
+
+const SEARCH_TOKEN_ALIASES: Record<string, string> = {
+  cases: "case",
+  docs: "documentation",
+  implementierung: "implementation",
+  implementierungen: "implementation",
+  implementations: "implementation",
+  papers: "paper",
+  protokoll: "protocol",
+  protokolle: "protocol",
+  protocols: "protocol",
+  quellen: "source",
+  quelle: "source",
+  repositories: "repository",
+  sources: "source",
+  spezifikation: "specification",
+  spezifikationen: "specification",
+  specifications: "specification",
+  standards: "standard",
+};
+
 // ── Redis client (lazy, reuses REDIS_URL) ────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,6 +129,10 @@ export interface PartialResult {
   agentName: string;
   content: string;
   ts: string;
+}
+
+export interface PartialResultMatch extends PartialResult {
+  score: number;
 }
 
 export interface SharedFactMatch {
@@ -171,14 +238,18 @@ export async function searchSharedFacts(
   if (entries.length === 0) return [];
 
   const maxResults = Math.max(1, Math.min(10, opts.maxResults ?? 5));
+  const keywordMatches = keywordSearchSharedFacts(entries, trimmedQuery, maxResults);
 
   if (opts.provider && opts.embeddingModel) {
     try {
       const cache = await buildFactEmbeddingCache(sessionId, entries, opts.provider, opts.embeddingModel);
       const [queryVector] = await opts.provider.embed([trimmedQuery], opts.embeddingModel);
-      if (!queryVector) return [];
+      if (!queryVector) {
+        log.warn({ query: trimmedQuery }, "Semantic shared-fact search returned no query vector — falling back to keyword match");
+        return keywordMatches;
+      }
 
-      return cache
+      const semanticMatches = cache
         .map((entry) => ({
           key: entry.key,
           value: entry.value,
@@ -186,12 +257,14 @@ export async function searchSharedFacts(
         }))
         .sort((left, right) => right.score - left.score)
         .slice(0, maxResults);
+
+      return mergeSharedFactMatches(semanticMatches, keywordMatches, maxResults);
     } catch (err) {
       log.warn({ err, query: trimmedQuery }, "Semantic shared-fact search failed — falling back to keyword match");
     }
   }
 
-  return keywordSearchSharedFacts(entries, trimmedQuery, maxResults);
+  return keywordMatches;
 }
 
 // ── Partial results API ──────────────────────────────────────────────────────
@@ -245,6 +318,33 @@ export async function readPartialResults(sessionId: string): Promise<PartialResu
     }
   }
   return [...(_results.get(sessionId) ?? [])];
+}
+
+export async function searchPartialResults(
+  sessionId: string,
+  query: string,
+  opts: { maxResults?: number } = {},
+): Promise<PartialResultMatch[]> {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return [];
+
+  const results = await readPartialResults(sessionId);
+  if (results.length === 0) return [];
+
+  const maxResults = Math.max(1, Math.min(10, opts.maxResults ?? 5));
+  const tokens = tokenizeSearchText(trimmedQuery);
+
+  return results
+    .map((result) => {
+      const haystack = `${result.agentName} ${result.taskId} ${result.content}`;
+      return {
+        ...result,
+        score: scoreTokenOverlap(tokens, haystack),
+      };
+    })
+    .filter((result) => result.score > 0)
+    .sort((left, right) => right.score - left.score || right.ts.localeCompare(left.ts))
+    .slice(0, maxResults);
 }
 
 // ── Direct agent messages ───────────────────────────────────────────────────
@@ -446,16 +546,76 @@ async function buildFactEmbeddingCache(
 }
 
 function keywordSearchSharedFacts(entries: Array<[string, string]>, query: string, maxResults: number): SharedFactMatch[] {
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tokens = tokenizeSearchText(query);
   return entries
     .map(([key, value]) => {
-      const haystack = `${key} ${value}`.toLowerCase();
-      const matched = tokens.filter((token) => haystack.includes(token)).length;
-      return { key, value, score: tokens.length > 0 ? matched / tokens.length : 0 };
+      return { key, value, score: scoreTokenOverlap(tokens, `${key} ${value}`) };
     })
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, maxResults);
+}
+
+function mergeSharedFactMatches(
+  semanticMatches: SharedFactMatch[],
+  keywordMatches: SharedFactMatch[],
+  maxResults: number,
+): SharedFactMatch[] {
+  const merged = new Map<string, SharedFactMatch>();
+
+  for (const match of [...semanticMatches, ...keywordMatches]) {
+    const existing = merged.get(match.key);
+    if (!existing || match.score > existing.score) {
+      merged.set(match.key, match);
+    }
+  }
+
+  return [...merged.values()]
+    .sort((left, right) => right.score - left.score)
+    .slice(0, maxResults);
+}
+
+function scoreTokenOverlap(queryTokens: string[], haystack: string): number {
+  if (queryTokens.length === 0) return 0;
+
+  const haystackTokens = new Set(tokenizeSearchText(haystack));
+  let matched = 0;
+  for (const token of queryTokens) {
+    if (haystackTokens.has(token)) {
+      matched += 1;
+    }
+  }
+
+  return matched / queryTokens.length;
+}
+
+function tokenizeSearchText(text: string): string[] {
+  const normalized = normalizeSearchText(text);
+  if (!normalized) return [];
+
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const token of normalized.split(" ")) {
+    if (!token) continue;
+    const canonicalToken = SEARCH_TOKEN_ALIASES[token] ?? token;
+    if (SEARCH_TOKEN_STOPWORDS.has(canonicalToken)) continue;
+    if (canonicalToken.length === 1 && !/\d/.test(canonicalToken)) continue;
+    if (seen.has(canonicalToken)) continue;
+    seen.add(canonicalToken);
+    tokens.push(canonicalToken);
+  }
+  return tokens;
+}
+
+function normalizeSearchText(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[_/\\-]+/g, " ")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {

@@ -243,26 +243,6 @@
         "write_file"
       ]
     },
-    "citation_researcher": {
-      "description": "Finds citation-grade primary sources for papers, briefs, and technical reports.",
-      "capabilities": ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
-      "tags": ["citations", "research", "papers", "sources", "docs"],
-      "model": {
-        "primary": "lmstudio/qwen3.5-4b",
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 6,
-      "systemPrompt": "You gather citation-grade sources. Prefer official specifications, maintainer-authored repositories, standards documents, release notes, vendor documentation, academic papers, and government or institutional publications over secondary summaries. Open every source before citing it. For each useful source, capture title, canonical URL, publisher or maintainer, publication or last-updated date when available, and a one-line relevance note. When a claim is important, try to capture an independent confirming source as well; if you cannot, mark the source as single-source evidence. Publish each source via share_finding in a structured form that downstream writers can cite. If an authoritative source cannot be found, say that explicitly instead of guessing.",
-      "tools": [
-        "web_search",
-        "web_fetch",
-        "read_shared_facts",
-        "share_finding",
-        "read_file",
-        "write_file"
-      ]
-    },
     "code_analyst": {
       "description": "Code analysis specialist for workspace inspection and bug diagnosis.",
       "capabilities": ["code reading", "architecture review"],
@@ -904,8 +884,8 @@
     },
     "source_backed_paper": {
       "description": "Produce a paper or report grounded in official sources and verified citations.",
-      "task": "Use document_intake first when the input includes attached reports or files, citation_researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
-      "allowedAgents": ["document_intake", "citation_researcher", "evidence_analyst", "paper_author", "source_verifier", "researcher", "summarizer", "qa_guard"],
+      "task": "Use document_intake first when the input includes attached reports or files, researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "allowedAgents": ["document_intake", "evidence_analyst", "paper_author", "source_verifier", "researcher", "summarizer", "qa_guard"],
       "params": {
         "outputStyle": {
           "description": "Requested style or citation format",
@@ -915,8 +895,8 @@
     },
     "verified_research_brief": {
       "description": "Produce a concise fact-checked research brief with named sources and explicit unresolved uncertainties.",
-      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery, citation_researcher for authoritative references when needed, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
-      "allowedAgents": ["document_intake", "researcher", "citation_researcher", "evidence_analyst", "source_verifier", "summarizer", "qa_guard"],
+      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery and authoritative references, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
+      "allowedAgents": ["document_intake", "researcher", "evidence_analyst", "source_verifier", "summarizer", "qa_guard"],
       "params": {
         "audience": {
           "description": "Intended audience for the brief",

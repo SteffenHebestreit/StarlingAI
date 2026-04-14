@@ -8,6 +8,7 @@ const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
 const ALLOWED_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".jsonc", ".jsonl", ".yaml", ".yml", ".toml", ".env.example",
+  ".mmd",
   ".ts", ".tsx", ".js", ".jsx", ".py", ".sh", ".bash",
   ".html", ".css", ".sql", ".xml", ".csv", ".log",
 ]);
@@ -22,6 +23,7 @@ const MIME_TYPES: Record<string, string> = {
   ".jsonc": "application/json; charset=utf-8",
   ".log": "text/plain; charset=utf-8",
   ".m4a": "audio/mp4",
+  ".mmd": "text/vnd.mermaid; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
   ".mp3": "audio/mpeg",
   ".pdf": "application/pdf",
