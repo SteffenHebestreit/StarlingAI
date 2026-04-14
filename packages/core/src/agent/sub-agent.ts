@@ -65,8 +65,13 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   create_ephemeral_agent: 1,
 };
 
+const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
+  delegate_to_agent: 6,
+};
+
 const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
   "computer_list_nodes",
+  "computer_list_sessions",
   "computer_session_start",
   "computer_session_attach",
   "computer_list_windows",
@@ -92,6 +97,21 @@ const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "parallel_delegate",
   "run_task_graph",
 ]);
+
+const WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES = new Set<string>([
+  "search_workflows",
+  "share_finding",
+]);
+
+function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
+  if (isCoordinatorAgent) {
+    const override = COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES[toolName];
+    if (override !== undefined) {
+      return override;
+    }
+  }
+  return SUB_AGENT_PER_TOOL_CAPS[toolName];
+}
 
 function isComputerObservationOnlyTask(task: string): boolean {
   const normalized = task.toLowerCase();
@@ -217,6 +237,20 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
     `You may use only these tools in this run: ${availableTools.join(", ")}`,
     "The runtime provides the real tool schemas separately. Use those exact tool definitions for names and parameters. Do not invent or paraphrase tool names.",
   ];
+
+  const hasDirectWebResearch = availableTools.includes("web_search") || availableTools.includes("web_fetch");
+  const canSearchForSpecialists = availableTools.includes("search_agents");
+  const canDelegateToSpecialists = availableTools.includes("delegate_to_agent");
+
+  if (hasDirectWebResearch) {
+    guidance.push("When the task depends on current, external, or source-sensitive facts, validate them with up-to-date web evidence whenever feasible instead of relying only on prior knowledge.");
+  } else if (canSearchForSpecialists && canDelegateToSpecialists) {
+    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents and then delegate_to_agent to route the work to a research-capable specialist before answering.");
+  } else if (canSearchForSpecialists) {
+    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents to identify a research-capable specialist instead of guessing.");
+  } else if (canDelegateToSpecialists) {
+    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, delegate to a research-capable specialist instead of guessing.");
+  }
 
   if (availableTools.includes("search_agents")) {
     guidance.push("If the right specialist is not obvious, call search_agents before delegating.");
@@ -482,6 +516,7 @@ function buildSubAgentToolAuditPayload(params: {
   result?: ToolResult;
   errorText?: string;
   resultPreview?: string;
+  successOverride?: boolean;
   cachedResult?: boolean;
   skippedReason?: string;
 }): Record<string, unknown> {
@@ -498,7 +533,7 @@ function buildSubAgentToolAuditPayload(params: {
   if (params.skippedReason) payload["skippedReason"] = params.skippedReason;
 
   if (params.phase === "done") {
-    const success = params.result ? params.result.success : !params.errorText;
+    const success = params.result ? params.result.success : (params.successOverride ?? !params.errorText);
     payload["success"] = success;
 
     const error = truncateToolAuditText(params.result?.error ?? params.errorText, 220);
@@ -515,7 +550,7 @@ function buildSubAgentToolAuditPayload(params: {
     const preview = params.resultPreview
       ?? (params.result?.success
         ? truncateToolAuditText(params.result.output)
-        : truncateToolAuditText(params.result?.error ?? params.errorText));
+        : truncateToolAuditText(params.result?.error ?? params.errorText ?? params.result?.output));
     if (preview) payload["resultPreview"] = preview;
   }
 
@@ -633,6 +668,40 @@ function looksLikeFailureResult(result: string): boolean {
   }
 
   return looksLikePlanningOnlyResult(preview);
+}
+
+function maybePreferWorkflowOutput(result: string, workflowOutput: string | null, toolNames: string[]): string {
+  const normalizedWorkflowOutput = workflowOutput?.trim();
+  if (!normalizedWorkflowOutput) {
+    return result;
+  }
+
+  if (!toolNames.includes("run_workflow")) {
+    return result;
+  }
+
+  if (!toolNames.every((toolName) => (
+    toolName === "run_workflow"
+    || WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES.has(toolName)
+  ))) {
+    return result;
+  }
+
+  const normalizedResult = result.trim();
+  if (!normalizedResult) {
+    return normalizedWorkflowOutput;
+  }
+
+  if (normalizedResult === normalizedWorkflowOutput) {
+    return result;
+  }
+
+  const workflowHeader = normalizedWorkflowOutput.split(/\r?\n/, 1)[0]?.trim();
+  if (workflowHeader && normalizedResult.includes(workflowHeader)) {
+    return result;
+  }
+
+  return normalizedWorkflowOutput;
 }
 
 function hasDeliverableArtifact(artifacts: Record<string, unknown>[]): boolean {
@@ -1017,9 +1086,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     const toolNames: string[] = [];
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
-    const lastToolCallSig = new Map<string, { args: string; result: string }>();
+    const lastToolCallSig = new Map<string, { args: string; result: string; success: boolean }>();
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
+    let workflowPassthroughOutput: string | null = null;
 
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
@@ -1070,6 +1140,181 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         },
         { sessionId: subSessionId, severity },
       );
+    };
+
+    const rescueSanitizedEmptyResult = async (rawResult: string): Promise<string> => {
+      const visibleResult = stripHallucinatedToolTags(rawResult);
+      if (visibleResult || toolCount === 0 || signal?.aborted) {
+        return visibleResult || rawResult;
+      }
+
+      try {
+        log.warn(
+          { agentName: opts.agentName, iterations, toolCalls: toolCount },
+          "Sub-agent final output became empty after stripping hallucinated tool markup — forcing synthesis rescue",
+        );
+        const rescueMessages: LLMMessage[] = [
+          {
+            role: "system",
+            content: systemPrompt +
+              "\n\nYour previous final answer contained only invalid tool-call markup and became empty after sanitization. " +
+              "DO NOT call any more tools. Produce your COMPLETE final answer now from the evidence already gathered in the conversation. " +
+              "Include the key facts, URLs, and extracts you retrieved.",
+          },
+          ...history,
+        ];
+        const rescueResponse = await provider.complete(rescueMessages, [], signal);
+        usage.promptTokens += rescueResponse.usage.promptTokens;
+        usage.completionTokens += rescueResponse.usage.completionTokens;
+        usage.totalTokens += rescueResponse.usage.totalTokens;
+
+        if (rescueResponse.tool_calls.length === 0) {
+          const rescued = stripHallucinatedToolTags(normalizeSubAgentOutput(rescueResponse.content));
+          if (rescued) {
+            log.info(
+              { agentName: opts.agentName, rescuedLength: rescued.length },
+              "Sanitized-empty output rescue succeeded",
+            );
+            return rescued;
+          }
+        }
+      } catch (rescueErr) {
+        log.warn({ rescueErr, agentName: opts.agentName }, "Sanitized-empty output rescue failed");
+      }
+
+      return "Sub-agent produced no final response.";
+    };
+
+    const recoverNoResponseAfterSubstantiveWork = (rawResult: string): { result: string; forcedOutcome: SubAgentOutcome | null } => {
+      if (rawResult !== "Sub-agent produced no final response.") {
+        return { result: rawResult, forcedOutcome: null };
+      }
+
+      const interruptedOutcome = classifyInterruptedOutcome({
+        successfulToolCount,
+        artifacts,
+        swarmState: opts.swarmState,
+      });
+      if (interruptedOutcome !== "partial") {
+        return { result: rawResult, forcedOutcome: null };
+      }
+
+      const recovered = buildInterruptedSubAgentOutput({
+        agentName: opts.agentName,
+        reason: "produced no final response after substantive work.",
+        swarmState: opts.swarmState,
+        toolNames,
+        toolCount,
+        iterations,
+        artifacts,
+      });
+      log.warn(
+        { agentName: opts.agentName, toolCount, successfulToolCount, iterations },
+        "Sub-agent completed substantive work but produced no final narrative — returning partial progress summary",
+      );
+      return { result: recovered, forcedOutcome: "partial" };
+    };
+
+    const attemptTimeoutSynthesis = async (): Promise<SubAgentRunResult | null> => {
+      if (!turnTimeoutMs || toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
+        return null;
+      }
+
+      const graceTimeoutMs = Math.max(1_500, Math.min(5_000, Math.round(turnTimeoutMs * 0.1)));
+      const graceAbort = new AbortController();
+      const graceTimer = setTimeout(() => graceAbort.abort(), graceTimeoutMs);
+      const graceSignal = opts.signal
+        ? AbortSignal.any([opts.signal, graceAbort.signal])
+        : graceAbort.signal;
+
+      try {
+        const synthMessages: LLMMessage[] = [
+          {
+            role: "system",
+            content: systemPrompt +
+              "\n\nYour execution time budget has expired. DO NOT call any more tools. " +
+              "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
+              "Include the key facts, URLs, and evidence you already retrieved. " +
+              "Do NOT mention the timeout unless the prior evidence itself requires it.",
+          },
+          ...history,
+        ];
+        const synthResponse = await provider.complete(synthMessages, [], graceSignal);
+        usage.promptTokens += synthResponse.usage.promptTokens;
+        usage.completionTokens += synthResponse.usage.completionTokens;
+        usage.totalTokens += synthResponse.usage.totalTokens;
+
+        if (synthResponse.tool_calls.length > 0) {
+          return null;
+        }
+
+        let result = normalizeSubAgentOutput(synthResponse.content);
+        if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+        result = await rescueSanitizedEmptyResult(result);
+        const recovered = recoverNoResponseAfterSubstantiveWork(result);
+        result = recovered.result;
+        result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+        if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+
+        const outputScan = scanOutput(result);
+        if (!outputScan.safe && outputScan.redacted) {
+          logAudit(
+            "output_redacted",
+            { agentName: opts.agentName, types: outputScan.detectedTypes },
+            { sessionId: subSessionId, severity: "warn" }
+          );
+          result = outputScan.redacted;
+        }
+
+        const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
+          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
+            ? "partial"
+            : "success");
+        const stats = buildStats("completed", semanticOutcome);
+        const suspicious = rejectSuspiciousNoToolOutput(
+          opts,
+          stats,
+          result,
+          turnTimeoutMs,
+          runStartedAt,
+        );
+        if (suspicious) {
+          return suspicious;
+        }
+
+        appendOutcome(opts.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: semanticOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+        });
+        logSubAgentCompletionAudit(
+          stats,
+          result,
+          { synthesizedAfterTimeout: true, timeoutMs: turnTimeoutMs, timeoutGraceMs: graceTimeoutMs },
+          semanticOutcome === "success" ? "info" : "warn",
+        );
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "completed",
+          iteration: iterations,
+          summary: `Completed delegated work in ${opts.agentName} after timeout-aware synthesis.`,
+        });
+        return withArtifacts({ output: result, stats });
+      } catch (synthErr) {
+        log.warn({ synthErr, agentName: opts.agentName }, "Timeout synthesis failed");
+        return null;
+      } finally {
+        clearTimeout(graceTimer);
+      }
     };
 
     const emitSubAgentToolAudit = (params: Parameters<typeof buildSubAgentToolAuditPayload>[0]): void => {
@@ -1293,6 +1538,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     while (iterations < maxIterations) {
       if (signal?.aborted) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
+          const synthesized = await attemptTimeoutSynthesis();
+          if (synthesized) {
+            return synthesized;
+          }
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,
             artifacts,
@@ -1362,10 +1611,29 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       // When running low on iterations, take increasingly aggressive
       // measures to force the agent to synthesize instead of tool-calling.
       const remaining = maxIterations - iterations;
+      const elapsedMs = Date.now() - runStartedAt;
+      const synthesisBufferMs = turnTimeoutMs
+        ? Math.max(3_000, Math.min(10_000, Math.round(turnTimeoutMs * 0.15)))
+        : undefined;
+      const timeRemainingMs = turnTimeoutMs ? Math.max(0, turnTimeoutMs - elapsedMs) : undefined;
+      const timeBudgetCritical = toolCount > 0
+        && synthesisBufferMs !== undefined
+        && timeRemainingMs !== undefined
+        && timeRemainingMs <= synthesisBufferMs;
       let effectiveSystemPrompt = systemPrompt;
       let effectiveTools = tools;
 
-      if (remaining === 1 && toolCount > 0) {
+      if (timeBudgetCritical) {
+        effectiveTools = [];
+        effectiveSystemPrompt +=
+          `\n\n⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
+          "NO MORE TOOLS AVAILABLE. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
+          "Include the key facts, URLs, and extracts you already retrieved.";
+        log.info(
+          { agentName: opts.agentName, iterations, toolCount, timeRemainingMs, synthesisBufferMs },
+          "Time budget nearly exhausted — stripping tools to force synthesis",
+        );
+      } else if (remaining === 1 && toolCount > 0) {
         // HARD: last iteration — strip ALL tools so the LLM *cannot* make
         // any more tool calls and is forced to produce a text answer.
         effectiveTools = [];
@@ -1403,6 +1671,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         response = await provider.complete(messages, effectiveTools, signal);
       } catch (err) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
+          const synthesized = await attemptTimeoutSynthesis();
+          if (synthesized) {
+            return synthesized;
+          }
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,
             artifacts,
@@ -1535,6 +1807,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           }
         }
 
+        result = await rescueSanitizedEmptyResult(result);
+        const recovered = recoverNoResponseAfterSubstantiveWork(result);
+        result = recovered.result;
+        result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+
         // Scan for secrets before returning to parent session
         const outputScan = scanOutput(result);
         if (!outputScan.safe && outputScan.redacted) {
@@ -1546,9 +1823,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           result = outputScan.redacted;
         }
 
-        const semanticOutcome: SubAgentOutcome = /no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-          ? "partial"
-          : "success";
+        const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
+          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
+            ? "partial"
+            : "success");
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -1593,7 +1871,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           iteration: iterations,
           summary: `Completed delegated work in ${opts.agentName}.`,
         });
-        return withArtifacts({ output: stripHallucinatedToolTags(result), stats });
+        return withArtifacts({ output: result, stats });
       }
 
       // Process tool calls — repair any mangled tool names first
@@ -1664,7 +1942,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
         // Per-tool call cap — prevent wasteful loops on a single tool
         const priorCount = perToolCallCount.get(tc.name) ?? 0;
-        const toolCap = SUB_AGENT_PER_TOOL_CAPS[tc.name];
+        const toolCap = resolveSubAgentToolCap(tc.name, isCoordinatorAgent);
         if (toolCap !== undefined && priorCount >= toolCap) {
           log.warn(
             { agentName: opts.agentName, tool: tc.name, count: priorCount, cap: toolCap },
@@ -1698,6 +1976,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
           );
+          const cachedNote = prev.success
+            ? "[Note: This is a cached result — you already called this tool with identical arguments. Move on to the next step.]"
+            : "[Note: This is a cached failed result — you already called this tool with identical arguments and it did not succeed. Do NOT call it again. Work from this partial result or report the blocker explicitly.]";
           emitSubAgentToolAudit({
             agentName: opts.agentName,
             tool: tc.name,
@@ -1705,11 +1986,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             args: tc.arguments,
             toolCallId: tc.id,
             resultPreview: prev.result,
+            successOverride: prev.success,
             cachedResult: true,
           });
           toolResults.push({
             role: "tool",
-            content: prev.result + "\n\n[Note: This is a cached result — you already called this tool with identical arguments. Move on to the next step.]",
+            content: `${prev.result}\n\n${cachedNote}`,
             tool_call_id: tc.id,
           });
           continue;
@@ -1724,9 +2006,16 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           toolCallId: tc.id,
           result,
         });
-        const resultContent = result.success ? result.output : `Error: ${result.error ?? "unknown"}`;
+        const resultContent = result.success
+          ? result.output
+          : (result.error?.trim()
+              ? `Error: ${result.error}`
+              : (result.output.trim() || "Error: unknown"));
         if (result.success) {
           successfulToolCount += 1;
+        }
+        if (tc.name === "run_workflow" && result.success) {
+          workflowPassthroughOutput = result.output;
         }
         if (
           response.tool_calls.length === 1
@@ -1736,7 +2025,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           decisiveDirectRemoteToolResult = result;
           decisiveDirectRemoteToolName = tc.name;
         }
-        lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent });
+        lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent, success: result.success });
 
         // When web_search reports degraded/hard-blocked, remove it from the
         // tools array so the LLM cannot call it on subsequent iterations.
@@ -1895,6 +2184,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             }
           }
 
+          result = await rescueSanitizedEmptyResult(result);
+          result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+
           const outputScan = scanOutput(result);
           if (!outputScan.safe && outputScan.redacted) {
             logAudit(
@@ -1945,7 +2237,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             iteration: iterations,
             summary: `Completed delegated work in ${opts.agentName}.`,
           });
-          return withArtifacts({ output: stripHallucinatedToolTags(result), stats });
+          return withArtifacts({ output: result, stats });
         }
       } catch (synthErr) {
         log.warn({ synthErr, agentName: opts.agentName }, "Synthesis pass after max iterations failed");
@@ -1965,7 +2257,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     });
 
     const completedFromArtifact = hasDeliverableArtifact(artifacts);
-    const maxIterationsOutput = completedFromArtifact
+    const maxIterationsOutput = workflowPassthroughOutput
+      ? maybePreferWorkflowOutput(workflowPassthroughOutput, workflowPassthroughOutput, toolNames)
+      : completedFromArtifact
       ? buildArtifactCompletionOutput({
           agentName: opts.agentName,
           maxIterations,

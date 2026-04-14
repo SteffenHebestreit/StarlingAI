@@ -111,7 +111,11 @@ describe("sub-agent research tool caps", () => {
         workspacePath: "/workspace",
       });
 
+      const messages = completeMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+      const systemMessage = messages?.find((message) => message.role === "system")?.content ?? "";
+
       expect(result.output).toContain("Research complete.");
+      expect(systemMessage).toContain("When the task depends on current, external, or source-sensitive facts, validate them with up-to-date web evidence whenever feasible instead of relying only on prior knowledge.");
       expect(searchQueries).toHaveLength(6);
       expect(fetchUrls).toHaveLength(6);
       expect(result.stats.toolCount).toBe(12);
@@ -119,6 +123,332 @@ describe("sub-agent research tool caps", () => {
     } finally {
       unregisterTool("web_search");
       unregisterTool("web_fetch");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns partial progress instead of a no-response sentinel after substantive tool work", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        mission_coordinator: {
+          description: "Coordinator empty-final-response rescue test agent",
+          systemPrompt: "Coordinate evidence gathering and publish findings.",
+          tools: ["delegate_to_agent", "share_finding"],
+          maxIterations: 6,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const responses = [
+      buildToolCallResponse("delegate-1", "delegate_to_agent", { agentName: "researcher", task: "Gather sources" }),
+      buildToolCallResponse("finding-1", "share_finding", { key: "mcp_protocol_overview", value: "Collected source metadata." }),
+      {
+        content: "",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+      {
+        content: "",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate work to another agent.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "Delegated result from researcher — PARTIAL PROGRESS." };
+      },
+    });
+    registerTool({
+      name: "share_finding",
+      description: "Publish a finding.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "Finding published to shared session memory." };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Coordinate protocol research and publish a finding.",
+        parentSessionId: "parent-empty-final-rescue",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.output).not.toBe("Sub-agent produced no final response.");
+      expect(result.output).toContain("Partial progress before interruption:");
+      expect(result.output).toContain("delegate_to_agent");
+      expect(result.output).toContain("share_finding");
+      expect(result.stats.outcome).toBe("partial");
+      expect(result.stats.terminalState).toBe("completed");
+    } finally {
+      unregisterTool("delegate_to_agent");
+      unregisterTool("share_finding");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets coordinator agents use delegate_to_agent more than the generic cap", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        mission_coordinator: {
+          description: "Coordinator delegation cap override test agent",
+          systemPrompt: "Coordinate the workflow by delegating each stage.",
+          tools: ["delegate_to_agent", "run_task_graph"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const responses = [
+      buildToolCallResponse("delegate-1", "delegate_to_agent", { agentName: "researcher", task: "Gather MCP evidence" }),
+      buildToolCallResponse("delegate-2", "delegate_to_agent", { agentName: "researcher", task: "Collect citation-grade MCP sources" }),
+      buildToolCallResponse("delegate-3", "delegate_to_agent", { agentName: "researcher", task: "Summarize MCP publication details" }),
+      buildToolCallResponse("delegate-4", "delegate_to_agent", { agentName: "paper_author", task: "Draft the protocol comparison paper" }),
+      buildToolCallResponse("delegate-5", "delegate_to_agent", { agentName: "quality_supervisor", task: "Review the protocol comparison paper" }),
+      {
+        content: "Workflow completed after coordinator handoffs.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "Workflow completed after coordinator handoffs.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const executedTasks: string[] = [];
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate work to another agent.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        executedTasks.push(String(args.task ?? ""));
+        return { success: true, output: `Delegated: ${String(args.task ?? "")}` };
+      },
+    });
+    registerTool({
+      name: "run_task_graph",
+      description: "Present only so the agent is classified as a coordinator.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "graph complete" };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Coordinate a source-grounded protocol paper workflow.",
+        parentSessionId: "parent-coordinator-cap",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.output).toContain("Workflow completed after coordinator handoffs.");
+      expect(executedTasks).toHaveLength(5);
+      expect(result.stats.toolCount).toBe(5);
+      expect(result.output).not.toContain("has been called 3 times this run");
+    } finally {
+      unregisterTool("delegate_to_agent");
+      unregisterTool("run_task_graph");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes through completed workflow output when discovery plus run_workflow are the only tools used", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        mission_coordinator: {
+          description: "Workflow passthrough test agent",
+          systemPrompt: "Find a reusable workflow, run it, and return the result.",
+          tools: ["search_workflows", "run_workflow"],
+          maxIterations: 4,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const workflowOutput = "Workflow protocol_comparison_paper [scene] completed via mission_coordinator bootstrap.\n\n# Vergleich von KI-Protokollen: MCP, A2A und AG-UI\n\nAusgearbeiteter Paper-Inhalt.";
+    const responses = [
+      buildToolCallResponse("workflow-search-1", "search_workflows", { query: "paper MCP A2A AG-UI" }),
+      buildToolCallResponse("workflow-run-1", "run_workflow", { name: "protocol_comparison_paper", workflowType: "scene" }),
+      {
+        content: "Das Paper zu KI-Protokollen mit den Schwerpunkten MCP, A2A und AG-UI wurde erfolgreich erstellt. Hier ist eine Zusammenfassung der wichtigsten Erkenntnisse.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "Workflow matches for paper MCP A2A AG-UI: protocol_comparison_paper [scene]" };
+      },
+    });
+    registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: workflowOutput,
+          metadata: {
+            workflowName: "protocol_comparison_paper",
+            workflowType: "scene",
+            blocked: false,
+          },
+        };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Erstelle ein kurzes Paper zu KI-Protokollen.",
+        parentSessionId: "parent-workflow-passthrough",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.output).toBe(workflowOutput);
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.stats.toolCount).toBe(2);
+    } finally {
+      unregisterTool("search_workflows");
+      unregisterTool("run_workflow");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes through completed workflow output when run_workflow is followed by share_finding", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        mission_coordinator: {
+          description: "Workflow passthrough with finding publication test agent",
+          systemPrompt: "Find a reusable workflow, run it, publish one finding, and return the result.",
+          tools: ["search_workflows", "run_workflow", "share_finding"],
+          maxIterations: 5,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const workflowOutput = "Workflow protocol_comparison_paper [scene] completed via mission_coordinator bootstrap.\n\n# KI-Protokolle im Vergleich: MCP, A2A und AG-UI\n\nVollstaendiger Paper-Inhalt mit Quellen und Trade-offs.";
+    const responses = [
+      buildToolCallResponse("workflow-search-2", "search_workflows", { query: "paper MCP A2A AG-UI" }),
+      buildToolCallResponse("workflow-run-2", "run_workflow", { name: "protocol_comparison_paper", workflowType: "scene" }),
+      buildToolCallResponse("workflow-findings-2", "share_finding", {
+        key: "ai_protocols_paper_complete",
+        value: "Paper complete",
+      }),
+      {
+        content: "Das Paper wurde erfolgreich erstellt. Hier ist eine kurze Zusammenfassung der wichtigsten Punkte.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "Workflow matches for paper MCP A2A AG-UI: protocol_comparison_paper [scene]" };
+      },
+    });
+    registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: workflowOutput,
+          metadata: {
+            workflowName: "protocol_comparison_paper",
+            workflowType: "scene",
+            blocked: false,
+          },
+        };
+      },
+    });
+    registerTool({
+      name: "share_finding",
+      description: "Publish a validated finding.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "Finding published to shared session memory." };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Erstelle ein kurzes Paper zu KI-Protokollen und publiziere den Abschlussfund.",
+        parentSessionId: "parent-workflow-share-finding",
+        workspacePath: "/workspace",
+      });
+
+      expect(result.output).toBe(workflowOutput);
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.stats.toolCount).toBe(3);
+    } finally {
+      unregisterTool("search_workflows");
+      unregisterTool("run_workflow");
+      unregisterTool("share_finding");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -45,7 +45,7 @@ describe("workspace catalog integrity", () => {
     expect(catalog.scenes["code_review"]?.description).toBeTruthy();
     expect(catalog.scenes["api_test_suite"]?.description).toBeTruthy();
     expect(catalog.scenes["multi_channel_broadcast"]?.description).toBeTruthy();
-    expect(catalog.scenes["protocol_comparison_paper"]?.description).toBeTruthy();
+    expect(catalog.scenes["source_backed_paper"]?.description).toBeTruthy();
   });
 
   it("ensures every scene allowedAgents entry points to a defined sub-agent", () => {

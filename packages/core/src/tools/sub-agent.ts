@@ -18,7 +18,7 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
-import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact } from "../swarm/memory.js";
+import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults } from "../swarm/memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
@@ -42,6 +42,8 @@ interface HeuristicRoutingSignals {
   looksFresh: boolean;
   looksSourceHeavy: boolean;
   looksDocumentDeliverable: boolean;
+  looksResearchTask: boolean;
+  looksSourceGroundedDocumentWorkflow: boolean;
   looksWebTask: boolean;
   looksArtifactRender: boolean;
   looksGroundedInput: boolean;
@@ -67,6 +69,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now|last year|this year)\b/i.test(normalized);
   const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
   const looksDocumentDeliverable = /\b(report|reports|brief|briefs|paper|papers|summary|summaries|presentation|writeup|write-ups?|document|documents|whitepaper|white paper|essay|bericht|berichte|aufsatz)\b/i.test(normalized);
+  const looksResearchTask = /\b(research|researching|researcher|recherche|recherchiere|forschung|investigate|investigation)\b/i.test(normalized);
   const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
   const looksArtifactRender = /\b(create|build|generate|render|produce|turn|convert|visuali[sz]e|present|html)\b/i.test(normalized);
   const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
@@ -116,6 +119,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const looksSourceGroundedDocumentWorkflow = looksDocumentDeliverable
     && (looksSourceHeavy
       || looksFresh
+      || looksResearchTask
       || looksSynthesisHeavy
       || domainCount >= 2
       || /\b(compare|comparison|versus|vs\.?|vergleich|protocol|protocols|protokoll|protokolle|standard|standards)\b/i.test(normalized));
@@ -125,6 +129,8 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     looksFresh,
     looksSourceHeavy,
     looksDocumentDeliverable,
+    looksResearchTask,
+    looksSourceGroundedDocumentWorkflow,
     looksWebTask,
     looksArtifactRender,
     looksGroundedInput,
@@ -207,10 +213,7 @@ function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude
     return false;
   }
 
-  if (
-    signals.looksDocumentDeliverable
-    && (signals.looksSourceHeavy || signals.looksFresh || signals.looksSynthesisHeavy || signals.domainCount >= 2)
-  ) {
+  if (signals.looksSourceGroundedDocumentWorkflow) {
     return false;
   }
 
@@ -254,10 +257,8 @@ function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: st
 
 function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
-  const looksSourceGroundedDocumentWorkflow = signals.looksDocumentDeliverable
-    && (signals.looksSourceHeavy || signals.looksFresh || signals.looksSynthesisHeavy || signals.domainCount >= 2);
 
-  if (!(signals.prefersPlanner || looksSourceGroundedDocumentWorkflow)) {
+  if (!(signals.prefersPlanner || signals.looksSourceGroundedDocumentWorkflow)) {
     return false;
   }
 
@@ -581,11 +582,7 @@ export async function resolveAgentRouting(
   }
 
   const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
-  const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksDocumentDeliverable
-    && (preferenceSignals.looksSourceHeavy
-      || preferenceSignals.looksFresh
-      || preferenceSignals.looksSynthesisHeavy
-      || preferenceSignals.domainCount >= 2)
+  const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksSourceGroundedDocumentWorkflow
     && !(preferenceSignals.looksGroundedInput
       && !preferenceSignals.looksFresh
       && !preferenceSignals.looksExternalData
@@ -1039,6 +1036,120 @@ function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskSt
   return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
 }
 
+function allocateParallelTaskIds(ctx: ToolContext, count: number): string[] {
+  if (count <= 0) return [];
+
+  const existingTasks = ctx.swarmState ? Object.keys(ctx.swarmState.tasks) : [];
+  const maxParallelIndex = existingTasks.reduce((maxIndex, taskId) => {
+    const match = /^parallel_(\d+)$/.exec(taskId);
+    if (!match) return maxIndex;
+    const parsed = Number.parseInt(match[1] ?? "0", 10);
+    return Number.isFinite(parsed) ? Math.max(maxIndex, parsed) : maxIndex;
+  }, 0);
+
+  return Array.from({ length: count }, (_value, index) => `parallel_${maxParallelIndex + index + 1}`);
+}
+
+function retryIntroducesNewAgent(
+  request: Pick<DelegationRequest, "agentName" | "fallbackAgents">,
+  attemptedAgents: string[],
+): boolean {
+  const retryCandidates = uniqueNames([
+    request.agentName ?? "",
+    ...(request.fallbackAgents ?? []),
+  ]);
+  if (retryCandidates.length === 0) {
+    return false;
+  }
+
+  const attempted = new Set(attemptedAgents.filter(Boolean));
+  return retryCandidates.some((candidate) => !attempted.has(candidate));
+}
+
+function isResearchLikeDelegation(
+  candidate: string,
+  task: string,
+  routingQuery?: string,
+  agentCfg?: { tools?: string[]; capabilities?: string[] },
+): boolean {
+  const text = `${routingQuery ?? ""}\n${task}`.toLowerCase();
+  const tools = agentCfg?.tools ?? [];
+  const capabilities = agentCfg?.capabilities ?? [];
+  const researchAgentName = /(research|citation|librarian|evidence|source_verifier)/i.test(candidate);
+  const researchTools = tools.includes("web_search") || tools.includes("web_fetch");
+  const researchCapabilities = capabilities.some((capability) => /research|documentation|source|fact.?check|citation/i.test(capability));
+  const sourceHeavyTask = /\b(research|recherche|recherchiere|find|gather|sammle|look for|source|sources|quelle|quellen|citation|citations|zitierfahig|zitierfaehig|reference|references|docs?|documentation|dokumentation|spec|specification|spezifikation|spezifikationen|official|publisher|publication|validate|validiere|protocol|protocols|protokoll|protokolle)\b/i.test(text);
+  return sourceHeavyTask && (researchAgentName || researchTools || researchCapabilities);
+}
+
+function formatReusableSessionEvidenceOutput(
+  title: string,
+  factMatches: Array<{ key: string; value: string; score: number }>,
+  partialMatches: Array<{ taskId: string; agentName: string; content: string; score: number }>,
+): string {
+  const factSection = factMatches.length > 0
+    ? "## Shared facts already gathered\n" + factMatches
+      .slice(0, 4)
+      .map((match) => `- **${match.key}** (${Math.round(match.score * 100)}%): ${summarizeText(match.value, 280)}`)
+      .join("\n")
+    : "";
+  const partialSection = partialMatches.length > 0
+    ? "## Relevant prior partial results\n" + partialMatches
+      .slice(0, 3)
+      .map((match) => `### ${match.agentName} (${match.taskId}, ${Math.round(match.score * 100)}%)\n${summarizeText(match.content, 520)}`)
+      .join("\n\n")
+    : "";
+
+  return [
+    `Reused relevant session/task memory for '${title}' instead of launching another duplicate research pass.`,
+    factSection,
+    partialSection,
+  ].filter(Boolean).join("\n\n");
+}
+
+async function findReusableSessionEvidence(
+  candidate: string,
+  request: DelegationRequest,
+  ctx: ToolContext,
+  agentCfg?: { tools?: string[]; capabilities?: string[] },
+): Promise<{ output: string; factCount: number; partialCount: number } | null> {
+  if (!isResearchLikeDelegation(candidate, request.task, request.routingQuery, agentCfg)) {
+    return null;
+  }
+
+  const query = (request.routingQuery ?? request.taskTitle ?? summarizeText(request.task, 160)).trim();
+  if (!query) {
+    return null;
+  }
+
+  const config = getConfig();
+  const embeddingModel = config.agents.defaults.model.embeddingModel;
+  const factMatches = await searchSharedFacts(ctx.sessionId, query, {
+    maxResults: 4,
+    provider: embeddingModel ? getEmbeddingProvider() : undefined,
+    embeddingModel,
+  });
+  const partialMatches = await searchPartialResults(ctx.sessionId, query, { maxResults: 3 });
+
+  const relevantFacts = factMatches.filter((match) => match.score >= 0.18);
+  const relevantPartials = partialMatches.filter((match) => match.score >= 0.18);
+  const enoughEvidence = relevantFacts.length >= 2 || (relevantFacts.length >= 1 && relevantPartials.length >= 1);
+
+  if (!enoughEvidence) {
+    return null;
+  }
+
+  return {
+    output: formatReusableSessionEvidenceOutput(
+      request.taskTitle ?? summarizeText(request.task, 80),
+      relevantFacts,
+      relevantPartials,
+    ),
+    factCount: relevantFacts.length,
+    partialCount: relevantPartials.length,
+  };
+}
+
 function looksLikePlanningOnlyResult(result: string): boolean {
   const preview = result.slice(0, 600).trim();
   if (!preview) return false;
@@ -1046,7 +1157,7 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
-  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create)\b/i.test(preview);
+  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create|fetch|gather|retrieve)\b/i.test(preview);
   if (!planningAction) return false;
 
   const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
@@ -1125,6 +1236,31 @@ function shouldAcceptPartialDelegation(
   }
 
   return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
+}
+
+function formatArtifactReferencesForSharedContext(artifacts: Record<string, unknown>[]): string {
+  const lines = artifacts
+    .map((artifact) => {
+      if (!artifact || typeof artifact !== "object") return "";
+      const value = artifact as Record<string, unknown>;
+      const outputPath = typeof value["outputPath"] === "string" ? value["outputPath"] : "";
+      const filename = typeof value["filename"] === "string" ? value["filename"] : "";
+      const previewMode = typeof value["previewMode"] === "string" ? value["previewMode"] : "";
+      const sourceTool = typeof value["sourceTool"] === "string" ? value["sourceTool"] : "";
+      const artifactRef = outputPath || filename;
+      if (!artifactRef) return "";
+
+      const qualifiers = [previewMode, sourceTool].filter(Boolean);
+      return qualifiers.length > 0
+        ? `- ${artifactRef} (${qualifiers.join(", ")})`
+        : `- ${artifactRef}`;
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+
+  return lines.length > 0
+    ? `\n\nArtifacts generated by this result:\n${lines.join("\n")}`
+    : "";
 }
 
 function uniqueNames(values: string[]): string[] {
@@ -1399,7 +1535,7 @@ function buildHeuristicRoutingCandidates(
 
   if ((signals.looksSourceHeavy && /\b(citation|citations|reference|references|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalized))
     || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
-    maybeAdd("citation_researcher", 0.56, ["official", "sources"]);
+    maybeAdd("researcher", 0.56, ["official", "sources"]);
   }
 
   return { candidates: heuristicCandidates, boosts: heuristicBoosts };
@@ -1572,7 +1708,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const skillMatchThreshold = resolveSkillMatchThreshold(request.skillMatchThreshold);
   const explicitAgentRequested = typeof request.agentName === "string" && request.agentName.trim().length > 0;
   const hasExplicitFallbacks = (request.fallbackAgents?.length ?? 0) > 0;
-  const reusableTask = request.taskId ? undefined : findReusableSwarmTask(ctx, signature);
+  const reusableTaskById = request.taskId
+    ? ctx.swarmState?.tasks[request.taskId]
+    : undefined;
+  const reusableTask = reusableTaskById?.signature === signature
+    ? reusableTaskById
+    : (request.taskId ? undefined : findReusableSwarmTask(ctx, signature));
+  const reusableTaskAttemptedAgents = reusableTask?.attempts.map((attempt) => attempt.agentName) ?? [];
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
     return {
@@ -1581,7 +1723,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       metadata: {
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
-        attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        attemptedAgents: reusableTaskAttemptedAgents,
         delegationSucceeded: true,
         reused: true,
       },
@@ -1595,7 +1737,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       metadata: {
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
-        attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        attemptedAgents: reusableTaskAttemptedAgents,
         delegationSucceeded: true,
         delegationOutcome: "partial",
         reused: true,
@@ -1610,23 +1752,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       metadata: {
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
-        attemptedAgents: reusableTask.attempts.map((attempt) => attempt.agentName),
+        attemptedAgents: reusableTaskAttemptedAgents,
         reused: true,
         inFlight: true,
       },
     };
   }
 
-  if (!request.taskId && reusableTask?.status === "failed") {
-    const attemptedAgents = reusableTask.attempts.map((attempt) => attempt.agentName);
+  if (!request.taskId && reusableTask?.status === "failed" && !retryIntroducesNewAgent(request, reusableTaskAttemptedAgents)) {
     return {
       success: false,
       output: "",
-      error: `Delegation for task '${title}' already failed earlier in this turn${attemptedAgents.length > 0 ? ` after trying ${attemptedAgents.join(", ")}` : ""}. Do not retry the same task verbatim. ${reusableTask.error ?? "Use a different agent or provide a more specific task."}`,
+      error: `Delegation for task '${title}' already failed earlier in this turn${reusableTaskAttemptedAgents.length > 0 ? ` after trying ${reusableTaskAttemptedAgents.join(", ")}` : ""}. Do not retry the same task verbatim. ${reusableTask.error ?? "Use a different agent or provide a more specific task."}`,
       metadata: {
         agentName: reusableTask.selectedAgent,
         taskId: reusableTask.id,
-        attemptedAgents,
+        attemptedAgents: reusableTaskAttemptedAgents,
         delegationSucceeded: false,
         reused: true,
         priorFailure: true,
@@ -1851,6 +1992,55 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ? `${sharedCtx}\n\n---\n\n${request.context ?? ""}`.trim()
         : request.context;
 
+      const reusableSessionEvidence = await findReusableSessionEvidence(candidate, request, ctx, agentCfg);
+      if (reusableSessionEvidence) {
+        attempt.finishedAt = new Date().toISOString();
+        attempt.status = "completed";
+        attempt.summary = summarizeText(reusableSessionEvidence.output);
+        attempt.toolCount = 0;
+        attempt.iterations = 0;
+        attempt.toolNames = [];
+        taskState.status = "completed";
+        taskState.output = reusableSessionEvidence.output;
+        taskState.error = undefined;
+        ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
+        publishSwarmState(ctx);
+        emitSwarmEvent("task_completed", {
+          sessionId: ctx.sessionId,
+          taskId,
+          agentName: candidate,
+          data: {
+            reusedSessionEvidence: true,
+            factCount: reusableSessionEvidence.factCount,
+            partialCount: reusableSessionEvidence.partialCount,
+          },
+        });
+        announceAgentCapability({
+          sessionId: ctx.sessionId,
+          agentName: candidate,
+          domain: agentCfg?.domain,
+          capabilities: agentCfg?.capabilities ?? [],
+          tags: agentCfg?.tags ?? [],
+          availability: "idle",
+          source: "runtime",
+        });
+        if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+        return {
+          success: true,
+          output: reusableSessionEvidence.output,
+          metadata: {
+            agentName: candidate,
+            taskId,
+            attemptedAgents,
+            delegationSucceeded: true,
+            reused: true,
+            reusedFromSessionMemory: true,
+            factCount: reusableSessionEvidence.factCount,
+            partialCount: reusableSessionEvidence.partialCount,
+          },
+        };
+      }
+
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
@@ -1973,7 +2163,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       }
 
       // Store successful output as a partial result and extract any FACT: lines
-      await appendPartialResult({ sessionId: ctx.sessionId, taskId, agentName: candidate, content: summarizeText(output, 1200), ts: attempt.finishedAt! });
+      await appendPartialResult({
+        sessionId: ctx.sessionId,
+        taskId,
+        agentName: candidate,
+        content: `${summarizeText(output, 1200)}${formatArtifactReferencesForSharedContext(artifacts)}`.trim(),
+        ts: attempt.finishedAt!,
+      });
       const extractedFacts = extractFactsFromOutput(output);
       for (const [k, v] of Object.entries(extractedFacts)) {
         await writeSharedFact(ctx.sessionId, k, v);
@@ -2585,10 +2781,12 @@ registerTool({
     const currentAgentName = typeof ctx.currentAgentName === "string" && ctx.currentAgentName.trim().length > 0
       ? ctx.currentAgentName.trim()
       : undefined;
+    // Route WITHOUT excludeAgents so the invoking agent can still appear in
+    // rawResolution — we need that to detect self-exclusion.  The manual
+    // filter below removes it before the result is returned to the caller.
     const rawResolution = await resolveAgentRouting(raw, {
       minConfidence,
       allowedAgents: ctx.allowedAgents,
-      excludeAgents: ctx.currentAgentName ? [ctx.currentAgentName] : undefined,
     });
     const selfExcluded = currentAgentName
       ? rawResolution.results.some((candidate) => candidate.name === currentAgentName)
@@ -2713,15 +2911,22 @@ registerTool({
     }
 
     const pinnedAgentName = !requestedAgentName ? getPinnedAgentForTask(task) : null;
-    const agentName = requestedAgentName || pinnedAgentName || "";
+    const rawAgentName = requestedAgentName || pinnedAgentName || "";
+    const primaryValidation = sanitizeDelegationAgentList(rawAgentName ? [rawAgentName] : undefined, ctx);
+    const agentName = primaryValidation.valid[0] ?? "";
 
     // Enforce per-scene agent scope only when an explicit agent was requested
-    if (agentName && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
+    if (primaryValidation.disallowed.length > 0) {
       return {
         success: false,
         output: "",
-        error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}`,
+        error: `Agent '${primaryValidation.disallowed[0]}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents?.join(", ") ?? ""}`,
       };
+    }
+
+    if (primaryValidation.invalid.length > 0) {
+      // Ignore unknown explicit agent names so the task can still recover via
+      // fallback agents or normal routing.
     }
 
     const rawFallbackAgents = explicitFallbackAgents?.length
@@ -2793,30 +2998,70 @@ registerTool({
     if (tasks.length === 0) return { success: false, output: "", error: "tasks array must not be empty" };
     if (tasks.length > 5) return { success: false, output: "", error: "Maximum 5 parallel tasks allowed" };
 
-    // Enforce per-scene agent scope for all explicit primary/fallback tasks upfront
-    for (const t of tasks) {
-      for (const candidate of [t.agentName, ...(t.fallbackAgents ?? [])].filter(Boolean) as string[]) {
-        if (ctx.allowedAgents && !ctx.allowedAgents.includes(candidate)) {
-          return {
-            success: false, output: "",
-            error: `Agent '${candidate}' is not permitted in this scene. Allowed: ${ctx.allowedAgents.join(", ")}`,
-          };
-        }
+    const normalizedTasks = tasks.map((taskSpec) => {
+      const rawAgentName = taskSpec.agentName ? String(taskSpec.agentName).trim() : "";
+      const primaryValidation = sanitizeDelegationAgentList(rawAgentName ? [rawAgentName] : undefined, ctx);
+      if (primaryValidation.disallowed.length > 0) {
+        return {
+          error: `Agent '${primaryValidation.disallowed[0]}' is not permitted in this scene. Allowed: ${ctx.allowedAgents?.join(", ") ?? ""}`,
+        };
       }
+      if (primaryValidation.invalid.length > 0) {
+        // Ignore unknown explicit agent names so the task can still recover via
+        // fallback agents or normal routing.
+      }
+
+      const fallbackValidation = sanitizeDelegationAgentList(taskSpec.fallbackAgents, ctx);
+      if (fallbackValidation.disallowed.length > 0) {
+        return {
+          error: `Agent '${fallbackValidation.disallowed[0]}' is not permitted in this scene. Allowed: ${ctx.allowedAgents?.join(", ") ?? ""}`,
+        };
+      }
+
+      return {
+        ...taskSpec,
+        agentName: primaryValidation.valid[0],
+        fallbackAgents: fallbackValidation.valid.length > 0 ? fallbackValidation.valid : undefined,
+      };
+    });
+
+    const normalizationError = normalizedTasks.find((taskSpec): taskSpec is { error: string } => "error" in taskSpec);
+    if (normalizationError && normalizationError.error) {
+      return { success: false, output: "", error: normalizationError.error };
+    }
+
+    const runnableTasks: Array<{
+      agentName: string | undefined;
+      task: string;
+      context?: string;
+      fallbackAgents: string[] | undefined;
+      routingQuery?: string;
+      skillMatchThreshold?: number;
+    }> = [];
+    for (const taskSpec of normalizedTasks) {
+      if ("error" in taskSpec) {
+        continue;
+      }
+      runnableTasks.push(taskSpec);
     }
 
     logAudit(
       "parallel_delegate_started",
-      { taskCount: tasks.length, agents: tasks.map(t => t.agentName ?? "auto") },
+      { taskCount: tasks.length, agents: runnableTasks.map((taskSpec) => taskSpec.agentName ?? "auto") },
       { sessionId: ctx.sessionId }
     );
 
-    const delegatedCtx = withDelegationFanoutAllowance(ctx, tasks.map((taskSpec) => taskSpec.agentName), tasks.length);
+    const delegatedCtx = withDelegationFanoutAllowance(
+      ctx,
+      runnableTasks.map((taskSpec) => taskSpec.agentName),
+      tasks.length,
+    );
+    const taskIds = allocateParallelTaskIds(delegatedCtx, runnableTasks.length);
 
     const results = await Promise.all(
-      tasks.map((taskSpec, index) => executeDelegationWithFallback({
+      runnableTasks.map((taskSpec, index) => executeDelegationWithFallback({
         ...taskSpec,
-        taskId: `parallel_${index + 1}`,
+        taskId: taskIds[index],
         taskTitle: summarizeText(taskSpec.task, 80),
       }, delegatedCtx))
     );

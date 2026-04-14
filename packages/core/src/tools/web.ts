@@ -133,6 +133,17 @@ registerTool({
           : "";
 
         if (results.length === 0) {
+          // If there are more backends left to try, fall through silently rather
+          // than returning an empty-result response.  This is the key path that
+          // lets a degraded SearXNG instance automatically retry via playwright
+          // DuckDuckGo without the agent seeing a zero-result response.
+          const hasMoreBackends = attemptedBackends.length < searchConfig.backends.length;
+          if (hasMoreBackends) {
+            log.warn({ query, backend }, "web_search: backend returned zero results, trying next backend");
+            backendErrors.push(`${backend}: no results`);
+            continue;
+          }
+
           const streak = recordZeroResultSearch(sessionId);
           const degraded = streak >= SEARCH_DEGRADED_THRESHOLD;
 
@@ -188,7 +199,7 @@ registerTool({
         const message = err instanceof Error ? err.message : String(err);
         backendErrors.push(`${backend}: ${message}`);
 
-        if (searchConfig.requestedBackend === "auto" && attemptedBackends.length < searchConfig.backends.length) {
+        if (attemptedBackends.length < searchConfig.backends.length) {
           log.warn({ err, query, backend }, "web_search backend failed, trying fallback backend");
           continue;
         }
@@ -430,9 +441,13 @@ export function resolveSearchBackendConfig(config: Config = getConfig()): Resolv
   const playwrightAvailable = getMcpConnections().has("playwright");
 
   if (searchConfig.backend === "searxng") {
+    // Always include playwright as a hard fallback when available, so a
+    // degraded/offline SearXNG instance automatically retries via browser search.
+    const backends: SearchBackend[] = ["searxng"];
+    if (playwrightAvailable) backends.push("playwright");
     return {
       requestedBackend: "searxng",
-      backends: ["searxng"],
+      backends,
       searxngBaseUrl,
       timeoutMs: searchConfig.timeoutMs,
     };

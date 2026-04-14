@@ -151,6 +151,158 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("synthesizes gathered evidence when timeout hits after tool work", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-synthesis-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        research_agent: {
+          description: "Timeout synthesis test agent",
+          systemPrompt: "Research the topic and return the findings.",
+          tools: ["get_swarm_state"],
+          maxIterations: 3,
+          turnTimeoutMs: 1000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "get_swarm_state",
+      description: "Return a verified protocol fact",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "MCP official docs: MCP is an open protocol for connecting AI systems to external tools and data. Source: https://modelcontextprotocol.io/",
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "fact-1",
+            name: "get_swarm_state",
+            arguments: {},
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }))
+      .mockResolvedValueOnce({
+        content: "MCP is an open protocol that standardizes how AI applications connect to external tools and data sources. Source: https://modelcontextprotocol.io/",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "research_agent",
+        task: "Summarize MCP.",
+        parentSessionId: "parent-timeout-synthesis",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("MCP is an open protocol");
+      expect(result.output).not.toContain("timed out after 1000ms");
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.stats.outcome).toBe("success");
+      expect(completeMock).toHaveBeenCalledTimes(3);
+    } finally {
+      unregisterTool("get_swarm_state");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("rescues final output that becomes empty after hallucinated tool markup is stripped", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-sanitize-rescue-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        research_agent: {
+          description: "Sanitized output rescue test agent",
+          systemPrompt: "Research the topic and return the findings.",
+          tools: ["get_swarm_state"],
+          maxIterations: 3,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "get_swarm_state",
+      description: "Return a verified protocol fact",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "MCP official docs: MCP is an open protocol for connecting AI systems to external tools and data. Source: https://modelcontextprotocol.io/",
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "fact-1",
+            name: "get_swarm_state",
+            arguments: {},
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "<tool_call><function=share_finding>{\"fact\":\"mcp\"}</function></tool_call>",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      })
+      .mockResolvedValueOnce({
+        content: "MCP is an open protocol that standardizes how AI applications connect to external tools and data sources. Source: https://modelcontextprotocol.io/",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "research_agent",
+        task: "Summarize MCP.",
+        parentSessionId: "parent-sanitize-rescue",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("MCP is an open protocol");
+      expect(result.output).not.toContain("<tool_call>");
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.stats.outcome).toBe("success");
+      expect(completeMock).toHaveBeenCalledTimes(3);
+    } finally {
+      unregisterTool("get_swarm_state");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("treats a synthesized max-iteration result as successful when a deliverable artifact was already produced", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-max-iter-artifact-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -639,6 +791,7 @@ describe("sub-agent turn timeouts", () => {
 
       expect(systemMessage).toContain("TOOL INVENTORY");
       expect(systemMessage).toContain("You may use only these tools in this run: list_agents, search_agents, delegate_to_agent, run_task_graph");
+      expect(systemMessage).toContain("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents and then delegate_to_agent to route the work to a research-capable specialist before answering.");
       expect(systemMessage).toContain("AGENT DISCOVERY");
       expect(systemMessage).toContain("Delegation in this run is restricted to these agents: researcher, coder");
       expect(systemMessage).toContain("- researcher: Research specialist");
@@ -1042,6 +1195,120 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.toolCount).toBe(3);
     } finally {
       unregisterTool("workspace_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves failed task-graph output across identical cached retries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-graph-failure-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        coord_agent: {
+          description: "Coordinator failure preservation test agent",
+          systemPrompt: "Use the task graph tool when needed.",
+          tools: ["run_task_graph"],
+          maxIterations: 5,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    unregisterTool("run_task_graph");
+    registerTool({
+      name: "run_task_graph",
+      description: "Stub task graph tool for failure preservation testing.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: false,
+          output: [
+            "Swarm task graph complete.",
+            "- evidence_mcp [completed] researcher",
+            "- draft_paper [failed] paper_author",
+          ].join("\n"),
+        };
+      },
+    });
+
+    const seenToolMessages: string[][] = [];
+    completeMock.mockImplementation(async (messages: unknown) => {
+      const toolMessages = Array.isArray(messages)
+        ? messages
+            .filter((message): message is { role?: string; content?: unknown } => typeof message === "object" && message !== null && "role" in message && (message as { role?: string }).role === "tool")
+            .map((message) => String(message.content ?? ""))
+        : [];
+      seenToolMessages.push(toolMessages);
+
+      if (seenToolMessages.length === 1) {
+        return {
+          content: "",
+          tool_calls: [
+            { id: "graph-1", name: "run_task_graph", arguments: { nodes: [{ id: "evidence_mcp", task: "Gather evidence" }] } },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        };
+      }
+
+      if (seenToolMessages.length === 2) {
+        return {
+          content: "",
+          tool_calls: [
+            { id: "graph-2", name: "run_task_graph", arguments: { nodes: [{ id: "evidence_mcp", task: "Gather evidence" }] } },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        };
+      }
+
+      return {
+        content: "Use the existing partial graph result.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      };
+    });
+
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coord_agent",
+        task: "Coordinate a source-grounded paper workflow.",
+        parentSessionId: "parent-graph-failure",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Use the existing partial graph result.");
+      expect(seenToolMessages[1]?.[0]).toContain("Swarm task graph complete.");
+      expect(seenToolMessages[1]?.[0]).not.toContain("Error: unknown");
+      expect(seenToolMessages[2]?.at(-1)).toContain("Swarm task graph complete.");
+      expect(seenToolMessages[2]?.at(-1)).toContain("cached failed result");
+
+      const doneEvents = auditEvents.filter(
+        (event) => event.type === "sub_agent_tool_call"
+          && event.data.tool === "run_task_graph"
+          && event.data.phase === "done",
+      );
+      expect(doneEvents).toHaveLength(2);
+      expect(doneEvents[0]?.data.success).toBe(false);
+      expect(doneEvents[0]?.data.resultPreview).toContain("Swarm task graph complete.");
+      expect(doneEvents[1]?.data.success).toBe(false);
+      expect(doneEvents[1]?.data.cachedResult).toBe(true);
+      expect(doneEvents[1]?.data.resultPreview).toContain("Swarm task graph complete.");
+    } finally {
+      unsubscribe();
+      unregisterTool("run_task_graph");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -50,36 +50,11 @@
         }
       }
     },
-    "protocol_comparison_paper": {
-      "description": "Compare protocols through coordinated evidence gathering and a grounded paper draft.",
-      "task": "Use mission_coordinator first to compare {{topic}} with evidence-backed research, consolidate the findings, draft the paper, and run one final quality pass before finishing.",
-      "allowedAgents": [
-        "mission_coordinator",
-        "citation_researcher",
-        "researcher",
-        "evidence_analyst",
-        "paper_author",
-        "quality_supervisor",
-        "summarizer"
-      ],
-      "params": {
-        "topic": {
-          "description": "Protocols, standards, or systems to compare",
-          "default": "the requested protocols"
-        },
-        "outputStyle": {
-          "description": "Requested comparison format",
-          "default": "grounded comparison paper with explicit citations and tradeoffs"
-        }
-      }
-    },
     "source_backed_paper": {
-      "description": "Produce a paper or report grounded in official sources and verified citations.",
-      "task": "When attachments or prior reports are provided, start with document_intake. If the evidence base is still thin or uneven, use mission_coordinator to coordinate the smallest viable evidence-gathering pass with citation_researcher or researcher, then consolidate the reusable findings with research_librarian or evidence_analyst. Draft only from collected evidence with paper_author, use source_verifier only to validate citations or claim-level gaps, and run exactly one final quality pass with quality_supervisor before finalizing. Do not create an ephemeral writer and do not rerun the whole paper pipeline after a viable draft already exists unless the quality pass names one smallest corrective action.",
+      "description": "Produce a paper, report, or research brief grounded in official sources and verified citations.",
+      "task": "When attachments or prior reports are provided, start with document_intake. Use researcher for source discovery — it handles both broad web research and citation-grade official sources. Use evidence_analyst to reconcile findings into a clean evidence ledger, and research_librarian to persist durable notes and graph links when the evidence base is large. For short briefs, use summarizer to produce the final deliverable. For full papers or reports, draft only from collected evidence with paper_author. Use source_verifier only to validate citations or claim-level gaps. Run exactly one final quality pass with quality_supervisor before finalizing. Do not create an ephemeral writer and do not rerun the whole pipeline after a viable draft already exists unless the quality pass names one smallest corrective action. Do not delegate to mission_coordinator from this scene — the research pipeline is already defined here.",
       "allowedAgents": [
-        "mission_coordinator",
         "document_intake",
-        "citation_researcher",
         "evidence_analyst",
         "research_librarian",
         "paper_author",
@@ -93,24 +68,9 @@
         "outputStyle": {
           "description": "Requested style or citation format",
           "default": "technical report with inline references"
-        }
-      }
-    },
-    "verified_research_brief": {
-      "description": "Produce a concise fact-checked research brief with named sources and explicit unresolved uncertainties.",
-      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery, citation_researcher for authoritative references when needed, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
-      "allowedAgents": [
-        "document_intake",
-        "researcher",
-        "citation_researcher",
-        "evidence_analyst",
-        "source_verifier",
-        "summarizer",
-        "qa_guard"
-      ],
-      "params": {
+        },
         "audience": {
-          "description": "Intended audience for the brief",
+          "description": "Intended audience",
           "default": "technical stakeholder"
         },
         "freshnessRequirement": {
@@ -119,13 +79,12 @@
         }
       }
     },
-    "deep_research_dossier": {
+    "deep_research": {
       "description": "Run a multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate.",
-      "task": "Use mission_coordinator first. It should decide whether the request needs independent source gathering, structured evidence indexing, data analysis, chart rendering, diagram generation, and final writing. Prefer citation_researcher and researcher for source collection, research_librarian to persist notes, graph links, and timelines, evidence_analyst to reconcile the ledger, data_analyst when structured numbers matter, chart_designer for HTML charts or tables based on verified numeric evidence, diagram_designer when a structural visual model would clarify the answer, paper_author or summarizer for the final deliverable, and quality_supervisor to decide whether one targeted corrective pass is justified before finalizing.",
+      "task": "Use mission_coordinator to partition the work into the smallest viable specialist graph. Use researcher for all source collection — it handles both broad web research and citation-grade official sources in a single agent. Use research_librarian to persist notes, graph links, and timelines. Use evidence_analyst to reconcile the ledger. Use data_analyst only when structured numbers matter. Use chart_designer for HTML charts or tables based on verified numeric evidence. Use diagram_designer when a structural visual model would clarify the answer. Use paper_author for the final deliverable when a full paper is requested, or summarizer for a short brief. Use quality_supervisor to decide whether one targeted corrective pass is justified before finalizing. IMPORTANT: mission_coordinator must NOT call search_workflows or run_workflow from inside this scene — the research pipeline is already defined. Delegate directly to the named specialists.",
       "allowedAgents": [
         "mission_coordinator",
         "researcher",
-        "citation_researcher",
         "research_librarian",
         "document_intake",
         "evidence_analyst",
@@ -148,26 +107,9 @@
         "freshnessRequirement": {
           "description": "How recent the evidence must be",
           "default": "prefer the freshest reliable sources and preserve publication dates"
-        }
-      }
-    },
-    "research_visual_brief": {
-      "description": "Produce a concise verified research brief plus at least one Mermaid visual when the topic has structure worth diagramming.",
-      "task": "Use mission_coordinator first. Gather sources with researcher and citation_researcher, organize the evidence with research_librarian, reconcile it with evidence_analyst, ask chart_designer for an HTML chart or table when the answer depends on sourced numeric evidence, ask diagram_designer for a Mermaid diagram when the answer has workflow, dependency, timeline, or relationship structure, then use summarizer for the brief and quality_supervisor for the final gate.",
-      "allowedAgents": [
-        "mission_coordinator",
-        "researcher",
-        "citation_researcher",
-        "research_librarian",
-        "evidence_analyst",
-        "chart_designer",
-        "diagram_designer",
-        "summarizer",
-        "quality_supervisor"
-      ],
-      "params": {
+        },
         "audience": {
-          "description": "Intended audience for the brief",
+          "description": "Intended audience",
           "default": "technical stakeholder"
         },
         "visualFocus": {

@@ -1078,10 +1078,10 @@ describe("search_agents tool", () => {
         },
       },
       subAgents: {
-        citation_researcher: {
-          description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
-          capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
-          tags: ["citations", "research", "sources", "papers"],
+        researcher: {
+          description: "Finds facts, documentation, and public information on the web. Collects citation-grade primary sources.",
+          capabilities: ["web research", "official source lookup", "citation research", "specification discovery"],
+          tags: ["citations", "research", "sources"],
           tools: ["web_search", "web_fetch", "share_finding"],
           maxIterations: 8,
         },
@@ -1089,7 +1089,7 @@ describe("search_agents tool", () => {
           description: "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
           capabilities: ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
           tags: ["papers", "reports", "citations", "drafting"],
-          tools: ["read_file", "write_file", "read_shared_facts"],
+          tools: ["read_shared_facts", "write_file", "read_file"],
           maxIterations: 5,
         },
         summarizer: {
@@ -1128,9 +1128,9 @@ describe("search_agents tool", () => {
         },
       },
       subAgents: {
-        citation_researcher: {
-          description: "Finds citation-grade primary sources for papers, reports, and technical briefs.",
-          capabilities: ["official source lookup", "citation research", "specification discovery", "bibliography prep"],
+        researcher: {
+          description: "Researches topics online, collects citation-grade primary sources for papers, reports, and technical briefs.",
+          capabilities: ["web research", "official source lookup", "citation research", "specification discovery", "bibliography prep"],
           tags: ["citations", "research", "sources", "papers"],
           tools: ["web_search", "web_fetch", "share_finding"],
           maxIterations: 8,
@@ -1175,6 +1175,56 @@ describe("search_agents tool", () => {
 
     try {
       const resolution = await resolveAgentRouting("write a short technical paper comparing MCP, A2A, and AG-UI using official specifications and current sources", { minConfidence: "medium" });
+      expect(resolution.results[0]?.name).toBe("mission_coordinator");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("routes protocol paper research queries to mission_coordinator even without explicit source keywords", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "General research specialist.",
+          capabilities: ["web research", "technical analysis"],
+          tags: ["research", "analysis"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 6,
+        },
+        mission_coordinator: {
+          description: "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
+          capabilities: ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating"],
+          tags: ["coordination", "parallel", "workflow", "quality"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        paper_author: {
+          description: "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
+          capabilities: ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
+          tags: ["papers", "reports", "citations", "drafting"],
+          tools: ["read_shared_facts", "write_file"],
+          maxIterations: 5,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ resolveAgentRouting }] = await Promise.all([
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      const resolution = await resolveAgentRouting("paper author writing research MCP A2A AG-UI", { minConfidence: "medium" });
       expect(resolution.results[0]?.name).toBe("mission_coordinator");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

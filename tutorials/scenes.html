@@ -186,10 +186,9 @@
   scenes: {
     source_backed_paper: {
       description: "Produce a paper or report grounded in official sources and verified citations",
-      task: "If evidence is still thin or uneven, use mission_coordinator to coordinate the smallest viable evidence-gathering pass with citation_researcher or researcher, consolidate findings, draft only from collected evidence with paper_author, and run exactly one final quality pass with quality_supervisor before finalizing.",
+      task: "If evidence is still thin or uneven, use mission_coordinator to coordinate the smallest viable evidence-gathering pass with researcher, consolidate findings, draft only from collected evidence with paper_author, and run exactly one final quality pass with quality_supervisor before finalizing.",
       allowedAgents: [
         "mission_coordinator",
-        "citation_researcher",
         "researcher",
         "paper_author",
         "quality_supervisor"
