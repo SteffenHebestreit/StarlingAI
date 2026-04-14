@@ -337,11 +337,16 @@ function normalizeWorkflowDiscoveryText(value: string): string {
     .trim();
 }
 
+function isMeaningfulWorkflowDiscoveryToken(token: string): boolean {
+  if (!token || WORKFLOW_DISCOVERY_STOP_WORDS.has(token)) return false;
+  return token.length >= 3 || /\d/.test(token);
+}
+
 function tokenizeWorkflowDiscoveryText(value: string): string[] {
   return [...new Set(
     normalizeWorkflowDiscoveryText(value)
       .split(" ")
-      .filter((token) => token.length >= 2 && !WORKFLOW_DISCOVERY_STOP_WORDS.has(token))
+      .filter((token) => isMeaningfulWorkflowDiscoveryToken(token))
   )];
 }
 
@@ -349,7 +354,7 @@ function expandWorkflowDiscoveryVariants(token: string): string[] {
   const variants = new Set<string>([token]);
   if (token.length > 4 && token.endsWith("es")) variants.add(token.slice(0, -2));
   if (token.length > 3 && token.endsWith("s")) variants.add(token.slice(0, -1));
-  return [...variants].filter((value) => value.length >= 2);
+  return [...variants].filter((value) => isMeaningfulWorkflowDiscoveryToken(value));
 }
 
 function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
@@ -666,6 +671,12 @@ function stripAgentPrefix(value: string): string {
   return value.replace(/^\[[^\]]+\]:\s*/i, "").trim();
 }
 
+function stripWorkflowPreamble(value: string): string {
+  // Remove "Workflow <name> [scene|job] completed/blocked ...\n\n" system prefix
+  // so only the actual deliverable content reaches the orchestrator LLM.
+  return value.replace(/^Workflow\s+\S+\s+\[(?:scene|job)\]\s+\S[^\n]*\n\n?/, "").trim();
+}
+
 function stripPresentationFormatting(value: string): string {
   return value
     .replace(/^\s{0,3}#{1,6}\s+/gm, "")
@@ -827,12 +838,21 @@ export function buildModelVisibleToolResult(
       ].filter(Boolean);
       return parts.join("\n");
     }
+    // For long completed deliverables (papers, reports, analyses) keep markdown
+    // intact and pass the full content so the orchestrator LLM can relay it verbatim.
+    const isLongDeliverable = cleaned.length > 2500;
+    const successEvidence = isLongDeliverable
+      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), 10_000)
+      : evidence;
+    const importantNote = isLongDeliverable
+      ? "IMPORTANT: Present the full content below VERBATIM to the user. Do NOT summarize, shorten, rephrase, or omit any section. Output it exactly as-is, preserving all headings, bullet points, and structure."
+      : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names.";
     const parts = [
       `Delegated result from ${agentName} — TASK COMPLETED.`,
       attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
       routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-      "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names.",
-      `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
+      importantNote,
+      `Observed evidence:\n${successEvidence || "No usable delegated result returned."}`,
     ].filter(Boolean);
     return parts.join("\n");
   }
@@ -1504,7 +1524,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "COMPLIANCE CORRECTION: This request requires specialist-agent orchestration.",
             "Do NOT answer directly from memory.",
             "You MUST call an orchestration tool now instead of writing a natural-language answer.",
-            "For a simple web lookup, prefer delegate_to_agent with researcher or citation_researcher.",
+            "For a simple web lookup, prefer delegate_to_agent with researcher.",
             "For broader multi-step online research, prefer delegate_to_agent with mission_coordinator or web_task_coordinator.",
             "A tool-free answer before delegation is invalid for this turn.",
           ].join(" ");

@@ -660,6 +660,11 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   const modelId = configuredModel.replace(/^[^/]+\//, "");
   const dataUrl = `data:${contentType};base64,${Buffer.from(bytes).toString("base64")}`;
 
+  // Disable thinking mode for vision calls — models like Qwen3.5 default
+  // to thinking-on, which consumes most of max_tokens on <think> reasoning
+  // and leaves the actual content field empty.
+  const needsThinkingOff = /(qwen|gemma-4)/i.test(modelId);
+
   const response = await fetchWithTimeout(
     `${baseUrl}/chat/completions`,
     {
@@ -679,6 +684,9 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
         }],
         max_tokens: 2048,
         temperature: 0.1,
+        ...(needsThinkingOff && {
+          chat_template_kwargs: { enable_thinking: false },
+        }),
       }),
     },
     config.multimodal.files.timeoutMs,
@@ -691,10 +699,17 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   const body = await parseUpstreamJsonResponse(response, "Vision analysis returned a non-JSON response");
   const choices = Array.isArray(body["choices"]) ? body["choices"] : [];
   const firstChoice = choices[0];
-  const content = firstChoice && typeof firstChoice === "object" && "message" in firstChoice
-    ? (firstChoice["message"] as Record<string, unknown>)["content"]
+  const message = firstChoice && typeof firstChoice === "object" && "message" in firstChoice
+    ? (firstChoice["message"] as Record<string, unknown>)
     : undefined;
-  return typeof content === "string" ? content.trim() : "";
+  const content = message?.["content"];
+  // Some providers return content as an array of {type,text} segments.
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? (content as Array<Record<string, unknown>>).map(s => typeof s["text"] === "string" ? s["text"] : "").join("")
+      : "";
+  return text.trim();
 }
 
 export async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {

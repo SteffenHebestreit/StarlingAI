@@ -127,6 +127,7 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).toContain("## Swarm Rules");
     expect(usesDirectMode || usesDelegateMode).toBe(true);
     expect(prompt).toContain("ask one concise clarifying question instead of guessing");
+    expect(prompt).toContain("validate it with up-to-date evidence whenever feasible");
     expect(prompt).toContain("parallel_delegate");
     expect(prompt).toContain("Maximum 1 create_ephemeral_agent call per turn");
     expect(prompt).toContain("## Orchestration Strategy");

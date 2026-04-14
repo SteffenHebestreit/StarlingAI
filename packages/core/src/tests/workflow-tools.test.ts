@@ -303,13 +303,13 @@ describe("workflow catalog tools", () => {
       scenes: {
         protocol_comparison_paper: {
           description: "Compare multiple protocols or standards through parallel evidence gathering, one grounded comparison paper draft, and one final quality gate.",
-          task: "Use mission_coordinator first. Partition the work into one evidence-gathering track per protocol, standard, or framework under comparison. Use citation_researcher or researcher for each track, require reusable findings via share_finding, consolidate overlap and conflicts with research_librarian or evidence_analyst, then delegate drafting to paper_author and exactly one final acceptance pass to quality_supervisor.",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          task: "Use mission_coordinator first. Partition the work into one evidence-gathering track per protocol, standard, or framework under comparison. Use researcher for each track, require reusable findings via share_finding, consolidate overlap and conflicts with research_librarian or evidence_analyst, then delegate drafting to paper_author and exactly one final acceptance pass to quality_supervisor.",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       },
       subAgents: {
         mission_coordinator: { description: "Coordinates multi-step work.", tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"], maxIterations: 6 },
-        citation_researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
+        researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
         paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
         quality_supervisor: { description: "Runs one quality gate.", tools: ["read_file"], maxIterations: 4 },
       },
@@ -358,7 +358,7 @@ describe("workflow catalog tools", () => {
         {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
           swarmState: {
             objective: "Schreibe mir ein kurzes Paper zu KI-Protokollen mit Fokus auf MCP, A2A und AG-UI.",
             startedAt: new Date().toISOString(),
@@ -391,12 +391,12 @@ describe("workflow catalog tools", () => {
         deep_research_dossier: {
           description: "Run a deep-research mission with evidence gathering and final synthesis.",
           task: "Use mission_coordinator first. It should decide whether the request needs independent source gathering, structured evidence indexing, data analysis, chart rendering, diagram generation, and final writing.",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       },
       subAgents: {
         mission_coordinator: { description: "Coordinates multi-step work.", tools: ["search_agents", "search_workflows", "run_workflow", "delegate_to_agent", "parallel_delegate", "run_task_graph"], maxIterations: 6 },
-        citation_researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
+        researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
         paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
         quality_supervisor: { description: "Runs one quality gate.", tools: ["read_file"], maxIterations: 4 },
       },
@@ -454,7 +454,7 @@ describe("workflow catalog tools", () => {
         {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       );
 
@@ -468,7 +468,7 @@ describe("workflow catalog tools", () => {
       expect(bootstrapCall?.task).toContain("Decide whether the request needs independent source gathering, structured evidence indexing, data analysis, chart rendering, diagram generation, and final writing.");
       expect(bootstrapCall?.task).toContain("Additional workflow context:");
       expect(bootstrapCall?.task).toContain("Workflow parameters:\n- topic: MCP vs A2A\n- focus_areas: Official specs and interoperability");
-      expect(bootstrapCall?.allowedAgents).toEqual(["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"]);
+      expect(bootstrapCall?.allowedAgents).toEqual(["mission_coordinator", "researcher", "paper_author", "quality_supervisor"]);
       expect(bootstrapCall?._workflowExecutionStack).toEqual(["scene:deep_research_dossier"]);
       expect(bootstrapCall?.inlineConfig?.tools).toEqual([
         "search_agents",
@@ -477,9 +477,92 @@ describe("workflow catalog tools", () => {
         "run_task_graph",
       ]);
       expect(bootstrapCall?.context).toContain("Do NOT call search_workflows or run_workflow");
-      expect(bootstrapCall?.context).toContain("gather evidence with researcher or citation_researcher");
+      expect(bootstrapCall?.context).toContain("gather evidence with researcher");
       expect(bootstrapCall?.context).toContain("If read_shared_facts is empty or insufficient");
       expect(runTurnMock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("run_workflow accepts partial-progress bootstrap output after substantive coordinator work", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        deep_research_dossier: {
+          description: "Run a deep-research mission with evidence gathering and final synthesis.",
+          task: "Use mission_coordinator first. It should decide whether the request needs independent source gathering, structured evidence indexing, data analysis, chart rendering, diagram generation, and final writing.",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph", "read_shared_facts", "share_finding"], maxIterations: 6 },
+        researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
+        paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
+        quality_supervisor: { description: "Runs one quality gate.", tools: ["read_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn();
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "Sub-agent 'mission_coordinator' produced no final response after substantive work.\nPartial progress before interruption:\n- Tool calls executed: 7 (run_task_graph, search_agents, delegate_to_agent, share_finding)\n- Iterations completed: 7",
+      stats: {
+        agentName: "mission_coordinator",
+        sessionId: "sub:workflow-scene:mission_coordinator:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 7,
+        toolNames: ["run_task_graph", "search_agents", "delegate_to_agent", "share_finding"],
+        iterations: 7,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 6,
+        model: "lmstudio/qwen3.5-9b",
+        capabilities: ["coordination"],
+        outcome: "partial",
+        terminalState: "completed",
+      },
+    }));
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "deep_research_dossier",
+          workflowType: "scene",
+        },
+        {
+          sessionId: "workflow-scene",
+          workspacePath: "/workspace",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Workflow deep_research_dossier [scene] completed via mission_coordinator bootstrap");
+      expect(result.output).toContain("Partial progress before interruption:");
+      expect(result.output).toContain("delegate_to_agent");
+      expect(result.metadata?.["bootstrapAgent"]).toBe("mission_coordinator");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -496,7 +579,7 @@ describe("workflow catalog tools", () => {
         deep_research_dossier: {
           description: "Run a deep-research mission with evidence gathering and final synthesis.",
           task: "Use mission_coordinator first. It should decide whether the request needs independent source gathering.",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       },
       subAgents: {
@@ -566,7 +649,7 @@ describe("workflow catalog tools", () => {
         {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       );
 
@@ -602,7 +685,7 @@ describe("workflow catalog tools", () => {
         deep_research_dossier: {
           description: "Run a deep-research mission with evidence gathering and final synthesis.",
           task: "Use mission_coordinator first. It should decide whether the request needs independent source gathering.",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       },
       subAgents: {
@@ -653,7 +736,7 @@ describe("workflow catalog tools", () => {
         {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       );
 
@@ -675,8 +758,8 @@ describe("workflow catalog tools", () => {
       scenes: {
         protocol_comparison_paper: {
           description: "Compare multiple protocols or standards through parallel evidence gathering, one grounded draft, and one final quality gate.",
-          task: "Use mission_coordinator first. Partition the work into one evidence-gathering track per protocol, standard, or framework under comparison. Use citation_researcher or researcher for each track, require reusable findings via share_finding, then delegate drafting to paper_author.",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          task: "Use mission_coordinator first. Partition the work into one evidence-gathering track per protocol, standard, or framework under comparison. Use researcher for each track, require reusable findings via share_finding, then delegate drafting to paper_author.",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       },
       subAgents: {
@@ -727,7 +810,7 @@ describe("workflow catalog tools", () => {
         {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
-          allowedAgents: ["mission_coordinator", "citation_researcher", "paper_author", "quality_supervisor"],
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author", "quality_supervisor"],
         },
       );
 

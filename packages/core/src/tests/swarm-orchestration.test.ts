@@ -109,6 +109,146 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
   }, 30_000);
 
+  it("reuses session/task memory for duplicate research delegations instead of spawning another researcher", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-memory-reuse-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research specialist.",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["research", "documentation lookup"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const memory = await import("../swarm/memory.js");
+    await memory.writeSharedFact(
+      "session-memory-reuse",
+      "a2a_protocol_sources",
+      "A2A Protocol Primary Sources: official specification https://a2a-protocol.org/latest/specification/ and repository https://github.com/a2aproject/A2A",
+    );
+    await memory.appendPartialResult({
+      sessionId: "session-memory-reuse",
+      taskId: "task_a2a_sources",
+      agentName: "researcher",
+      content: "A2A official specification: https://a2a-protocol.org/latest/specification/ ; GitHub repository: https://github.com/a2aproject/A2A",
+      ts: new Date().toISOString(),
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Find A2A sources",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      task: "Find citation-grade primary sources for the A2A protocol and summarize the official specification.",
+      routingQuery: "A2A protocol official specification primary sources",
+    }, {
+      sessionId: "session-memory-reuse",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Reused relevant session/task memory");
+    expect(result.output).toContain("a2a_protocol_sources");
+    expect(result.metadata?.["reusedFromSessionMemory"]).toBe(true);
+    expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+    expect(Object.values(swarmState.tasks)).toHaveLength(1);
+    expect(Object.values(swarmState.tasks)[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("reuses protocol facts for punctuation-heavy multilingual research retries", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-memory-reuse-multilingual-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research specialist.",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["research", "documentation lookup"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const memory = await import("../swarm/memory.js");
+    await memory.writeSharedFact(
+      "session-memory-reuse-multilingual",
+      "a2a_protocol_v1_official_spec",
+      "A2A Protocol v1.0 official specification for agent to agent communication over HTTP and gRPC.",
+    );
+    await memory.writeSharedFact(
+      "session-memory-reuse-multilingual",
+      "a2a_github_repository",
+      "Official GitHub repository for the A2A protocol with SDKs, samples, and implementation guidance.",
+    );
+    await memory.appendPartialResult({
+      sessionId: "session-memory-reuse-multilingual",
+      taskId: "evidence_gather_a2a",
+      agentName: "researcher",
+      content: "A2A official specification, GitHub repository, and enterprise feature documentation were already collected for the protocol comparison paper.",
+      ts: new Date().toISOString(),
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      task: "Sammle aktuelle, zitierfahige Quellen zum Agent-to-Agent (A2A) Protokoll - Standards, Implementierungen, Use Cases.",
+    }, {
+      sessionId: "session-memory-reuse-multilingual",
+      workspacePath: tempDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Reused relevant session/task memory");
+    expect(result.output).toContain("a2a_protocol_v1_official_spec");
+    expect(result.output).toContain("a2a_github_repository");
+    expect(result.metadata?.["reusedFromSessionMemory"]).toBe(true);
+    expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("ignores undefined fallback agents instead of attempting them", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-delegate-"));
     tempDirs.push(tempDir);
@@ -168,6 +308,289 @@ describe("swarm orchestration tools", () => {
     expect(result.output).toContain("retrieval_analyst");
     expect(result.metadata?.["attemptedAgents"]).toEqual(["researcher", "retrieval_analyst"]);
     expect(runSubAgentWithStatsMock.mock.calls.map((call) => call[0].agentName)).toEqual(["researcher", "retrieval_analyst"]);
+  }, 30_000);
+
+  it("drops an unknown explicit agent name and auto-routes the task instead of failing immediately", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-unknown-explicit-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research specialist for official protocol documentation.",
+          capabilities: ["research", "documentation lookup", "web analysis"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: `${args.agentName}: gathered protocol sources for ${args.task}`,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 1,
+        toolNames: ["web_search"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "completed",
+        outcome: "success",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Collect MCP sources",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "research_coordinator",
+      task: "Recherchiere aktuelle Informationen zu MCP und sammle offizielle Quellen.",
+      routingQuery: "MCP official sources protocol research",
+    }, {
+      sessionId: "session-unknown-explicit",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("researcher");
+    expect(result.output).not.toContain("research_coordinator");
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+    expect(runSubAgentWithStatsMock.mock.calls[0]?.[0]?.agentName).toBe("researcher");
+    expect(Object.values(swarmState.tasks)).toHaveLength(1);
+    expect(Object.values(swarmState.tasks)[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("auto-routes unknown explicit agents inside parallel_delegate instead of dropping the research task", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-parallel-unknown-explicit-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        paper_author: {
+          description: "Paper drafting specialist.",
+          capabilities: ["paper drafting", "reports"],
+          tools: ["read_shared_facts", "generate_document"],
+          maxIterations: 4,
+        },
+        researcher: {
+          description: "Research specialist for official protocol documentation.",
+          capabilities: ["research", "documentation lookup", "web analysis"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: `${args.agentName}: completed ${args.task}`,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: args.agentName === "researcher" ? 1 : 0,
+        toolNames: args.agentName === "researcher" ? ["web_search"] : [],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "completed",
+        outcome: "success",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const parallelDelegate = getTool("parallel_delegate");
+    expect(parallelDelegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Research and draft protocol paper",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await parallelDelegate!.execute({
+      tasks: [
+        {
+          agentName: "paper_author",
+          task: "Schreibe eine kurze Struktur fuer das Paper.",
+        },
+        {
+          agentName: "research_coordinator",
+          task: "Recherchiere aktuelle Informationen zu MCP, A2A und AG-UI.",
+          routingQuery: "MCP A2A AG-UI protocol official sources research",
+        },
+      ],
+    }, {
+      sessionId: "session-parallel-unknown-explicit",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("paper_author");
+    expect(result.output).toContain("researcher");
+    expect(result.output).not.toContain("is not defined in config.subAgents");
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(2);
+    expect(runSubAgentWithStatsMock.mock.calls.map((call) => call[0]?.agentName)).toEqual([
+      "paper_author",
+      "researcher",
+    ]);
+  }, 30_000);
+
+  it("keeps earlier parallel task statuses when a later parallel batch fails", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-parallel-task-ids-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Research and citation lookup specialist.",
+          capabilities: ["official source lookup", "web research"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const taskText = String(args.task ?? "");
+      const failed = taskText.includes("Second batch");
+      return {
+        output: failed
+          ? "Error: source lookup still incomplete."
+          : `Collected verified sources for ${taskText}`,
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: taskText.length,
+          toolCount: failed ? 1 : 2,
+          toolNames: failed ? ["web_search"] : ["web_search", "web_fetch"],
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          terminalState: "completed",
+          outcome: failed ? "failure" : "success",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const parallelDelegate = getTool("parallel_delegate");
+    expect(parallelDelegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Compare protocol sources across multiple parallel batches",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const first = await parallelDelegate!.execute({
+      tasks: [
+        {
+          agentName: "researcher",
+          task: "First batch MCP sources",
+        },
+        {
+          agentName: "researcher",
+          task: "First batch A2A sources",
+        },
+      ],
+    }, {
+      sessionId: "session-parallel-ids",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    const second = await parallelDelegate!.execute({
+      tasks: [
+        {
+          agentName: "researcher",
+          task: "Second batch A2A retry",
+        },
+        {
+          agentName: "researcher",
+          task: "Second batch AG-UI retry",
+        },
+      ],
+    }, {
+      sessionId: "session-parallel-ids",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(false);
+    expect(Object.keys(swarmState.tasks)).toEqual([
+      "parallel_1",
+      "parallel_2",
+      "parallel_3",
+      "parallel_4",
+    ]);
+    expect(swarmState.tasks["parallel_1"]?.title).toContain("First batch MCP sources");
+    expect(swarmState.tasks["parallel_1"]?.status).toBe("completed");
+    expect(swarmState.tasks["parallel_2"]?.title).toContain("First batch A2A sources");
+    expect(swarmState.tasks["parallel_2"]?.status).toBe("completed");
+    expect(swarmState.tasks["parallel_3"]?.title).toContain("Second batch A2A retry");
+    expect(swarmState.tasks["parallel_3"]?.status).toBe("failed");
+    expect(swarmState.tasks["parallel_4"]?.title).toContain("Second batch AG-UI retry");
+    expect(swarmState.tasks["parallel_4"]?.status).toBe("failed");
   }, 30_000);
 
   it("forwards allowedAgents scope into delegated sub-agent runs", async () => {
@@ -261,8 +684,8 @@ describe("swarm orchestration tools", () => {
       subAgents: {
         web_task_coordinator: {
           description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
-          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
-          tags: ["coordination", "web", "browser", "research"],
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis", "web analysis"],
+          tags: ["coordination", "web", "browser", "research", "analysis"],
           tools: ["search_agents", "delegate_to_agent"],
         },
         researcher: {
@@ -479,6 +902,86 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  it("treats planning-only completed delegation output as failure and uses the fallback agent", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName === "researcher") {
+        return {
+          output: "Let me fetch the official documentation pages and SDK repositories to get complete information.",
+          stats: {
+            agentName: args.agentName,
+            sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+            promptChars: 0,
+            userContentChars: String(args.task ?? "").length,
+            toolCount: 5,
+            toolNames: ["web_search", "web_fetch"],
+            iterations: 5,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            maxIterations: 5,
+            model: "mock",
+            capabilities: [],
+            outcome: "success",
+            terminalState: "completed",
+          },
+        };
+      }
+
+      return {
+        output: `${args.agentName}:${args.task}:ok`,
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(args.task ?? "").length,
+          toolCount: 0,
+          toolNames: [],
+          iterations: 0,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          outcome: "success",
+          terminalState: "completed",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Research MCP source metadata",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      fallbackAgents: ["retrieval_analyst"],
+      task: "Find official MCP documentation and SDK repositories",
+    }, {
+      sessionId: "session-planning-fetch-output",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("retrieval_analyst");
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("researcher");
+    expect(tasks[0]?.attempts[0]?.status).toBe("failed");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
+    expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
   it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-maintainer-"));
     tempDirs.push(workspacePath);
@@ -596,12 +1099,6 @@ describe("swarm orchestration tools", () => {
           tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"],
           capabilities: ["web retrieval", "evidence synthesis"],
           tags: ["coordination", "web", "research"],
-        },
-        citation_researcher: {
-          description: "Official source lookup specialist",
-          tools: ["web_search", "web_fetch"],
-          capabilities: ["citation research"],
-          tags: ["citations", "sources"],
         },
       },
     }), "utf8");
@@ -1215,6 +1712,72 @@ describe("swarm orchestration tools", () => {
     expect(runSubAgentMock).toHaveBeenCalledTimes(1);
   }, 15000);
 
+  it("reuses partial graph nodes with the same taskId and signature instead of rerunning duplicate research", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: [
+        `Sub-agent '${args.agentName}' timed out after 1000ms`,
+        "Partial progress before interruption:",
+        "- Tool calls executed: 3 (web_search, web_fetch, share_finding)",
+        "- Iterations completed: 1",
+      ].join("\n"),
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 3,
+        toolNames: ["web_search", "web_fetch", "share_finding"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        outcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const runTaskGraph = getTool("run_task_graph");
+    expect(runTaskGraph).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Research protocols",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const graphArgs = {
+      objective: "Research protocols",
+      nodes: [
+        { id: "gather_mcp", agentName: "researcher", task: "Find official MCP specification" },
+      ],
+    };
+
+    const first = await runTaskGraph!.execute(graphArgs, {
+      sessionId: "session-graph-reuse",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    const second = await runTaskGraph!.execute(graphArgs, {
+      sessionId: "session-graph-reuse",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+    expect(swarmState.tasks["gather_mcp"]?.status).toBe("partial");
+    expect(second.output).toContain("gather_mcp [partial]");
+  }, 15000);
+
   it("refuses to replay an identical failed delegated task in the same turn", async () => {
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       const { agentName, task, parentSessionId } = args;
@@ -1275,6 +1838,105 @@ describe("swarm orchestration tools", () => {
     expect(second.error).toContain("already failed earlier in this turn");
     expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
     expect(Object.values(swarmState.tasks)).toHaveLength(1);
+  }, 15_000);
+
+  it("allows retrying a failed task with a different explicit agent in the same turn", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-explicit-retry-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "mock-model" },
+        },
+      },
+      subAgents: {
+        evidence_analyst: {
+          description: "Evidence analyst.",
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        researcher: {
+          description: "Research specialist.",
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const { agentName, task, parentSessionId } = args;
+      return {
+        output: agentName === "evidence_analyst"
+          ? "Sub-agent produced no final response."
+          : `${agentName}: official MCP sources collected for ${task}`,
+        stats: {
+          agentName,
+          sessionId: `sub:${parentSessionId}:${agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(task ?? "").length,
+          toolCount: 1,
+          toolNames: ["web_fetch"],
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          terminalState: "completed",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Recover failed source lookup",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const first = await delegate!.execute({
+      agentName: "evidence_analyst",
+      task: "Find citation-grade primary sources for MCP.",
+    }, {
+      sessionId: "session-explicit-retry",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    const second = await delegate!.execute({
+      agentName: "researcher",
+      task: "Find citation-grade primary sources for MCP.",
+    }, {
+      sessionId: "session-explicit-retry",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(first.success).toBe(false);
+    expect(second.success).toBe(true);
+    expect(second.metadata?.["taskId"]).toBe(first.metadata?.["taskId"]);
+    expect(second.output).toContain("researcher");
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(2);
+
+    const tasks = Object.values(swarmState.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.status).toBe("completed");
+    expect(tasks[0]?.selectedAgent).toBe("researcher");
+    expect(tasks[0]?.attempts).toHaveLength(2);
+    expect(tasks[0]?.attempts[0]?.agentName).toBe("evidence_analyst");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("researcher");
   }, 15_000);
 
   it("does not invoke architect fallback after an explicitly requested agent fails", async () => {
@@ -1572,6 +2234,100 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts).toHaveLength(1);
     expect(tasks[0]?.attempts[0]?.agentName).toBe("paper_author");
     expect(tasks[0]?.attempts[0]?.status).toBe("partial");
+  }, 15000);
+
+  it("injects artifact paths from earlier partial results into downstream agent context", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName === "paper_author") {
+        return {
+          output: "Saved the comparison paper draft and summarized the remaining caveats.",
+          stats: {
+            agentName: args.agentName,
+            sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+            promptChars: 0,
+            userContentChars: String(args.task ?? "").length,
+            toolCount: 1,
+            toolNames: ["generate_document"],
+            iterations: 1,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            maxIterations: 5,
+            model: "mock",
+            capabilities: [],
+            outcome: "partial",
+            terminalState: "max_iterations",
+          },
+          artifacts: [
+            {
+              outputPath: "reports/protocol-comparison.md",
+              filename: "protocol-comparison.md",
+              contentType: "text/markdown; charset=utf-8",
+              previewMode: "markdown",
+              sourceTool: "generate_document",
+            },
+          ],
+        };
+      }
+
+      return {
+        output: `${args.agentName}:${args.task}:ok`,
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(args.task ?? "").length,
+          toolCount: 0,
+          toolNames: [],
+          iterations: 0,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          outcome: "success",
+          terminalState: "completed",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Draft and review the comparison packet",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    const draftResult = await delegate!.execute({
+      agentName: "paper_author",
+      task: "Write the protocol comparison paper.",
+    }, {
+      sessionId: "session-artifact-context",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(draftResult.success).toBe(true);
+    expect(draftResult.metadata?.["delegationOutcome"]).toBe("partial");
+
+    const reviewResult = await delegate!.execute({
+      agentName: "quality_supervisor",
+      task: "Review the generated protocol comparison paper and decide whether one corrective pass is needed.",
+    }, {
+      sessionId: "session-artifact-context",
+      workspacePath: "/workspace",
+      swarmState,
+    });
+
+    expect(reviewResult.success).toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(2);
+    expect(runSubAgentWithStatsMock.mock.calls[1]?.[0]?.context).toContain("reports/protocol-comparison.md");
+    expect(runSubAgentWithStatsMock.mock.calls[1]?.[0]?.context).toContain("generate_document");
   }, 15000);
 
   it("returns the best partial result when later fallbacks only produce inability disclaimers", async () => {

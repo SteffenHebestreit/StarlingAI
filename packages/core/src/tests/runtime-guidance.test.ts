@@ -327,6 +327,54 @@ describe("runtime turn guidance", () => {
     expect(result).not.toContain("TASK COMPLETED");
   });
 
+  it("passes long delegated deliverables verbatim instead of truncating to 1600 chars", () => {
+    const paperBody = [
+      "# KI-Protokolle: MCP, A2A und AG-UI im Vergleich",
+      "",
+      "## 1. Einleitung",
+      "placeholder section ".repeat(40),
+      "",
+      "## 2. MCP (Model Context Protocol)",
+      "Anthropic-Standard für KI-Tool-Integration. ".repeat(40),
+      "",
+      "## 3. A2A (Agent-to-Agent)",
+      "Google-Protokoll für Agentenkommunikation. ".repeat(40),
+      "",
+      "## 4. AG-UI",
+      "Frontend-Streaming-Standard für KI-Agenten. ".repeat(40),
+      "",
+      "## 5. Fazit",
+      "Vergleich der drei führenden KI-Protokolle. ".repeat(20),
+    ].join("\n");
+    // Wrap as run_workflow output, as produced by the workflow tool
+    const workflowOutput = `Workflow protocol_comparison_paper [scene] completed via mission_coordinator bootstrap.\n\n${paperBody}`;
+
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      workflowOutput,
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK COMPLETED.");
+    expect(result).toContain("VERBATIM");
+    expect(result).not.toContain("Do NOT paraphrase with different numbers or names.");
+    // Workflow preamble stripped
+    expect(result).not.toContain("Workflow protocol_comparison_paper [scene] completed");
+    // Paper body present in full (key sections not truncated)
+    expect(result).toContain("## 1. Einleitung");
+    expect(result).toContain("## 5. Fazit");
+    // Not truncated at 1600 chars — should be much longer
+    const evidenceStart = result.indexOf("Observed evidence:\n");
+    const evidenceContent = result.slice(evidenceStart + "Observed evidence:\n".length);
+    expect(evidenceContent.length).toBeGreaterThan(2500);
+  });
+
   it("treats blocked workflow evidence as failed research rather than completed drafting input", () => {
     const result = buildModelVisibleToolResult(
       "run_workflow",

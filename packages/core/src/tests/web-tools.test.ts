@@ -2,9 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config/schema.js";
 import { expandSearchQuery, rankSearchResults, rerankSearchResults, resolveSearchBackendConfig } from "../tools/web.js";
 
+// Mock MCP registry so tests can control playwright availability
+const mcpConnections = new Map<string, unknown>();
+vi.mock("../mcp/registry.js", () => ({
+  getMcpConnections: () => mcpConnections,
+}));
+
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  mcpConnections.clear();
   delete process.env["SEARXNG_BASE_URL"];
 
   const configLoader = await import("../config/loader.js");
@@ -211,5 +218,93 @@ describe("web search backend selection", () => {
     expect(result.output).toContain("via duckduckgo");
     expect(result.metadata?.["attemptedBackends"]).toEqual(["searxng", "duckduckgo"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("includes playwright as fallback backend when searxng is explicitly configured and playwright is available", async () => {
+    mcpConnections.set("playwright", {});
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    const config: Config = {
+      ...realConfig,
+      retrieval: {
+        ...realConfig.retrieval,
+        search: {
+          backend: "searxng",
+          searxngBaseUrl: "http://search.local",
+          timeoutMs: 12000,
+        },
+      },
+    };
+
+    const resolved = resolveSearchBackendConfig(config);
+
+    expect(resolved.requestedBackend).toBe("searxng");
+    expect(resolved.backends).toEqual(["searxng", "playwright"]);
+  });
+
+  it("falls through to playwright duckduckgo when searxng returns zero results", async () => {
+    mcpConnections.set("playwright", {});
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      retrieval: {
+        ...realConfig.retrieval,
+        search: {
+          backend: "searxng",
+          searxngBaseUrl: "http://search.local",
+          timeoutMs: 12000,
+        },
+      },
+    });
+
+    // SearXNG returns a valid but empty results array
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("http://search.local/")) {
+        return new Response(JSON.stringify({ results: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("network error", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Playwright callTool mock — navigate + snapshot returning a DuckDuckGo result
+    const playwrightCallTool = vi.fn(async (input: { name: string }) => {
+      if (input.name === "browser_navigate") return { content: [{ type: "text", text: "" }] };
+      if (input.name === "browser_snapshot") {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              '- link "KI-Protokolle im Vergleich" [ref=e1] -> https://example.com/ki-protokolle',
+              "- text: MCP, A2A und AG-UI in der Übersicht",
+            ].join("\n"),
+          }],
+        };
+      }
+      return { content: [{ type: "text", text: "" }] };
+    });
+    mcpConnections.set("playwright", { client: { callTool: playwrightCallTool } });
+
+    const { clearSearchSessionState } = await import("../tools/web.js");
+    clearSearchSessionState("session-searxng-fallback");
+
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("web_search");
+
+    const result = await tool!.execute({ query: "KI-Protokolle", maxResults: 5 }, {
+      sessionId: "session-searxng-fallback",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("via playwright");
+    expect(result.output).toContain("KI-Protokolle im Vergleich");
+    expect(result.metadata?.["attemptedBackends"]).toEqual(["searxng", "playwright"]);
+    // streak should NOT have been incremented since playwright succeeded
+    expect(result.metadata?.["consecutiveZeroResults"]).toBeUndefined();
   });
 });

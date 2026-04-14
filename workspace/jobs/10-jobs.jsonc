@@ -14,10 +14,11 @@
       },
       "steps": [
         {
-          "scene": "verified_research_brief",
+          "scene": "source_backed_paper",
           "label": "Research and verify",
           "params": {
             "audience": "operations leadership",
+            "outputStyle": "concise brief",
             "freshnessRequirement": "use only same-day or most recent official updates relevant to {{topic}}"
           }
         },
@@ -50,7 +51,7 @@
       ]
     },
     "deep_research_packet": {
-      "description": "Run a deep-research dossier workflow and optionally follow it with a compact visual brief.",
+      "description": "Run a deep-research dossier workflow with optional Mermaid visuals.",
       "params": {
         "topic": {
           "description": "Research topic or question",
@@ -63,18 +64,12 @@
       },
       "steps": [
         {
-          "scene": "deep_research_dossier",
-          "label": "Build dossier",
+          "scene": "deep_research",
+          "label": "Build dossier with visuals",
           "params": {
             "deliverable": "{{deliverable}}",
             "includeVisuals": "yes",
-            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}}"
-          }
-        },
-        {
-          "scene": "research_visual_brief",
-          "label": "Create visual brief",
-          "params": {
+            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}}",
             "audience": "decision maker",
             "visualFocus": "choose the clearest Mermaid visual structure for {{topic}}"
           }
@@ -100,7 +95,7 @@
       ]
     },
     "source_grounded_paper_packet": {
-      "description": "Run a reusable evidence-gathering workflow and then draft a source-grounded paper with one final quality gate.",
+      "description": "Collect evidence and draft a source-grounded paper with one final quality gate.",
       "params": {
         "topic": {
           "description": "Topic, protocol set, or question to cover",
@@ -113,19 +108,11 @@
       },
       "steps": [
         {
-          "scene": "deep_research_dossier",
-          "label": "Collect and reconcile evidence",
-          "params": {
-            "deliverable": "evidence ledger and reusable notes for {{topic}}",
-            "includeVisuals": "only when they materially improve the explanation",
-            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}} and preserve publication dates"
-          }
-        },
-        {
           "scene": "source_backed_paper",
-          "label": "Draft source-grounded paper",
+          "label": "Collect evidence and draft paper",
           "params": {
-            "outputStyle": "{{outputStyle}}"
+            "outputStyle": "{{outputStyle}}",
+            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}} and preserve publication dates"
           }
         }
       ]
@@ -140,9 +127,11 @@
       },
       "steps": [
         {
-          "scene": "research_visual_brief",
+          "scene": "deep_research",
           "label": "Research and diagram",
           "params": {
+            "deliverable": "concise visual brief",
+            "includeVisuals": "yes",
             "audience": "technical stakeholder",
             "visualFocus": "create the single most useful Mermaid diagram for {{topic}}"
           }
