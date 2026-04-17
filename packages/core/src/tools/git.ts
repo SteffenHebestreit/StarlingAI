@@ -28,8 +28,9 @@ async function runGitInSandbox(
 ): Promise<{ success: boolean; output: string; error?: string }> {
   const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
   const workdir = options?.workdir ?? "/workspace";
-  const gitCmd = ["git", ...args].join(" ");
 
+  // Invoke git directly inside the container (no `sh -lc`) so caller-supplied
+  // strings cannot be interpreted as shell metacharacters.
   const dockerArgs = [
     "run", "--rm",
     options?.network ? "--network=bridge" : "--network=none",
@@ -41,7 +42,7 @@ async function runGitInSandbox(
     "-v", `${workspaceMountSource}:/workspace`,
     "-w", workdir,
     SANDBOX_IMAGE,
-    "sh", "-lc", gitCmd,
+    "git", ...args,
   ];
 
   try {
@@ -204,12 +205,12 @@ registerTool({
     }
 
     // Stage files first
-    const addResult = await runGitInSandbox(["add", ...files], ctx);
+    const addResult = await runGitInSandbox(["add", "--", ...files], ctx);
     if (!addResult.success) return addResult;
 
-    // Commit
-    const commitArgs = ["commit", "-m", `'${message.replace(/'/g, "'\\''")}'`];
-    if (author) commitArgs.push("--author", `'${author.replace(/'/g, "'\\''")}'`);
+    // Commit — no shell quoting needed; git is invoked directly via execve.
+    const commitArgs = ["commit", "-m", message];
+    if (author) commitArgs.push("--author", author);
 
     log.info({ message: message.substring(0, 100), files, sessionId: ctx.sessionId }, "git_commit");
     return runGitInSandbox(commitArgs, ctx);
@@ -307,3 +308,118 @@ registerTool({
     return runGitInSandbox(gitArgs, ctx);
   },
 });
+
+// ── git_tag (Tier 2 — mutating, per-call approval) ───────────────────────
+
+registerTool({
+  name: "git_tag",
+  description:
+    "Create an annotated or lightweight Git tag on the current HEAD or a specific commit. " +
+    "Annotated tags (default) include a message and the tagger identity. " +
+    "Use lightweight tags only when the tag is a temporary bookmark.",
+  parameters: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "Tag name (e.g. v1.2.3).",
+      },
+      message: {
+        type: "string",
+        description:
+          "Annotation message for the tag. When provided, creates an annotated tag. " +
+          "Omit to create a lightweight tag.",
+      },
+      ref: {
+        type: "string",
+        description: "Commit hash, branch, or ref to tag (default: HEAD).",
+      },
+      force: {
+        type: "boolean",
+        description: "Replace an existing tag with the same name (default: false).",
+      },
+    },
+    required: ["name"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const name = String(args["name"] ?? "").trim();
+    const message = args["message"] != null ? String(args["message"]).trim() : "";
+    const ref = args["ref"] != null ? String(args["ref"]).trim() : "";
+    const force = Boolean(args["force"]);
+
+    if (!name || !/^[a-zA-Z0-9._/-]+$/.test(name)) {
+      return { success: false, output: "", error: "Invalid tag name." };
+    }
+
+    const gitArgs = ["tag"];
+    if (force) gitArgs.push("-f");
+    if (message) {
+      gitArgs.push("-a", name, "-m", message);
+    } else {
+      gitArgs.push(name);
+    }
+    if (ref) gitArgs.push(ref);
+
+    log.info({ name, message: !!message, ref, force, sessionId: ctx.sessionId }, "git_tag");
+    return runGitInSandbox(gitArgs, ctx);
+  },
+});
+
+// ── git_push (Tier 2 — mutating + network, per-call approval) ───────────
+
+registerTool({
+  name: "git_push",
+  description:
+    "Push local commits or tags to a remote Git repository. " +
+    "Network access is enabled for the sandbox during this operation. " +
+    "Requires per-call approval because it communicates with an external remote.",
+  parameters: {
+    type: "object",
+    properties: {
+      remote: {
+        type: "string",
+        description: "Remote name (default: origin).",
+        default: "origin",
+      },
+      branch: {
+        type: "string",
+        description: "Local branch to push (default: current branch).",
+      },
+      tags: {
+        type: "boolean",
+        description: "Push all tags alongside the branch (default: false).",
+      },
+      force: {
+        type: "boolean",
+        description: "Force-push — only use when rewriting history is intentional (default: false).",
+      },
+      setUpstream: {
+        type: "boolean",
+        description: "Set the upstream tracking reference for the branch (default: false).",
+      },
+    },
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const remote = String(args["remote"] ?? "origin").trim() || "origin";
+    const branch = args["branch"] != null ? String(args["branch"]).trim() : "";
+    const tags = Boolean(args["tags"]);
+    const force = Boolean(args["force"]);
+    const setUpstream = Boolean(args["setUpstream"]);
+
+    // Validate remote name
+    if (!/^[a-zA-Z0-9_.-]+$/.test(remote)) {
+      return { success: false, output: "", error: "Invalid remote name." };
+    }
+
+    const gitArgs = ["push"];
+    if (force) gitArgs.push("--force");
+    if (setUpstream) gitArgs.push("--set-upstream");
+    if (tags) gitArgs.push("--tags");
+    gitArgs.push(remote);
+    if (branch) gitArgs.push(branch);
+
+    log.info({ remote, branch, tags, force, sessionId: ctx.sessionId }, "git_push");
+    return runGitInSandbox(gitArgs, ctx, { network: true });
+  },
+});
+

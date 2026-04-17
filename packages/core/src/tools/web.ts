@@ -373,7 +373,7 @@ async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Pr
   }
 }
 
-function isPrivateHost(host: string): boolean {
+export function isPrivateHost(host: string): boolean {
   // Strip IPv6 brackets if present
   const h = host.replace(/^\[|\]$/g, "");
 
@@ -441,10 +441,12 @@ export function resolveSearchBackendConfig(config: Config = getConfig()): Resolv
   const playwrightAvailable = getMcpConnections().has("playwright");
 
   if (searchConfig.backend === "searxng") {
-    // Always include playwright as a hard fallback when available, so a
-    // degraded/offline SearXNG instance automatically retries via browser search.
+    // Always include playwright (when available) and DuckDuckGo as hard fallbacks
+    // so a degraded/offline SearXNG instance automatically retries via browser
+    // search and then DuckDuckGo without the agent seeing a zero-result failure.
     const backends: SearchBackend[] = ["searxng"];
     if (playwrightAvailable) backends.push("playwright");
+    backends.push("duckduckgo");
     return {
       requestedBackend: "searxng",
       backends,

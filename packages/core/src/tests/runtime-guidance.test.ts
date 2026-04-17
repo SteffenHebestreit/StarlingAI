@@ -141,6 +141,29 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("Do NOT claim that you cannot modify the toolset or agent set");
   });
 
+  it("treats new workflow authoring requests as swarm maintenance", () => {
+    const guidance = buildDynamicTurnGuidance("lass uns einen neuen workflow generieren, der browser-agent http://n8n.k2o öffnet, credentials einfügt und dann die project-list öffnet", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("Treat this as swarm maintenance inside the current repository");
+    expect(guidance?.prompt).toContain("delegate_to_agent tool with agentName='swarm_maintainer'");
+    expect(guidance?.prompt).not.toContain("workflow catalog before inventing");
+  });
+
+  it("treats worflow typo as swarm maintenance (suppresses catalog guardrail)", () => {
+    // Regression: typo 'worflow' (missing k) must still classify as swarm maintenance
+    // so workflowCatalogSuppressedForMaintenance stays true and the guardrail does not fire.
+    const guidance = buildDynamicTurnGuidance(
+      "lass uns einen neuen worflow generieren\n\nbrowser-agent offnet eine instanz auf http://n8n.k2o, dann werden die passenden credentials eingefügt und nach dem einloggen die seite der project-list geöffnet",
+      "orchestration_only",
+    );
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("swarm_maintainer");
+  });
+
   it("builds an authoritative temporal context prompt for the current turn", () => {
     const prompt = buildTemporalContextPrompt(new Date("2026-03-26T12:00:00.000Z"));
 

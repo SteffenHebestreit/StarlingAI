@@ -31,27 +31,11 @@ const VM_TOOL_PARAMETERS = {
     },
     apiUrl: {
       type: "string",
-      description: "Base Proxmox API URL, e.g. https://proxmox.example.com:8006/api2/json",
-    },
-    username: {
-      type: "string",
-      description: "Proxmox username for password login, e.g. root@pam",
-    },
-    password: {
-      type: "string",
-      description: "Password, $ENV_VAR, or secret:key for password login",
-    },
-    tokenId: {
-      type: "string",
-      description: "API token identifier, e.g. root@pam!starlingai",
-    },
-    tokenSecret: {
-      type: "string",
-      description: "API token secret, $ENV_VAR, or secret:key",
+      description: "Base Proxmox API URL, e.g. https://proxmox.example.com:8006/api2/json. Optional when 'profile' is set — the profile's apiUrl is used.",
     },
     node: {
       type: "string",
-      description: "Target node name",
+      description: "Target node name. Optional when 'profile' is set — the profile's node is used.",
     },
     vmId: {
       type: "number",
@@ -115,7 +99,7 @@ const VM_TOOL_PARAMETERS = {
 
 registerTool({
   name: "vm_manage",
-  description: "Manage virtual machines through configured infrastructure backends. Supports Proxmox profiles and generic webhook adapters.",
+  description: "Manage virtual machines through configured infrastructure backends. Supports Proxmox profiles and generic webhook adapters. Authentication MUST come from a server-side 'profile' — credentials never enter model context.",
   parameters: VM_TOOL_PARAMETERS,
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     return executeVmTool(args, ctx, { allowWebhook: true, legacyProxmoxOnly: false });
@@ -124,7 +108,7 @@ registerTool({
 
 registerTool({
   name: "proxmox_vm",
-  description: "Manage Proxmox virtual machines through the Proxmox VE API. Supports cloning from templates, starting/stopping VMs, checking status, and retrieving guest IPs.",
+  description: "Manage Proxmox virtual machines through the Proxmox VE API. Supports cloning from templates, starting/stopping VMs, checking status, and retrieving guest IPs. Authentication MUST come from a server-side 'profile' — credentials never enter model context.",
   parameters: VM_TOOL_PARAMETERS,
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     return executeVmTool(args, ctx, { allowWebhook: false, legacyProxmoxOnly: true });
@@ -590,7 +574,7 @@ async function createAuthContext(
   if (!username || !password) {
     return {
       success: false,
-      error: "Provide either tokenId + tokenSecret or username + password for Proxmox authentication",
+      error: "Proxmox authentication is missing. Configure a 'profile' under infrastructure.virtualization with tokenId+tokenSecret or username+password (use $ENV_VAR or secret:key references — credentials must not enter model context).",
     };
   }
 

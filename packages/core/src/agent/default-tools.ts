@@ -61,6 +61,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
 
 export const ORCHESTRATION_TOOL_NAMES = [
   "delegate_to_agent",
+  "swarm_delegate",
   "list_agents",
   "search_agents",
   "search_workflows",

@@ -209,6 +209,13 @@ export interface SpeechToTextResult {
   duration?: number;
 }
 
+export interface SavedTtsVoice {
+  voice_id: string;
+  name: string;
+  lang?: string;
+  ref_text?: string;
+}
+
 export interface SavedTtsVoiceResult {
   status: string;
   voice_id: string;
@@ -622,6 +629,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     args: Record<string, unknown>;
   }
 
+  interface PendingInputRequest {
+    inputId: string;
+    requestId: string;
+    question: string;
+    choices?: string[];
+  }
+
   interface PendingTurnRecovery {
     sessionId: string;
     baselineTotalMessages: number;
@@ -629,6 +643,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   const pendingApproval = ref<PendingApproval | null>(null);
+  const pendingInputRequest = ref<PendingInputRequest | null>(null);
   const pendingTurnRecovery = ref<PendingTurnRecovery | null>(null);
   const notificationsSubscribed = ref(false);
 
@@ -910,7 +925,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
 
     pendingApproval.value = null;
-    pendingIntervention.value = null;
+      pendingInputRequest.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
     isStreaming.value = false;
@@ -936,6 +951,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         applyCurrentSessionRunSelection(currentSessionId.value ?? recovery.sessionId);
         pendingRequestId.value = null;
         pendingApproval.value = null;
+        pendingInputRequest.value = null;
         pendingIntervention.value = null;
         isStreaming.value = false;
         isError.value = false;
@@ -1382,6 +1398,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       streamingText.value = "";
       pendingRequestId.value = null;
       pendingApproval.value = null;
+      pendingInputRequest.value = null;
       pendingIntervention.value = null;
       isStreaming.value = false;
       clearTurnStallState();
@@ -1404,6 +1421,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     streamingText.value = "";
     pendingRequestId.value = null;
     pendingApproval.value = null;
+    pendingInputRequest.value = null;
     pendingIntervention.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
@@ -1643,6 +1661,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     connecting.value = false;
     // Clear stale UI state so reconnect starts clean
     pendingApproval.value = null;
+    pendingInputRequest.value = null;
     pendingIntervention.value = null;
     notificationsSubscribed.value = false;
     liveSwarmState.value = null;
@@ -1791,6 +1810,22 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    if (type === "agent.input_needed") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
+        const inputId = String(data["inputId"]);
+        const rawChoices = data["choices"];
+        pendingInputRequest.value = {
+          inputId,
+          requestId: String(data["requestId"]),
+          question: String(data["question"] ?? ""),
+          choices: Array.isArray(rawChoices) ? rawChoices.map(String) : undefined,
+        };
+      }
+      return;
+    }
+
     if (type === "agent.intervention") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
@@ -1902,6 +1937,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         clearTurnStallState();
         isError.value = isBlocked;
         pendingApproval.value = null;
+        pendingInputRequest.value = null;
         appendSwarmRun(isBlocked ? "blocked" : "ok", swarmState);
         liveSwarmState.value = null;
         syntheticSwarmState.value = null;
@@ -1956,6 +1992,11 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingApproval.value = null;
   }
 
+  async function respondInput(inputId: string, answer: string): Promise<void> {
+    await rpc("input.respond", { inputId, answer });
+    pendingInputRequest.value = null;
+  }
+
   function dismissIntervention(): void {
     pendingIntervention.value = null;
   }
@@ -1988,6 +2029,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     streamingText.value = "";
     pendingRequestId.value = null;
     pendingApproval.value = null;
+    pendingInputRequest.value = null;
     pendingIntervention.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
@@ -2099,9 +2141,19 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as SpeechToTextResult;
   }
 
-  async function listVoices(): Promise<Record<string, unknown>> {
+  async function listVoices(): Promise<{ voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string }> {
     const response = await authorizedFetch("/api/multimodal/voices");
-    return await response.json() as Record<string, unknown>;
+    return await response.json() as { voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string };
+  }
+
+  async function removeTtsVoice(voiceId: string): Promise<void> {
+    const response = await authorizedFetch(`/api/multimodal/voices/${encodeURIComponent(voiceId)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Failed to delete voice: ${response.status}`);
+    }
   }
 
   async function saveTtsVoice(input: {
@@ -2299,6 +2351,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     isError,
     turnLikelyStalled,
     pendingApproval,
+    pendingInputRequest,
     pendingIntervention,
     connect,
     disconnect,
@@ -2315,6 +2368,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     transcribeAudio,
     listVoices,
     saveTtsVoice,
+    removeTtsVoice,
     synthesizeSpeech,
     summarizeForSpeech,
     analyzeImageFile,
@@ -2324,6 +2378,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     downloadSessionDebugMarkdown,
     downloadSessionAuditMarkdown,
     respondApproval,
+    respondInput,
     dismissIntervention,
     cancelTurn,
     archiveSession,

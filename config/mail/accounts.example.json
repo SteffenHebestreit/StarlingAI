@@ -18,6 +18,16 @@
         "user": "$MAIL_WORK_USER",
         "pass": "$MAIL_WORK_PASS",
         "from": "Me (Work) <me@company.example>"
+      },
+      "caldav": {
+        "serverUrl": "https://nextcloud.company.example/remote.php/dav",
+        "username": "$MAIL_WORK_USER",
+        "password": "$MAIL_WORK_PASS"
+      },
+      "carddav": {
+        "serverUrl": "https://nextcloud.company.example/remote.php/dav",
+        "username": "$MAIL_WORK_USER",
+        "password": "$MAIL_WORK_PASS"
       }
     },
     {

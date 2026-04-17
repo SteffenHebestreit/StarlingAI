@@ -68,6 +68,7 @@ export interface RunTurnOptions {
   onIntervention?: (notice: InterventionNotice) => void;
   onSwarmState?: (state: SwarmState) => void;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
@@ -555,11 +556,16 @@ function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, tool
 
 const CONTINUATION_PROMISE_RE = /\b(i(?:'ll| will)(?:\s+now)?|i am going to|ich werde(?:\s+nun)?|ich beauftrage(?:\s+nun)?|n[äa]chste orchestrierung|next orchestration|next logical step|n[äa]chste logische aktion)\b/i;
 const IMPLICIT_CONTINUATION_EXECUTION_RE = /\b(?:i(?:\s+have|'ve)[\s\S]{0,80}\b(?:corrected|fixed|updated|adjusted)\b[\s\S]{0,80}\b(?:am\s+)?(?:now\s+)?(?:running|executing|starting|retrying|restarting)\b|ich\s+habe[\s\S]{0,80}\b(?:korrigiert|angepasst|berichtigt)\b[\s\S]{0,80}\b(?:und\s+)?(?:f(?:[üu]hre|uehre)|starte|versuche|sto(?:ss|ß)e)\b[\s\S]{0,40}\b(?:nun|jetzt)\b[\s\S]{0,20}\b(?:aus|an)\b)/i;
+const MAINTENANCE_EXECUTION_PROMISE_RE = /\b(?:i(?:'ll| will)\s+(?:create|generate|delegate|build)|ich\s+(?:werde|erstelle|generiere|delegiere|beauftrage)|(?:erstelle|generiere|delegiere|beauftrage)\s+ich(?:\s+nun|\s+jetzt)?)\b/i;
 const MISLEADING_EXECUTED_NEXT_STEP_RE = /\b(the next (?:logical )?(?:step|action)|der n[äa]chste(?: logische)?(?: schritt| aktion)|die n[äa]chste(?: logische)? aktion)\b[\s\S]{0,80}\b(which has been executed|has been executed|was executed|has already been executed|wurde(?:\s+bereits)?\s+ausgef[üu]hrt|ist bereits erfolgt)\b/i;
 const NEXT_TURN_HANDOFF_RE = /\b(would you like me to (?:initiate|start|retry)|in the next turn|im n[äa]chsten zug|im n[äa]chsten turn|neue[nr]? delegations(?:strategie|versuch)|new delegation attempt|no further tool calls can be made in this turn|keine weiteren tool calls .* in diesem zug)\b/i;
 
 function looksLikeContinuationPromise(value: string): boolean {
   return CONTINUATION_PROMISE_RE.test(value) || IMPLICIT_CONTINUATION_EXECUTION_RE.test(value);
+}
+
+function looksLikeMaintenanceExecutionPromise(value: string): boolean {
+  return looksLikeContinuationPromise(value) || MAINTENANCE_EXECUTION_PROMISE_RE.test(value);
 }
 
 function shouldRewriteTerminalResponse(value: string, toolIterations: number): boolean {
@@ -593,6 +599,39 @@ function hasRecentUnresolvedDelegatedAction(history: readonly { role: string; co
       || /PARTIAL RESULT|max_iterations|timed out|could not complete|delegation limit/i.test(content)
     ) {
       return true;
+    }
+  }
+
+  return false;
+}
+
+function hasRecentWorkflowAuthoringMaintenanceContext(history: readonly { role: string; content?: string | null }[]): boolean {
+  let skippedCurrentUser = false;
+  let inspectedPriorUserMessages = 0;
+
+  for (const message of [...history].reverse()) {
+    if (message.role !== "user") continue;
+
+    const content = String(message.content ?? "").trim();
+    if (!content) continue;
+
+    if (!skippedCurrentUser) {
+      skippedCurrentUser = true;
+      continue;
+    }
+
+    inspectedPriorUserMessages += 1;
+    const normalized = content.toLowerCase();
+    const guidance = buildDynamicTurnGuidance(content);
+    const workflowLike = WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))
+      || WORKFLOW_HINT_TERMS.some((term) => normalized.includes(term));
+
+    if (guidance?.swarmMaintenanceSensitive && workflowLike) {
+      return true;
+    }
+
+    if (inspectedPriorUserMessages >= 2) {
+      break;
     }
   }
 
@@ -1073,6 +1112,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : detectedDynamicGuidance;
   const allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
   const allowedToolNameSet = new Set(allowedToolNames);
+  const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
   // When autoApprove is set, wrap the approvalCallback to always return true.
@@ -1084,6 +1124,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     approvalCallback: resolvedApprovalCallback,
+    inputCallback: opts.inputCallback,
     onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
@@ -1125,24 +1166,57 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
+  const requiresMaintenanceFollowUpDelegation = recentWorkflowAuthoringMaintenanceContext
+    && (allowedToolNameSet.has("delegate_to_agent")
+      || allowedToolNameSet.has("parallel_delegate")
+      || allowedToolNameSet.has("run_task_graph")
+      || allowedToolNameSet.has("create_ephemeral_agent"));
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
+  let maintenanceDelegationRetryUsed = false;
+  let maintenanceDelegationEnforcementPrompt = "";
   let unresolvedDelegationContinuationRetryUsed = false;
   let unresolvedDelegationEnforcementPrompt = "";
   const isWorkflowExecutionTurn = session.channel === "workflow" || (opts._workflowExecutionStack?.length ?? 0) > 0;
-  const workflowCatalogGuidance = !isWorkflowExecutionTurn && workflowCatalogSignal.required
+  const workflowCatalogSuppressedForMaintenance = Boolean(
+    initialDynamicGuidance?.swarmMaintenanceSensitive || recentWorkflowAuthoringMaintenanceContext,
+  );
+  const workflowCatalogGuidance = !isWorkflowExecutionTurn && !workflowCatalogSuppressedForMaintenance && workflowCatalogSignal.required
     ? buildWorkflowCatalogGuidance(workflowCatalogSignal)
     : "";
   const workflowCatalogRequired = Boolean(
     (allowedToolNameSet.has("search_workflows") || allowedToolNameSet.has("run_workflow"))
     && !isWorkflowExecutionTurn
     && !initialDynamicGuidance?.pentestMethodologySensitive
-    && !initialDynamicGuidance?.swarmMaintenanceSensitive
+    && !workflowCatalogSuppressedForMaintenance
     && workflowCatalogSignal.required,
   );
   let workflowCatalogRetryUsed = false;
   let workflowCatalogEnforcementPrompt = "";
-  let workflowCatalogAttemptedThisTurn = false;
+  // Seed from history: if the previous turn already ran search_workflows / run_workflow in this
+  // session, skip the catalog-check enforcement on the follow-up turn (e.g. "try again").
+  // We only look in messages that belong to the immediately prior completed turn — between the
+  // second-to-last user message and the current (most recent) user message.
+  const workflowCatalogAttemptedInPriorTurn = (() => {
+    if (!workflowCatalogRequired) return false;
+    const hist = session.getHistory();
+    let foundCurrentUser = false;
+    for (let i = hist.length - 1; i >= Math.max(0, hist.length - 40); i--) {
+      const msg = hist[i];
+      if (msg?.role === "user") {
+        if (!foundCurrentUser) { foundCurrentUser = true; continue; }
+        // Reached the start of the prior turn — stop here
+        break;
+      }
+      if (msg?.role === "assistant" && Array.isArray(msg.tool_calls)) {
+        if (msg.tool_calls.some((tc) => isWorkflowCatalogToolName(tc.function.name))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  })();
+  let workflowCatalogAttemptedThisTurn = workflowCatalogAttemptedInPriorTurn;
   let workflowExecutionRetryUsed = false;
   let workflowExecutionCorrectionRetryUsed = false;
   let workflowExecutionEnforcementPrompt = "";
@@ -1248,6 +1322,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
+      ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: maintenanceDelegationEnforcementPrompt }] : []),
       ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
       ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
@@ -1335,6 +1410,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     );
     const repeatedWorkflowSearchRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "search_workflows");
     if (
+      !workflowCatalogSuppressedForMaintenance
+      &&
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
       && !runWorkflowRequested
@@ -1438,6 +1515,45 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const rawResponse = llmResponse.content ?? "";
       const unresolvedDelegatedActionInHistory = hasRecentUnresolvedDelegatedAction(session.getHistory());
       const promisedContinuationWithoutTools = looksLikeContinuationPromise(rawResponse);
+      const promisedMaintenanceExecutionWithoutTools = requiresMaintenanceFollowUpDelegation
+        && looksLikeMaintenanceExecutionPromise(rawResponse);
+
+      if (promisedMaintenanceExecutionWithoutTools) {
+        if (!maintenanceDelegationRetryUsed) {
+          maintenanceDelegationRetryUsed = true;
+          maintenanceDelegationEnforcementPrompt = [
+            "COMPLIANCE CORRECTION: This is follow-up information for an ongoing workflow-authoring maintenance request.",
+            "Do NOT claim that you are creating, generating, or delegating the workflow unless this response actually includes the orchestration tool call.",
+            "You MUST call an orchestration tool now.",
+            "Prefer delegate_to_agent with swarm_maintainer when available.",
+            "A tool-free promise to create the workflow is invalid for this turn.",
+          ].join(" ");
+          guardrailEvents.push({ type: "delegation_required", details: "tool_free_maintenance_answer_rejected" });
+          logAudit("guardrail_flagged", {
+            type: "tool_free_maintenance_answer_rejected",
+            recentWorkflowAuthoringMaintenanceContext,
+          }, { sessionId: session.id, severity: "warn" });
+          continue;
+        }
+
+        return blocked(
+          "This workflow-authoring follow-up required an orchestration tool, but the model only promised the action without executing it.",
+          toolContext.swarmState,
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "missing_required_maintenance_delegation",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
 
       if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
         if (!workflowCatalogRetryUsed) {
@@ -1465,6 +1581,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
 
       if (
+        !workflowCatalogSuppressedForMaintenance
+        &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn
       ) {
@@ -1895,6 +2013,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const workflowErrorText = result.error?.trim() || resultText;
         if (
           isWorkflowNameResolutionFailureMessage(workflowErrorText)
+          && !workflowCatalogSuppressedForMaintenance
           && shouldRequireWorkflowExecutionAfterSearch(workflowCorrectionMatches)
         ) {
           if (!workflowExecutionCorrectionRetryUsed) {
@@ -1997,6 +2116,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           if (loopIntervention) opts.onIntervention?.(loopIntervention);
           _recentOutputsByTool.set(tc.name, []); // reset so alert fires at most once per burst
         }
+      }
+
+      // Redact any secrets that leaked into the tool output before the LLM ever sees it
+      // (DB error messages, SSH banners, etc. can echo credentials back).
+      const secretScan = scanOutput(resultText);
+      if (!secretScan.safe && secretScan.redacted) {
+        resultText = secretScan.redacted;
+        guardrailEvents.push({ type: "tool_output_secret_redacted", details: `${tc.name}:${(secretScan.detectedTypes ?? []).join(",")}` });
+        logAudit("output_redacted", {
+          surface: "tool_output",
+          tool: tc.name,
+          detectedTypes: secretScan.detectedTypes,
+        }, { sessionId: session.id, severity: "warn" });
       }
 
       // Prevent indirect prompt injection from tool output payloads

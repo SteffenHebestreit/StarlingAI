@@ -17,6 +17,8 @@ import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
+import { encodeRgbaToPng } from "./computer-adapters/vnc-protocol.js";
 
 const log = childLogger("agent:computer-vision");
 
@@ -76,12 +78,169 @@ export function computeScreenshotHash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex").slice(0, 16);
 }
 
+// ── Screenshot resize pipeline ────────────────────────────────────────────────
+// Resizes PNG screenshots to at most screenshotMaxWidth before sending to the
+// vision model.  A 3840×1080 screenshot encoded as base64 can be 6–10 MB and
+// push inference time past 60 s on a local GPU.  Downscaling to 1920 px wide
+// preserves enough detail to read text and UI elements (≥ 85 % quality).
+
+function paethPredictor(a: number, b: number, c: number): number {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+}
+
+/**
+ * Reverse PNG row filters (types 0–4) and return raw pixel data as a flat
+ * Buffer with `bpp` bytes per pixel (no filter bytes, no padding).
+ */
+function reversePngFilters(raw: Buffer, width: number, height: number, bpp: number): Buffer {
+  const rowBytes = width * bpp;
+  const out = Buffer.alloc(height * rowBytes);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (1 + rowBytes);
+    const filterType = raw[rowStart]!;
+    const outOff = y * rowBytes;
+    const prevOff = outOff - rowBytes;
+    for (let x = 0; x < rowBytes; x++) {
+      const raw_v = raw[rowStart + 1 + x]!;
+      const left = x >= bpp ? out[outOff + x - bpp]! : 0;
+      const up = y > 0 ? out[prevOff + x]! : 0;
+      const upLeft = y > 0 && x >= bpp ? out[prevOff + x - bpp]! : 0;
+      switch (filterType) {
+        case 0: out[outOff + x] = raw_v; break;
+        case 1: out[outOff + x] = (raw_v + left) & 0xff; break;
+        case 2: out[outOff + x] = (raw_v + up) & 0xff; break;
+        case 3: out[outOff + x] = (raw_v + Math.floor((left + up) / 2)) & 0xff; break;
+        case 4: out[outOff + x] = (raw_v + paethPredictor(left, up, upLeft)) & 0xff; break;
+        default: out[outOff + x] = raw_v;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Bilinear downsample raw RGBA pixel data (Buffer of srcW*srcH*4 bytes).
+ */
+function bilinearResize(src: Buffer, srcW: number, srcH: number, dstW: number, dstH: number): Buffer {
+  const dst = Buffer.alloc(dstW * dstH * 4);
+  const xScale = srcW / dstW;
+  const yScale = srcH / dstH;
+  for (let dy = 0; dy < dstH; dy++) {
+    const sy = dy * yScale;
+    const sy0 = Math.floor(sy);
+    const sy1 = Math.min(sy0 + 1, srcH - 1);
+    const fy = sy - sy0;
+    for (let dx = 0; dx < dstW; dx++) {
+      const sx = dx * xScale;
+      const sx0 = Math.floor(sx);
+      const sx1 = Math.min(sx0 + 1, srcW - 1);
+      const fx = sx - sx0;
+      const dstOff = (dy * dstW + dx) * 4;
+      for (let c = 0; c < 4; c++) {
+        const tl = src[(sy0 * srcW + sx0) * 4 + c]!;
+        const tr = src[(sy0 * srcW + sx1) * 4 + c]!;
+        const bl = src[(sy1 * srcW + sx0) * 4 + c]!;
+        const br = src[(sy1 * srcW + sx1) * 4 + c]!;
+        dst[dstOff + c] = Math.round(tl * (1 - fx) * (1 - fy) + tr * fx * (1 - fy) + bl * (1 - fx) * fy + br * fx * fy);
+      }
+    }
+  }
+  return dst;
+}
+
+/**
+ * Decode a PNG, downscale to maxWidth (maintaining aspect ratio) if needed,
+ * and re-encode.  Supports 8-bit RGB (colorType 2) and RGBA (colorType 6).
+ * Returns the original buffer unchanged when no resize is needed or the PNG
+ * uses an unsupported format.
+ */
+function resizeScreenshotForVision(
+  png: Buffer,
+  maxWidth: number,
+): { bytes: Buffer; resized: boolean; srcW: number; srcH: number; dstW: number; dstH: number } {
+  const noop = (srcW = 0, srcH = 0) => ({ bytes: png, resized: false, srcW, srcH, dstW: srcW, dstH: srcH });
+  const PNG_SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+  for (let i = 0; i < 8; i++) { if (png[i] !== PNG_SIG[i]) return noop(); }
+
+  let pos = 8;
+  let srcW = 0; let srcH = 0; let colorType = 0; let bitDepth = 0;
+  const idatChunks: Buffer[] = [];
+
+  while (pos + 8 <= png.length) {
+    const length = png.readUInt32BE(pos);
+    const type = png.subarray(pos + 4, pos + 8).toString("ascii");
+    const data = png.subarray(pos + 8, pos + 8 + length);
+    pos += 4 + 4 + length + 4;
+    if (type === "IHDR") {
+      srcW = data.readUInt32BE(0);
+      srcH = data.readUInt32BE(4);
+      bitDepth = data[8]!;
+      colorType = data[9]!;
+    } else if (type === "IDAT") {
+      idatChunks.push(Buffer.from(data));
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+
+  // Only handle 8-bit RGB and RGBA; skip indexed, grayscale, 16-bit, etc.
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) return noop(srcW, srcH);
+  if (srcW <= maxWidth) return noop(srcW, srcH);
+
+  const dstW = maxWidth;
+  const dstH = Math.max(1, Math.round(srcH * (maxWidth / srcW)));
+  const bpp = colorType === 6 ? 4 : 3;
+
+  const raw = inflateSync(Buffer.concat(idatChunks));
+  let rgba = reversePngFilters(raw, srcW, srcH, bpp);
+
+  if (bpp === 3) {
+    // RGB → RGBA
+    const buf = Buffer.alloc(srcW * srcH * 4);
+    for (let i = 0; i < srcW * srcH; i++) {
+      buf[i * 4] = rgba[i * 3]!;
+      buf[i * 4 + 1] = rgba[i * 3 + 1]!;
+      buf[i * 4 + 2] = rgba[i * 3 + 2]!;
+      buf[i * 4 + 3] = 255;
+    }
+    rgba = buf;
+  }
+
+  const resized = bilinearResize(rgba, srcW, srcH, dstW, dstH);
+  return { bytes: encodeRgbaToPng(dstW, dstH, resized), resized: true, srcW, srcH, dstW, dstH };
+}
+
 async function callVision(bytes: Uint8Array, contentType: string, prompt: string): Promise<string> {
   const model = resolveVisionModel();
   if (!model) {
     throw new Error("No vision model configured — set computerUse.visionModel or multimodal.files.visionModel");
   }
-  return analyzeImageBytes(bytes, contentType, model, prompt);
+
+  let finalBytes: Buffer = bytes instanceof Buffer ? bytes : Buffer.from(bytes);
+  if (contentType === "image/png") {
+    const config = getConfig();
+    const cuConfig = (config as Record<string, unknown>)["computerUse"] as { screenshotMaxWidth?: number } | undefined;
+    const maxWidth = cuConfig?.screenshotMaxWidth ?? 1920;
+    try {
+      const result = resizeScreenshotForVision(finalBytes, maxWidth);
+      if (result.resized) {
+        log.debug(
+          { src: `${result.srcW}x${result.srcH}`, dst: `${result.dstW}x${result.dstH}` },
+          "Resized screenshot for vision analysis",
+        );
+        finalBytes = result.bytes;
+      }
+    } catch (err) {
+      // Malformed PNG / unsupported chunk → fall back to original bytes.
+      log.debug({ err }, "PNG resize failed; sending original bytes to vision model");
+    }
+  }
+
+  return analyzeImageBytes(finalBytes, contentType, model, prompt);
 }
 
 export function normalizeScreenshotAnalysisFocus(focusHint?: string): ScreenshotAnalysisFocus | null {

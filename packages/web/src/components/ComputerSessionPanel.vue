@@ -49,6 +49,15 @@ const agentActionMarkers = computed<AgentActionMarker[]>(() => {
       age: now - a.timestamp,
     }));
 });
+
+const screenshotAge = computed<string>(() => {
+  void _markerTick.value; // re-evaluate on timer tick
+  if (!screenshot.value?.timestamp) return "";
+  const ageMs = Date.now() - screenshot.value.timestamp;
+  if (ageMs < 1_500) return "live";
+  if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}s ago`;
+  return `${Math.round(ageMs / 60_000)}m ago`;
+});
 const screenshotImage = ref<HTMLImageElement | null>(null);
 const copyStatus = ref("");
 const mappedClick = ref<{
@@ -232,6 +241,7 @@ async function copyClickCommand() {
         <span>Frame: {{ screenshot.frameId ? screenshot.frameId.slice(0, 8) : "n/a" }}</span>
         <span>Bitmap: {{ screenshot.width }} x {{ screenshot.height }}</span>
         <span v-if="screenshot.displayTopology">Monitors: {{ screenshot.displayTopology.monitors.length }}</span>
+        <span class="screenshot-age">{{ screenshotAge }}</span>
       </div>
       <div v-if="mappedClick" class="click-inspector">
         <div class="click-inspector-header">
@@ -513,6 +523,11 @@ async function copyClickCommand() {
   margin-top: 0.5rem;
   font-size: 0.78rem;
   color: var(--color-text-muted, #888);
+}
+
+.screenshot-age {
+  color: var(--color-success, #4caf50);
+  font-weight: 500;
 }
 
 .click-inspector,

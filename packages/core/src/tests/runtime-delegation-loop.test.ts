@@ -1269,7 +1269,7 @@ describe("runtime delegated-loop regressions", () => {
     let llmCallCount = 0;
     streamMock.mockImplementation((_messages, tools) => {
       llmCallCount += 1;
-      const toolNames = tools.map((tool) => tool.name);
+      const toolNames = tools.map((tool: { name: string }) => tool.name);
       expect(toolNames).toContain("delegate_to_agent");
       expect(toolNames).toContain("search_agents");
       expect(toolNames).not.toContain("web_search");
@@ -1607,6 +1607,226 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("delegate_to_agent");
     freshRuntime.unregisterTool("search_workflows");
     freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("does not force run_workflow for workflow-authoring maintenance requests", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_for_authoring_1", "search_workflows", {
+          query: "n8n browser login workflow",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("workflow_authoring_delegate_1", {
+          agentName: "swarm_maintainer",
+          task: "Create a new workflow that opens http://n8n.k2o, fills the matching credentials, logs in, and opens the project list.",
+        });
+      }
+      return createTextStream("I delegated the workflow creation to swarm_maintainer.");
+    });
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow matches for n8n browser login workflow: browser_inspection [scene]",
+      metadata: {
+        workflowMatches: [
+          {
+            name: "browser_inspection",
+            workflowType: "scene",
+            score: 0.41,
+            matchedTerms: ["browser", "workflow"],
+          },
+        ],
+      },
+    }));
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "swarm_maintainer created the new workflow definition.",
+    }));
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "lass uns einen neuen workflow generieren, der per browser-agent http://n8n.k2o öffnet, credentials einfügt und danach die project-list öffnet",
+    });
+
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_run_required_after_search" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
+    expect(toolMessages[1]?.content).toContain("swarm_maintainer created the new workflow definition.");
+
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("does not reject credential follow-ups for workflow authoring with a workflow catalog check", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("workflow_authoring_followup_delegate_1", {
+          agentName: "swarm_maintainer",
+          task: "Create a new workflow that opens http://n8n.k2o, uses the matching site-data credentials to log in, and opens the project list.",
+        });
+      }
+      return createTextStream("I delegated the workflow creation to swarm_maintainer.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "swarm_maintainer created the new workflow definition.",
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow matches for site-data: competitive_analysis [scene]",
+      metadata: {
+        workflowMatches: [
+          {
+            name: "competitive_analysis",
+            workflowType: "scene",
+            score: 0.54,
+            matchedTerms: ["alles", "den", "data"],
+          },
+        ],
+      },
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "competitive_analysis ran.",
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "lass uns einen neuen workflow generieren" });
+    session.addMessage({ role: "assistant", content: "Wo sind die Credentials hinterlegt?" });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "ist alles in den credentials hinterlegt und in den site-data",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(searchWorkflowsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).not.toHaveBeenCalled();
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
+    ]));
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("forces delegation for workflow-authoring follow-ups instead of accepting a tool-free promise", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createTextStream("Da die Credentials in den gespeicherten Credentials und site-data hinterlegt sind, erstelle ich jetzt einen spezialisierten Workflow-Agenten, der diesen Workflow generiert.");
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("workflow_authoring_followup_delegate_retry_1", {
+          agentName: "swarm_maintainer",
+          task: "Create a new workflow that opens http://n8n.k2o, uses the matching site-data credentials to log in, and opens the project list.",
+        });
+      }
+      return createTextStream("Ich habe die Workflow-Erstellung an swarm_maintainer delegiert.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "swarm_maintainer created the new workflow definition.",
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "lass uns einen neuen workflow generieren" });
+    session.addMessage({ role: "assistant", content: "Wo sind die Credentials hinterlegt?" });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "ist alles in den cedentials hintelegt und in den site-data",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_maintenance_answer_rejected" }),
+    ]));
+
+    freshRuntime.unregisterTool("delegate_to_agent");
   });
 
   it("forces an exact workflow retry after an invalid workflow name following catalog search", async () => {

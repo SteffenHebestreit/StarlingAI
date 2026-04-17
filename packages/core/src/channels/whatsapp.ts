@@ -169,7 +169,7 @@ export async function handleWhatsappEvent(c: Context): Promise<Response> {
           continue;
         }
 
-        const sessionId = getOrCreateChannelSession("whatsapp", senderId);
+        const sessionId = await getOrCreateChannelSession("whatsapp", senderId);
         runChannelTurn(sessionId, text)
           .then(response => waSend(accessToken, phoneNumberId, senderId, response))
           .catch(err => log.error({ err }, "WhatsApp turn error"));

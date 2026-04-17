@@ -235,6 +235,29 @@ function toSingleEndpointRuntimeStatus(
   };
 }
 
+function updateProviderRuntimeComponent(status: ProviderRuntimeStatusSnapshot): void {
+  const activeEndpoint = status.endpoints.find((entry) => entry.active) ?? status.endpoints[0];
+  const firstUnhealthy = status.endpoints.find((entry) => !entry.healthy || !entry.available);
+
+  markRuntimeComponentSuccess(
+    "providers",
+    {
+      mode: status.mode,
+      provider: status.activeProviderId,
+      activeModel: status.activeModel,
+      activeBaseUrl: status.activeBaseUrl,
+      loadedModel: activeEndpoint?.loadedModel,
+      endpoints: status.endpoints,
+    },
+    status.healthy
+      ? undefined
+      : {
+          healthy: false,
+          error: firstUnhealthy?.lastError ?? "Provider health check failed",
+        },
+  );
+}
+
 export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeStatusSnapshot> {
   const config = getConfig();
   const modelConfig = config.agents.defaults.model;
@@ -244,7 +267,7 @@ export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeSt
   if (provider instanceof FailoverChatProvider) {
     const endpoints = await provider.syncRuntimeStatus();
     const activeEndpoint = endpoints.find((entry) => entry.active) ?? endpoints[0];
-    return {
+    const status: ProviderRuntimeStatusSnapshot = {
       healthy: endpoints.some((entry) => entry.healthy && entry.available),
       mode: "failover",
       activeProviderId: activeEndpoint?.providerId,
@@ -252,12 +275,14 @@ export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeSt
       activeBaseUrl: activeEndpoint?.baseUrl,
       endpoints,
     };
+    updateProviderRuntimeComponent(status);
+    return status;
   }
 
   if (provider instanceof LMStudioProvider) {
     await provider.checkHealth();
     const endpointSnapshot = toSingleEndpointRuntimeStatus(endpoint, provider.getRuntimeSnapshot());
-    return {
+    const status: ProviderRuntimeStatusSnapshot = {
       healthy: endpointSnapshot.healthy,
       mode: "single",
       activeProviderId: endpointSnapshot.providerId,
@@ -265,10 +290,12 @@ export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeSt
       activeBaseUrl: endpointSnapshot.baseUrl,
       endpoints: [endpointSnapshot],
     };
+    updateProviderRuntimeComponent(status);
+    return status;
   }
 
   const health = await provider.checkHealth();
-  return {
+  const status: ProviderRuntimeStatusSnapshot = {
     healthy: health.healthy,
     mode: "single",
     activeProviderId: endpoint.providerId,
@@ -288,6 +315,8 @@ export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeSt
       loadedModel: health.loadedModel,
     }],
   };
+  updateProviderRuntimeComponent(status);
+  return status;
 }
 
 export type { ChatProvider } from "./lmstudio.js";

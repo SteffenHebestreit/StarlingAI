@@ -689,7 +689,7 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
         }),
       }),
     },
-    config.multimodal.files.timeoutMs,
+    config.multimodal.files.visionTimeoutMs,
   );
 
   if (!response.ok) {

@@ -1,6 +1,6 @@
 # StarlingAI — Roadmap
 
-> **Last updated:** 2026-04-10 · **Current release:** v0.5.0 (Stage 9 workflow and orchestration release)
+> **Last updated:** 2026-06-15 · **Current release:** v0.5.1 (Stage 10.4 planned additions shipped)
 
 This roadmap tracks both the completed architecture milestones and the honest gap analysis of where the implementation diverges from the swarm philosophy. It is a living document — the swarm may self-update entries in the `workspace/` area, but the core architecture decisions here are operator-owned.
 
@@ -62,7 +62,7 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 **v0.3.2 fix (Stage 8.2):** Updated the main assistant's `customInstructions` in `10-core-agents.jsonc` to explicitly prefer calling `delegate_to_agent` **without an agent name** for tasks where the specialist is not immediately obvious. Reserve explicit naming for known specialists with proven routing history.
 
-**Remaining work:** A dedicated `swarm_delegate` tool (no `agentName` field, forces undirected delegation) would further nudge the LLM away from scripted assignment — planned for Stage 8.2 completion.
+**Remaining work:** None — `swarm_delegate` tool ships as a dedicated no-`agentName` counterpart to `delegate_to_agent`. Agents that have `swarm_delegate` in their tool set are recognized as coordinators by the routing system.
 
 ---
 
@@ -119,13 +119,13 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | Task | Priority | GAP | Status |
 |------|----------|-----|--------|
 | Default-containerized sub-agents (opt-out model) | High | GAP-1 | ✅ v0.3.2 (enable `defaultContainerized: true` to activate) |
-| Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 | ✅ Instructions updated; `swarm_delegate` tool pending |
+| Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 | ✅ Instructions updated; `swarm_delegate` tool implemented |
 | `self_improvement_applied` audit events | High | GAP-3 | ✅ v0.3.2 |
 | Warden `config_proposal_flood` check | High | GAP-4 | ✅ v0.3.2 |
 | Navigation tools scope | Low | GAP-5 | ✅ Not a gap — correctly scoped to distance_specialist |
 | `selfdev__` prefix guard in dynamic-tools.ts | Low | GAP-6 | ✅ v0.3.2 |
-| Multi-instance gateway clustering (Redis-backed session sharding) | Medium | — | Planned |
-| Configurable approval timeout per scene | Low | — | Planned |
+| Multi-instance gateway clustering (Redis-backed session sharding) | Medium | — | ✅ v0.6.4 |
+| Configurable approval timeout per scene | Low | — | ✅ v0.6.4 |
 
 ---
 
@@ -144,11 +144,98 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
-## Stage 10 — Federated Swarms (Exploratory)
+## Stage 10 — Workflow, Scene & Agent Expansion (Active, 2026 Q2–Q3)
+
+**Theme:** Make the swarm immediately useful for the most common real-world work patterns. Adds purpose-built scenes, multi-step jobs, standard agents, and missing tool coverage so operators can wire high-value workflows without writing custom code.
+
+### 10.1 — Scenes
+
+| Scene | Purpose | Notes |
+|-------|---------|-------|
+| `security_audit` | CVE research + static code analysis + compliance check → risk report | |
+| `software_bug_fix` | Diagnose → minimal fix → test cycle → change summary | Max 2 fix-test cycles |
+| `incident_response` | Triage → root-cause → remediate → post-incident brief | Human-in-loop on infra apply |
+| `accessibility_audit` | WCAG 2.2 browser-driven audit → structured issue report | |
+| `data_pipeline_review` | Schema quality, null rates, anomaly detection → data quality report | Uses `db_analyst` + `sql_developer` |
+| `competitive_analysis` | Multi-competitor parallel research → comparison table + visual brief | |
+| `release_notes_draft` | Git log + diff analysis → Keep-a-Changelog notes + optional broadcast | |
+| `translation_task` | Document/message translation with optional QA spot-check | |
+| `infrastructure_change` | Plan → compliance review → human-approved apply → verify | Human-in-loop: `terraform_apply`, `ansible_apply` |
+| `calendar_scheduling` | Check availability → book event → channel confirmation | |
+| `onboarding_packet` | Gather resources → translate → structured onboarding Markdown doc | |
+| `code_refactor` | Diagnose → minimal targeted refactor → test verification → clean commit | Max 2 refactor-test cycles |
+| `content_creation` | Research → draft → quality-check audience-ready content | Uses `content_writer` |
+| `database_migration` | Inspect schema → write idempotent migration → compliance gate → apply → verify | Human-in-loop on `sql_query` write |
+| `contract_review` | Intake → clause inventory → risk table → negotiation points | Legal analysis only — requires human review |
+
+**Human-in-loop gates added:** `infrastructure_apply`, `terraform_apply`, `ansible_apply`, `db_query_write`, `sql_query` (write path) — all require explicit operator approval before execution.
+
+### 10.2 — Jobs (Multi-Step Workflows)
+
+| Job | Steps | Trigger |
+|-----|-------|---------|
+| `weekly_security_digest` | `security_audit` → `multi_channel_broadcast` | API + `/security-digest` slash |
+| `release_broadcast` | `release_notes_draft` → `multi_channel_broadcast` | API + `/release` slash |
+| `incident_postmortem` | `incident_response` → `source_backed_paper` → `multi_channel_broadcast` | API + `/incident` slash |
+| `competitive_snapshot` | `competitive_analysis` | API + `/competitive` slash |
+| `data_quality_report` | `data_pipeline_review` → `multi_channel_broadcast` | API |
+| `morning_briefing` | `deep_research` (today's news) → `multi_channel_broadcast` | API + `/morning` slash |
+| `scheduled_code_review` | `code_review` → `multi_channel_broadcast` | API + `/code-review` slash |
+| `onboarding_delivery` | `onboarding_packet` → `multi_channel_broadcast` | API + `/onboard` slash |
+| `content_pipeline` | `content_creation` → `multi_channel_broadcast` | API + `/content` slash |
+
+### 10.3 — Agents
+
+| Agent | Role | Key Tools |
+|-------|------|-----------|
+| `devops_coordinator` | CI/CD orchestration, rollout coordination, rollback decisions | `shell_exec`, `ssh_exec`, `service_check`, delegation tools |
+| `test_generator` | Unit/integration test generation from code or specs (Vitest, Jest, pytest) | `workspace_search`, `read_file`, `write_file`, `shell_exec` |
+| `log_analyst` | Structured log parsing, anomaly detection, incident timeline extraction | `read_file`, `ssh_exec`, `shell_exec`, `metric_write` |
+| `sql_developer` | SQL query authoring, optimization, schema migrations, index recommendations | `sql_query`, `get_site_credentials`, `write_file` |
+| `email_composer` | Professional email drafting with approval-gated send-handoff to `mail_agent` | `read_file`, `write_file`, `share_finding` |
+| `finance_analyst` | Balance sheet, budget, cash-flow, and KPI analysis from spreadsheet or file data | `spreadsheet_read`, `extract_file_content`, `generate_chart_html` |
+| `content_writer` | Blog posts, product copy, newsletters, documentation, and press releases from a brief | `read_file`, `write_file`, `generate_document` |
+
+### 10.4 — Additions (Shipped in v0.5.1)
+
+| Item | Type | Status | Notes |
+|------|------|--------|-------|
+| `http_request` tool | Tool | ✅ Pre-existing | Available since Stage 9; direct GET/POST/PUT/DELETE without spawning `api_integrator` |
+| `run_test_suite` tool | Tool | ✅ v0.5.1 | Tier-2 Docker-sandboxed test runner; supports vitest/jest/pytest/mocha/go/cargo/make/npm/custom with optional filter pattern |
+| `log_stream` tool | Tool | ✅ v0.5.1 | Tier-1 read-only; tails Docker Compose service logs or workspace log files with substring filter and line limit |
+| `git_tag` / `git_push` tools | Tool | ✅ v0.5.1 | Tier-2 sandbox; `git_tag` creates annotated or lightweight tags; `git_push` is approval-gated with network enabled |
+| `translate_text` tool | Tool | ✅ v0.5.1 | Tier-0 inline LLM translation; max 4 000 chars; auto-detects source language; no agent spawn required |
+| `ask_user` tool | Tool | ✅ v0.5.1 | HITL pause-and-ask; supports multiple-choice and free-text input; routed via WebSocket `agent.input_needed` event |
+| `contract_analyst` agent | Agent | ✅ v0.5.1 | Deep legal document analysis with risk scoring, clause inventory, and jurisdiction comparison; routes to `contract_review` scene |
+| `monitoring_setup` scene | Scene | ✅ v0.5.1 | Define alert rules, thresholds, and dashboards; human-in-loop approval before applying alert config |
+| `feature_planning` scene | Scene | ✅ v0.5.1 | Product feature → acceptance criteria → task graph → `project_planner` handoff; human approval gates |
+| `database_analysis` job | Job | ✅ v0.5.1 | Scheduled schema + data quality check via `data_pipeline_review` scene; broadcasts weekly digest to configured channels |
+
+---
+
+## Stage 11 — Federated Swarms (Exploratory)
 
 Two or more StarlingAI instances discover each other via the swarm bus and can delegate tasks cross-instance. Each instance remains fully self-governing; the federation is purely additive and cannot override another instance's tool policies or guardrails.
 
-This stage is exploratory — it depends on Stage 8 container isolation being complete and validated.
+### Planned capabilities
+
+| Capability | Description |
+|-----------|-------------|
+| Peer discovery | Instances announce themselves on a shared message bus topic; peers maintain a heartbeat registry |
+| Cross-instance delegation | A coordinator on instance A can `delegate_to_agent` targeting an agent on instance B by address |
+| Result relay | Results from remote delegations are relayed back and merged into the originating session's shared facts |
+| Policy isolation | Remote instance's Tier rules, guardrails, and humanInLoopSteps are fully respected; no override path exists |
+| Capability broadcast | Each instance advertises its loaded agent set and tool tiers; coordinators can query before delegating |
+| Federated search | `workspace_search` can optionally broadcast to peer instances and merge ranked results |
+| Audit trail | All cross-instance delegations are logged to the originating instance's audit store with peer address and session ID |
+
+### Prerequisites
+
+- Stage 8 container isolation must be complete and validated on all participating instances
+- All instances must be running the same major version of the gateway protocol
+- Peer authentication uses shared HMAC tokens configured per-instance via `starlingai.json`
+
+This stage is exploratory — no shipping timeline is committed. Implementation will begin once Stage 10 is fully stable in production.
 
 ---
 
