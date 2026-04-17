@@ -231,7 +231,7 @@ describe("event-driven task graph", () => {
   }, 15_000);
 
   it("starts dependent nodes as soon as their own prerequisites complete without waiting for unrelated slow nodes", async () => {
-    let releaseSlowNode: (() => void) | null = null;
+    let releaseSlowNode: (() => void) | null = null as ((() => void) | null);
     const invocationOrder: string[] = [];
 
     runSubAgentMock.mockImplementation(async ({ agentName, task }: { agentName: string; task: string }) => {

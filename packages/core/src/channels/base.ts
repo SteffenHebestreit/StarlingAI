@@ -1,7 +1,8 @@
 /**
  * Base types and helpers shared by all inbound message channels.
  */
-import { createSession, getSession, endSession } from "../agent/session.js";
+import { createSession, getSession, endSession, resolveSession } from "../agent/session.js";
+import { getChannelSessionId, setChannelSessionId } from "../agent/session-redis.js";
 import { runTurn } from "../agent/runtime.js";
 import { logAudit } from "../audit/logger.js";
 import { recordChannelIngressDenied } from "./registry.js";
@@ -111,13 +112,29 @@ export function deleteChannelSession(key: string): void {
 
 /**
  * Get or create a session for a sender on a given channel.
+ * Async to support cross-instance Redis channel-session routing.
  */
-export function getOrCreateChannelSession(channelType: string, senderId: string): string {
+export async function getOrCreateChannelSession(channelType: string, senderId: string): Promise<string> {
   const key = `${channelType}:${senderId}`;
-  let sid = _sessions.get(key);
-  if (sid && getSession(sid)) return sid;
+
+  // 1. Check local in-process map first (fastest path).
+  const localSid = _sessions.get(key);
+  if (localSid && getSession(localSid)) return localSid;
+
+  // 2. Check Redis for a session that was created on another instance.
+  const redisSid = await getChannelSessionId(channelType, senderId);
+  if (redisSid) {
+    const redisSession = await resolveSession(redisSid);
+    if (redisSession) {
+      _sessions.set(key, redisSid);
+      return redisSid;
+    }
+  }
+
+  // 3. Create a fresh session and publish the mapping.
   const session = createSession({ channel: channelType, userId: senderId });
   _sessions.set(key, session.id);
+  void setChannelSessionId(channelType, senderId, session.id);
   return session.id;
 }
 

@@ -16,12 +16,90 @@ export interface MailSmtpConfig extends MailAccountAuthConfig {
   from?: string;
 }
 
+export interface DavCredentials {
+  serverUrl: string;
+  username: string;
+  password: string;
+}
+
 export interface MailAccountConfig {
   id: string;
   address: string;
   displayName?: string;
   imap: MailImapConfig;
   smtp: MailSmtpConfig;
+  caldav?: DavCredentials;
+  carddav?: DavCredentials;
+}
+
+export interface CalendarInfo {
+  url: string;
+  displayName: string;
+  description: string;
+  color?: string;
+  timezone?: string;
+}
+
+export interface CalendarEvent {
+  uid: string;
+  url: string;
+  etag: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  description: string;
+  location: string;
+  status: string;
+  attendees: string[];
+  rrule?: string;
+}
+
+export interface CalendarEventInput {
+  uid?: string;
+  title: string;
+  start: string;
+  end: string;
+  allDay?: boolean;
+  description?: string;
+  location?: string;
+  status?: string;
+  attendees?: string[];
+  rrule?: string;
+}
+
+export interface AddressBookInfo {
+  url: string;
+  displayName: string;
+  description: string;
+}
+
+export interface Contact {
+  uid: string;
+  url: string;
+  etag: string;
+  fullName: string;
+  firstName?: string;
+  lastName?: string;
+  emails: string[];
+  phones: string[];
+  organization?: string;
+  title?: string;
+  notes?: string;
+  birthday?: string;
+}
+
+export interface ContactInput {
+  uid?: string;
+  fullName: string;
+  firstName?: string;
+  lastName?: string;
+  emails?: string[];
+  phones?: string[];
+  organization?: string;
+  title?: string;
+  notes?: string;
+  birthday?: string;
 }
 
 export interface MessageRef {

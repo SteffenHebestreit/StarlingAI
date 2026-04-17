@@ -95,13 +95,9 @@ registerTool({
         description: "Optional vars injected into the generated role playbook",
         additionalProperties: true,
       },
-      vaultPassword: {
-        type: "string",
-        description: "Optional Ansible Vault password, $ENV_VAR, or secret:key. When provided, a temporary vault password file is created automatically.",
-      },
       vaultPasswordFilePath: {
         type: "string",
-        description: "Optional workspace-relative path to an existing Ansible Vault password file.",
+        description: "Optional workspace-relative path to an existing Ansible Vault password file. Reference the file by path — the actual vault password must be staged on disk by the operator and never pass through model context.",
       },
       vaultId: {
         type: "string",

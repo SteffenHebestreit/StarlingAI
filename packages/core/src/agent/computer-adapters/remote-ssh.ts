@@ -251,14 +251,21 @@ export class SshComputerAdapter implements ComputerAdapter {
     const sshArgs = this.buildSshArgs();
     // Use -- to prevent command injection through SSH args
     const fullCmd = this.buildAuthPrefix() + `ssh ${sshArgs.join(" ")} -- ${this.shellQuote(command)}`;
-    const { stdout, stderr } = await execAsync(fullCmd, {
-      timeout: this.config.connectTimeoutMs ?? 30_000,
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    if (stderr.trim()) {
-      log.debug({ stderr: stderr.substring(0, 200) }, "SSH stderr output");
+    try {
+      const { stdout, stderr } = await execAsync(fullCmd, {
+        timeout: this.config.connectTimeoutMs ?? 30_000,
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      if (stderr.trim()) {
+        log.debug({ stderr: stderr.substring(0, 200) }, "SSH stderr output");
+      }
+      return stdout;
+    } catch (err) {
+      // Scrub credential values from error messages to prevent password leaks
+      // in audit logs and agent responses.
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(this.scrubCredentials(msg));
     }
-    return stdout;
   }
 
   /** Upload a file to the remote machine via SCP. */
@@ -320,6 +327,22 @@ export class SshComputerAdapter implements ComputerAdapter {
   private shellQuote(cmd: string): string {
     // Use bash -c with single-quoted string (escape single quotes)
     return `bash -c '${cmd.replace(/'/g, "'\\''")}'`;
+  }
+
+  /** Strip credential values from error messages so they don't leak into logs / agent output. */
+  private scrubCredentials(message: string): string {
+    if (this.credentials) {
+      // Replace literal password value (possibly shell-escaped) with a redaction marker
+      const escaped = this.credentials.replace(/'/g, "'\\''");
+      let scrubbed = message.replaceAll(this.credentials, "[REDACTED]");
+      if (escaped !== this.credentials) {
+        scrubbed = scrubbed.replaceAll(escaped, "[REDACTED]");
+      }
+      // Also catch sshpass -p '...' pattern in case of partial matches
+      scrubbed = scrubbed.replace(/sshpass\s+-p\s+'[^']*'/g, "sshpass -p '[REDACTED]'");
+      return scrubbed;
+    }
+    return message;
   }
 
   private parseWmctrlOutput(raw: string): WindowInfo[] {

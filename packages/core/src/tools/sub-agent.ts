@@ -252,7 +252,7 @@ function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: st
   }
 
   const tools = planner.tools ?? [];
-  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+  return tools.includes("delegate_to_agent") || tools.includes("swarm_delegate") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
 }
 
 function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
@@ -290,7 +290,7 @@ function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude
   }
 
   const tools = coordinator.tools ?? [];
-  return tools.includes("delegate_to_agent") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
+  return tools.includes("delegate_to_agent") || tools.includes("swarm_delegate") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
 }
 
 export interface AgentRoutingCandidate {
@@ -2956,6 +2956,61 @@ registerTool({
       task,
       context: enrichedContext,
       fallbackAgents,
+      routingQuery,
+      skillMatchThreshold,
+      taskTitle: summarizeText(task, 80),
+    }, ctx);
+  },
+});
+
+// ─── swarm_delegate ────────────────────────────────────────────────────────────
+//
+// Undirected delegation only — no agentName parameter. The swarm routing system
+// (keyword + embedding + outcome-weighted bidding) always picks the specialist.
+// Use this when you do not yet know which agent is best for the task, or when
+// you want the swarm to self-select based on current availability and skill scores.
+// Prefer delegate_to_agent only when you already know from context which exact
+// specialist to invoke.
+
+registerTool({
+  name: "swarm_delegate",
+  description: "Delegate a task to the swarm without naming a specific agent. The autonomous routing system (embedding match + outcome-weighted bidding) selects the best available specialist. Use this when the ideal specialist is not obvious — the swarm almost always picks better than an LLM guess at this point in the conversation. For tasks where you already know the exact right specialist from prior context, use delegate_to_agent instead.",
+  parameters: {
+    type: "object",
+    properties: {
+      task: {
+        type: "string",
+        description: "The task or question for a specialist to complete. Write this as a clear, self-contained assignment — the routing system uses its full text to pick the agent.",
+      },
+      context: {
+        type: "string",
+        description: "Optional background context — prior findings, data already gathered, or constraints the specialist should know.",
+      },
+      routingQuery: {
+        type: "string",
+        description: "Optional override query used for routing. Defaults to the task text. Provide this when the task text contains a lot of detail that might obscure the core capability needed.",
+      },
+      skillMatchThreshold: {
+        type: "number",
+        description: "Optional 0–1 threshold. If the best-matched specialist scores below this value an ephemeral agent is synthesised instead. Defaults to the swarm's global threshold.",
+      },
+    },
+    required: ["task"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const task = String(args["task"] ?? "").trim();
+    const context = args["context"] ? String(args["context"]) : undefined;
+    const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
+    const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
+
+    if (!task) {
+      return { success: false, output: "", error: "task is required" };
+    }
+
+    // Undirected — no agentName — the routing system owns the choice.
+    return executeDelegationWithFallback({
+      task,
+      context,
       routingQuery,
       skillMatchThreshold,
       taskTitle: summarizeText(task, 80),

@@ -34,6 +34,8 @@ export interface SceneSummary {
   humanInLoopSteps?: string[];
   /** Name of an approvalChannels entry — used when this scene is triggered via webhook */
   approvalChannel?: string;
+  /** Per-scene override for the approval channel timeout (ms). Falls back to channel config when absent. */
+  approvalTimeoutMs?: number;
 }
 
 export function listAllScenes(): SceneSummary[] {
@@ -54,6 +56,7 @@ export function listAllScenes(): SceneSummary[] {
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
       approvalChannel: scene.approvalChannel,
+      approvalTimeoutMs: scene.approvalTimeoutMs,
     });
   }
 
@@ -92,6 +95,7 @@ export function getScene(name: string): SceneSummary | null {
       allowedAgents: configScene.allowedAgents,
       humanInLoopSteps: configScene.humanInLoopSteps,
       approvalChannel: configScene.approvalChannel,
+      approvalTimeoutMs: configScene.approvalTimeoutMs,
     };
   }
   const description = getCredential(SCENE_DESCRIPTION_KEY(name));

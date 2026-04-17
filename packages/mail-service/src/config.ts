@@ -3,6 +3,12 @@ import JSON5 from "json5";
 import { z } from "zod";
 import type { MailAccountConfig } from "./types.js";
 
+const DavCredentialsSchema = z.object({
+  serverUrl: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
 const MailAccountSchema = z.object({
   id: z.string().min(1),
   address: z.string().email(),
@@ -22,6 +28,8 @@ const MailAccountSchema = z.object({
     pass: z.string().min(1),
     from: z.string().min(1).optional(),
   }),
+  caldav: DavCredentialsSchema.optional(),
+  carddav: DavCredentialsSchema.optional(),
 });
 
 const MailServiceConfigSchema = z.object({
@@ -66,6 +74,16 @@ function resolveAccount(account: z.infer<typeof MailAccountSchema>): MailAccount
       pass: resolveEnvToken(account.smtp.pass),
       from: account.smtp.from ? resolveEnvToken(account.smtp.from) : undefined,
     },
+    caldav: account.caldav ? {
+      serverUrl: resolveEnvToken(account.caldav.serverUrl),
+      username: resolveEnvToken(account.caldav.username),
+      password: resolveEnvToken(account.caldav.password),
+    } : undefined,
+    carddav: account.carddav ? {
+      serverUrl: resolveEnvToken(account.carddav.serverUrl),
+      username: resolveEnvToken(account.carddav.username),
+      password: resolveEnvToken(account.carddav.password),
+    } : undefined,
   };
 }
 

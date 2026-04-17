@@ -10,6 +10,12 @@ import { formatMainAssistantPersonalityGuidance } from "../personality/service.j
 import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import type { SwarmState } from "../tools/registry.js";
+import {
+  saveSessionToRedis,
+  loadSessionFromRedis,
+  deleteSessionFromRedis,
+  loadAllSessionsFromRedis,
+} from "./session-redis.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -69,7 +75,7 @@ export interface SessionTranscriptPage {
   nextBeforeMessageId?: string;
 }
 
-interface PersistedSessionRecord {
+export interface PersistedSessionRecord {
   id: string;
   channel: string;
   userId?: string;
@@ -256,14 +262,14 @@ export class AgentSession {
     this.history.push(withTimestamp(msg));
     this.touch();
     this.maybeTrimHistory();
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   addMessages(msgs: Array<LLMMessage & { metadata?: Record<string, unknown> }>): void {
     this.history.push(...msgs.map(withTimestamp));
     this.touch();
     this.maybeTrimHistory();
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   pruneTransientTurnSystemMessages(): void {
@@ -293,13 +299,13 @@ export class AgentSession {
 
     this.history = kept.reverse();
     this.touch();
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   incrementTurn(): void {
     this.turnCount++;
     this.touch();
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   getTurnCount(): number {
@@ -311,7 +317,7 @@ export class AgentSession {
     this.turnCount = 0;
     this.touch();
     logAudit("session_reset", { reason: "manual_reset" }, { sessionId: this.id });
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   end(): void {
@@ -330,7 +336,7 @@ export class AgentSession {
     this.archivedAt = new Date();
     this.touch(this.archivedAt);
     this.end();
-    persistSessionStore();
+    persistSessionStore(this);
   }
 
   toRecord(): PersistedSessionRecord {
@@ -492,7 +498,7 @@ export class AgentSession {
 
     if (trimmed) {
       this.touch();
-      persistSessionStore();
+      persistSessionStore(this);
       log.debug({ sessionId: this.id, remaining: this.history.length }, "Trimmed history for context window");
     }
   }
@@ -532,7 +538,7 @@ export function createSession(opts: AgentSessionOptions): AgentSession {
 
   const session = new AgentSession(opts);
   _sessions.set(session.id, session);
-  persistSessionStore();
+  persistSessionStore(session);
   return session;
 }
 
@@ -559,6 +565,7 @@ export function deleteSession(id: string): boolean {
   session.end();
   _sessions.delete(id);
   persistSessionStore();
+  void deleteSessionFromRedis(id);
   return true;
 }
 
@@ -570,6 +577,66 @@ export function getAllSessions(opts?: { includeArchived?: boolean }): AgentSessi
   return [..._sessions.values()]
     .filter((session) => opts?.includeArchived || !session.isArchived())
     .sort((left, right) => right.getUpdatedAt().getTime() - left.getUpdatedAt().getTime());
+}
+
+/**
+ * Async session lookup with Redis fallback.
+ *
+ * Tries the in-process cache first; if the session is not found locally
+ * (e.g. the client was routed to a different gateway instance last time),
+ * fetches and hydrates it from Redis.
+ *
+ * Returns `undefined` when the session does not exist anywhere or is archived.
+ */
+export async function resolveSession(id: string): Promise<AgentSession | undefined> {
+  const local = _sessions.get(id);
+  if (local && !local.isArchived()) return local;
+
+  const raw = await loadSessionFromRedis(id);
+  if (!raw) return undefined;
+
+  try {
+    const record = JSON.parse(raw) as PersistedSessionRecord;
+    const session = AgentSession.fromRecord(record);
+    if (session.isArchived()) return undefined;
+    _sessions.set(session.id, session);
+    return session;
+  } catch (err) {
+    log.warn({ err, sessionId: id }, "Failed to hydrate session from Redis");
+    return undefined;
+  }
+}
+
+/**
+ * Seed the in-process session cache from Redis on startup.
+ *
+ * Must be called after the REDIS_URL env var is available.  Sessions already
+ * loaded from the JSON file are merged: the entry with the newer `updatedAt
+ * wins.
+ */
+export async function initSessionRedis(): Promise<void> {
+  const raws = await loadAllSessionsFromRedis();
+  if (!raws.length) return;
+
+  let loaded = 0;
+  for (const raw of raws) {
+    try {
+      const record = JSON.parse(raw) as PersistedSessionRecord;
+      const existing = _sessions.get(record.id);
+      const recordUpdatedAt = new Date(record.updatedAt).getTime();
+      const existingUpdatedAt = existing?.getUpdatedAt().getTime() ?? 0;
+      if (!existing || recordUpdatedAt > existingUpdatedAt) {
+        _sessions.set(record.id, AgentSession.fromRecord(record));
+        loaded++;
+      }
+    } catch (err) {
+      log.warn({ err }, "Failed to hydrate session from Redis during init");
+    }
+  }
+
+  if (loaded > 0) {
+    log.info({ loaded }, "Seeded sessions from Redis");
+  }
 }
 
 export function listSessions(opts?: { includeArchived?: boolean }): SessionSummary[] {
@@ -628,7 +695,15 @@ function loadPersistedSessions(): void {
   }
 }
 
-function persistSessionStore(): void {
+/**
+ * Persist the local JSON store and optionally mirror a single changed session to Redis.
+ * Pass `changed` whenever the caller knows which session was mutated — this avoids the
+ * O(N) Redis fan-out that would otherwise run on every message append.
+ * Pass `null` to indicate a structural change (e.g. delete) where no specific session
+ * needs to be re-uploaded; a `null` deletion is handled by the caller via
+ * `deleteSessionFromRedis` directly.
+ */
+function persistSessionStore(changed?: AgentSession | null): void {
   try {
     mkdirSync(dirname(SESSION_STORE_PATH), { recursive: true });
     writeFileSync(SESSION_STORE_PATH, JSON.stringify({
@@ -638,6 +713,15 @@ function persistSessionStore(): void {
     }, null, 2) + "\n", "utf8");
   } catch (err) {
     log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
+  }
+
+  if (changed) {
+    const record = changed.toRecord();
+    void saveSessionToRedis(
+      record.id,
+      JSON.stringify(record),
+      new Date(record.updatedAt).getTime(),
+    );
   }
 }
 

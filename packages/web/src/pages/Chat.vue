@@ -173,6 +173,48 @@
       </div>
     </Transition>
 
+    <!-- Human-in-the-loop input request banner -->
+    <Transition name="approval">
+      <div v-if="gateway.pendingInputRequest"
+           role="alertdialog" aria-live="assertive"
+           class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
+           style="background: rgba(10,18,30,0.97); border: 1px solid rgba(56,189,248,0.5); box-shadow: 0 0 24px rgba(56,189,248,0.2);">
+        <div class="px-5 py-4">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="text-xs font-semibold tracking-widest uppercase"
+                  style="background: linear-gradient(90deg,#38bdf8,#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
+              Question
+            </span>
+          </div>
+          <p class="text-sm text-gray-200 mb-3">{{ gateway.pendingInputRequest.question }}</p>
+          <div v-if="gateway.pendingInputRequest.choices?.length" class="flex flex-wrap gap-2 mb-3">
+            <button
+              v-for="choice in gateway.pendingInputRequest.choices"
+              :key="choice"
+              @click="submitInputChoice(choice)"
+              class="btn-ghost px-4 py-2 rounded-xl text-sm font-medium"
+              style="border-color: rgba(56,189,248,0.35); color: #7dd3fc;">
+              {{ choice }}
+            </button>
+          </div>
+          <div class="flex gap-2">
+            <input
+              v-model="inputRequestText"
+              type="text"
+              placeholder="Type your answer…"
+              @keydown.enter.exact.prevent="submitInputFreeText"
+              class="flex-1 rounded-xl bg-gray-800/60 border border-white/10 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-sky-500/50" />
+            <button
+              @click="submitInputFreeText"
+              :disabled="!inputRequestText.trim()"
+              class="btn-grad px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-40">
+              Send
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
     <Transition name="approval">
       <div v-if="gateway.pendingIntervention"
            role="alert" aria-live="assertive"
@@ -387,7 +429,7 @@
             v-model="inputText"
             @keydown.enter.exact.prevent="sendMessage"
             @keydown.enter.shift.exact="inputText += '\n'"
-            :disabled="gateway.isLoading || !gateway.connected"
+            :disabled="gateway.isLoading || !gateway.connected || Boolean(gateway.pendingInputRequest)"
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
@@ -960,6 +1002,7 @@ const orbAiState = computed(() => {
       hasRunningToolCalls.value ||
       hasRunningSwarmTasks.value ||
       Boolean(gateway.pendingApproval) ||
+      Boolean(gateway.pendingInputRequest) ||
       Boolean(gateway.pendingIntervention)
     ) {
       return "activity";
@@ -2109,6 +2152,22 @@ async function triggerJob(name: string) {
 async function approveAction(approved: boolean) {
   if (!gateway.pendingApproval) return;
   await gateway.respondApproval(gateway.pendingApproval.approvalId, approved);
+}
+
+const inputRequestText = ref("");
+
+async function submitInputChoice(choice: string) {
+  if (!gateway.pendingInputRequest) return;
+  inputRequestText.value = "";
+  await gateway.respondInput(gateway.pendingInputRequest.inputId, choice);
+}
+
+async function submitInputFreeText() {
+  if (!gateway.pendingInputRequest) return;
+  const answer = inputRequestText.value.trim();
+  if (!answer) return;
+  inputRequestText.value = "";
+  await gateway.respondInput(gateway.pendingInputRequest.inputId, answer);
 }
 
 async function handleInterventionAction(action: InterventionAction) {

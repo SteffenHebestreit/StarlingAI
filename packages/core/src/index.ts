@@ -18,6 +18,8 @@ import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
+import { initSessionRedis } from "./agent/session.js";
+import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
@@ -63,13 +65,22 @@ import "./tools/timers.js";
 import "./tools/http-request.js";
 import "./tools/git.js";
 import "./tools/messaging.js";
+import "./tools/ask-user.js";
+import "./tools/run-test-suite.js";
+import "./tools/log-stream.js";
+import "./tools/translate-text.js";
 import "./tools/mail.js";
+import "./tools/calendar.js";
+import "./tools/contacts.js";
 import "./tools/agent-datastore.js";
 import "./tools/tool-develop.js";
 import "./tools/self-improve-tools.js";
 import "./tools/graph.js";
 import "./tools/timeseries.js";
 import "./tools/research-scratch.js";
+import "./tools/sql.js";
+import "./tools/spreadsheet.js";
+import "./tools/pdf-forms.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";
@@ -94,6 +105,9 @@ export async function main() {
 
   // Initialize durable scene-job storage before worker startup.
   await initSceneJobStore();
+
+  // Seed in-process session cache from Redis (multi-instance session sharding).
+  await initSessionRedis();
 
   // Check LLM provider health
   await initProviders();
@@ -215,6 +229,7 @@ export async function main() {
     stopAllReminders();
     stopAllTimers();
     await flushAuditLog();
+    await closeSessionRedis();
     process.exit(0);
   };
 

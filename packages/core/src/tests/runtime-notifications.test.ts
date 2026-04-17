@@ -51,6 +51,7 @@ describe("runtime notifications", () => {
     const job = await createJob({
       sceneName: "daily_digest",
       task: "Summarize the day",
+      turnTimeoutMs: 900_000,
     });
 
     await completeJob(job.id, {
@@ -81,6 +82,7 @@ describe("runtime notifications", () => {
     const job = await createJob({
       sceneName: "broken_job",
       task: "Fail intentionally",
+      turnTimeoutMs: 900_000,
     });
 
     await failJob(job.id, "Upstream service unavailable");
