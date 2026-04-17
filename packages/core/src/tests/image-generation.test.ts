@@ -13,7 +13,7 @@ function responseJson(body: unknown, init: ResponseInit = {}): Response {
 }
 
 function responseBytes(bytes: Uint8Array, init: ResponseInit = {}): Response {
-  return new Response(bytes, init);
+  return new Response(bytes as unknown as BodyInit, init);
 }
 
 describe("image generation adapters", () => {

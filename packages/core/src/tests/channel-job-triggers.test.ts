@@ -34,6 +34,7 @@ describe("channel job triggers", () => {
       mode: "prefix" as const,
       ignoreCase: true,
       parseParams: true,
+      silent: false,
     };
 
     const match = matchChannelTrigger(trigger, {

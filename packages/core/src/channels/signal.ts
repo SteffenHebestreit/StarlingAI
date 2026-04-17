@@ -171,7 +171,7 @@ async function handleSignalMessage(
     return;
   }
 
-  const sessionId = getOrCreateChannelSession("signal", message.senderId);
+  const sessionId = await getOrCreateChannelSession("signal", message.senderId);
   runChannelTurn(sessionId, message.text)
     .then((response) => sendSignalMessage(signalCliPath, account, message.senderId, response))
     .catch((err) => log.error({ err }, "Signal turn error"));

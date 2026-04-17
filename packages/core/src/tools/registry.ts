@@ -44,6 +44,7 @@ export interface ToolContext {
   sessionId: string;
   workspacePath: string;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   onSubAgentProgress?: (event: {
     agentName: string;
     kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";

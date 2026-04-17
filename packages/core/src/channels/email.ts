@@ -141,7 +141,7 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
 
           if (!from || !textBody.trim()) continue;
 
-          const sessionId = getOrCreateChannelSession("email", from);
+          const sessionId = await getOrCreateChannelSession("email", from);
           log.info({ from, subject }, "Email received");
 
           try {

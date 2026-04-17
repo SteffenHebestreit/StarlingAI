@@ -9,7 +9,7 @@ describe("speech summary prompt", () => {
     expect(prompt).toContain("MUST remain in German");
     expect(prompt).toContain("Never switch into the user's voice");
     expect(prompt).toContain("I need help");
-    expect(prompt).toContain("Respond with only the summary");
+    expect(prompt).toContain("Respond with only the spoken summary");
   });
 
   it("detects common German assistant replies", () => {

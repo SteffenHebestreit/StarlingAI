@@ -15,7 +15,7 @@
 
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { archiveSession, getSession, createSession } from "../agent/session.js";
+import { archiveSession, getSession, createSession, resolveSession } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
@@ -57,8 +57,8 @@ export async function handleAguiStream(
   const runId       = randomUUID();
   const messageId   = randomUUID();
 
-  // Get or create session
-  let session = sessionId ? getSession(sessionId) : undefined;
+  // Get or create session — try Redis fallback for cross-instance routing
+  let session = sessionId ? await resolveSession(sessionId) : undefined;
   if (!session) {
     session = createSession({ channel: "webchat:agui" });
   }

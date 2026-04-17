@@ -1,67 +1,8 @@
-import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { callMailService, formatMailServiceError, ok, fail } from "./mail-service-client.js";
 
 const log = childLogger("tool:mail");
-
-interface MailServiceResult<T = unknown> {
-  status: number;
-  body: T;
-}
-
-function formatMailServiceError<T>(response: MailServiceResult<T>): string {
-  const body = response.body as Record<string, unknown> | null | undefined;
-  const detail = typeof body?.["error"] === "string"
-    ? body.error
-    : typeof body?.["message"] === "string"
-      ? body.message
-      : "";
-  return detail
-    ? `Mail service returned HTTP ${response.status}: ${detail}`
-    : `Mail service returned HTTP ${response.status}`;
-}
-
-function resolveMailConfig() {
-  const config = getConfig().mail;
-  return {
-    serviceUrl: process.env["SAI_MAIL_SERVICE_URL"] ?? config.serviceUrl,
-    timeoutMs: Number(process.env["SAI_MAIL_SERVICE_TIMEOUT_MS"] ?? config.timeoutMs),
-    authToken: process.env["SAI_MAIL_SERVICE_TOKEN"] ?? config.authToken,
-  };
-}
-
-async function callMailService<T>(
-  path: string,
-  init?: RequestInit,
-): Promise<MailServiceResult<T>> {
-  const config = resolveMailConfig();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  try {
-    const response = await fetch(`${config.serviceUrl}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...(config.authToken ? { Authorization: `Bearer ${config.authToken}` } : {}),
-        ...(init?.headers ?? {}),
-      },
-      signal: controller.signal,
-    });
-    const body = await response.json().catch(() => ({})) as T;
-    return { status: response.status, body };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function ok(output: string, metadata?: Record<string, unknown>): ToolResult {
-  return { success: true, output, metadata };
-}
-
-function fail(error: string, metadata?: Record<string, unknown>): ToolResult {
-  return { success: false, output: "", error, metadata };
-}
 
 function parseStringArray(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;

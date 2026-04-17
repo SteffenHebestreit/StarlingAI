@@ -65,19 +65,49 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `generate_chart_html` | Save an HTML chart report with embedded visualization data in the workspace | None |
 | `generate_mermaid_diagram` | Save a Mermaid diagram artifact in the workspace for direct preview in chat | None |
 | `generate_pdf` | Save a simple PDF document in the workspace | None |
+| `pdf_fill` | Fill form fields in an existing PDF and write the result to the workspace | None |
+| `list_pdf_form_fields` | List the fillable form fields in a PDF file | None |
+| `spreadsheet_read` | Read a spreadsheet file (xlsx, xls, csv, ods) from the workspace into structured data | None |
+| `spreadsheet_write` | Write tabular data to a spreadsheet file (xlsx, csv) in the workspace | None |
 | `n8n_fetch_leads` | Fetch lead data from an n8n workflow | None |
 | `n8n_mark_applied` | Mark a lead as applied in n8n | None |
 | `webhook__<name>` | Any auto-registered webhook tool | None (auto-classified Tier 1) |
+| `mail_list_accounts` | List configured mail accounts | None |
+| `mail_list_mailboxes` | List mailboxes for a mail account | None |
+| `mail_search` | Search email across one or more accounts | None |
+| `mail_read` | Read a specific email message | None |
+| `mail_list_unread` | List unread messages in a mailbox | None |
+| `mail_create_mailbox` | Create a mailbox folder | None |
+| `mail_delete_mailbox` | Delete an empty mailbox folder | None |
+| `mail_move` | Move messages to a different mailbox folder | None |
+| `mail_delete` | Delete messages (move to Trash or permanent) | None |
+| `mail_prepare_draft` | Create a draft message for review before sending | None |
+| `mail_update_draft` | Update a saved draft | None |
+| `mail_get_draft` | Read a saved draft | None |
+| `mail_categorize` | Attach a category label and note to a message | None |
+| `mail_send_draft` | Send an approved draft — requires human approval | Per-call |
+| `calendar_list_calendars` | List CalDAV calendars for a mail account | None |
+| `calendar_list_events` | List events in a calendar within a date range | None |
+| `calendar_create_event` | Create a new calendar event | None |
+| `calendar_update_event` | Update an existing calendar event | None |
+| `calendar_delete_event` | Delete a calendar event | None |
+| `contacts_list_address_books` | List CardDAV address books for a mail account | None |
+| `contacts_search` | Search or list contacts in an address book | None |
+| `contacts_create` | Create a new contact | None |
+| `contacts_update` | Update an existing contact | None |
+| `contacts_delete` | Delete a contact | None |
 
 ### Tier 2 — Execute (Execution-Tier, Approval Depends On Tool)
 
 | Tool | Description | Approval | Sandbox |
 |------|-------------|---------|---------|
 | `delegate_to_agent` | Delegate a task to a named or auto-routed sub-agent via A2A | None | No |
+| `swarm_delegate` | Delegate undirected — the swarm routing system picks the best specialist automatically | None | No |
 | `create_ephemeral_agent` | Create a temporary sub-agent from a spec | None | No |
 | `parallel_delegate` | Run up to 5 agents concurrently | None | No |
 | `run_task_graph` | Execute a dependency-aware swarm task graph | None | No |
 | `run_workflow` | Execute a reusable scene or job inline in a temporary workflow session | None | No |
+| `sql_query` | Run a parameterised read query against a PostgreSQL or MySQL database | Per-call | No |
 | `shell_exec` | Execute a shell command | Per-call | Yes — Docker container |
 | `run_script` | Run a script file | Per-call | Yes — Docker container |
 | `http_request` | Make an outbound HTTP request | Per-call | No |

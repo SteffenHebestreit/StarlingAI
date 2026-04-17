@@ -11,6 +11,7 @@ import {
   getSession,
   getSessionRecord,
   getSessionTranscript,
+  resolveSession,
   listSessions,
 } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
@@ -23,6 +24,7 @@ import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { subscribeToNotifications } from "../runtime/notifications.js";
+import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 
 const log = childLogger("gateway:rpc");
 
@@ -44,9 +46,11 @@ export type RpcMethod =
   | "scenes.list"
   | "jobs.list"
   | "approval.respond"
+  | "input.respond"
   | "computer.list_sessions"
   | "computer.emergency_stop"
-  | "computer.heartbeat";
+  | "computer.heartbeat"
+  | "computer.request_screenshot";
 
 interface RpcRequest {
   id: string;
@@ -68,6 +72,11 @@ interface GatewayEvent {
 
 interface PendingApproval {
   resolve: (approved: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface PendingInputRequest {
+  resolve: (answer: string) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -232,6 +241,7 @@ export class RpcConnection {
   private abortControllers = new Map<string, AbortController>();
   private sessionTurnRequestIds = new Map<string, string>();
   private pendingApprovals = new Map<string, PendingApproval>();
+  private pendingInputRequests = new Map<string, PendingInputRequest>();
 
   constructor(ws: WebSocket) {
     this.connId = randomUUID();
@@ -355,6 +365,18 @@ export class RpcConnection {
           clearTimeout(pending.timeout);
           this.pendingApprovals.delete(approvalId);
           pending.resolve(approved);
+        }
+        return { ok: true };
+      }
+
+      case "input.respond": {
+        const inputId = String(params["inputId"] ?? "");
+        const answer = String(params["answer"] ?? "");
+        const pendingInput = this.pendingInputRequests.get(inputId);
+        if (pendingInput) {
+          clearTimeout(pendingInput.timeout);
+          this.pendingInputRequests.delete(inputId);
+          pendingInput.resolve(answer);
         }
         return { ok: true };
       }
@@ -496,7 +518,7 @@ export class RpcConnection {
         }
 
         if (!sessionId) throw new Error("No active session — call session.create first");
-        const session = getSession(sessionId);
+        const session = getSession(sessionId) ?? await resolveSession(sessionId);
         if (!session) throw new Error(`Session not found: ${sessionId}`);
 
         const supersededRequestId = this.sessionTurnRequestIds.get(session.id);
@@ -652,6 +674,19 @@ export class RpcConnection {
               this.pendingApprovals.set(approvalId, { resolve, timeout });
             });
           },
+          inputCallback: async (question, choices, timeoutMs = 120_000) => {
+            const inputId = randomUUID();
+            this.sendEvent({ type: "agent.input_needed", data: { requestId, inputId, question, choices } });
+
+            return new Promise<string>((resolve) => {
+              const timeout = setTimeout(() => {
+                this.pendingInputRequests.delete(inputId);
+                log.warn({ inputId }, "User input timed out — returning empty string");
+                resolve("");
+              }, timeoutMs);
+              this.pendingInputRequests.set(inputId, { resolve, timeout });
+            });
+          },
         }).then(output => {
           if (timedOut || completed) return;
           completed = true;
@@ -732,6 +767,35 @@ export class RpcConnection {
         return { ok: true };
       }
 
+      case "computer.request_screenshot": {
+        const csId = String(params["computerSessionId"] ?? "");
+        const session = computerSessionManager.getSession(csId);
+        if (!session || session.state !== "active") {
+          return { ok: false, error: `No active session: ${csId}` };
+        }
+        try {
+          const snapshot = await captureComputerSessionSnapshot(csId);
+          if (snapshot.dataUrl && typeof snapshot.width === "number" && typeof snapshot.height === "number") {
+            this.sendEvent({
+              type: "computer.screenshot",
+              data: {
+                computerSessionId: csId,
+                dataUrl: snapshot.dataUrl,
+                width: snapshot.width,
+                height: snapshot.height,
+                timestamp: snapshot.timestamp,
+                frameId: snapshot.frameId,
+                activeWindow: snapshot.activeWindow,
+                displayTopology: session.displayTopology,
+              },
+            });
+          }
+        } catch (err) {
+          log.debug({ csId, err }, "computer.request_screenshot capture failed (non-fatal)");
+        }
+        return { ok: true };
+      }
+
       default:
         throw new Error(`Unknown method: ${method}`);
     }
@@ -756,6 +820,12 @@ export class RpcConnection {
       pending.resolve(false);
     }
     this.pendingApprovals.clear();
+    // Resolve any pending input requests with empty string so they unblock
+    for (const [, pending] of this.pendingInputRequests) {
+      clearTimeout(pending.timeout);
+      pending.resolve("");
+    }
+    this.pendingInputRequests.clear();
     log.info({ connId: this.connId }, "RPC connection closed");
   }
 

@@ -50,6 +50,60 @@
         }
       }
     },
+    "n8n_project_list": {
+      "description": "Authenticated access to internal web applications: log in to a target URL (supports internal HTTP domains like n8n.k2o), fill credentials, and navigate to a protected page such as the n8n project list (Projektliste, Einträge prüfen, neue Workflows). Includes enhanced timeout handling and error recovery for internal networks.",
+      "task": "Use web_task_coordinator to orchestrate the multi-step browser workflow. First, detect if targetUrl is an internal HTTP domain (e.g., http://n8n.k2o) and configure browser settings accordingly. Set explicit timeout of 120 seconds for all navigation and interaction steps. Use browser_agent to navigate to the target URL with HTTP protocol enforcement and enhanced error handling for internal networks. Trigger site_fill_credentials human-in-loop step for secure credential entry. Use browser_agent to fill username and password fields with retry logic, submit the login form, and wait for successful authentication with extended timeout. After login, navigate to the protected Project List page. Use evidence_analyst or vision_browser_analyst to verify login success (e.g., check for user dashboard elements). Implement error recovery: if navigation fails due to internal network issues, retry with adjusted settings. Finally, use summarizer to produce a concise report with: navigation steps completed, login status, current page state, timeout configurations used, and any blockers encountered.",
+      "allowedAgents": [
+        "web_task_coordinator",
+        "browser_agent",
+        "vision_browser_analyst",
+        "evidence_analyst",
+        "summarizer"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials",
+        "mcp__playwright__browser_navigate"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "targetUrl": {
+          "description": "Initial URL to open (supports internal HTTP domains like http://n8n.k2o)",
+          "default": "http://n8n.k2o"
+        },
+        "protectedPageUrl": {
+          "description": "URL of the protected page to navigate after login (e.g., Project List page)",
+          "default": "http://n8n.k2o/projects"
+        },
+        "credentialStoreName": {
+          "description": "Name of the credential store to use for login credentials",
+          "default": "n8n_credentials"
+        },
+        "verificationSelectors": {
+          "description": "CSS selectors to verify successful login (e.g., user menu, dashboard elements)",
+          "default": ".user-menu, .dashboard, .project-list"
+        },
+        "outputFormat": {
+          "description": "Report format: markdown, json, or brief",
+          "default": "markdown with step-by-step log and verification status"
+        },
+        "navigationTimeout": {
+          "description": "Navigation timeout in seconds (minimum 120 for internal domains)",
+          "default": "120"
+        },
+        "retryCount": {
+          "description": "Number of retry attempts for failed navigation steps",
+          "default": "3"
+        },
+        "useHttpExplicitly": {
+          "description": "Force HTTP protocol instead of HTTPS (required for internal domains)",
+          "default": "true"
+        },
+        "internalDomainHandling": {
+          "description": "Strategy for handling internal network domains",
+          "default": "enhanced_timeout_with_retry_and_error_recovery"
+        }
+      }
+    },
     "source_backed_paper": {
       "description": "Produce a paper, report, or research brief grounded in official sources and verified citations.",
       "task": "When attachments or prior reports are provided, start with document_intake. Use researcher for source discovery — it handles both broad web research and citation-grade official sources. Use evidence_analyst to reconcile findings into a clean evidence ledger, and research_librarian to persist durable notes and graph links when the evidence base is large. For short briefs, use summarizer to produce the final deliverable. For full papers or reports, draft only from collected evidence with paper_author. Use source_verifier only to validate citations or claim-level gaps. Run exactly one final quality pass with quality_supervisor before finalizing. Do not create an ephemeral writer and do not rerun the whole pipeline after a viable draft already exists unless the quality pass names one smallest corrective action. Do not delegate to mission_coordinator from this scene — the research pipeline is already defined here.",

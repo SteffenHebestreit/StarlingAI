@@ -5,8 +5,10 @@
  * external services.  Request bodies, headers, and query parameters
  * are fully configurable.
  */
+import { resolve as dnsResolve } from "node:dns/promises";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
+import { isPrivateHost } from "./web.js";
 
 const log = childLogger("tool:http-request");
 const MAX_RESPONSE_BODY = 64_000; // truncate large bodies
@@ -58,6 +60,26 @@ registerTool({
     // Validate URL scheme
     if (!/^https?:\/\//i.test(url)) {
       return { success: false, output: "", error: "URL must start with http:// or https://" };
+    }
+
+    // SSRF guard — reject loopback, RFC1918, link-local, and cloud-metadata targets.
+    // Also DNS-resolve to catch hostnames that point at internal IPs.
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.toLowerCase();
+      if (isPrivateHost(host)) {
+        return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
+      }
+      try {
+        const addrs = await dnsResolve(host);
+        if (addrs.some((addr) => isPrivateHost(addr))) {
+          return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
+        }
+      } catch {
+        // DNS failure is non-fatal — could be an IP literal or unavailable resolver.
+      }
+    } catch {
+      return { success: false, output: "", error: "Invalid URL" };
     }
 
     const headers = new Headers();

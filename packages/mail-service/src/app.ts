@@ -7,6 +7,8 @@ import { log } from "./logger.js";
 import { sendDraft } from "./smtp-client.js";
 import type { CategoryRecord, DraftRecord, MailAccountConfig, MailSummary } from "./types.js";
 import { DraftStore } from "./draft-store.js";
+import { calendarRoutes } from "./calendar-routes.js";
+import { contactsRoutes } from "./contacts-routes.js";
 
 const SearchRequestSchema = z.object({
   accountIds: z.array(z.string()).optional(),
@@ -271,6 +273,9 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
     const updated = await opts.store.markDraftSent(draft.id);
     return c.json(updated);
   });
+
+  app.route("", calendarRoutes(opts.accounts));
+  app.route("", contactsRoutes(opts.accounts));
 
   app.onError((err, c) => {
     log.error({ err }, "mail service request failed");

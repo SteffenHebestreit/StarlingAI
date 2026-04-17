@@ -1228,6 +1228,13 @@ export function createGateway() {
   app.get("/api/runtime/status", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    try {
+      await syncChatProviderRuntimeStatus();
+    } catch {
+      // Return the last known runtime snapshot even if the refresh probe fails.
+    }
+
     return c.json(getRuntimeStatusSnapshot());
   });
 
@@ -1738,6 +1745,45 @@ export function createGateway() {
       }
 
       return c.json(await parseUpstreamJsonResponse(upstream, "Saved voice response was not JSON"));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  app.delete("/api/multimodal/voices/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+
+    if (!multimodalServiceConfigured(multimodalConfig.tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable voice management.");
+    }
+
+    if (multimodalConfig.tts.api !== "qwen-compatible") {
+      return c.json({ error: "Voice deletion is only supported for qwen-compatible TTS backends." }, 400);
+    }
+
+    const voiceId = c.req.param("id");
+    if (!voiceId?.trim()) return c.json({ error: "voice id is required" }, 400);
+
+    try {
+      const upstream = await fetchWithTimeout(
+        upstreamUrl(multimodalConfig.tts.baseUrl, `/voices/${encodeURIComponent(voiceId)}`),
+        {
+          method: "DELETE",
+          headers: upstreamHeaders(multimodalConfig.tts.apiKey),
+        },
+        multimodalConfig.tts.timeoutMs,
+      );
+
+      if (!upstream.ok) {
+        return new Response(JSON.stringify({ error: await extractUpstreamError(upstream, "Failed to delete voice") }), {
+          status: upstream.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return c.json({ ok: true, voice_id: voiceId });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
@@ -2786,6 +2832,7 @@ export function createGateway() {
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
       approvalChannel: scene.approvalChannel,
+      approvalTimeoutMs: scene.approvalTimeoutMs,
       params: mergedParams,
       turnTimeoutMs,
     });

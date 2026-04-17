@@ -1,6 +1,6 @@
 {
   "name": "@starlingai/mail-service",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -24,6 +24,7 @@
     "mailparser": "^3.7.2",
     "nodemailer": "^6.9.16",
     "pino": "^9.6.0",
+    "tsdav": "^2.1.8",
     "zod": "^3.24.2"
   },
   "devDependencies": {

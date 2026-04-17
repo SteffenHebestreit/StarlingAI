@@ -64,6 +64,7 @@ export interface SceneJobPayload {
   allowedAgents?: string[];
   humanInLoopSteps?: string[];
   approvalChannel?: string;
+  approvalTimeoutMs?: number;
   params?: Record<string, string>;
   turnTimeoutMs: number;
 }
@@ -77,6 +78,7 @@ export interface CreateSceneJobInput {
   allowedAgents?: string[];
   humanInLoopSteps?: string[];
   approvalChannel?: string;
+  approvalTimeoutMs?: number;
   params?: Record<string, string>;
   turnTimeoutMs: number;
 }
@@ -306,6 +308,7 @@ class InMemorySceneJobStore implements SceneJobStore {
         allowedAgents: input.allowedAgents,
         humanInLoopSteps: input.humanInLoopSteps,
         approvalChannel: input.approvalChannel,
+        approvalTimeoutMs: input.approvalTimeoutMs,
         params: input.params,
         turnTimeoutMs: input.turnTimeoutMs,
       },
@@ -531,6 +534,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       allowedAgents: input.allowedAgents,
       humanInLoopSteps: input.humanInLoopSteps,
       approvalChannel: input.approvalChannel,
+      approvalTimeoutMs: input.approvalTimeoutMs,
       params: input.params,
       turnTimeoutMs: input.turnTimeoutMs,
     };
@@ -869,6 +873,7 @@ function normalizePayload(value: unknown): SceneJobPayload {
     allowedAgents: Array.isArray(payload.allowedAgents) ? payload.allowedAgents.filter((entry): entry is string => typeof entry === "string") : undefined,
     humanInLoopSteps: Array.isArray(payload.humanInLoopSteps) ? payload.humanInLoopSteps.filter((entry): entry is string => typeof entry === "string") : undefined,
     approvalChannel: typeof payload.approvalChannel === "string" ? payload.approvalChannel : undefined,
+    approvalTimeoutMs: typeof payload.approvalTimeoutMs === "number" && Number.isFinite(payload.approvalTimeoutMs) ? payload.approvalTimeoutMs : undefined,
     params: typeof payload.params === "object" && payload.params !== null
       ? Object.fromEntries(Object.entries(payload.params as Record<string, unknown>).map(([key, entry]) => [key, String(entry)]))
       : undefined,

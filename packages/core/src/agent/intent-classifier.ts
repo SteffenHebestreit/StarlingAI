@@ -98,13 +98,18 @@ export const PENTEST_METHODOLOGY_PATTERNS = [
 
 export const SWARM_MAINTENANCE_HINT_TERMS = [
   "agent set", "agent-set", "agents-set", "main agent", "main-agent", "sub agent", "sub-agent", "subagent",
-  "tool set", "tool-set", "toolset", "workspace/agents", "config assistant", "self tune", "self-tune",
-  "system prompt", "prompt optimizer", "routing prompt", "swarm", "starlingai itself",
+  "tool set", "tool-set", "toolset", "workspace/agents", "workspace/scenes", "workspace/jobs",
+  "config assistant", "self tune", "self-tune", "system prompt", "prompt optimizer",
+  "routing prompt", "workflow definition", "scene definition", "job definition", "swarm", "starlingai itself",
 ];
 
 export const SWARM_MAINTENANCE_PATTERNS = [
   /\b(implement|add|update|improve|change|modify|wire|integrate|refine|fix)\b[\s\S]{0,100}\b(agent|agents|sub-?agents?|toolset|tool set|tools|prompt|system prompt|routing|main agent|main-assistant|swarm)\b/,
   /\b(toolset|tool set|agent set|agents-set|main agent|main-agent|workspace\/agents|config assistant)\b[\s\S]{0,100}\b(implement|update|improve|change|modify|fix|wire|integrate)\b/,
+  /\b(create|add|generate|build|define|author)\b[\s\S]{0,100}\b(new\s+)?(scene|scenes|job|jobs|worflow|worflows|workflow|workflows|playbook|playbooks)\b/,
+  /\b(edit|update|modify|change|fix|refine|improve)\b[\s\S]{0,100}\b(scene|scenes|job|jobs|worflow|worflows|workflow|workflows|playbook|playbooks)\b/,
+  /\b(erstell(?:e|en|t)?|erzeuge?|generier(?:e|en|t)?|baue?|füge|fuege|lege\s+an|anlegen)\b[\s\S]{0,100}\b(neuen?\s+|neue\s+|neues\s+)?(scene|scenes|job|jobs|worflow|worflows|workflow|workflows|playbook|playbooks)\b/,
+  /\b(neuen?|neue|neues)\b[\s\S]{0,40}\b(scene|scenes|job|jobs|worflow|worflows|workflow|workflows|playbook|playbooks)\b/,
   /\b(why|check why|investigate why)\b[\s\S]{0,120}\b(does not want to implement|won't implement|refuses to implement|cannot implement|can not implement)\b/,
   /\b(not asking you to use the system|asking you to improve the system|improve starlingai|update starlingai|maintain the swarm)\b/,
 ];
@@ -122,7 +127,7 @@ export const NAVIGATION_PATTERNS = [
 
 export const WORKFLOW_HINT_TERMS = [
   "catalog", "catalogue", "chain", "job", "jobs", "playbook", "playbooks",
-  "reusable", "reuse", "scene", "scenes", "workflow", "workflows",
+  "reusable", "reuse", "scene", "scenes", "worflow", "worflows", "workflow", "workflows",
 ];
 
 export const WORKFLOW_ACTION_TERMS = [

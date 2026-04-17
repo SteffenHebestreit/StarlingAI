@@ -43,9 +43,10 @@ describe("git tools", () => {
       "F:/StarlingAI:/workspace",
       "-w",
       "/workspace/packages/core",
-      "sh",
-      "-lc",
-      "git status --porcelain=v2 --branch",
+      "git",
+      "status",
+      "--porcelain=v2",
+      "--branch",
     ]), expect.objectContaining({ timeout: 60000 }));
   });
 
@@ -67,8 +68,10 @@ describe("git tools", () => {
 
     expect(result.success).toBe(true);
     expect(execFileAsyncMock).toHaveBeenCalledTimes(2);
-    expect(execFileAsyncMock.mock.calls[0]?.[1]).toContain("git add src/tests");
-    expect(execFileAsyncMock.mock.calls[1]?.[1]).toContain("git commit -m 'feat: add api tests'");
+    const addCallArgs = execFileAsyncMock.mock.calls[0]?.[1] as string[];
+    const commitCallArgs = execFileAsyncMock.mock.calls[1]?.[1] as string[];
+    expect(addCallArgs).toEqual(expect.arrayContaining(["git", "add", "--", "src/tests"]));
+    expect(commitCallArgs).toEqual(expect.arrayContaining(["git", "commit", "-m", "feat: add api tests"]));
   });
 
   it("rejects non-https clone URLs", async () => {
@@ -105,9 +108,14 @@ describe("git tools", () => {
     expect(result.success).toBe(true);
     expect(execFileAsyncMock).toHaveBeenCalledWith("docker", expect.arrayContaining([
       "--network=bridge",
-      "sh",
-      "-lc",
-      "git clone --branch main --depth 1 https://example.com/repo.git vendor/repo",
+      "git",
+      "clone",
+      "--branch",
+      "main",
+      "--depth",
+      "1",
+      "https://example.com/repo.git",
+      "vendor/repo",
     ]), expect.any(Object));
   });
 });
