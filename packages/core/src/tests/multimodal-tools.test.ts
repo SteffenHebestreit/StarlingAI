@@ -504,7 +504,7 @@ describe("multimodal and browser direct tools", () => {
       upstreamInputs.push(body.input);
       expect(body.voice).toBe("alloy");
       expect(body.input.length).toBeLessThanOrEqual(DEFAULT_TTS_CHUNK_MAX_CHARS);
-      return new Response(createPcmWav(upstreamInputs.length + 1, upstreamInputs.length * 50), {
+      return new Response(createPcmWav(upstreamInputs.length + 1, upstreamInputs.length * 50) as unknown as BodyInit, {
         status: 200,
         headers: { "Content-Type": "audio/wav" },
       });

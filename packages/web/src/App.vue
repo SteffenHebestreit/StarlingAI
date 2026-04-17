@@ -24,7 +24,7 @@
           </span>
         </div>
         <span class="text-xs bg-purple-900/40 text-purple-400 border border-purple-700/30 px-2 py-0.5 rounded-full font-medium">
-          v0.4.1
+          v0.6.4
         </span>
       </div>
 

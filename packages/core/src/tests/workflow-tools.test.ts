@@ -370,7 +370,7 @@ describe("workflow catalog tools", () => {
 
       expect(result.success).toBe(true);
       expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
-      const bootstrapCall = runSubAgentWithStatsMock.mock.calls[0]?.[0];
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
       expect(bootstrapCall?.task).toContain("Original user request:");
       expect(bootstrapCall?.task).toContain("MCP, A2A und AG-UI");
       expect(bootstrapCall?.context).toContain("Original user request:");
@@ -461,7 +461,7 @@ describe("workflow catalog tools", () => {
       expect(result.success).toBe(true);
       expect(result.output).toContain("completed via mission_coordinator bootstrap");
       expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
-      const bootstrapCall = runSubAgentWithStatsMock.mock.calls[0]?.[0];
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
       expect(bootstrapCall).toBeDefined();
       expect(bootstrapCall?.agentName).toBe("mission_coordinator");
       expect(bootstrapCall?.parentSessionId).toBe("workflow-scene");
@@ -655,7 +655,7 @@ describe("workflow catalog tools", () => {
 
       expect(result.success).toBe(true);
 
-      const bootstrapCall = runSubAgentWithStatsMock.mock.calls[0]?.[0];
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
       expect(bootstrapCall?.inlineConfig?.tools).toEqual([
         "search_agents",
         "delegate_to_agent",

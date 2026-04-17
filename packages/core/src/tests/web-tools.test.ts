@@ -239,7 +239,7 @@ describe("web search backend selection", () => {
     const resolved = resolveSearchBackendConfig(config);
 
     expect(resolved.requestedBackend).toBe("searxng");
-    expect(resolved.backends).toEqual(["searxng", "playwright"]);
+    expect(resolved.backends).toEqual(["searxng", "playwright", "duckduckgo"]);
   });
 
   it("falls through to playwright duckduckgo when searxng returns zero results", async () => {

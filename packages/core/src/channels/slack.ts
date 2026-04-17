@@ -163,7 +163,7 @@ export async function handleSlackEvent(c: Context): Promise<Response> {
     return c.json({ ok: true });
   }
 
-  const sessionId = getOrCreateChannelSession("slack", senderId);
+  const sessionId = await getOrCreateChannelSession("slack", senderId);
   // Fire and forget — Slack requires 200 within 3s
   runChannelTurn(sessionId, text).then(response =>
     slackSend(botToken, channelId, response)

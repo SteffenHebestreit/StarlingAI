@@ -175,7 +175,7 @@ export function startDiscordChannel(): () => Promise<void> {
               break;
             }
 
-            const sessionId = getOrCreateChannelSession("discord", senderId);
+            const sessionId = await getOrCreateChannelSession("discord", senderId);
             runChannelTurn(sessionId, content)
               .then(response => discordSend(token, channelId, response))
               .catch(err => log.error({ err }, "Discord turn error"));

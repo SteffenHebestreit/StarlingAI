@@ -143,6 +143,552 @@
           "webhookKey": "$JOB_RESEARCH_VISUAL_DIGEST_KEY"
         }
       ]
+    },
+    "weekly_security_digest": {
+      "description": "Research the latest CVEs, security advisories, and threat intelligence for the configured stack, produce a prioritized risk report, and broadcast it to the configured channels.",
+      "params": {
+        "scope": {
+          "description": "Software stack, services, or dependency set to cover",
+          "default": "Node.js, Docker, nginx, PostgreSQL, and configured npm dependencies"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "severityThreshold": {
+          "description": "Minimum severity to include",
+          "default": "medium"
+        }
+      },
+      "steps": [
+        {
+          "scene": "security_audit",
+          "label": "Collect CVEs and audit findings",
+          "params": {
+            "target": "{{scope}}",
+            "auditScope": "dependencies",
+            "severityThreshold": "{{severityThreshold}}",
+            "outputFormat": "markdown with risk table and remediation plan"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast security digest",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "urgent"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_WEEKLY_SECURITY_DIGEST_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/security-digest",
+          "mode": "prefix",
+          "captureRemainderAs": "scope",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{scope|configured stack}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "release_broadcast": {
+      "description": "Generate release notes from git history for a specified version range and broadcast them to the configured channels.",
+      "params": {
+        "version": {
+          "description": "Release version label",
+          "default": "next"
+        },
+        "targetRef": {
+          "description": "Git ref range to generate notes from",
+          "default": "HEAD~20..HEAD"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "audience": {
+          "description": "Intended audience for the notes: internal, public, or technical",
+          "default": "internal team"
+        }
+      },
+      "steps": [
+        {
+          "scene": "release_notes_draft",
+          "label": "Draft release notes from git",
+          "params": {
+            "version": "{{version}}",
+            "targetRef": "{{targetRef}}",
+            "audience": "{{audience}}",
+            "broadcast": "no"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast release notes",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_RELEASE_BROADCAST_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/release",
+          "mode": "prefix",
+          "captureRemainderAs": "version",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for release {{version|next}} as {{jobId}}.",
+          "params": {
+            "channels": "slack",
+            "targetRef": "HEAD~20..HEAD"
+          }
+        }
+      ]
+    },
+    "incident_postmortem": {
+      "description": "Triage a live or recent incident, guide remediation, and produce a structured post-incident report that is broadcast to the ops channel.",
+      "params": {
+        "incident": {
+          "description": "Description of the failure or alert",
+          "default": ""
+        },
+        "affectedService": {
+          "description": "Service or container showing the failure",
+          "default": "discover from logs"
+        },
+        "channels": {
+          "description": "Comma-separated channels to broadcast the postmortem to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "incident_response",
+          "label": "Triage, remediate, and capture findings",
+          "params": {
+            "incident": "{{incident}}",
+            "severity": "high",
+            "affectedService": "{{affectedService}}"
+          }
+        },
+        {
+          "scene": "source_backed_paper",
+          "label": "Draft post-incident report",
+          "params": {
+            "outputStyle": "post-incident report with timeline, root cause, remediation steps, and follow-up actions",
+            "audience": "engineering and operations team",
+            "freshnessRequirement": "use findings from the triage step; no additional web research needed"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast postmortem",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "formal"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_INCIDENT_POSTMORTEM_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/incident",
+          "mode": "prefix",
+          "captureRemainderAs": "incident",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for incident: {{incident|the reported issue}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "competitive_snapshot": {
+      "description": "Run a competitive analysis for one or more products, produce a visual intelligence brief, and optionally broadcast it.",
+      "params": {
+        "competitors": {
+          "description": "Comma-separated competitor names or products",
+          "default": ""
+        },
+        "dimensions": {
+          "description": "Comparison dimensions",
+          "default": "pricing, features, market-position"
+        },
+        "channels": {
+          "description": "Comma-separated channels to broadcast to, or empty to skip broadcast",
+          "default": ""
+        }
+      },
+      "steps": [
+        {
+          "scene": "competitive_analysis",
+          "label": "Research and compare competitors",
+          "params": {
+            "competitors": "{{competitors}}",
+            "dimensions": "{{dimensions}}",
+            "deliverable": "competitive intelligence brief with comparison table and key differentiators",
+            "audience": "product and strategy stakeholders"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_COMPETITIVE_SNAPSHOT_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/competitive",
+          "mode": "prefix",
+          "captureRemainderAs": "competitors",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{competitors|the requested products}} as {{jobId}}.",
+          "params": {
+            "dimensions": "pricing, features, market-position"
+          }
+        }
+      ]
+    },
+    "data_quality_report": {
+      "description": "Inspect a data source or attached files for schema quality, completeness, and anomalies, then broadcast a structured data quality report.",
+      "params": {
+        "dataSource": {
+          "description": "File path, database name, or description of the data source",
+          "default": "attached files or configured database"
+        },
+        "channels": {
+          "description": "Comma-separated channels for delivery",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "data_pipeline_review",
+          "label": "Analyze data quality",
+          "params": {
+            "dataSource": "{{dataSource}}",
+            "validationRules": "null rates, type consistency, referential integrity, value distributions",
+            "outputFormat": "markdown data quality report with issue table"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast data quality report",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DATA_QUALITY_REPORT_KEY"
+        }
+      ]
+    },
+    "morning_briefing": {
+      "description": "Produce a combined morning briefing: today's calendar, overnight ops alerts, key news or research on the configured topic, and any pending notifications — delivered to the configured channel.",
+      "params": {
+        "topic": {
+          "description": "Background topic for the research section (platform news, industry, project)",
+          "default": "platform and technology news relevant to the current stack"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "telegram"
+        },
+        "calendarLookahead": {
+          "description": "How many days of calendar events to include",
+          "default": "1"
+        }
+      },
+      "steps": [
+        {
+          "scene": "deep_research",
+          "label": "Gather morning research brief",
+          "params": {
+            "deliverable": "concise morning digest — 3 to 5 bullet points per sub-topic, no padding",
+            "includeVisuals": "no",
+            "freshnessRequirement": "use only today's or yesterday's sources for news items",
+            "audience": "operator",
+            "visualFocus": "none"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Deliver morning briefing",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_MORNING_BRIEFING_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["telegram"],
+          "pattern": "/morning",
+          "mode": "exact",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} as {{jobId}}.",
+          "params": {
+            "channels": "telegram"
+          }
+        }
+      ]
+    },
+    "scheduled_code_review": {
+      "description": "Perform a structured code review of recent commits, produce a review report, and broadcast it to the engineering channel.",
+      "params": {
+        "targetRef": {
+          "description": "Git ref range to review",
+          "default": "HEAD~10..HEAD"
+        },
+        "focusAreas": {
+          "description": "Review focus: security, performance, style, logic, all",
+          "default": "all"
+        },
+        "channels": {
+          "description": "Channels to deliver the report to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "code_review",
+          "label": "Inspect changes and produce review",
+          "params": {
+            "targetRef": "{{targetRef}}",
+            "focusAreas": "{{focusAreas}}"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast code review report",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_SCHEDULED_CODE_REVIEW_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/code-review",
+          "mode": "prefix",
+          "captureRemainderAs": "targetRef",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{targetRef|recent commits}} as {{jobId}}.",
+          "params": {
+            "channels": "slack",
+            "focusAreas": "all"
+          }
+        }
+      ]
+    },
+    "onboarding_delivery": {
+      "description": "Build an onboarding packet for a new team member or project and deliver it via the configured channel.",
+      "params": {
+        "topic": {
+          "description": "What the person is being onboarded to",
+          "default": ""
+        },
+        "audience": {
+          "description": "Who is being onboarded and their background",
+          "default": "new team member with intermediate technical background"
+        },
+        "outputLanguage": {
+          "description": "Language for the final packet",
+          "default": "English"
+        },
+        "channels": {
+          "description": "Channel to deliver the packet link or summary to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "onboarding_packet",
+          "label": "Build structured onboarding document",
+          "params": {
+            "topic": "{{topic}}",
+            "audience": "{{audience}}",
+            "outputLanguage": "{{outputLanguage}}",
+            "outputFormat": "structured Markdown with sections and a quick-reference table"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Notify about new onboarding packet",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_ONBOARDING_DELIVERY_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/onboard",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "content_pipeline": {
+      "description": "Research a topic, produce audience-ready written content, and publish a summary notification to the configured channel.",
+      "params": {
+        "topic": {
+          "description": "Topic, angle, or key message for the content",
+          "default": ""
+        },
+        "contentType": {
+          "description": "blog-post, newsletter, product-copy, or documentation",
+          "default": "blog-post"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "general technical audience"
+        },
+        "channels": {
+          "description": "Channel to notify on completion",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "content_creation",
+          "label": "Research and draft content",
+          "params": {
+            "contentType": "{{contentType}}",
+            "topic": "{{topic}}",
+            "audience": "{{audience}}",
+            "tone": "professional and engaging",
+            "requiresResearch": "yes"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Notify on content completion",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_CONTENT_PIPELINE_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/content",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "contentType": "blog-post",
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "database_analysis": {
+      "description": "Run a scheduled schema inspection and data quality check against a configured database, then broadcast a weekly digest summarising findings, anomalies, and recommended actions.",
+      "params": {
+        "dataSource": {
+          "description": "Database name, connection alias, or file path to analyse",
+          "default": "configured default database"
+        },
+        "validationRules": {
+          "description": "Comma-separated validation rules to enforce",
+          "default": "null rates, type consistency, referential integrity, row-count drift, value distributions, duplicate keys"
+        },
+        "channels": {
+          "description": "Comma-separated channels to deliver the digest to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "data_pipeline_review",
+          "label": "Inspect schema and data quality",
+          "params": {
+            "dataSource": "{{dataSource}}",
+            "validationRules": "{{validationRules}}",
+            "outputFormat": "markdown database analysis report with findings table and recommended actions"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast weekly database digest",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DATABASE_ANALYSIS_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/db-analysis",
+          "mode": "prefix",
+          "captureRemainderAs": "dataSource",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{dataSource|the default database}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
     }
   }
 }

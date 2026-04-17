@@ -88,6 +88,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  list_pdf_form_fields: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Inspect AcroForm fields in an existing PDF file",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  spreadsheet_read: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read a workspace spreadsheet (XLSX, XLS, ODS, CSV) and return sheets as JSON row arrays",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   transcribe_audio: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Transcribe an audio file from the workspace using the configured STT backend",
@@ -428,6 +440,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,  // sub-agent's own tool calls carry their own approvals
     requiresSandbox: false,
   },
+  swarm_delegate: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Delegate a task without naming an agent — the swarm routing system picks the best specialist",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   create_ephemeral_agent: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Spin up a purpose-built single-use agent from an inline spec and run it immediately",
@@ -470,6 +488,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  sql_query: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Run a parameterised SQL query against a PostgreSQL or MySQL/MariaDB database",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  pdf_fill: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Fill AcroForm fields in an existing PDF file and save the result to the workspace",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
   git_commit: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Stage files and create a git commit",
@@ -481,6 +511,42 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     description: "Switch or create branches, restore files",
     requiresPerCallApproval: true,
     requiresSandbox: true,
+  },
+  git_tag: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Create an annotated or lightweight git tag",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  git_push: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Push commits or tags to a remote git repository (network-enabled sandbox)",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  run_test_suite: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Run a named test suite inside a Docker sandbox and return the output",
+    requiresPerCallApproval: true,
+    requiresSandbox: true,
+  },
+  log_stream: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Tail and filter container logs or workspace log files (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  translate_text: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Translate a short string to a target language using the configured LLM",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  ask_user: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Pause execution and ask the human user a question with optional choices",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
   },
   browser_click: {
     tier: ToolTier.TWO_EXECUTE,
@@ -538,6 +604,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   generate_document: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate and save a workspace document as Markdown, text, HTML, or JSON",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  spreadsheet_write: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write JSON row data to an XLSX file in the workspace",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -768,6 +840,71 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+
+  // ─── CalDAV Calendar Tools ───────────────────────────────────────────────
+  calendar_list_calendars: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List available CalDAV calendars for a configured account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  calendar_list_events: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List events in a CalDAV calendar within a date range",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  calendar_create_event: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a new event in a CalDAV calendar",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  calendar_update_event: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Update an existing event in a CalDAV calendar",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  calendar_delete_event: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete an event from a CalDAV calendar",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+
+  // ─── CardDAV Contacts Tools ──────────────────────────────────────────────
+  contacts_list_address_books: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List available CardDAV address books for a configured account",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  contacts_search: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search contacts in a CardDAV address book",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  contacts_create: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a new contact in a CardDAV address book",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  contacts_update: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Update an existing contact in a CardDAV address book",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  contacts_delete: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete a contact from a CardDAV address book",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+
   ssh_exec: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Execute commands on a remote system over SSH",

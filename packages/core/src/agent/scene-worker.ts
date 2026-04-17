@@ -465,7 +465,7 @@ function buildApprovalCallback(
     });
 
     const approved = await raceAgainstAbort(
-      requestApprovalViaChannel(approvalChannel, toolName, args, job.sceneName),
+      requestApprovalViaChannel(approvalChannel, toolName, args, job.sceneName, job.payload.approvalTimeoutMs),
       controller.signal,
     );
 

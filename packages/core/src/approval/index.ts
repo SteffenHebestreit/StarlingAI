@@ -29,7 +29,8 @@ export async function requestApprovalViaChannel(
   channelName: string,
   toolName: string,
   args: Record<string, unknown>,
-  sceneName?: string
+  sceneName?: string,
+  approvalTimeoutMs?: number
 ): Promise<boolean> {
   const config = getConfig();
   const channelConfig = config.approvalChannels?.[channelName];
@@ -44,7 +45,7 @@ export async function requestApprovalViaChannel(
       const secret = randomUUID();
       const { id, promise } = createPendingApproval({
         toolName, args, sceneName, secret,
-        timeoutMs: channelConfig.timeoutMs,
+        timeoutMs: approvalTimeoutMs ?? channelConfig.timeoutMs,
       });
       await sendSlackApproval(id, secret, toolName, args, sceneName, channelConfig);
       return promise;
@@ -63,7 +64,7 @@ export async function requestApprovalViaChannel(
       }
       const { id, promise } = createPendingApproval({
         toolName, args, sceneName, secret,
-        timeoutMs: channelConfig.timeoutMs,
+        timeoutMs: approvalTimeoutMs ?? channelConfig.timeoutMs,
       });
       await sendOutboundWebhookApproval(id, secret, toolName, args, sceneName, channelConfig);
       return promise;

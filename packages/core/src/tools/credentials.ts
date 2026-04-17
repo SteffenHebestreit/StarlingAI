@@ -13,7 +13,7 @@
  */
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolveSiteCredential } from "../credentials/sites.js";
-import { getMcpConnections } from "../mcp/registry.js";
+import { callPlaywrightTool } from "./multimodal.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
@@ -143,14 +143,8 @@ registerTool({
     }
 
     // Get Playwright MCP connection
-    const connection = getMcpConnections().get("playwright");
-    if (!connection) {
-      return {
-        success: false,
-        output: "",
-        error: "Playwright browser is not connected. Navigate to the login page with browser_navigate first.",
-      };
-    }
+    // Use callPlaywrightTool which properly checks isError from MCP results
+    // (raw callTool returns isError without throwing, masking fill failures)
 
     logAudit("credential_fill", { hostname: cred.hostname, source: cred.source, target: "browser" }, { sessionId: ctx.sessionId });
 
@@ -159,10 +153,7 @@ registerTool({
 
     // 1. Fill username
     try {
-      await connection.client.callTool({
-        name: "browser_type",
-        arguments: { element: "username / email field", ref: usernameRef, text: cred.username },
-      });
+      await callPlaywrightTool("browser_type", { element: "username / email field", ref: usernameRef, text: cred.username });
       results.push(`Username field (ref ${usernameRef}): filled ✓`);
     } catch (err) {
       allOk = false;
@@ -171,10 +162,7 @@ registerTool({
 
     // 2. Fill password
     try {
-      await connection.client.callTool({
-        name: "browser_type",
-        arguments: { element: "password field", ref: passwordRef, text: cred.password },
-      });
+      await callPlaywrightTool("browser_type", { element: "password field", ref: passwordRef, text: cred.password });
       results.push(`Password field (ref ${passwordRef}): filled ✓`);
     } catch (err) {
       allOk = false;
@@ -184,10 +172,7 @@ registerTool({
     // 3. Click submit (optional)
     if (submitRef) {
       try {
-        await connection.client.callTool({
-          name: "browser_click",
-          arguments: { element: "submit / login button", ref: submitRef },
-        });
+        await callPlaywrightTool("browser_click", { element: "submit / login button", ref: submitRef });
         results.push(`Submit button (ref ${submitRef}): clicked ✓`);
       } catch (err) {
         allOk = false;

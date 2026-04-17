@@ -47,7 +47,7 @@ const DEFAULT_MAX_ITERATIONS = 5;
 // These prevent a single tool from dominating the iteration budget
 // (e.g. repeated computer_session_start after a connection failure).
 const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
-  computer_session_start: 3,
+  computer_session_start: 4,
   computer_session_stop: 2,
   computer_session_attach: 2,
   computer_list_nodes: 2,
@@ -62,11 +62,13 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_type: 4,
   computer_hotkey: 4,
   delegate_to_agent: 3,
+  swarm_delegate: 3,
   create_ephemeral_agent: 1,
 };
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
+  swarm_delegate: 6,
 };
 
 const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
@@ -78,6 +80,12 @@ const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
   "computer_snapshot",
   "computer_capture_region",
   "computer_wait_for",
+  // http_request lets observation-mode runs query REST APIs (e.g. LM Studio /v1/models)
+  // instead of being stranded when vision analysis is unavailable.
+  "http_request",
+  // get_site_credentials is read-only (tier 0, never exposes secrets) and provides
+  // stored URLs so the agent doesn't hallucinate ports/paths from training data.
+  "get_site_credentials",
 ]);
 
 const MAIL_READ_ONLY_TOOLS = new Set<string>([
@@ -93,6 +101,7 @@ const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "search_agents",
   "search_workflows",
   "delegate_to_agent",
+  "swarm_delegate",
   "run_workflow",
   "parallel_delegate",
   "run_task_graph",
@@ -120,7 +129,7 @@ function isComputerObservationOnlyTask(task: string): boolean {
   const observationIntent = /(list|identify|inspect|analy[sz]e|describe|report|read|check|show|visible|screenshot|snapshot|screen|what is on (?:the )?screen|loaded models|model names|welche|liste|prüfe|analysiere|beschreibe|sichtbar)/i.test(normalized);
   if (!observationIntent) return false;
 
-  const explicitInteraction = /(click|doubleclick|type|press|hotkey|shortcut|open|launch|navigate|scroll|drag|upload|download|log in|login|sign in|fill|submit|reply|send|switch tab|switch window|focus the input|paste)/i.test(normalized);
+  const explicitInteraction = /(click|doubleclick|type|press|hotkey|shortcut|open|launch|navigate|scroll|drag|upload|download|log in|login|sign in|fill|submit|reply|send|switch tab|switch window|focus the input|paste|öffne|starte|navigiere|klick|eingeben|einloggen|anmelden|hochladen|herunterladen|ausfüllen|absenden|antworten|senden|einfügen)/i.test(normalized);
   return !explicitInteraction;
 }
 
@@ -179,6 +188,9 @@ function buildTaskModeGuidance(agentName: string, task: string): string {
         "Report concrete failure signals first. Avoid exploratory narration that does not produce evidence.",
       ].join("\n");
     }
+    if (agentName === "computer_use_agent") {
+      return "CREDENTIAL LOOKUP: Before making http_request calls to a service, call get_site_credentials with the hostname or short name to retrieve the stored URL, port, and API key. Do NOT guess default ports or URLs from training data.";
+    }
     return "";
   }
 
@@ -189,6 +201,7 @@ function buildTaskModeGuidance(agentName: string, task: string): string {
     "Prefer additional computer_snapshot or computer_capture_region calls over any interaction.",
     "Do NOT click, type, use hotkeys, scroll, drag, open apps, or launch dialogs for this task.",
     "If the current desktop does not already show the requested evidence, report that limitation explicitly instead of probing blindly.",
+    "If you need to make an http_request to a service, call get_site_credentials first to retrieve the stored URL and port. Do NOT guess URLs or default ports from training data.",
   ].join("\n");
 }
 
@@ -240,7 +253,7 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
 
   const hasDirectWebResearch = availableTools.includes("web_search") || availableTools.includes("web_fetch");
   const canSearchForSpecialists = availableTools.includes("search_agents");
-  const canDelegateToSpecialists = availableTools.includes("delegate_to_agent");
+  const canDelegateToSpecialists = availableTools.includes("delegate_to_agent") || availableTools.includes("swarm_delegate");
 
   if (hasDirectWebResearch) {
     guidance.push("When the task depends on current, external, or source-sensitive facts, validate them with up-to-date web evidence whenever feasible instead of relying only on prior knowledge.");
@@ -262,7 +275,9 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
     guidance.push("Call list_agents when you need the full delegate catalog with descriptions and tool access.");
   }
   if (availableTools.includes("delegate_to_agent")) {
-    guidance.push("Sub-agent names are not tools. Invoke another specialist only through delegate_to_agent.");
+    guidance.push("Sub-agent names are not tools. Invoke another specialist only through delegate_to_agent or swarm_delegate.");
+  } else if (availableTools.includes("swarm_delegate")) {
+    guidance.push("Sub-agent names are not tools. Invoke specialists through swarm_delegate and let the swarm pick the right agent.");
   }
   if (availableTools.includes("parallel_delegate")) {
     guidance.push("Use parallel_delegate only for genuinely independent partitions of work.");
@@ -2006,11 +2021,23 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           toolCallId: tc.id,
           result,
         });
-        const resultContent = result.success
+        let resultContent = result.success
           ? result.output
           : (result.error?.trim()
               ? `Error: ${result.error}`
               : (result.output.trim() || "Error: unknown"));
+
+        // Redact any secrets leaked into the tool output before the sub-agent sees it.
+        const toolOutputScan = scanOutput(resultContent);
+        if (!toolOutputScan.safe && toolOutputScan.redacted) {
+          resultContent = toolOutputScan.redacted;
+          logAudit(
+            "output_redacted",
+            { surface: "tool_output", agentName: opts.agentName, tool: tc.name, detectedTypes: toolOutputScan.detectedTypes },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+        }
+
         if (result.success) {
           successfulToolCount += 1;
         }

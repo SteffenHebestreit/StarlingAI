@@ -2,6 +2,11 @@ import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useGatewayStore } from "./gateway";
 
+// ── Live-preview polling ─────────────────────────────────────────────────────
+// Poll for a fresh screenshot every second while a session is being observed.
+// This keeps the panel live even when no agent turn is running.
+const LIVE_PREVIEW_INTERVAL_MS = 1_000;
+
 export interface ComputerSession {
   id: string;
   adapter: string;
@@ -328,6 +333,40 @@ export const useComputerStore = defineStore("computer", () => {
     },
     { immediate: true },
   );
+
+  // ── Live-preview polling ─────────────────────────────────────────────────
+  // When a session is being observed, poll for a fresh screenshot every second
+  // so the panel updates even when no agent turn is actively running.
+  let livePreviewTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startLivePreview() {
+    if (livePreviewTimer) return;
+    livePreviewTimer = setInterval(() => {
+      const csId = observedSessionId.value;
+      if (!csId || !gateway.connected) return;
+      const session = sessions.value.find((s) => s.id === csId);
+      if (!session || session.state !== "active") return;
+      // Skip poll if a fresh screenshot arrived in the last 600ms (agent is pushing them already)
+      const cached = screenshotsBySession.value[csId];
+      if (cached && Date.now() - cached.timestamp < 600) return;
+      gateway.rpc("computer.request_screenshot", { computerSessionId: csId }).catch(() => {/* non-fatal */});
+    }, LIVE_PREVIEW_INTERVAL_MS);
+  }
+
+  function stopLivePreview() {
+    if (livePreviewTimer) {
+      clearInterval(livePreviewTimer);
+      livePreviewTimer = null;
+    }
+  }
+
+  watch(observedSessionId, (id) => {
+    if (id) {
+      startLivePreview();
+    } else {
+      stopLivePreview();
+    }
+  }, { immediate: true });
 
   return {
     sessions,

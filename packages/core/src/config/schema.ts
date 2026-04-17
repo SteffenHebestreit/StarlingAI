@@ -206,6 +206,10 @@ export const MultimodalFileServiceSchema = MultimodalServiceSchema.extend({
   visionBaseUrl: z.string().url().optional(),
   /** Optional API key for the dedicated vision endpoint. */
   visionApiKey: z.string().optional(),
+  /** Timeout for vision LLM calls in milliseconds (default: 120 000).
+   *  Kept separate from timeoutMs (which applies to the file-to-markdown service)
+   *  because local LLM inference on large screenshots can take 60–120 s. */
+  visionTimeoutMs: z.number().int().positive().default(120_000),
 });
 
 export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
@@ -620,6 +624,9 @@ export const SceneConfigSchema = z.object({
   humanInLoopSteps: z.array(z.string()).optional(), // tool names that require user approval in this scene
   /** Name of an entry in `approvalChannels` — used when this scene is triggered via webhook */
   approvalChannel: z.string().optional(),
+  /** Override the approval channel timeout for this scene (ms). Min 60 s, max 24 h.
+   *  Falls back to the channel's own timeoutMs when not set. */
+  approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
 });
 
 export const ScenesSchema = z.record(SceneConfigSchema);

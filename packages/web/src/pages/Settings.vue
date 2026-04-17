@@ -446,6 +446,42 @@
                   </button>
                 </div>
               </div>
+
+              <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Saved Voice Library</div>
+                    <div class="text-xs text-gray-500 mt-1">All voices saved in the qwen-compatible TTS backend. Click a voice ID to set it as Default Voice ID.</div>
+                  </div>
+                  <button @click="loadSavedVoices" :disabled="voiceLibrary.loading" class="btn-ghost px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5">
+                    <svg v-if="!voiceLibrary.loading" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H3.989a.75.75 0 0 0-.75.75v4.242a.75.75 0 0 0 1.5 0v-2.43l.31.31a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm1.23-3.723a.75.75 0 0 0 .219-.53V2.929a.75.75 0 0 0-1.5 0V5.36l-.31-.31A7 7 0 0 0 3.239 8.188a.75.75 0 1 0 1.448.389A5.5 5.5 0 0 1 13.89 6.11l.311.31h-2.432a.75.75 0 0 0 0 1.5h4.243a.75.75 0 0 0 .53-.219Z" clip-rule="evenodd" /></svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 animate-spin"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H3.989a.75.75 0 0 0-.75.75v4.242a.75.75 0 0 0 1.5 0v-2.43l.31.31a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm1.23-3.723a.75.75 0 0 0 .219-.53V2.929a.75.75 0 0 0-1.5 0V5.36l-.31-.31A7 7 0 0 0 3.239 8.188a.75.75 0 1 0 1.448.389A5.5 5.5 0 0 1 13.89 6.11l.311.31h-2.432a.75.75 0 0 0 0 1.5h4.243a.75.75 0 0 0 .53-.219Z" clip-rule="evenodd" /></svg>
+                    {{ voiceLibrary.loading ? 'Loading…' : 'Refresh' }}
+                  </button>
+                </div>
+                <div v-if="voiceLibrary.error" class="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">{{ voiceLibrary.error }}</div>
+                <div v-if="!voiceLibrary.loaded && !voiceLibrary.loading" class="text-xs text-gray-600 italic">Click Refresh to load voices from the backend.</div>
+                <div v-else-if="voiceLibrary.loaded && voiceLibrary.voices.length === 0" class="text-xs text-gray-600 italic">No saved voices found in the backend.</div>
+                <ul v-else class="divide-y divide-purple-500/10">
+                  <li v-for="voice in voiceLibrary.voices" :key="voice.voice_id" class="flex items-center justify-between py-2 gap-3 group">
+                    <div class="min-w-0 flex-1">
+                      <button @click="multimodalForm.ttsDefaultVoiceId = voice.voice_id" class="text-left max-w-full">
+                        <div class="text-xs font-semibold text-gray-200 truncate group-hover:text-purple-300 transition-colors" :class="{ 'text-purple-300': multimodalForm.ttsDefaultVoiceId === voice.voice_id }">{{ voice.name }}</div>
+                        <div class="text-[11px] text-gray-500 font-mono truncate">{{ voice.voice_id }}<span v-if="voice.lang" class="ml-2 text-gray-600">{{ voice.lang }}</span></div>
+                      </button>
+                    </div>
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                      <span v-if="multimodalForm.ttsDefaultVoiceId === voice.voice_id" class="text-[10px] text-purple-400 font-medium">active</span>
+                      <button
+                        @click="removeSavedVoice(voice.voice_id)"
+                        :disabled="voiceLibrary.removingId === voice.voice_id"
+                        class="text-[11px] text-red-400/70 hover:text-red-300 transition-colors disabled:opacity-40"
+                        title="Remove voice from library"
+                      >{{ voiceLibrary.removingId === voice.voice_id ? 'Removing…' : 'Remove' }}</button>
+                    </div>
+                  </li>
+                </ul>
+              </div>
             </div>
 
             <div class="border-t border-purple-500/10 pt-3 space-y-3">
@@ -557,7 +593,7 @@
         <div v-if="isSettingsPage" class="glass-card p-5">
           <h3 class="section-title">About StarlingAI</h3>
           <div class="text-sm text-gray-500 space-y-1">
-            <p>Version: <span class="text-gray-300">0.6.3</span></p>
+            <p>Version: <span class="text-gray-300">0.6.4</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
             <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
           </div>
@@ -2306,11 +2342,56 @@ async function saveVoiceSampleToLibrary() {
 
     savedVoiceForm.error = false;
     savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}' and set it as Default Voice ID`;
+    void loadSavedVoices();
   } catch (error) {
     savedVoiceForm.error = true;
     savedVoiceForm.message = error instanceof Error ? error.message : String(error);
   } finally {
     savedVoiceForm.saving = false;
+  }
+}
+
+const voiceLibrary = reactive({
+  loading: false,
+  loaded: false,
+  voices: [] as Array<{ voice_id: string; name: string; lang?: string }>,
+  removingId: null as string | null,
+  error: "",
+});
+
+async function loadSavedVoices() {
+  if (!multimodalForm.ttsBaseUrl.trim() || multimodalForm.ttsApi !== "qwen-compatible") return;
+  voiceLibrary.loading = true;
+  voiceLibrary.error = "";
+  try {
+    const catalog = await gateway.listVoices();
+    voiceLibrary.voices = catalog.voices.map((v) => ({
+      voice_id: v.voice_id,
+      name: v.name ?? v.voice_id,
+      lang: v.lang,
+    }));
+    voiceLibrary.loaded = true;
+  } catch (error) {
+    voiceLibrary.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    voiceLibrary.loading = false;
+  }
+}
+
+async function removeSavedVoice(voiceId: string) {
+  if (!confirm(`Remove voice "${voiceId}" from the library?`)) return;
+  voiceLibrary.removingId = voiceId;
+  voiceLibrary.error = "";
+  try {
+    await gateway.removeTtsVoice(voiceId);
+    voiceLibrary.voices = voiceLibrary.voices.filter((v) => v.voice_id !== voiceId);
+    if (multimodalForm.ttsDefaultVoiceId === voiceId) {
+      multimodalForm.ttsDefaultVoiceId = "";
+    }
+  } catch (error) {
+    voiceLibrary.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    voiceLibrary.removingId = null;
   }
 }
 

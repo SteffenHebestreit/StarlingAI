@@ -137,7 +137,7 @@ describe("rpc timeout cleanup", () => {
       }));
 
       expect(runTurnMock).toHaveBeenCalledTimes(1);
-      expect(runTurnMock.mock.calls[0]?.[0]).toMatchObject({
+      expect((runTurnMock.mock.calls as any[])[0]?.[0] as Record<string, unknown>).toMatchObject({
         userMessage: "hello",
         maxIterationsOverride: 200,
         turnTimeoutOverrideMs: 7200000,
