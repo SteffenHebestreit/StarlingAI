@@ -38,6 +38,18 @@ export interface ResolvedSiteCredential {
   source: "config" | "store";
 }
 
+export interface StoredSiteCredentialRecord {
+  hostname: string;
+  username: string;
+  password: string;
+  loginUrl?: string;
+  urls?: Record<string, string>;
+  usernameSelector?: string;
+  passwordSelector?: string;
+  submitSelector?: string;
+  notes?: string;
+}
+
 // ─── Resolve credentials for a hostname ──────────────────────────────────────
 
 export function resolveSiteCredential(
@@ -72,24 +84,20 @@ export function resolveSiteCredential(
   }
 
   // 2. Check runtime credential store (API-managed)
-  const storedHost = findStoredSiteHost(host);
-  const lookupHost = storedHost ?? host;
-  const username = getCredential(SITE_USERNAME_KEY(lookupHost));
-  const password = getCredential(SITE_PASSWORD_KEY(lookupHost));
-  if (username && password) {
-    logAudit("credential_accessed", { hostname: lookupHost, source: "store" }, { sessionId });
-    const selectors = parseJsonRecord(getCredential(SITE_SELECTORS_KEY(lookupHost)));
-    const urls = parseJsonRecord(getCredential(SITE_URLS_KEY(lookupHost)));
+  const stored = getStoredSiteCredentialRecord(host);
+  if (stored) {
+    const resolvedUsername = resolveStoredCredentialRef(stored.username, stored.hostname, "username");
+    const resolvedPassword = resolveStoredCredentialRef(stored.password, stored.hostname, "password");
+    if (!resolvedUsername || !resolvedPassword) {
+      log.warn({ host: stored.hostname }, "Stored site credential could not be fully resolved");
+      return null;
+    }
+
+    logAudit("credential_accessed", { hostname: stored.hostname, source: "store" }, { sessionId });
     return {
-      hostname: lookupHost,
-      username,
-      password,
-      loginUrl: getCredential(SITE_LOGIN_URL_KEY(lookupHost)) ?? undefined,
-      urls: Object.keys(urls).length > 0 ? urls : undefined,
-      usernameSelector: selectors["username"],
-      passwordSelector: selectors["password"],
-      submitSelector: selectors["submit"],
-      notes: getCredential(SITE_NOTES_KEY(lookupHost)) ?? undefined,
+      ...stored,
+      username: resolvedUsername,
+      password: resolvedPassword,
       source: "store",
     };
   }
@@ -154,6 +162,29 @@ export function deleteSiteCredential(hostname: string): void {
   deleteCredential(SITE_SELECTORS_KEY(host));
   deleteCredential(SITE_NOTES_KEY(host));
   log.info({ host }, "Site credential deleted from store");
+}
+
+export function getStoredSiteCredentialRecord(hostname: string): StoredSiteCredentialRecord | null {
+  const host = normalizeHost(hostname);
+  const storedHost = findStoredSiteHost(host);
+  const lookupHost = storedHost ?? host;
+  const username = getCredential(SITE_USERNAME_KEY(lookupHost));
+  const password = getCredential(SITE_PASSWORD_KEY(lookupHost));
+  if (!username || !password) return null;
+
+  const selectors = parseJsonRecord(getCredential(SITE_SELECTORS_KEY(lookupHost)));
+  const urls = parseJsonRecord(getCredential(SITE_URLS_KEY(lookupHost)));
+  return {
+    hostname: lookupHost,
+    username,
+    password,
+    loginUrl: getCredential(SITE_LOGIN_URL_KEY(lookupHost)) ?? undefined,
+    urls: Object.keys(urls).length > 0 ? urls : undefined,
+    usernameSelector: selectors["username"],
+    passwordSelector: selectors["password"],
+    submitSelector: selectors["submit"],
+    notes: getCredential(SITE_NOTES_KEY(lookupHost)) ?? undefined,
+  };
 }
 
 export interface SiteCredentialSummary {
@@ -242,6 +273,32 @@ function findHostAlias(hostname: string, candidates: string[]): string | null {
   }
 
   return null;
+}
+
+function resolveStoredCredentialRef(
+  value: string,
+  host: string,
+  field: "username" | "password",
+): string | undefined {
+  if (value.startsWith("$")) {
+    const envKey = value.slice(1);
+    const envValue = process.env[envKey];
+    if (!envValue) {
+      log.warn({ host, field, envKey }, "Env var for stored site credential is not set");
+    }
+    return envValue;
+  }
+
+  if (value.startsWith("secret:")) {
+    const key = value.slice("secret:".length);
+    const secretValue = getCredential(key);
+    if (!secretValue) {
+      log.warn({ host, field, key }, "Named secret for stored site credential not found in credential store");
+    }
+    return secretValue;
+  }
+
+  return value;
 }
 
 function resolvePasswordRef(ref: string, host: string): string | undefined {
