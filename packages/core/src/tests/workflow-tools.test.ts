@@ -485,6 +485,321 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  it("run_workflow bootstraps coordinator scenes that start with 'Use <agent> to ...'", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        n8n_project_list: {
+          description: "Authenticated internal browser workflow.",
+          task: "Use web_task_coordinator to orchestrate the multi-step browser workflow. Delegate browser_agent to navigate to the target website and capture the resulting page state.",
+          allowedAgents: ["web_task_coordinator", "browser_agent", "summarizer"],
+        },
+      },
+      subAgents: {
+        web_task_coordinator: {
+          description: "Coordinates multi-step web work.",
+          tools: ["search_agents", "search_workflows", "run_workflow", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        browser_agent: { description: "Operates the browser.", tools: ["browser_navigate"], maxIterations: 4 },
+        summarizer: { description: "Summarizes outputs.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn();
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "Delegated browser work and collected the resulting state.",
+      stats: {
+        agentName: "web_task_coordinator",
+        sessionId: "sub:workflow-scene:web_task_coordinator:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 1,
+        toolNames: ["delegate_to_agent"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 6,
+        model: "lmstudio/qwen3.5-9b",
+        capabilities: ["coordination"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "n8n_project_list",
+          workflowType: "scene",
+        },
+        {
+          sessionId: "workflow-scene",
+          workspacePath: "/workspace",
+          allowedAgents: ["web_task_coordinator", "browser_agent", "summarizer"],
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("completed via web_task_coordinator bootstrap");
+      expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock).not.toHaveBeenCalled();
+
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
+      expect(bootstrapCall?.agentName).toBe("web_task_coordinator");
+      expect(bootstrapCall?.task).toContain("Orchestrate the multi-step browser workflow.");
+      expect(bootstrapCall?.task).not.toContain("Use web_task_coordinator");
+      expect(bootstrapCall?._workflowExecutionStack).toEqual(["scene:n8n_project_list"]);
+      expect(bootstrapCall?.inlineConfig?.tools).toEqual([
+        "search_agents",
+        "delegate_to_agent",
+        "parallel_delegate",
+        "run_task_graph",
+      ]);
+      expect(bootstrapCall?.context).toContain("Do NOT call search_workflows or run_workflow");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("run_workflow bootstraps direct browser scenes and strips web_search when the URL is explicit", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        credentialed_browser_table_read: {
+          description: "Open a known site, log in with stored credentials, then read a protected table.",
+          task: "Use browser_agent to open http://n8n.k2o. Call get_site_credentials first to retrieve the login URL and named URLs. Do NOT use web_search. Then use site_fill_credentials to log in and open the named project-list URL.",
+          allowedAgents: ["browser_agent"],
+          params: {
+            navigationTimeout: {
+              description: "Navigation timeout in seconds for the protected page read.",
+              default: "120",
+            },
+          },
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Operates the browser.",
+          tools: ["web_search", "get_site_credentials", "site_fill_credentials", "browser_navigate", "browser_snapshot", "browser_click", "browser_wait_for"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn();
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "Opened the site, logged in, and read the visible table.",
+      stats: {
+        agentName: "browser_agent",
+        sessionId: "sub:workflow-scene:browser_agent:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 3,
+        toolNames: ["get_site_credentials", "site_fill_credentials", "browser_snapshot"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 8,
+        model: "lmstudio/qwen3.5-9b",
+        capabilities: ["browser"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "credentialed_browser_table_read",
+          workflowType: "scene",
+        },
+        {
+          sessionId: "workflow-scene",
+          workspacePath: "/workspace",
+          allowedAgents: ["browser_agent"],
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("completed via browser_agent bootstrap");
+      expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock).not.toHaveBeenCalled();
+
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
+      expect(bootstrapCall?.agentName).toBe("browser_agent");
+      expect(bootstrapCall?.task).toContain("Open http://n8n.k2o.");
+      expect(bootstrapCall?.task).not.toContain("Use browser_agent");
+      expect(bootstrapCall?.context).toContain("Do NOT use web_search");
+      expect(bootstrapCall?.context).toContain("Call get_site_credentials first");
+      expect(bootstrapCall?.context).toContain("prefer the named destination URL from get_site_credentials immediately");
+      expect(bootstrapCall?.context).toContain("do not wait for or re-check login-form text such as Sign in");
+      expect(bootstrapCall?.context).toContain("do not guess alternate hosts such as localhost");
+      expect(bootstrapCall?.context).toContain("prefer browser_snapshot over browser_screenshot");
+      expect(bootstrapCall?.turnTimeoutOverrideMs).toBe(150000);
+      expect(bootstrapCall?.inlineConfig?.tools).toEqual([
+        "get_site_credentials",
+        "site_fill_credentials",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_wait_for",
+      ]);
+      expect(bootstrapCall?._workflowExecutionStack).toEqual(["scene:credentialed_browser_table_read"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("run_workflow uses the scene approval channel for bootstrap scenes when no interactive callback exists", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      approvalChannels: {
+        "slack-approvals": {
+          type: "slack",
+          webhookUrl: "https://hooks.slack.com/services/test/test/test",
+          timeoutMs: 60_000,
+        },
+      },
+      scenes: {
+        credentialed_browser_approval: {
+          description: "Open a known site and require approval before stored credentials are submitted.",
+          task: "Use browser_agent to open http://n8n.k2o and then call site_fill_credentials.",
+          allowedAgents: ["browser_agent"],
+          humanInLoopSteps: ["site_fill_credentials"],
+          approvalChannel: "slack-approvals",
+          approvalTimeoutMs: 60_000,
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Operates the browser.",
+          tools: ["site_fill_credentials", "browser_navigate", "browser_snapshot"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn();
+    const requestApprovalViaChannelMock = vi.fn(async () => true);
+    const runSubAgentWithStatsMock = vi.fn(async (opts: { approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean> }) => {
+      const approved = await opts.approvalCallback?.("site_fill_credentials", { hostname: "n8n.k2o" });
+      return {
+        output: `approval: ${String(approved)}`,
+        stats: {
+          agentName: "browser_agent",
+          sessionId: "sub:workflow-scene:browser_agent:test",
+          promptChars: 0,
+          userContentChars: 0,
+          toolCount: 1,
+          toolNames: ["site_fill_credentials"],
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 8,
+          model: "lmstudio/qwen3.5-9b",
+          capabilities: ["browser"],
+          outcome: "success",
+          terminalState: "completed",
+        },
+      };
+    });
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+    vi.doMock("../approval/index.js", () => ({
+      requestApprovalViaChannel: requestApprovalViaChannelMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "credentialed_browser_approval",
+          workflowType: "scene",
+        },
+        {
+          sessionId: "workflow-scene",
+          workspacePath: "/workspace",
+          allowedAgents: ["browser_agent"],
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock).not.toHaveBeenCalled();
+      expect(requestApprovalViaChannelMock).toHaveBeenCalledTimes(1);
+      expect(requestApprovalViaChannelMock).toHaveBeenCalledWith(
+        "slack-approvals",
+        "site_fill_credentials",
+        { hostname: "n8n.k2o" },
+        "credentialed_browser_approval",
+        60_000,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow accepts partial-progress bootstrap output after substantive coordinator work", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
