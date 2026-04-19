@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { requestApprovalViaChannel } from "../approval/index.js";
 import { archiveSession, createSession } from "../agent/session.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn } from "../agent/runtime.js";
@@ -515,7 +516,7 @@ function resolveCoordinatorBootstrapAgent(
   scene: SceneSummary,
   allowedAgents: string[] | undefined,
 ): string | null {
-  const match = scene.task.match(/^\s*use\s+([a-z0-9_:-]+)\s+first\b/i);
+  const match = scene.task.match(/^\s*use\s+([a-z0-9_:-]+)\s+(?:first\b|to\b)/i);
   if (!match?.[1]) return null;
 
   const agentName = match[1].trim();
@@ -532,12 +533,50 @@ function resolveCoordinatorBootstrapAgent(
     : null;
 }
 
+function isCoordinatorBootstrapAgent(agentName: string): boolean {
+  const agentConfig = getConfig().subAgents[agentName];
+  if (!agentConfig) return false;
+  const tools = agentConfig.tools ?? [];
+  return tools.some((toolName) => COORDINATOR_BOOTSTRAP_TOOL_NAMES.has(toolName));
+}
+
+function resolveSceneBootstrapAgent(
+  scene: SceneSummary,
+  allowedAgents: string[] | undefined,
+): string | null {
+  const coordinatorBootstrap = resolveCoordinatorBootstrapAgent(scene, allowedAgents);
+  if (coordinatorBootstrap) return coordinatorBootstrap;
+
+  const match = scene.task.match(/^\s*use\s+([a-z0-9_:-]+)\s+(?:first\b|to\b)/i);
+  if (!match?.[1]) return null;
+
+  const agentName = match[1].trim();
+  if (allowedAgents?.length && !allowedAgents.includes(agentName)) {
+    return null;
+  }
+
+  return getConfig().subAgents[agentName] ? agentName : null;
+}
+
 function stripCoordinatorBootstrapInstruction(task: string, agentName: string): string {
-  const stripped = task.replace(
-    new RegExp(`^\\s*use\\s+${escapeRegExp(agentName)}\\s+first\\.?\\s*`, "i"),
+  const trimmedTask = task.trim();
+  const strippedFirstSentence = task.replace(
+    new RegExp(`^\\s*use\\s+${escapeRegExp(agentName)}\\s+first(?:\\s+when\\b[^.?!]*[.?!]|\\s*[.?!])\\s*`, "i"),
     "",
   ).trim();
-  return stripped || task;
+  if (strippedFirstSentence && strippedFirstSentence !== trimmedTask) return strippedFirstSentence;
+
+  const strippedToDirective = task.replace(
+    new RegExp(`^\\s*use\\s+${escapeRegExp(agentName)}\\s+to\\s+`, "i"),
+    "",
+  ).trim();
+  if (strippedToDirective && strippedToDirective !== trimmedTask) return strippedToDirective;
+
+  const strippedFirstDirective = task.replace(
+    new RegExp(`^\\s*use\\s+${escapeRegExp(agentName)}\\s+first\\b[\\s.?!]*`, "i"),
+    "",
+  ).trim();
+  return strippedFirstDirective || task;
 }
 
 function rewriteCoordinatorBootstrapTask(task: string): string {
@@ -551,6 +590,14 @@ function rewriteCoordinatorBootstrapTask(task: string): string {
   return `${rewritten.slice(0, 1).toUpperCase()}${rewritten.slice(1)}`;
 }
 
+function shouldDisableBrowserSearchForBootstrap(agentName: string, task: string): boolean {
+  if (agentName !== "browser_agent") return false;
+  return /\bhttps?:\/\//i.test(task)
+    || /\bget_site_credentials\b/i.test(task)
+    || /\blogin\s*url\b/i.test(task)
+    || /\bnamed\s+urls?\b/i.test(task);
+}
+
 function buildCoordinatorBootstrapInlineConfig(agentName: string) {
   const agentConfig = getConfig().subAgents[agentName];
   if (!agentConfig) return null;
@@ -561,6 +608,24 @@ function buildCoordinatorBootstrapInlineConfig(agentName: string) {
       !WORKFLOW_BOOTSTRAP_BLOCKED_TOOL_NAMES.has(toolName)
       && COORDINATOR_BOOTSTRAP_ALLOWED_TOOL_NAMES.has(toolName)
     )),
+  };
+}
+
+function buildSceneBootstrapInlineConfig(agentName: string, task: string) {
+  if (isCoordinatorBootstrapAgent(agentName)) {
+    return buildCoordinatorBootstrapInlineConfig(agentName);
+  }
+
+  const agentConfig = getConfig().subAgents[agentName];
+  if (!agentConfig) return null;
+
+  if (!shouldDisableBrowserSearchForBootstrap(agentName, task)) {
+    return agentConfig;
+  }
+
+  return {
+    ...agentConfig,
+    tools: (agentConfig.tools ?? []).filter((toolName) => toolName !== "web_search"),
   };
 }
 
@@ -585,6 +650,72 @@ function buildCoordinatorBootstrapContext(
   ].filter(Boolean).join("\n");
 }
 
+function buildSceneBootstrapContext(
+  scene: SceneSummary,
+  workflowContext: string | undefined,
+  allowedAgents: string[] | undefined,
+  agentName: string,
+): string {
+  if (isCoordinatorBootstrapAgent(agentName)) {
+    return buildCoordinatorBootstrapContext(scene, workflowContext, allowedAgents);
+  }
+
+  return [
+    `Selected reusable workflow: ${scene.name} [scene].`,
+    `Scene description: ${scene.description}`,
+    "This workflow is already selected. Execute it directly.",
+    "Do NOT call search_workflows or run_workflow from inside this workflow.",
+    agentName === "browser_agent"
+      ? "The workflow already provides the target host or URL. Do NOT use web_search for this workflow."
+      : "",
+    agentName === "browser_agent"
+      ? "Call get_site_credentials first to retrieve loginUrl, named URLs, selectors, and notes before navigating."
+      : "",
+    agentName === "browser_agent"
+      ? "If the site credentials include a named URL for the requested destination, use that URL instead of guessing a path."
+      : "",
+    agentName === "browser_agent"
+      ? "After site_fill_credentials submits a known login form, prefer the named destination URL from get_site_credentials immediately instead of waiting for generic landing-page text such as Projects, Home, or Dashboard."
+      : "",
+    agentName === "browser_agent"
+      ? "After site_fill_credentials, do not wait for or re-check login-form text such as Sign in, Email, or Password, and do not click the submit button again unless a fresh snapshot shows the form is still awaiting submission. Use a short fixed delay or the known destination URL instead."
+      : "",
+    agentName === "browser_agent"
+      ? "For known credentialed hosts, stay on that same host and do not guess alternate hosts such as localhost, app.n8n.io, or n8n.io. If the named URL still fails, report the blocker instead of inventing a fallback host."
+      : "",
+    agentName === "browser_agent"
+      ? "For table or list extraction, prefer browser_snapshot over browser_screenshot and synthesize immediately once the visible rows or cells are readable."
+      : "",
+    workflowContext?.trim() ? `Workflow context:\n${workflowContext.trim()}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function resolveSceneBootstrapTurnTimeoutMs(
+  scene: SceneSummary,
+  mergedParams: Record<string, string>,
+  bootstrapAgent: string,
+  inheritedTurnTimeoutMs: number | undefined,
+): number | undefined {
+  if (inheritedTurnTimeoutMs !== undefined) {
+    return inheritedTurnTimeoutMs;
+  }
+  if (bootstrapAgent !== "browser_agent") {
+    return undefined;
+  }
+
+  const rawNavigationTimeout = mergedParams["navigationTimeout"]?.trim();
+  if (!rawNavigationTimeout) {
+    return undefined;
+  }
+
+  const navigationTimeoutSec = Number.parseInt(rawNavigationTimeout, 10);
+  if (!Number.isFinite(navigationTimeoutSec) || navigationTimeoutSec <= 0) {
+    return undefined;
+  }
+
+  return Math.max(60_000, navigationTimeoutSec * 1000 + 30_000);
+}
+
 function sceneRequiresCoordinatorEvidence(scene: SceneSummary): boolean {
   const taskText = `${scene.description}\n${scene.task}`.toLowerCase();
   return taskText.includes("evidence")
@@ -605,6 +736,26 @@ function coordinatorBootstrapLackedSubstantiveProgress(toolNames: string[] | und
   const uniqueToolNames = [...new Set((toolNames ?? []).filter(Boolean))];
   if (uniqueToolNames.length === 0) return false;
   return uniqueToolNames.every((toolName) => COORDINATOR_BOOTSTRAP_NON_PROGRESS_TOOL_NAMES.has(toolName));
+}
+
+function resolveWorkflowApprovalCallback(
+  scene: SceneSummary,
+  ctx: ToolContext,
+): ToolContext["approvalCallback"] {
+  if (ctx.approvalCallback) {
+    return ctx.approvalCallback;
+  }
+  if (!scene.approvalChannel) {
+    return undefined;
+  }
+
+  return async (toolName: string, args: Record<string, unknown>) => requestApprovalViaChannel(
+    scene.approvalChannel!,
+    toolName,
+    args,
+    scene.name,
+    scene.approvalTimeoutMs,
+  );
 }
 
 function buildCoordinatorBootstrapProgressFailure(
@@ -675,6 +826,7 @@ async function runSceneInline(
   const task = appendWorkflowContext(applyTemplate(scene.task, mergedParams), enrichedWorkflowContext);
   const allowedAgents = intersectAllowedAgents(ctx.allowedAgents, scene.allowedAgents);
   const mergedHumanInLoopSteps = mergeHumanInLoopSteps(ctx.humanInLoopSteps, scene.humanInLoopSteps);
+  const approvalCallback = resolveWorkflowApprovalCallback(scene, ctx);
   const workflowExecutionStack = [
     ...(ctx._workflowExecutionStack ?? []),
     buildWorkflowExecutionKey(scene.name, "scene"),
@@ -693,12 +845,18 @@ async function runSceneInline(
   });
 
   try {
-    const bootstrapAgent = resolveCoordinatorBootstrapAgent(scene, allowedAgents);
+    const bootstrapAgent = resolveSceneBootstrapAgent(scene, allowedAgents);
     if (bootstrapAgent) {
       const bootstrapTask = rewriteCoordinatorBootstrapTask(
         stripCoordinatorBootstrapInstruction(task, bootstrapAgent),
       );
-      const bootstrapConfig = buildCoordinatorBootstrapInlineConfig(bootstrapAgent);
+      const bootstrapConfig = buildSceneBootstrapInlineConfig(bootstrapAgent, task);
+      const bootstrapTurnTimeoutMs = resolveSceneBootstrapTurnTimeoutMs(
+        scene,
+        mergedParams,
+        bootstrapAgent,
+        ctx.turnTimeoutOverrideMs,
+      );
       if (!bootstrapConfig) {
         throw new Error(`Workflow bootstrap agent '${bootstrapAgent}' is not configured.`);
       }
@@ -706,19 +864,19 @@ async function runSceneInline(
       const bootstrapRun = await runSubAgentWithStats({
         agentName: bootstrapAgent,
         task: bootstrapTask,
-        context: buildCoordinatorBootstrapContext(scene, enrichedWorkflowContext, allowedAgents),
+        context: buildSceneBootstrapContext(scene, enrichedWorkflowContext, allowedAgents, bootstrapAgent),
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         allowedAgents,
         signal: ctx.signal,
-        approvalCallback: ctx.approvalCallback,
+        approvalCallback,
         onProgress: ctx.onSubAgentProgress,
         humanInLoopSteps: mergedHumanInLoopSteps,
         onComputerAction: ctx.onComputerAction,
         onComputerScreenshot: ctx.onComputerScreenshot,
         onComputerSessionState: ctx.onComputerSessionState,
         maxIterationsOverride: ctx.maxIterationsOverride,
-        turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
+        turnTimeoutOverrideMs: bootstrapTurnTimeoutMs,
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
@@ -729,7 +887,9 @@ async function runSceneInline(
       });
 
       const bootstrapResponse = bootstrapRun.output.trim() || `Workflow bootstrap delegation to ${bootstrapAgent} produced no output.`;
-      const bootstrapProgressFailure = buildCoordinatorBootstrapProgressFailure(scene, bootstrapRun.stats.toolNames);
+      const bootstrapProgressFailure = isCoordinatorBootstrapAgent(bootstrapAgent)
+        ? buildCoordinatorBootstrapProgressFailure(scene, bootstrapRun.stats.toolNames)
+        : null;
       const finalBootstrapResponse = bootstrapProgressFailure
         ? `${bootstrapResponse}\n\n${bootstrapProgressFailure}`
         : bootstrapResponse;
@@ -755,7 +915,7 @@ async function runSceneInline(
     const result = await runTurn({
       session,
       userMessage: task,
-      approvalCallback: ctx.approvalCallback,
+      approvalCallback,
       signal: ctx.signal,
       allowedAgents,
       humanInLoopSteps: mergedHumanInLoopSteps,

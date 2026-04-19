@@ -228,10 +228,156 @@ interface WorkflowCatalogMatch {
   matchedTerms: string[];
 }
 
+function serializeWorkflowParamHints(
+  params: Record<string, { description?: string; default?: string }> | undefined,
+): string {
+  if (!params) return "";
+
+  return Object.entries(params)
+    .map(([paramName, paramDef]) => [
+      paramName,
+      paramDef.description ?? "",
+      paramDef.default ?? "",
+    ].filter(Boolean).join(" "))
+    .filter(Boolean)
+    .join("\n");
+}
+
 interface WorkflowCatalogSignal {
   required: boolean;
   reason: "explicit_request" | "catalog_match" | "hint_terms" | "none";
   strongestMatch?: WorkflowCatalogMatch;
+}
+
+interface ApprovedWorkflowFollowUp {
+  workflowName: string;
+  workflowType: "scene";
+  params: Record<string, string>;
+  candidateName: string;
+}
+
+const RUN_CANDIDATE_RE = /(?:^|\n)\s*RUN_CANDIDATE:\s*(.+?)\s*$/im;
+const AFFIRMATIVE_WORKFLOW_APPROVAL_RE = /^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|please do(?: that)?|do it|go ahead|run (?:it|that)|start (?:it|that)|ja|jep|klar|ja bitte|mach(?:\s+es)?|tu(?:\s+es)?|bitte(?:\s+(?:mach(?:\s+es)?|starte(?:\s+es)?|ausf(?:ü|ue)hren))?|starte(?:\s+es)?|ausf(?:ü|ue)hren(?:\s+bitte)?)\s*[.!?]*\s*$/i;
+
+function extractRunCandidateName(content: string | null | undefined): string | null {
+  if (typeof content !== "string" || content.length === 0) return null;
+  const match = content.match(RUN_CANDIDATE_RE);
+  if (!match) return null;
+
+  const candidateName = match[1]?.trim().replace(/^["'`]+|["'`]+$/g, "") ?? "";
+  return candidateName.length > 0 ? candidateName : null;
+}
+
+function parseToolCallArguments(raw: string | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectApprovedRunCandidateFollowUp(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown>; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }[],
+  userMessage: string,
+): ApprovedWorkflowFollowUp | null {
+  const normalizedMessage = userMessage.trim();
+  if (!normalizedMessage || normalizedMessage.length > 80 || !AFFIRMATIVE_WORKFLOW_APPROVAL_RE.test(normalizedMessage)) {
+    return null;
+  }
+
+  let foundCurrentUser = false;
+  let candidateName: string | null = null;
+  let sawProjectListWorkflow = false;
+
+  for (let index = history.length - 1; index >= Math.max(0, history.length - 30); index -= 1) {
+    const message = history[index];
+    if (!message) continue;
+
+    if (message.role === "user") {
+      if (!foundCurrentUser) {
+        foundCurrentUser = true;
+        continue;
+      }
+      break;
+    }
+
+    if (!foundCurrentUser) continue;
+
+    if (!candidateName) {
+      candidateName = extractRunCandidateName(message.content) ?? candidateName;
+    }
+
+    if (message.role === "tool") {
+      const workflowName = typeof message.metadata?.["workflowName"] === "string"
+        ? String(message.metadata["workflowName"])
+        : "";
+      const workflowType = typeof message.metadata?.["workflowType"] === "string"
+        ? String(message.metadata["workflowType"])
+        : "";
+      if (workflowName === "n8n_project_list" && workflowType === "scene") {
+        sawProjectListWorkflow = true;
+      }
+    }
+
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue;
+
+    for (const toolCall of message.tool_calls) {
+      if (toolCall?.function?.name !== "run_workflow") continue;
+      const args = parseToolCallArguments(toolCall.function.arguments);
+      const workflowName = typeof args?.["name"] === "string" ? String(args["name"]) : "";
+      const workflowType = typeof args?.["workflowType"] === "string" ? String(args["workflowType"]) : "auto";
+      if (workflowName === "n8n_project_list" && (workflowType === "scene" || workflowType === "auto")) {
+        sawProjectListWorkflow = true;
+      }
+    }
+  }
+
+  if (!candidateName || !sawProjectListWorkflow) return null;
+
+  return {
+    workflowName: "n8n_run_workflow",
+    workflowType: "scene",
+    params: {
+      workflowName: candidateName,
+    },
+    candidateName,
+  };
+}
+
+function buildApprovedRunCandidateGuidance(followUp: ApprovedWorkflowFollowUp): string {
+  return [
+    "Approved workflow follow-up detected for this turn.",
+    `The previous n8n_project_list result ended with RUN_CANDIDATE: ${followUp.candidateName}.`,
+    "The user just approved running that exact workflow.",
+    `Call run_workflow now with name \"${followUp.workflowName}\", workflowType \"${followUp.workflowType}\", and params.workflowName \"${followUp.candidateName}\".`,
+    "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, or run_task_graph first.",
+    "Do NOT answer in natural language before issuing that run_workflow call.",
+  ].join(" ");
+}
+
+function isApprovedRunCandidateToolCall(
+  toolCall: { name: string; arguments?: Record<string, unknown> },
+  followUp: ApprovedWorkflowFollowUp,
+): boolean {
+  if (toolCall.name !== "run_workflow") return false;
+
+  const workflowName = typeof toolCall.arguments?.["name"] === "string"
+    ? String(toolCall.arguments["name"])
+    : "";
+  const workflowType = typeof toolCall.arguments?.["workflowType"] === "string"
+    ? String(toolCall.arguments["workflowType"])
+    : "auto";
+  const params = toolCall.arguments?.["params"];
+  const workflowParamName = params && typeof params === "object" && !Array.isArray(params) && typeof (params as Record<string, unknown>)["workflowName"] === "string"
+    ? String((params as Record<string, unknown>)["workflowName"])
+    : "";
+
+  return workflowName === followUp.workflowName
+    && (workflowType === followUp.workflowType || workflowType === "auto")
+    && workflowParamName.trim() === followUp.candidateName;
 }
 
 function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unknown> | undefined): WorkflowCatalogMatch[] {
@@ -362,7 +508,12 @@ function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
   const sceneHints = listAllScenes().map((scene) => ({
     name: scene.name,
     workflowType: "scene" as const,
-    searchableText: [scene.name, scene.description, scene.task].filter(Boolean).join("\n"),
+    searchableText: [
+      scene.name,
+      scene.description,
+      scene.task,
+      serializeWorkflowParamHints(scene.params),
+    ].filter(Boolean).join("\n"),
   }));
   const jobHints = listAllJobs().map((job) => ({
     name: job.name,
@@ -370,6 +521,7 @@ function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
     searchableText: [
       job.name,
       job.description,
+      serializeWorkflowParamHints(job.params),
       ...(job.steps ?? []).map((step) => `${step.label ?? ""} ${step.scene}`.trim()),
     ].filter(Boolean).join("\n"),
   }));
@@ -1114,6 +1266,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
+  const approvedRunCandidateFollowUp = detectApprovedRunCandidateFollowUp(session.getHistory(), userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
   // When autoApprove is set, wrap the approvalCallback to always return true.
   const resolvedApprovalCallback = opts.autoApprove
@@ -1184,6 +1337,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const workflowCatalogGuidance = !isWorkflowExecutionTurn && !workflowCatalogSuppressedForMaintenance && workflowCatalogSignal.required
     ? buildWorkflowCatalogGuidance(workflowCatalogSignal)
     : "";
+  const approvedRunCandidateGuidance = !isWorkflowExecutionTurn && approvedRunCandidateFollowUp
+    ? buildApprovedRunCandidateGuidance(approvedRunCandidateFollowUp)
+    : "";
   const workflowCatalogRequired = Boolean(
     (allowedToolNameSet.has("search_workflows") || allowedToolNameSet.has("run_workflow"))
     && !isWorkflowExecutionTurn
@@ -1220,6 +1376,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let workflowExecutionRetryUsed = false;
   let workflowExecutionCorrectionRetryUsed = false;
   let workflowExecutionEnforcementPrompt = "";
+  let approvedRunCandidateRetryUsed = false;
+  let approvedRunCandidateEnforcementPrompt = "";
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
   const provider = opts.enableThinking !== undefined
@@ -1321,10 +1479,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
+      ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: maintenanceDelegationEnforcementPrompt }] : []),
       ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
       ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
+      ...(approvedRunCandidateEnforcementPrompt ? [{ role: "system" as const, content: approvedRunCandidateEnforcementPrompt }] : []),
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
@@ -1398,8 +1558,48 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     const workflowCatalogToolRequested = llmResponse.tool_calls.some((toolCall) => isWorkflowCatalogToolName(toolCall.name));
     const runWorkflowRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "run_workflow");
+    const approvedRunCandidateToolRequested = approvedRunCandidateFollowUp
+      ? llmResponse.tool_calls.some((toolCall) => isApprovedRunCandidateToolCall(toolCall, approvedRunCandidateFollowUp))
+      : false;
     if (workflowCatalogToolRequested) {
       workflowCatalogAttemptedThisTurn = true;
+    }
+
+    if (approvedRunCandidateFollowUp && !workflowRunCompletedThisTurn && !approvedRunCandidateToolRequested) {
+      if (!approvedRunCandidateRetryUsed) {
+        approvedRunCandidateRetryUsed = true;
+        approvedRunCandidateEnforcementPrompt = [
+          "COMPLIANCE CORRECTION: the user just approved a recent n8n RUN_CANDIDATE follow-up.",
+          `You MUST call run_workflow now with name \"${approvedRunCandidateFollowUp.workflowName}\", workflowType \"${approvedRunCandidateFollowUp.workflowType}\", and params.workflowName \"${approvedRunCandidateFollowUp.candidateName}\".`,
+          "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, run_task_graph, or give a tool-free answer first.",
+          "Any response that skips this exact run_workflow call is invalid for this turn.",
+        ].join(" ");
+        guardrailEvents.push({ type: "workflow_required", details: "approved_run_candidate_follow_up_rejected" });
+        logAudit("guardrail_flagged", {
+          type: "approved_run_candidate_follow_up_rejected",
+          candidateName: approvedRunCandidateFollowUp.candidateName,
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        }, { sessionId: session.id, severity: "warn" });
+        continue;
+      }
+
+      return blocked(
+        "This turn required running the approved n8n workflow candidate, but the model still skipped the required run_workflow call.",
+        toolContext.swarmState,
+        buildTurnPerformanceMetrics({
+          turnStartedAt,
+          firstModelResponseMs,
+          llmCalls,
+          llmTimeMs,
+          toolCallsRequested,
+          toolExecutionTimeMs,
+          lastPromptMetrics,
+          completionChars: 0,
+          finishReason: "missing_approved_run_candidate_execution",
+          blocked: true,
+          toolIterations: iterationCount,
+        }),
+      );
     }
 
     const nonWorkflowOrchestrationRequested = llmResponse.tool_calls.some((toolCall) =>
