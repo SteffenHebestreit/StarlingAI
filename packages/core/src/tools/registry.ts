@@ -19,6 +19,18 @@ export interface SwarmTaskAttempt {
   toolCount?: number;
   iterations?: number;
   toolNames?: string[];
+  /** Token usage attributed to this attempt's sub-agent execution. */
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  /** Wall-clock duration for the attempt (finishedAt − startedAt), in ms. */
+  durationMs?: number;
+  /** Terminal state from the sub-agent runner (e.g. "completed", "max_iterations", "timeout"). */
+  terminalState?: string;
+  /** True when the attempt exceeded one or more configured per-task soft budgets. */
+  budgetExceeded?: boolean;
+  /** Human-readable list of which budget(s) tripped (tokens / toolCalls / durationMs). */
+  budgetBreaches?: string[];
 }
 
 export interface SwarmTaskState {
@@ -31,6 +43,20 @@ export interface SwarmTaskState {
   attempts: SwarmTaskAttempt[];
   output?: string;
   error?: string;
+  /**
+   * Per-task budget rollup across all attempts.
+   * Lazily maintained by the delegation pipeline so observability tools can
+   * answer "what did this task cost?" without re-walking attempts each time.
+   */
+  totals?: {
+    attempts: number;
+    toolCount: number;
+    iterations: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    durationMs: number;
+  };
 }
 
 export interface SwarmState {
