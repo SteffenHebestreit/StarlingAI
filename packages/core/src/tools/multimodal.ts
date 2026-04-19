@@ -718,14 +718,23 @@ export async function callPlaywrightTool(toolName: string, args: Record<string, 
     throw new Error("Playwright MCP server is not connected");
   }
 
-  const result = await connection.client.callTool({ name: toolName, arguments: args });
+  const availableTools = new Set(connection.tools.map((tool) => tool.name));
+  const resolvedToolName = toolName === "browser_screenshot" && !availableTools.has(toolName) && availableTools.has("browser_take_screenshot")
+    ? "browser_take_screenshot"
+    : toolName;
+
+  if (resolvedToolName !== toolName) {
+    log.info({ requestedToolName: toolName, resolvedToolName }, "Resolved legacy Playwright tool name");
+  }
+
+  const result = await connection.client.callTool({ name: resolvedToolName, arguments: args });
   const output = (result.content as Array<{ type: string; text?: string }> | undefined)
     ?.map(item => (item.type === "text" ? (item.text ?? "") : JSON.stringify(item)))
     .join("\n")
     .trim() ?? "";
 
   if ((result as { isError?: boolean }).isError) {
-    throw new Error(output || `Playwright tool ${toolName} failed`);
+    throw new Error(output || `Playwright tool ${resolvedToolName} failed`);
   }
 
   return output;
