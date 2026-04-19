@@ -16,7 +16,13 @@ import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure,
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
-import { buildSessionAuditMarkdown, buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
+import {
+  buildSessionAuditMarkdown,
+  buildSessionAuditMarkdownDetached,
+  buildSessionDebugMarkdown,
+  buildSessionDebugMarkdownDetached,
+  SessionExportBusyError,
+} from "../agent/debug-session-export.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
@@ -2205,13 +2211,16 @@ export function createGateway() {
     }
 
     try {
-      const markdown = await buildSessionDebugMarkdown(sessionId);
+      const markdown = await buildSessionDebugMarkdownDetached(sessionId);
       const filename = `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
       return c.body(markdown, 200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": buildContentDisposition(filename, "attachment"),
       });
     } catch (error) {
+      if (error instanceof SessionExportBusyError) {
+        return c.json({ error: error.message }, 409);
+      }
       if (error instanceof Error && error.message.includes("Session not found")) {
         return c.json({ error: error.message }, 404);
       }
@@ -2229,13 +2238,16 @@ export function createGateway() {
     }
 
     try {
-      const markdown = await buildSessionAuditMarkdown(sessionId);
+      const markdown = await buildSessionAuditMarkdownDetached(sessionId);
       const filename = `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
       return c.body(markdown, 200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": buildContentDisposition(filename, "attachment"),
       });
     } catch (error) {
+      if (error instanceof SessionExportBusyError) {
+        return c.json({ error: error.message }, 409);
+      }
       if (error instanceof Error && error.message.includes("Session not found")) {
         return c.json({ error: error.message }, 404);
       }

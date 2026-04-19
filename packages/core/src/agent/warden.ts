@@ -154,6 +154,11 @@ export function deregisterSessionAbortController(sessionId: string): void {
   _sessionAbortControllers.delete(sessionId);
 }
 
+export function isSessionTurnActive(sessionId: string): boolean {
+  const controller = _sessionAbortControllers.get(sessionId);
+  return Boolean(controller && !controller.signal.aborted);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {

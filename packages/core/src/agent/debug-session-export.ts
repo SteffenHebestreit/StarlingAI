@@ -1,8 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { AuditEvent } from "../audit/schema.js";
 import { flushAuditLog, resolveAuditLogPath } from "../audit/logger.js";
+import { isSessionTurnActive } from "./warden.js";
 import {
   getSessionRecord,
   getSessionTranscript,
@@ -10,111 +13,48 @@ import {
   type SessionTranscriptMessage,
 } from "./session.js";
 
+export class SessionExportBusyError extends Error {
+  constructor(sessionId: string) {
+    super(`Session export is unavailable while the session is still running: ${sessionId}`);
+    this.name = "SessionExportBusyError";
+  }
+}
+
+interface SessionExportSnapshot {
+  id: string;
+  channel: string;
+  userId?: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+  turns: number;
+  workspacePath: string;
+  systemPrompt: string;
+  transcript: SessionTranscriptMessage[];
+  rawHistory: SessionHistoryMessage[];
+}
+
+const AUDIT_PARSE_YIELD_INTERVAL = 250;
+const MARKDOWN_APPEND_YIELD_INTERVAL = 25;
+
 export async function buildSessionAuditMarkdown(sessionId: string): Promise<string> {
-  const session = getSessionRecord(sessionId);
-  if (!session) {
-    throw new Error(`Session not found: ${sessionId}`);
-  }
-
-  const auditEvents = await readSessionAuditEvents(sessionId, session.getWorkspacePath());
-  const relatedSubSessions = [...new Set(
-    auditEvents
-      .map((event) => event.sessionId)
-      .filter((value): value is string => typeof value === "string" && value.startsWith(`sub:${sessionId}:`)),
-  )];
-
-  const lines: string[] = [
-    "# StarlingAI Session Audit Export",
-    "",
-    `- Session: ${session.id}`,
-    `- Channel: ${session.channel}`,
-    `- User: ${session.userId ?? "(none)"}`,
-    `- Created: ${session.createdAt.toISOString()}`,
-    `- Updated: ${session.getUpdatedAt().toISOString()}`,
-    `- Status: ${session.isArchived() ? `Archived (${session.getArchivedAt()?.toISOString() ?? "unknown"})` : "Active"}`,
-    `- Turns: ${session.getTurnCount()}`,
-    `- Workspace: ${session.getWorkspacePath()}`,
-    `- Audit events: ${auditEvents.length}`,
-    `- Related sub-sessions: ${relatedSubSessions.length > 0 ? relatedSubSessions.join(", ") : "(none)"}`,
-    "",
-    "## Audit Events",
-    "",
-  ];
-
-  if (auditEvents.length === 0) {
-    lines.push("No matching audit events were found.", "");
-  } else {
-    auditEvents.forEach((event, index) => appendAuditEvent(lines, event, index + 1));
-  }
-
-  return lines.join("\n");
+  const snapshot = captureSessionExportSnapshot(sessionId);
+  return buildSessionAuditMarkdownFromSnapshot(snapshot);
 }
 
 export async function buildSessionDebugMarkdown(sessionId: string): Promise<string> {
-  const session = getSessionRecord(sessionId);
-  if (!session) {
-    throw new Error(`Session not found: ${sessionId}`);
-  }
+  const snapshot = captureSessionExportSnapshot(sessionId);
+  return buildSessionDebugMarkdownFromSnapshot(snapshot);
+}
 
-  const transcriptPage = getSessionTranscript(sessionId);
-  const transcript = transcriptPage?.transcript ?? [];
-  const rawHistory = [...session.getHistory()];
-  const auditEvents = await readSessionAuditEvents(sessionId, session.getWorkspacePath());
-  const relatedSubSessions = [...new Set(
-    auditEvents
-      .map((event) => event.sessionId)
-      .filter((value): value is string => typeof value === "string" && value.startsWith(`sub:${sessionId}:`)),
-  )];
+export async function buildSessionAuditMarkdownDetached(sessionId: string): Promise<string> {
+  const snapshot = captureSessionExportSnapshot(sessionId, { allowActive: true });
+  return buildSessionAuditMarkdownFromSnapshot(snapshot);
+}
 
-  const lines: string[] = [
-    "# StarlingAI Debug Session Export",
-    "",
-    `- Session: ${session.id}`,
-    `- Channel: ${session.channel}`,
-    `- User: ${session.userId ?? "(none)"}`,
-    `- Created: ${session.createdAt.toISOString()}`,
-    `- Updated: ${session.getUpdatedAt().toISOString()}`,
-    `- Status: ${session.isArchived() ? `Archived (${session.getArchivedAt()?.toISOString() ?? "unknown"})` : "Active"}`,
-    `- Turns: ${session.getTurnCount()}`,
-    `- Workspace: ${session.getWorkspacePath()}`,
-    `- Transcript messages: ${transcript.length}`,
-    `- Raw history messages: ${rawHistory.length}`,
-    `- Audit events: ${auditEvents.length}`,
-    `- Related sub-sessions: ${relatedSubSessions.length > 0 ? relatedSubSessions.join(", ") : "(none)"}`,
-    "",
-    "## System Prompt",
-    "",
-    "```text",
-    session.getSystemPrompt(),
-    "```",
-    "",
-    "## Transcript",
-    "",
-  ];
-
-  if (transcript.length === 0) {
-    lines.push("No transcript messages recorded.", "");
-  } else {
-    for (const message of transcript) {
-      appendTranscriptMessage(lines, message);
-    }
-  }
-
-  lines.push("## Raw Session History", "");
-  if (rawHistory.length === 0) {
-    lines.push("No raw session history recorded.", "");
-  } else {
-    rawHistory.forEach((message, index) => appendRawHistoryMessage(lines, message, index + 1));
-  }
-
-  lines.push("## Audit Events", "");
-  if (auditEvents.length === 0) {
-    lines.push("No matching audit events were found.", "");
-  } else {
-    auditEvents.forEach((event, index) => appendAuditEvent(lines, event, index + 1));
-  }
-
-  return lines.join("\n");
+export async function buildSessionDebugMarkdownDetached(sessionId: string): Promise<string> {
+  const snapshot = captureSessionExportSnapshot(sessionId, { allowActive: true });
+  return buildSessionDebugMarkdownFromSnapshot(snapshot);
 }
 
 function describeTranscriptContent(message: SessionTranscriptMessage): string {
@@ -226,7 +166,152 @@ function appendAuditEvent(lines: string[], event: AuditEvent, ordinal: number): 
   lines.push("");
 }
 
-async function readSessionAuditEvents(sessionId: string, workspacePath?: string): Promise<AuditEvent[]> {
+async function buildSessionAuditMarkdownFromSnapshot(snapshot: SessionExportSnapshot): Promise<string> {
+  const auditEvents = await readSessionAuditEventsAsync(snapshot.id, snapshot.workspacePath);
+  const relatedSubSessions = getRelatedSubSessions(snapshot.id, auditEvents);
+
+  const lines: string[] = [
+    "# StarlingAI Session Audit Export",
+    "",
+    `- Session: ${snapshot.id}`,
+    `- Channel: ${snapshot.channel}`,
+    `- User: ${snapshot.userId ?? "(none)"}`,
+    `- Created: ${snapshot.createdAt}`,
+    `- Updated: ${snapshot.updatedAt}`,
+    `- Status: ${snapshot.archivedAt ? `Archived (${snapshot.archivedAt})` : "Active"}`,
+    `- Turns: ${snapshot.turns}`,
+    `- Workspace: ${snapshot.workspacePath}`,
+    `- Audit events: ${auditEvents.length}`,
+    `- Related sub-sessions: ${relatedSubSessions.length > 0 ? relatedSubSessions.join(", ") : "(none)"}`,
+    "",
+    "## Audit Events",
+    "",
+  ];
+
+  if (auditEvents.length === 0) {
+    lines.push("No matching audit events were found.", "");
+  } else {
+    await appendAuditEventsAsync(lines, auditEvents);
+  }
+
+  return lines.join("\n");
+}
+
+async function buildSessionDebugMarkdownFromSnapshot(snapshot: SessionExportSnapshot): Promise<string> {
+  const auditEvents = await readSessionAuditEventsAsync(snapshot.id, snapshot.workspacePath);
+  const relatedSubSessions = getRelatedSubSessions(snapshot.id, auditEvents);
+
+  const lines: string[] = [
+    "# StarlingAI Debug Session Export",
+    "",
+    `- Session: ${snapshot.id}`,
+    `- Channel: ${snapshot.channel}`,
+    `- User: ${snapshot.userId ?? "(none)"}`,
+    `- Created: ${snapshot.createdAt}`,
+    `- Updated: ${snapshot.updatedAt}`,
+    `- Status: ${snapshot.archivedAt ? `Archived (${snapshot.archivedAt})` : "Active"}`,
+    `- Turns: ${snapshot.turns}`,
+    `- Workspace: ${snapshot.workspacePath}`,
+    `- Transcript messages: ${snapshot.transcript.length}`,
+    `- Raw history messages: ${snapshot.rawHistory.length}`,
+    `- Audit events: ${auditEvents.length}`,
+    `- Related sub-sessions: ${relatedSubSessions.length > 0 ? relatedSubSessions.join(", ") : "(none)"}`,
+    "",
+    "## System Prompt",
+    "",
+    "```text",
+    snapshot.systemPrompt,
+    "```",
+    "",
+    "## Transcript",
+    "",
+  ];
+
+  if (snapshot.transcript.length === 0) {
+    lines.push("No transcript messages recorded.", "");
+  } else {
+    await appendTranscriptMessagesAsync(lines, snapshot.transcript);
+  }
+
+  lines.push("## Raw Session History", "");
+  if (snapshot.rawHistory.length === 0) {
+    lines.push("No raw session history recorded.", "");
+  } else {
+    await appendRawHistoryMessagesAsync(lines, snapshot.rawHistory);
+  }
+
+  lines.push("## Audit Events", "");
+  if (auditEvents.length === 0) {
+    lines.push("No matching audit events were found.", "");
+  } else {
+    await appendAuditEventsAsync(lines, auditEvents);
+  }
+
+  return lines.join("\n");
+}
+
+function captureSessionExportSnapshot(sessionId: string, opts?: { allowActive?: boolean }): SessionExportSnapshot {
+  const session = getSessionRecord(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+  if (!opts?.allowActive && isSessionTurnActive(sessionId)) {
+    throw new SessionExportBusyError(sessionId);
+  }
+
+  const transcriptPage = getSessionTranscript(sessionId);
+
+  return {
+    id: session.id,
+    channel: session.channel,
+    userId: session.userId,
+    createdAt: session.createdAt.toISOString(),
+    updatedAt: session.getUpdatedAt().toISOString(),
+    archivedAt: session.getArchivedAt()?.toISOString(),
+    turns: session.getTurnCount(),
+    workspacePath: session.getWorkspacePath(),
+    systemPrompt: session.getSystemPrompt(),
+    transcript: transcriptPage?.transcript ?? [],
+    rawHistory: [...session.getHistory()],
+  };
+}
+
+function getRelatedSubSessions(sessionId: string, auditEvents: AuditEvent[]): string[] {
+  return [...new Set(
+    auditEvents
+      .map((event) => event.sessionId)
+      .filter((value): value is string => typeof value === "string" && value.startsWith(`sub:${sessionId}:`)),
+  )];
+}
+
+async function appendTranscriptMessagesAsync(lines: string[], transcript: SessionTranscriptMessage[]): Promise<void> {
+  for (let index = 0; index < transcript.length; index += 1) {
+    appendTranscriptMessage(lines, transcript[index]!);
+    if ((index + 1) % MARKDOWN_APPEND_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+  }
+}
+
+async function appendRawHistoryMessagesAsync(lines: string[], rawHistory: SessionHistoryMessage[]): Promise<void> {
+  for (let index = 0; index < rawHistory.length; index += 1) {
+    appendRawHistoryMessage(lines, rawHistory[index]!, index + 1);
+    if ((index + 1) % MARKDOWN_APPEND_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+  }
+}
+
+async function appendAuditEventsAsync(lines: string[], auditEvents: AuditEvent[]): Promise<void> {
+  for (let index = 0; index < auditEvents.length; index += 1) {
+    appendAuditEvent(lines, auditEvents[index]!, index + 1);
+    if ((index + 1) % MARKDOWN_APPEND_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+  }
+}
+
+async function readSessionAuditEventsAsync(sessionId: string, workspacePath?: string): Promise<AuditEvent[]> {
   await flushAuditLog();
 
   const candidates = [
@@ -242,7 +327,7 @@ async function readSessionAuditEvents(sessionId: string, workspacePath?: string)
 
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
-    for (const event of readAuditEventsFromFile(candidate)) {
+    for (const event of await readMatchingAuditEventsFromFileAsync(candidate, sessionId)) {
       if (event.sessionId !== sessionId && !event.sessionId?.startsWith(`sub:${sessionId}:`)) {
         continue;
       }
@@ -257,12 +342,29 @@ async function readSessionAuditEvents(sessionId: string, workspacePath?: string)
   return events.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
 }
 
-function readAuditEventsFromFile(filePath: string): AuditEvent[] {
-  return readFileSync(filePath, "utf8")
-    .split(/\r?\n/)
-    .filter((line) => line.trim().length > 0)
-    .map((line) => safeParseAuditEvent(line))
-    .filter((event): event is AuditEvent => event !== null);
+async function readMatchingAuditEventsFromFileAsync(filePath: string, sessionId: string): Promise<AuditEvent[]> {
+  const raw = await readFile(filePath, "utf8");
+  const lines = raw.split(/\r?\n/);
+  const events: AuditEvent[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line || line.trim().length === 0) continue;
+
+    const event = safeParseAuditEvent(line);
+    if (!event) continue;
+    if (event.sessionId !== sessionId && !event.sessionId?.startsWith(`sub:${sessionId}:`)) {
+      continue;
+    }
+
+    events.push(event);
+
+    if ((index + 1) % AUDIT_PARSE_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+  }
+
+  return events;
 }
 
 function safeParseAuditEvent(line: string): AuditEvent | null {

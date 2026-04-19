@@ -2246,29 +2246,49 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   async function downloadSessionDebugMarkdown(sessionId: string): Promise<void> {
-    const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/debug-markdown`);
-    const blob = await response.blob();
-    const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
-      ?? `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/debug-markdown`);
+      const blob = await response.blob();
+      const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
+        ?? `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      notifications.pushLocalNotification({
+        title: "Debug export unavailable",
+        message: error instanceof Error ? error.message : String(error),
+        level: "warn",
+        category: "export",
+        sessionId,
+      });
+    }
   }
 
   async function downloadSessionAuditMarkdown(sessionId: string): Promise<void> {
-    const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/audit-markdown`);
-    const blob = await response.blob();
-    const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
-      ?? `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/audit-markdown`);
+      const blob = await response.blob();
+      const filename = parseContentDispositionFilename(response.headers.get("content-disposition"))
+        ?? `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      notifications.pushLocalNotification({
+        title: "Audit export unavailable",
+        message: error instanceof Error ? error.message : String(error),
+        level: "warn",
+        category: "export",
+        sessionId,
+      });
+    }
   }
 
   async function summarizeForSpeech(input: {
