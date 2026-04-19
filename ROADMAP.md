@@ -1,6 +1,6 @@
 # StarlingAI — Roadmap
 
-> **Last updated:** 2026-06-15 · **Current release:** v0.5.1 (Stage 10.4 planned additions shipped)
+> **Last updated:** 2026-04-19 · **Current release:** v0.6.4 (multi-instance gateway clustering + configurable approval timeouts)
 
 This roadmap tracks both the completed architecture milestones and the honest gap analysis of where the implementation diverges from the swarm philosophy. It is a living document — the swarm may self-update entries in the `workspace/` area, but the core architecture decisions here are operator-owned.
 
@@ -36,9 +36,9 @@ These are gaps between the stated philosophy and the current implementation. Eve
 
 **Startup safety gate:** When `defaultContainerized: true`, the gateway runs `probeDockerReachability()` before binding the listen socket. If `docker version` fails or times out (5 s default), startup aborts with an actionable error rather than silently falling back to in-process execution. Operators who genuinely want the legacy in-process default must set the flag explicitly to `false`.
 
-**v0.3.2 (Stage 8.1):** Added `agents.defaultContainerized` flag and `container.disabled` per-agent escape hatch. 15+ trusted read-only agents pre-marked.
+**v0.3.2 (Stage 8.1):** Added `agents.defaultContainerized` flag and `container.disabled` per-agent escape hatch; trusted read-only agents pre-marked in the workspace catalog.
 
-**Closing change (Stage 8.1 completion):** Default flipped from `false` → `true` in `config/schema.ts`. Four additional agents marked opt-out (`agent_architect`, `agent_factory`, `quality_supervisor`, `productivity_agent` — all read-only or pure-orchestration). New `probeDockerReachability()` helper in `container-runner.ts`; `createGateway().start()` calls it pre-listen and refuses to start when the flag is on but Docker is unreachable.
+**Closing change (post-v0.6.4 on develop):** Default flipped from `false` → `true` in `config/schema.ts`, with a `STARLINGAI_DEFAULT_CONTAINERIZED=false` escape hatch used by the test environment. Four additional agents marked opt-out (`agent_architect`, `agent_factory`, `quality_supervisor`, `productivity_agent` — all read-only or pure-orchestration); the workspace catalog now opts 27 agents out of containerization where Tier 0/1 tools or in-process-only MCP connections make a sandbox redundant. New `probeDockerReachability()` helper in `container-runner.ts`; `createGateway().start()` calls it pre-listen and refuses to start when the flag is on but Docker is unreachable.
 
 **Operator migration:** Existing deployments that lack a Docker daemon must add `"agents": { "defaultContainerized": false }` to their gateway config to retain the previous behavior. New deployments get container isolation out of the box.
 
