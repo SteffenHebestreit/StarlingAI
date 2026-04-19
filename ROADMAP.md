@@ -40,6 +40,8 @@ These are gaps between the stated philosophy and the current implementation. Eve
 
 **Closing change (post-v0.6.4 on develop):** Default flipped from `false` → `true` in `config/schema.ts`, with a `STARLINGAI_DEFAULT_CONTAINERIZED=false` escape hatch used by the test environment. Four additional agents marked opt-out (`agent_architect`, `agent_factory`, `quality_supervisor`, `productivity_agent` — all read-only or pure-orchestration); the workspace catalog now opts 27 agents out of containerization where Tier 0/1 tools or in-process-only MCP connections make a sandbox redundant. New `probeDockerReachability()` helper in `container-runner.ts`; `createGateway().start()` calls it pre-listen and refuses to start when the flag is on but Docker is unreachable.
 
+**Mid-session safety net:** The startup probe catches a dead daemon before the gateway accepts traffic, but the daemon can also die mid-session. `runSubAgentInContainer` now pattern-matches Docker CLI errors (`Cannot connect to the Docker daemon`, `ENOENT` on `docker`, etc.) and emits a `docker_daemon_unreachable` audit event. The Warden subscribes to that event and raises an error-severity `docker_daemon_unreachable` alert with an intervention notice pointing operators to Docker Desktop / dockerd or the `STARLINGAI_DEFAULT_CONTAINERIZED=false` escape hatch. Rate-limited to once per 60 s to avoid flooding.
+
 **Operator migration:** Existing deployments that lack a Docker daemon must add `"agents": { "defaultContainerized": false }` to their gateway config to retain the previous behavior. New deployments get container isolation out of the box.
 
 ---

@@ -323,6 +323,16 @@ export function buildWardenIntervention(
     };
   }
 
+  if (reasonCode === "docker_daemon_unreachable") {
+    return {
+      reasonCode,
+      severity: "error",
+      summary: "Docker daemon unreachable — containerized delegations failing",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} Check that Docker Desktop / dockerd is running, or temporarily set agents.defaultContainerized to false (or STARLINGAI_DEFAULT_CONTAINERIZED=false) and restart the gateway.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
   if (reasonCode === "computer_stale_loop") {
     return {
       reasonCode,
