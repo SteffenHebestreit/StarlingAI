@@ -38,7 +38,7 @@ export const ProvidersSchema = z.object({
 });
 
 export const ModelConfigSchema = z.object({
-  primary: z.string().max(200).default("lmstudio/qwen3.5"),
+  primary: z.string().max(200).default("lmstudio/qwen3.6-35b-a3b"),
   fallback: z.string().max(200).optional(),
   cloudFallback: z.string().max(200).optional(),
   /** Override the provider's baseUrl for this specific model (e.g. a different LM Studio instance or vLLM endpoint). Falls back to the provider's configured baseUrl when omitted. */

@@ -1015,7 +1015,7 @@
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
                   <label class="field-label">Primary Model</label>
-                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.5-35b-a3b" />
+                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen3.6-35b-a3b" />
                 </div>
                 <div class="md:col-span-2">
                   <label class="field-label">Endpoint Override <span class="text-gray-600 font-normal">optional</span></label>

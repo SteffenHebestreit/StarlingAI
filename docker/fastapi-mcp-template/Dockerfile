@@ -18,7 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
     FTMD_MARKITDOWN_ENABLE_LLM=false \
     FTMD_OPENAI_BASE_URL=http://host.docker.internal:1234/v1 \
-    FTMD_OPENAI_MODEL=qwen/qwen3.5-35b-a3b
+    FTMD_OPENAI_MODEL=qwen3.6-35b-a3b
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
