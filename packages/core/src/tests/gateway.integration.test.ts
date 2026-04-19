@@ -57,6 +57,8 @@ describe("gateway HTTP bridge", () => {
     delete process.env["SAI_CRED_STORE"];
     delete process.env["SAI_AUDIT_LOG"];
     delete process.env["SAI_USER_MEMORY_PATH"];
+    delete process.env["N8N_USERNAME"];
+    delete process.env["N8N_KEY"];
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
@@ -201,7 +203,7 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
-  it("rejects dashboard writes to config-owned resources and preserves stored site passwords", async () => {
+  it("rejects dashboard writes to config-owned resources and preserves stored site credential refs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-settings-"));
     const port = 19000 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
@@ -230,6 +232,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
     process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
     process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["N8N_USERNAME"] = "admin@n8n.local";
+    process.env["N8N_KEY"] = "runtime-secret-from-env";
 
     vi.resetModules();
 
@@ -275,7 +279,7 @@ describe("gateway HTTP bridge", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ username: "runtime-user", password: "runtime-secret" }),
+        body: JSON.stringify({ username: "$N8N_USERNAME", password: "$N8N_KEY" }),
       });
       expect(createSite.status).toBe(200);
 
@@ -285,13 +289,17 @@ describe("gateway HTTP bridge", () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ username: "runtime-user-2" }),
+        body: JSON.stringify({}),
       });
       expect(updateSite.status).toBe(200);
 
+      const storedRaw = sites.getStoredSiteCredentialRecord("runtime.example");
+      expect(storedRaw?.username).toBe("$N8N_USERNAME");
+      expect(storedRaw?.password).toBe("$N8N_KEY");
+
       const stored = sites.resolveSiteCredential("runtime.example");
-      expect(stored?.username).toBe("runtime-user-2");
-      expect(stored?.password).toBe("runtime-secret");
+      expect(stored?.username).toBe("admin@n8n.local");
+      expect(stored?.password).toBe("runtime-secret-from-env");
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();

@@ -23,7 +23,7 @@ import {
   buildSessionDebugMarkdownDetached,
   SessionExportBusyError,
 } from "../agent/debug-session-export.js";
-import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
+import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, getStoredSiteCredentialRecord, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
   listAllJobs as listJobDefinitions,
@@ -2282,9 +2282,9 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const username = String(body["username"] ?? "").trim();
-    const existing = resolveSiteCredential(hostname);
-    const password = String(body["password"] ?? "").trim() || (existing?.source === "store" ? existing.password : "");
+    const existing = getStoredSiteCredentialRecord(hostname);
+    const username = String(body["username"] ?? "").trim() || (existing?.username ?? "");
+    const password = String(body["password"] ?? "").trim() || (existing?.password ?? "");
     if (!username || !password) {
       return c.json({ error: "username and password are required" }, 400);
     }
