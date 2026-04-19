@@ -11,6 +11,7 @@
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
+import { scanOutput } from "../guardrails/output.js";
 import type { ContainerTaskPayload, ContainerTaskResult } from "./container-runner.js";
 import { createChatProvider } from "../providers/index.js";
 
@@ -145,9 +146,16 @@ async function main(): Promise<void> {
         }
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
+        let resultContent = result.success ? result.output : `Error: ${result.error ?? "unknown"}`;
+        // Redact any secrets the tool surfaced before they reach the LLM history.
+        const secretScan = scanOutput(resultContent);
+        if (!secretScan.safe && secretScan.redacted) {
+          resultContent = secretScan.redacted;
+          process.stderr.write(`SECRET_REDACTED:${tc.name}:${(secretScan.detectedTypes ?? []).join(",")}\n`);
+        }
         toolResults.push({
           role: "tool",
-          content: result.success ? result.output : `Error: ${result.error ?? "unknown"}`,
+          content: resultContent,
           tool_call_id: tc.id,
         });
       }
