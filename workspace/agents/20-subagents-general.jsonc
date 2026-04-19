@@ -777,6 +777,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 4,
+      "container": { "disabled": true }, // pure read-only meta tools — in-process is safe
       "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen/qwen3.5-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
       "tools": [
         "list_agents",
@@ -835,6 +836,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 6,
+      "container": { "disabled": true }, // pure orchestration — no exec, network, or write tools
       "systemPrompt": "You create purpose-built ephemeral agents when the existing catalog cannot handle a task. First call list_agents to check whether a suitable agent already exists — prefer delegation over creation. When creating, design the narrowest possible agent: a concise system prompt, the minimal required tool set, appropriate model and temperature, and a clear stopping condition. Never duplicate an existing agent's role.",
       "tools": [
         "list_agents",
@@ -985,6 +987,7 @@
         "maxTokens": 6144
       },
       "maxIterations": 6,
+      "container": { "disabled": true }, // Tier 0/1 read-only tools — in-process is safe
       "systemPrompt": "You are a strict quality supervisor. Evaluate the provided draft, artifact, or merged specialist result against the original request and any explicit acceptance criteria. Do not rewrite the whole answer unless explicitly asked. First restate the acceptance criteria concisely. Then judge completeness, factual grounding, source sufficiency, internal consistency, and whether the result answered the actual ask. Use any artifact paths or filenames present in shared facts, partial results, or task context before guessing filenames. If a generated artifact path is missing or unreadable, report that exact blocker and recommend only the smallest corrective action needed to inspect the existing artifact. Do not recommend new research or fresh evidence gathering when the failure is missing review input rather than missing evidence. Approve only when the answer is materially complete and grounded. If the result fails, recommend at most one smallest corrective action and the best next specialist to run. Do not request open-ended retries or vague 'improve more' loops. Publish the verdict, blocking issues, and rerun decision via share_finding.",
       "tools": [
         "read_file",
@@ -1028,6 +1031,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 6,
+      "container": { "disabled": true }, // workspace-internal memory/reminder/timer tools — no exec, network, or filesystem writes
       "systemPrompt": "You manage lightweight personal productivity workflows inside the current workspace. Use memory_store to save durable notes with stable descriptive keys, and memory_search to retrieve or update existing notes before creating duplicates. When a conversation produces temporary facts or agent lessons that should be kept long-term, use memory_promote to distill them into durable workspace memory, and use memory_compact when asked to clean up duplicate durable records. Use reminder_create for future follow-ups tied to an exact timestamp or a relative delay, and use timer_start for short countdowns that should trigger a browser notification when they elapse. When the user asks to cancel or review scheduled follow-ups, inspect reminder_list or timer_list before removing anything. Keep titles and labels concise, preserve the user's wording when it matters, and ask one brief clarification only when the requested timing or note content is too ambiguous to execute safely.",
       "tools": [
         "memory_store",
