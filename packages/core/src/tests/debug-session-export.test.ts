@@ -3,8 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { flushAuditLog, logAudit } from "../audit/logger.js";
-import { buildSessionAuditMarkdown, buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
+import {
+  buildSessionAuditMarkdown,
+  buildSessionAuditMarkdownDetached,
+  buildSessionDebugMarkdown,
+  buildSessionDebugMarkdownDetached,
+  SessionExportBusyError,
+} from "../agent/debug-session-export.js";
 import { createSession, resetSessionsForTests } from "../agent/session.js";
+import { deregisterSessionAbortController, registerSessionAbortController } from "../agent/warden.js";
 
 describe("debug session markdown export", () => {
   let tempDir: string | null = null;
@@ -143,5 +150,51 @@ describe("debug session markdown export", () => {
     expect(markdown).toContain(`sub:${session.id}:audit_specialist:123`);
     expect(markdown).not.toContain("## Transcript");
     expect(markdown).not.toContain("## Raw Session History");
+  });
+
+  it("rejects session exports while the session turn is still active", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "starlingai-busy-export-"));
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, "audit.jsonl");
+
+    const session = createSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a busy export test assistant.",
+    });
+
+    const controller = new AbortController();
+    registerSessionAbortController(session.id, controller);
+
+    await expect(buildSessionDebugMarkdown(session.id)).rejects.toBeInstanceOf(SessionExportBusyError);
+    await expect(buildSessionAuditMarkdown(session.id)).rejects.toBeInstanceOf(SessionExportBusyError);
+
+    deregisterSessionAbortController(session.id);
+  });
+
+  it("exports detached snapshots while the session turn is still active", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "starlingai-live-export-"));
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, "audit.jsonl");
+
+    const session = createSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a detached export test assistant.",
+    });
+
+    session.addMessage({ role: "user", content: "Run a checked export." });
+    logAudit("message_received", { length: 21 }, { sessionId: session.id, channel: "webchat" });
+
+    const controller = new AbortController();
+    registerSessionAbortController(session.id, controller);
+
+    const debugMarkdown = await buildSessionDebugMarkdownDetached(session.id);
+    const auditMarkdown = await buildSessionAuditMarkdownDetached(session.id);
+
+    expect(debugMarkdown).toContain("# StarlingAI Debug Session Export");
+    expect(debugMarkdown).toContain("Run a checked export.");
+    expect(auditMarkdown).toContain("# StarlingAI Session Audit Export");
+    expect(auditMarkdown).toContain("message_received");
+
+    deregisterSessionAbortController(session.id);
   });
 });
