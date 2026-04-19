@@ -586,6 +586,27 @@ export const MailServiceSchema = z.object({
   authToken: z.string().min(1).optional(),
 });
 
+// ─── Data Feeds ───────────────────────────────────────────────────────────────
+// Per-provider configuration for the pluggable real-time data architecture
+// (weather, news, finance, reference, network). Each provider entry is keyed
+// by its provider id. Free providers default to enabled; keyed providers wait
+// until an `apiKey` (env-var ref or `secret:` reference) is supplied.
+
+export const DataFeedProviderEntrySchema = z.object({
+  /** Explicitly enable/disable this provider. Omit to use the default policy. */
+  enabled: z.boolean().optional(),
+  /** API key for paid/keyed providers. Supports `$ENV_VAR` and `secret:key` refs. */
+  apiKey: z.string().optional(),
+  /** Provider-specific configuration overrides (passed verbatim to the provider). */
+  config: z.record(z.unknown()).optional(),
+});
+
+export const DataFeedsSchema = z.object({
+  providers: z.record(DataFeedProviderEntrySchema).default({}),
+});
+
+export type DataFeedsConfig = z.infer<typeof DataFeedsSchema>;
+
 // ─── Guardrails ───────────────────────────────────────────────────────────────
 
 export const GuardrailsSchema = z.object({
@@ -773,6 +794,24 @@ export const ConfigSchema = z.object({
       /** Warn when system prompt exceeds this char count (~8k tokens). */
       promptBudgetChars: z.number().int().min(1_000).default(32_000),
     }).default({}),
+    /**
+     * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
+     * They are observability signals, not mid-flight kills (turnTimeoutMs handles
+     * hard cutoffs). When a delegation exceeds any limit, the attempt and task are
+     * tagged with budgetExceeded + a list of which limits tripped, and a budget
+     * audit event fires. The sub-agent's output is still returned — orchestrators
+     * can decide whether to spend more on a retry or stop here.
+     *
+     * Set any field to 0 to disable that specific check.
+     */
+    budgets: z.object({
+      /** Cap on total tokens (prompt + completion) attributed to a single delegation attempt. */
+      maxTokensPerTask: z.number().int().min(0).default(0),
+      /** Cap on tool-call count for a single delegation attempt. */
+      maxToolCallsPerTask: z.number().int().min(0).default(0),
+      /** Cap on wall-clock duration for a single delegation attempt (ms). */
+      maxDurationMsPerTask: z.number().int().min(0).default(0),
+    }).default({}),
   }).default({}),
   subAgents: SubAgentsSchema.default({}),
   scenes: ScenesSchema.default({}),
@@ -791,6 +830,7 @@ export const ConfigSchema = z.object({
   mail: MailServiceSchema.default({}),
   toolDevelopment: ToolDevelopmentSchema.default({}),
   selfImprovement: SelfImprovementSchema.default({}),
+  dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),

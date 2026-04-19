@@ -5,7 +5,7 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
@@ -1024,6 +1024,84 @@ function summarizeText(text: string, maxLength = 180): string {
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
 }
 
+/**
+ * Resolve the per-task soft budgets from config.
+ * Returns 0 for any disabled limit. Kept inline so config changes are picked up
+ * each call without restart.
+ */
+function getTaskBudgets(): { tokens: number; toolCalls: number; durationMs: number } {
+  const budgets = getConfig().agents.budgets;
+  return {
+    tokens: budgets?.maxTokensPerTask ?? 0,
+    toolCalls: budgets?.maxToolCallsPerTask ?? 0,
+    durationMs: budgets?.maxDurationMsPerTask ?? 0,
+  };
+}
+
+/**
+ * Finalize a SwarmTaskAttempt with duration, budget breach detection, and
+ * task-level totals rollup. Always pair `attempt.startedAt` with this call so
+ * `durationMs` is correct. Logs a `task_budget_exceeded` audit when caps trip.
+ *
+ * Idempotent — safe to call once per attempt at the point where finishedAt is set.
+ */
+function finalizeAttemptBudget(
+  ctx: ToolContext,
+  task: SwarmTaskState,
+  attempt: SwarmTaskAttempt,
+): void {
+  if (!attempt.finishedAt) attempt.finishedAt = new Date().toISOString();
+  const startedMs = Date.parse(attempt.startedAt);
+  const finishedMs = Date.parse(attempt.finishedAt);
+  if (Number.isFinite(startedMs) && Number.isFinite(finishedMs) && finishedMs >= startedMs) {
+    attempt.durationMs = finishedMs - startedMs;
+  }
+
+  const budgets = getTaskBudgets();
+  const breaches: string[] = [];
+  if (budgets.tokens > 0 && (attempt.totalTokens ?? 0) > budgets.tokens) breaches.push("tokens");
+  if (budgets.toolCalls > 0 && (attempt.toolCount ?? 0) > budgets.toolCalls) breaches.push("toolCalls");
+  if (budgets.durationMs > 0 && (attempt.durationMs ?? 0) > budgets.durationMs) breaches.push("durationMs");
+  if (breaches.length > 0) {
+    attempt.budgetExceeded = true;
+    attempt.budgetBreaches = breaches;
+    logAudit(
+      "task_budget_exceeded",
+      {
+        taskId: task.id,
+        agentName: attempt.agentName,
+        breaches,
+        totalTokens: attempt.totalTokens ?? 0,
+        toolCount: attempt.toolCount ?? 0,
+        durationMs: attempt.durationMs ?? 0,
+        limits: budgets,
+      },
+      { sessionId: ctx.sessionId, severity: "warn" },
+    );
+  }
+
+  recomputeTaskTotals(task);
+}
+
+/** Recompute per-task rollup totals from its attempts. Called by finalizeAttemptBudget. */
+function recomputeTaskTotals(task: SwarmTaskState): void {
+  let toolCount = 0, iterations = 0, promptTokens = 0, completionTokens = 0, totalTokens = 0, durationMs = 0;
+  for (const a of task.attempts) {
+    toolCount += a.toolCount ?? 0;
+    iterations += a.iterations ?? 0;
+    promptTokens += a.promptTokens ?? 0;
+    completionTokens += a.completionTokens ?? 0;
+    totalTokens += a.totalTokens ?? 0;
+    durationMs += a.durationMs ?? 0;
+  }
+  task.totals = {
+    attempts: task.attempts.length,
+    toolCount, iterations,
+    promptTokens, completionTokens, totalTokens,
+    durationMs,
+  };
+}
+
 function buildTaskSignature(title: string, task: string, dependsOn: string[] = []): string {
   const normalizedTitle = summarizeText(title, 120).toLowerCase();
   const normalizedTask = summarizeText(task, 240).toLowerCase();
@@ -2000,6 +2078,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolCount = 0;
         attempt.iterations = 0;
         attempt.toolNames = [];
+        finalizeAttemptBudget(ctx, taskState, attempt);
         taskState.status = "completed";
         taskState.output = reusableSessionEvidence.output;
         taskState.error = undefined;
@@ -2066,7 +2145,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       };
 
       let output: string;
-      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined;
+      let stats: {
+        toolCount: number;
+        iterations: number;
+        toolNames: string[];
+        terminalState?: string;
+        outcome?: string;
+        usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+      } | undefined;
       let artifacts: Record<string, unknown>[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
@@ -2093,6 +2179,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolCount = stats.toolCount;
         attempt.iterations = stats.iterations;
         attempt.toolNames = [...stats.toolNames];
+        if (stats.usage) {
+          attempt.promptTokens = stats.usage.promptTokens;
+          attempt.completionTokens = stats.usage.completionTokens;
+          attempt.totalTokens = stats.usage.totalTokens;
+        }
+        if (stats.terminalState) {
+          attempt.terminalState = stats.terminalState;
+        }
       }
 
       let delegationOutcome = stats?.outcome;
@@ -2117,6 +2211,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ));
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
+      finalizeAttemptBudget(ctx, taskState, attempt);
 
       if (weak) {
         // Use stats.outcome as fallback — <final_answer> tag parsing can
@@ -2218,6 +2313,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       attempt.finishedAt = new Date().toISOString();
       attempt.status = "failed";
       attempt.summary = summarizeText(message);
+      finalizeAttemptBudget(ctx, taskState, attempt);
       taskState.status = "failed";
       taskState.error = summarizeText(message);
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
@@ -2317,11 +2413,120 @@ function formatSwarmState(state: SwarmState): string {
   }
 
   const lines = tasks.map((task) => {
-    const attempts = task.attempts.map((attempt) => `${attempt.agentName}:${attempt.status}`).join(", ");
-    return `- ${task.id} [${task.status}] ${task.title}${task.selectedAgent ? ` via ${task.selectedAgent}` : ""}${attempts ? ` | attempts: ${attempts}` : ""}`;
+    const attempts = task.attempts
+      .map((attempt) => {
+        const flag = attempt.budgetExceeded ? `!budget(${(attempt.budgetBreaches ?? []).join("/")})` : "";
+        return `${attempt.agentName}:${attempt.status}${flag ? ` ${flag}` : ""}`;
+      })
+      .join(", ");
+    const totals = task.totals
+      ? ` | totals: ${task.totals.totalTokens}tok, ${task.totals.toolCount}tools, ${task.totals.durationMs}ms`
+      : "";
+    return `- ${task.id} [${task.status}] ${task.title}${task.selectedAgent ? ` via ${task.selectedAgent}` : ""}${attempts ? ` | attempts: ${attempts}` : ""}${totals}`;
   });
 
   return `Objective: ${state.objective}\nUpdated: ${state.updatedAt}\nTasks:\n${lines.join("\n")}`;
+}
+
+function formatSwarmBudget(state: SwarmState): { output: string; metadata: Record<string, unknown> } {
+  const tasks = Object.values(state.tasks);
+  const budgets = getTaskBudgets();
+
+  const overall = {
+    attempts: 0,
+    toolCount: 0,
+    iterations: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    durationMs: 0,
+  };
+  const perAgent = new Map<string, typeof overall>();
+  const breachedAttempts: Array<{ taskId: string; agentName: string; breaches: string[]; totalTokens: number; toolCount: number; durationMs: number }> = [];
+
+  for (const task of tasks) {
+    if (task.totals) {
+      overall.attempts += task.totals.attempts;
+      overall.toolCount += task.totals.toolCount;
+      overall.iterations += task.totals.iterations;
+      overall.promptTokens += task.totals.promptTokens;
+      overall.completionTokens += task.totals.completionTokens;
+      overall.totalTokens += task.totals.totalTokens;
+      overall.durationMs += task.totals.durationMs;
+    }
+    for (const a of task.attempts) {
+      const slot = perAgent.get(a.agentName) ?? {
+        attempts: 0, toolCount: 0, iterations: 0,
+        promptTokens: 0, completionTokens: 0, totalTokens: 0, durationMs: 0,
+      };
+      slot.attempts += 1;
+      slot.toolCount += a.toolCount ?? 0;
+      slot.iterations += a.iterations ?? 0;
+      slot.promptTokens += a.promptTokens ?? 0;
+      slot.completionTokens += a.completionTokens ?? 0;
+      slot.totalTokens += a.totalTokens ?? 0;
+      slot.durationMs += a.durationMs ?? 0;
+      perAgent.set(a.agentName, slot);
+
+      if (a.budgetExceeded) {
+        breachedAttempts.push({
+          taskId: task.id,
+          agentName: a.agentName,
+          breaches: a.budgetBreaches ?? [],
+          totalTokens: a.totalTokens ?? 0,
+          toolCount: a.toolCount ?? 0,
+          durationMs: a.durationMs ?? 0,
+        });
+      }
+    }
+  }
+
+  const lines: string[] = [];
+  lines.push(`Objective: ${state.objective}`);
+  lines.push(`Tasks tracked: ${tasks.length}`);
+  lines.push("");
+  lines.push("## Configured per-task budgets");
+  lines.push(`- maxTokensPerTask: ${budgets.tokens > 0 ? budgets.tokens : "(unset)"}`);
+  lines.push(`- maxToolCallsPerTask: ${budgets.toolCalls > 0 ? budgets.toolCalls : "(unset)"}`);
+  lines.push(`- maxDurationMsPerTask: ${budgets.durationMs > 0 ? budgets.durationMs : "(unset)"}`);
+  lines.push("");
+  lines.push("## Overall totals");
+  lines.push(`- attempts: ${overall.attempts}`);
+  lines.push(`- iterations: ${overall.iterations}`);
+  lines.push(`- toolCount: ${overall.toolCount}`);
+  lines.push(`- promptTokens: ${overall.promptTokens}`);
+  lines.push(`- completionTokens: ${overall.completionTokens}`);
+  lines.push(`- totalTokens: ${overall.totalTokens}`);
+  lines.push(`- durationMs: ${overall.durationMs}`);
+  lines.push("");
+  lines.push("## Per-agent breakdown");
+  if (perAgent.size === 0) {
+    lines.push("- (no attempts recorded yet)");
+  } else {
+    const sorted = [...perAgent.entries()].sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+    for (const [agent, totals] of sorted) {
+      lines.push(`- ${agent}: ${totals.attempts} attempts, ${totals.totalTokens}tok, ${totals.toolCount}tools, ${totals.durationMs}ms`);
+    }
+  }
+  lines.push("");
+  lines.push("## Budget breaches");
+  if (breachedAttempts.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const b of breachedAttempts) {
+      lines.push(`- task ${b.taskId} via ${b.agentName}: ${b.breaches.join(", ")} | ${b.totalTokens}tok, ${b.toolCount}tools, ${b.durationMs}ms`);
+    }
+  }
+
+  return {
+    output: lines.join("\n"),
+    metadata: {
+      budgets,
+      overall,
+      perAgent: Object.fromEntries(perAgent),
+      breaches: breachedAttempts,
+    },
+  };
 }
 
 function validateTaskGraphNodes(nodes: TaskGraphNodeInput[]): string[] {
@@ -2359,6 +2564,24 @@ registerTool({
       success: true,
       output: formatSwarmState(state),
       metadata: { swarmState: state },
+    };
+  },
+});
+
+registerTool({
+  name: "get_swarm_budget",
+  description: "Aggregate token, tool-call, and wall-clock spending across all swarm tasks this turn. Shows configured per-task budgets, overall totals, per-agent breakdown, and any attempts that breached a budget.",
+  parameters: {
+    type: "object",
+    properties: {},
+  },
+  async execute(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const state = ensureSwarmState(ctx, "Current turn");
+    const { output, metadata } = formatSwarmBudget(state);
+    return {
+      success: true,
+      output,
+      metadata,
     };
   },
 });
