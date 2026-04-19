@@ -15,6 +15,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
+import { probeDockerReachability } from "../agent/container-runner.js";
 import { buildSessionAuditMarkdown, buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
 import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
@@ -3575,9 +3576,27 @@ export function createGateway() {
   });
 
   return {
-    start(): Promise<void> {
+    async start(): Promise<void> {
+      // Docker reachability gate. When the operator has enabled
+      // agents.defaultContainerized, sub-agents will be expected to run inside
+      // Docker by default. If Docker is unreachable, refusing to start is the
+      // only safe choice — silently falling back to in-process execution would
+      // erase the isolation guarantee the operator turned the flag on for.
+      if (config.agents.defaultContainerized) {
+        const probe = await probeDockerReachability();
+        if (!probe.reachable) {
+          const msg = `agents.defaultContainerized is true but Docker is unreachable (${probe.error ?? "unknown"}). ` +
+            `Refusing to start — sub-agents would silently fall back to in-process execution. ` +
+            `Either start Docker, set agents.defaultContainerized to false explicitly, or mark each agent with container.disabled: true.`;
+          log.error({ probe }, msg);
+          throw new Error(msg);
+        }
+        log.info({ serverVersion: probe.serverVersion, durationMs: probe.durationMs },
+          "Docker reachable — defaultContainerized sub-agents enabled");
+      }
+
       const port = config.gateway.port;
-      return new Promise((resolve, reject) => {
+      return new Promise<void>((resolve, reject) => {
         const handleError = (error: Error) => {
           httpServer.off("error", handleError);
           reject(error);

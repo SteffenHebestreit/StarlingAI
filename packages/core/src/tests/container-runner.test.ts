@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseContainerDiagnosticLine } from "../agent/container-runner.js";
+import { parseContainerDiagnosticLine, probeDockerReachability } from "../agent/container-runner.js";
 import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
 
 describe("container runner diagnostics", () => {
@@ -46,4 +46,35 @@ describe("container runner diagnostics", () => {
       }),
     ).toBe("/tmp/custom-workspace");
   });
+
+  it("probeDockerReachability resolves with reachable=true or returns a structured failure", async () => {
+    // Real probe — environment-dependent, so we only assert structural shape.
+    const result = await probeDockerReachability(3000);
+    expect(typeof result.reachable).toBe("boolean");
+    expect(typeof result.durationMs).toBe("number");
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    if (result.reachable) {
+      expect(result.serverVersion).toBeTruthy();
+      expect(result.error).toBeUndefined();
+    } else {
+      expect(result.error).toBeTruthy();
+    }
+  }, 10_000);
+
+  it("probeDockerReachability honors a tight timeout when docker is missing", async () => {
+    // Override PATH so the docker binary cannot be found, forcing the spawn to fail
+    // fast. This validates that probe failures surface as structured errors rather
+    // than throwing.
+    const originalPath = process.env["PATH"];
+    process.env["PATH"] = "/nonexistent-path-for-test";
+    try {
+      const result = await probeDockerReachability(2000);
+      expect(result.reachable).toBe(false);
+      expect(result.error).toBeTruthy();
+      expect(result.durationMs).toBeLessThan(3000);
+    } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
+    }
+  }, 10_000);
 });

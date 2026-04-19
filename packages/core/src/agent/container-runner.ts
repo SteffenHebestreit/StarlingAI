@@ -353,3 +353,71 @@ export function parseContainerDiagnosticLine(line: string): ContainerDiagnosticE
   }
   return null;
 }
+
+export interface DockerReachability {
+  reachable: boolean;
+  /** docker server version reported by `docker version --format`. Present only when reachable. */
+  serverVersion?: string;
+  /** Captured stderr / spawn error message when unreachable. */
+  error?: string;
+  /** Time taken by the probe in ms. */
+  durationMs: number;
+}
+
+/**
+ * Probe whether Docker is reachable from this process. Used at gateway startup
+ * when `agents.defaultContainerized` is enabled — if Docker is down, we want to
+ * abort loud rather than silently fall back to in-process execution and lose
+ * the isolation guarantee that operators are relying on.
+ *
+ * Pure read-only — runs `docker version --format '{{.Server.Version}}'` with a
+ * short timeout. Never spawns a container.
+ */
+export async function probeDockerReachability(timeoutMs = 5000): Promise<DockerReachability> {
+  const start = Date.now();
+  return new Promise<DockerReachability>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const settle = (result: DockerReachability) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn("docker", ["version", "--format", "{{.Server.Version}}"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      settle({ reachable: false, error: `docker spawn failed: ${message}`, durationMs: Date.now() - start });
+      return;
+    }
+
+    const killTimer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      settle({ reachable: false, error: `docker probe timed out after ${timeoutMs}ms`, durationMs: Date.now() - start });
+    }, timeoutMs);
+    killTimer.unref?.();
+
+    proc.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    proc.on("error", (err) => {
+      clearTimeout(killTimer);
+      settle({ reachable: false, error: `docker spawn error: ${err.message}`, durationMs: Date.now() - start });
+    });
+    proc.on("close", (code) => {
+      clearTimeout(killTimer);
+      const durationMs = Date.now() - start;
+      const serverVersion = stdout.trim();
+      if (code === 0 && serverVersion) {
+        settle({ reachable: true, serverVersion, durationMs });
+      } else {
+        const errMsg = stderr.trim() || `docker exited with code ${code}`;
+        settle({ reachable: false, error: errMsg, durationMs });
+      }
+    });
+  });
+}

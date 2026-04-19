@@ -28,21 +28,19 @@ These are gaps between the stated philosophy and the current implementation. Eve
 
 ### GAP-1 — Container Isolation Is Opt-In, Not Universal
 
-> **Status: ✅ Partially implemented in v0.3.2 — opt-out model deployed**
+> **Status: ✅ Closed — `defaultContainerized` defaults to `true`, with a startup Docker reachability gate**
 
 **Philosophy stated:** *"Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-only`, and `--network none` enforced."*
 
-**Reality today:** Sub-agent LLM loops run **in-process** inside the main gateway Node.js process by default. Isolation applies to:
-- **`shell_exec` / `run_script`** → always routed to the dedicated `sandbox` container ✅
-- **`selfdev__*` dynamic tools** → always sandboxed ✅
-- **Sub-agent with `container.enabled: true`** → uses `container-runner.ts` with full Docker isolation ✅
-- **All other sub-agents** → run in-process, sharing the gateway memory space ❌
+**Reality today (post-fix):** Sub-agents now run **containerized by default**. The `agents.defaultContainerized` config flag defaults to `true`. Trusted read-mostly agents (research, analysis, orchestration, browser interpretation, productivity) are pre-marked with `container.disabled: true`; everything else (shell exec, SSH, terraform, git writes, DB writes, external mail/notify, computer-use) runs containerized through `container-runner.ts`.
 
-**Impact:** A compromised or misbehaving sub-agent could in theory interfere with other in-process sessions, escalate through shared module state, or read environment variables that other agents left in memory.
+**Startup safety gate:** When `defaultContainerized: true`, the gateway runs `probeDockerReachability()` before binding the listen socket. If `docker version` fails or times out (5 s default), startup aborts with an actionable error rather than silently falling back to in-process execution. Operators who genuinely want the legacy in-process default must set the flag explicitly to `false`.
 
-**v0.3.2 fix (Stage 8.1):** Added `agents.defaultContainerized: boolean` global flag to config schema and `container.disabled: true` per-agent escape hatch. When `defaultContainerized: true`, all agents run containerized unless they explicitly opt out. 15 trusted read-only agents in `20-subagents-general.jsonc` are pre-marked `container.disabled: true`. Operators can enable the default-containerized mode by setting `agents.defaultContainerized: true` in gateway config.
+**v0.3.2 (Stage 8.1):** Added `agents.defaultContainerized` flag and `container.disabled` per-agent escape hatch. 15+ trusted read-only agents pre-marked.
 
-**Remaining work (Stage 8.1 completion):** Enable `defaultContainerized: true` by default in the shipped config once the container image build pipeline is verified in CI.
+**Closing change (Stage 8.1 completion):** Default flipped from `false` → `true` in `config/schema.ts`. Four additional agents marked opt-out (`agent_architect`, `agent_factory`, `quality_supervisor`, `productivity_agent` — all read-only or pure-orchestration). New `probeDockerReachability()` helper in `container-runner.ts`; `createGateway().start()` calls it pre-listen and refuses to start when the flag is on but Docker is unreachable.
+
+**Operator migration:** Existing deployments that lack a Docker daemon must add `"agents": { "defaultContainerized": false }` to their gateway config to retain the previous behavior. New deployments get container isolation out of the box.
 
 ---
 
@@ -118,7 +116,7 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 | Task | Priority | GAP | Status |
 |------|----------|-----|--------|
-| Default-containerized sub-agents (opt-out model) | High | GAP-1 | ✅ v0.3.2 (enable `defaultContainerized: true` to activate) |
+| Default-containerized sub-agents (opt-out model) | High | GAP-1 | ✅ Closed — `defaultContainerized` now defaults to `true`; gateway aborts startup if Docker is unreachable |
 | Undirected delegation guidance + `swarm_delegate` tool | Medium | GAP-2 | ✅ Instructions updated; `swarm_delegate` tool implemented |
 | `self_improvement_applied` audit events | High | GAP-3 | ✅ v0.3.2 |
 | Warden `config_proposal_flood` check | High | GAP-4 | ✅ v0.3.2 |

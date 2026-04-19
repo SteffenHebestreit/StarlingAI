@@ -775,9 +775,17 @@ export const ConfigSchema = z.object({
     ephemeralGeneration: EphemeralGenerationSchema.default({}),
     /** When true, ALL sub-agents default to containerized execution (Docker isolation).
      *  Individual agents can opt out by setting container.disabled: true in their config.
-     *  Defaults to false for backwards compatibility; set true in production for full
-     *  alignment with the "every agent runs in an isolated container" security principle. */
-    defaultContainerized: z.boolean().default(false),
+     *  Defaults to true to align with the "every agent runs in an isolated container"
+     *  security principle. The gateway runs a Docker reachability probe at startup —
+     *  if Docker is unreachable while this flag is on, startup aborts loud rather than
+     *  silently falling back to in-process execution. Set explicitly to false to keep
+     *  the legacy in-process default.
+     *
+     *  Environment override: STARLINGAI_DEFAULT_CONTAINERIZED=false flips the default
+     *  back to false (used by the test harness to keep mock-LLM tests in-process). */
+    defaultContainerized: z.boolean().default(
+      process.env["STARLINGAI_DEFAULT_CONTAINERIZED"] === "false" ? false : true,
+    ),
     rateLimit: RateLimitSchema.default({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),
