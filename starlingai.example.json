@@ -26,7 +26,7 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "fallback": "lmstudio/qwen3.5-4b",
         "enableThinking": true,
         "contextWindow": 32768,
@@ -266,7 +266,7 @@
       "capabilities": ["browser automation", "form submission", "page evidence capture"],
       "tags": ["browser", "playwright"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.2,
         "maxTokens": 4096
       },
@@ -292,7 +292,7 @@
       "capabilities": ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
       "tags": ["coordination", "web", "browser", "research"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 6144
       },
@@ -314,7 +314,7 @@
       "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction"],
       "tags": ["browser", "vision", "analysis"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 4096
       },
@@ -397,7 +397,7 @@
       "capabilities": ["api integration", "webhook design", "mcp setup", "automation glue", "workflow handoff"],
       "tags": ["integration", "api", "webhook", "mcp", "automation"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -526,7 +526,7 @@
       "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
       "tags": ["infrastructure", "ops", "terraform", "ansible", "vault", "ssh", "scp", "docker", "proxmox", "readiness"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -551,7 +551,7 @@
       "capabilities": ["image generation", "prompt refinement"],
       "tags": ["image", "design", "multimodal"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.45,
         "maxTokens": 4096
       },
@@ -604,7 +604,7 @@
       "capabilities": ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
       "tags": ["papers", "reports", "citations", "research", "drafting"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.15,
         "maxTokens": 8192
       },
@@ -659,7 +659,7 @@
       "capabilities": ["agent design", "prompt writing", "model selection", "ephemeral agents"],
       "tags": ["meta", "agents", "architecture"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 4096
       },
@@ -676,7 +676,7 @@
       "capabilities": ["meta orchestration", "ephemeral agents"],
       "tags": ["meta", "agents"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.2,
         "maxTokens": 4096
       },
@@ -697,7 +697,7 @@
       "capabilities": ["pentest coordination", "engagement planning", "methodology maintenance", "prompt tuning", "tool selection governance", "report writing"],
       "tags": ["pentest", "security", "offensive"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -722,7 +722,7 @@
       "capabilities": ["network reconnaissance", "port scanning", "service enumeration", "OS fingerprinting", "CVE lookup"],
       "tags": ["pentest", "recon", "nmap", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -743,7 +743,7 @@
       "capabilities": ["web vulnerability scanning", "directory brute-force", "SQL injection", "web reconnaissance"],
       "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -766,7 +766,7 @@
       "capabilities": ["network auditing", "service exploitation", "credential testing", "NSE scripting"],
       "tags": ["pentest", "network", "nmap", "hydra", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.1,
         "maxTokens": 8192
       },
@@ -788,7 +788,7 @@
       "capabilities": ["exploit execution", "metasploit", "payload delivery", "post-exploitation"],
       "tags": ["pentest", "exploit", "metasploit", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.05,
         "maxTokens": 8192
       },
@@ -809,7 +809,7 @@
       "capabilities": ["report writing", "finding aggregation", "risk rating", "remediation guidance", "executive summaries"],
       "tags": ["pentest", "reporting", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "temperature": 0.2,
         "maxTokens": 8192
       },

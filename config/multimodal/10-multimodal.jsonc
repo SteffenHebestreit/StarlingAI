@@ -8,7 +8,7 @@
       // Vision LLM — same model as the primary, Qwen 3.5 is multimodal (vision + tool calling).
       // visionTimeoutMs is separate from timeoutMs (which is for the file-to-markdown service)
       // because local LLM inference on large screenshots can take well over 60 s.
-      "visionModel": "lmstudio/qwen/qwen3.5-35b-a3b",
+      "visionModel": "lmstudio/qwen3.6-35b-a3b",
       "visionTimeoutMs": 120000
     },
     "stt": {

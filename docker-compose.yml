@@ -139,13 +139,13 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - ENABLED_TOOLS=file_converter
-      # qwen/qwen3.5-35b-a3b is used as a text model through the provider.
+      # qwen3.6-35b-a3b is used as a text model through the provider.
       # Keep LLM-enhanced image conversion disabled unless a real vision-capable model is loaded.
       - FTMD_MARKITDOWN_ENABLE_LLM=false
       # Provider configuration for file conversion features that rely on text-only model access.
       - FTMD_OPENAI_BASE_URL=${FTMD_OPENAI_BASE_URL:-http://host.docker.internal:1234/v1}
       - FTMD_OPENAI_API_KEY=${FTMD_OPENAI_API_KEY:-lm-studio}
-      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen/qwen3.5-35b-a3b}
+      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen3.6-35b-a3b}
       - LOG_LEVEL=${FASTAPI_MCP_TEMPLATE_LOG_LEVEL:-INFO}
     networks:
       - starlingai-internal

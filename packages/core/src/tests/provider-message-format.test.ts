@@ -40,7 +40,7 @@ describe("normalizeMessagesForModel", () => {
       { role: "user", content: "Task" },
     ];
 
-    const normalized = normalizeMessagesForModel(messages, "qwen/qwen3.5-35b-a3b");
+    const normalized = normalizeMessagesForModel(messages, "qwen3.6-35b-a3b");
 
     expect(normalized).toEqual(messages);
   });

@@ -13,7 +13,7 @@ const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) =>
       tools: ["read_file", "write_file"],
       maxIterations: 4,
       model: {
-        primary: "lmstudio/qwen/qwen3.5-35b-a3b",
+        primary: "lmstudio/qwen3.6-35b-a3b",
         temperature: 0.1,
       },
     });
@@ -208,7 +208,7 @@ describe("create_ephemeral_agent policy", () => {
       expect(runSubAgentMock.mock.calls[0]?.[0]?.agentName).toBe("agent_architect");
       expect(runSubAgentMock.mock.calls[1]?.[0]?.agentName).toBe("ephemeral:investor_memo_writer");
       expect(runSubAgentMock.mock.calls[1]?.[0]?.task).toBe("Draft an investor memo focused on unit economics.");
-      expect(runSubAgentMock.mock.calls[1]?.[0]?.inlineConfig?.model?.primary).toBe("lmstudio/qwen/qwen3.5-35b-a3b");
+      expect(runSubAgentMock.mock.calls[1]?.[0]?.inlineConfig?.model?.primary).toBe("lmstudio/qwen3.6-35b-a3b");
       expect(runSubAgentMock.mock.calls.some((call) => call[0]?.agentName === "researcher")).toBe(false);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

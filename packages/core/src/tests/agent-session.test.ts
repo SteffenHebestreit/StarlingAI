@@ -471,7 +471,7 @@ describe("AgentSession collapsed history", () => {
       "Delegated result from computer_use_agent - TASK COMPLETED SUCCESSFULLY.",
       "IMPORTANT: Relay ALL specific details from the evidence below.",
       "Observed evidence:",
-      "1. qwen/qwen3.5-35b-a3b - READY - 22.87 GB",
+      "1. qwen3.6-35b-a3b - READY - 22.87 GB",
       "2. zai-org/glm-4.7-flash - READY - 18.13 GB",
       "3. qwen/qwen3.5-4b - READY - 3.92 GB",
       "4. text-embedding-qwen3-embedding-0.6b - READY - 639.15 MB",
@@ -504,7 +504,7 @@ describe("AgentSession collapsed history", () => {
 
     expect(collapsed).toHaveLength(1);
     expect(collapsed[0]?.content).toContain("delegate_to_agent(agentName: computer_use_agent, task: List models)");
-    expect(collapsed[0]?.content).toContain("qwen/qwen3.5-35b-a3b - READY - 22.87 GB");
+    expect(collapsed[0]?.content).toContain("qwen3.6-35b-a3b - READY - 22.87 GB");
     expect(collapsed[0]?.content).toContain(evidenceTail);
   });
 
