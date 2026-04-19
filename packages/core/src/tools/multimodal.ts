@@ -718,7 +718,7 @@ export async function callPlaywrightTool(toolName: string, args: Record<string, 
     throw new Error("Playwright MCP server is not connected");
   }
 
-  const availableTools = new Set(connection.tools.map((tool) => tool.name));
+  const availableTools = new Set((connection.tools ?? []).map((tool) => tool.name));
   const resolvedToolName = toolName === "browser_screenshot" && !availableTools.has(toolName) && availableTools.has("browser_take_screenshot")
     ? "browser_take_screenshot"
     : toolName;
