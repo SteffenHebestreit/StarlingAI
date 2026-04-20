@@ -89,7 +89,12 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     && !looksFresh
     && !looksExternalData
     && !looksSequential;
-  const looksBrowserLoginTask = /\b(log[ -]?in|login|sign[ -]?in|signin|anmeld(?:en|ung)?|zugangsdaten|credentials?|username|password|portal|account|dashboard|inbox|mailbox|nachrichten?|messages?|form|formular|apply|application|bewerb(?:en|ung)?|submit|checkout|invoice|rechnung)\b/i.test(normalized);
+  // Require both a login/form/auth signal AND a site/navigation/target signal so that
+  // isolated keywords like "login" in unrelated contexts (e.g. "login taxonomy regulatory")
+  // do not over-match.
+  const hasLoginSignal = /\b(log[ -]?in|login|sign[ -]?in|signin|anmeld(?:en|ung)?|zugangsdaten|credentials?|username|password|portal|account|dashboard|inbox|mailbox|form|formular|apply|application|bewerb(?:en|ung)?|submit|checkout|invoice|rechnung)\b/i.test(normalized);
+  const hasBrowserTargetSignal = /\b(browser|website|web\s?site|webseite|seite|page|url|https?:\/\/|\.(?:com|de|org|net|io|co|app|dev|gov|edu)(?:\/|\b)|site|login[- ]?url|freelancermap|github|gitlab|twitter|linkedin|xing|amazon|ebay|facebook|instagram|portal|dashboard|inbox|mailbox|nachrichten?|messages?|fill|navigate|navigation|open|browse|visit|check|retrieve|download|upload|click|type)\b/i.test(normalized);
+  const looksBrowserLoginTask = hasLoginSignal && hasBrowserTargetSignal;
   const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
     && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
     && (!looksRenderFromProvidedData || looksSequential);
