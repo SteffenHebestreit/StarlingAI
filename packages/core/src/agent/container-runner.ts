@@ -145,7 +145,7 @@ export async function runSubAgentInContainer(
   providerBaseUrl: string,
   providerApiKey: string,
 ): Promise<ContainerRunResult> {
-  const container = agentCfg.container!;
+  const container = agentCfg.container ?? {} as NonNullable<SubAgentConfig["container"]>;
   const image = container.image ?? "starlingai/agent-worker:dev";
   const memoryMb = container.memoryMb ?? 512;
   const cpus = container.cpus ?? 0.5;
