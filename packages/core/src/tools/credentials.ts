@@ -26,6 +26,7 @@ registerTool({
   description: [
     "Check whether stored login credentials exist for a website and retrieve non-secret metadata (login URL, CSS selectors, notes).",
     "Actual username and password are NEVER returned — use site_fill_credentials to fill login forms securely.",
+    "When saved loginUrl or named URLs are present, use those saved URLs before guessing a path or opening the homepage.",
     "The hostname is matched against configured sites (e.g. 'github.com', 'jira.company.com').",
   ].join(" "),
   parameters: {
@@ -70,6 +71,7 @@ registerTool({
     if (cred.submitSelector)    lines.push(`**Submit selector:** \`${cred.submitSelector}\``);
     if (cred.notes)             lines.push(`**Notes:** ${cred.notes}`);
     lines.push("");
+    lines.push("If the saved login URL or a named URL matches the task, navigate to that saved URL immediately instead of the homepage or a guessed path.");
     lines.push("To log in: navigate to the login URL, take a browser_snapshot, then call site_fill_credentials with the element refs for the username, password, and submit fields.");
 
     return {

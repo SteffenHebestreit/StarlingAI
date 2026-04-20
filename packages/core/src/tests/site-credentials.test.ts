@@ -142,4 +142,33 @@ describe("site credential resolution", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("resolves store-backed credentials across equivalent TLD variants", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-store-tld-"));
+
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    vi.resetModules();
+
+    try {
+      const sites = await import("../credentials/sites.js");
+
+      sites.saveSiteCredential("www.freelancermap.de", {
+        username: "user@example.com",
+        password: "stored-secret",
+        loginUrl: "https://www.freelancermap.de/login",
+      });
+
+      expect(sites.resolveSiteCredential("freelancermap.com")).toMatchObject({
+        hostname: "freelancermap.de",
+        username: "user@example.com",
+        password: "stored-secret",
+        loginUrl: "https://www.freelancermap.de/login",
+        source: "store",
+      });
+      expect(sites.resolveSiteCredential("www.freelancermap.com")?.hostname).toBe("freelancermap.de");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
