@@ -943,6 +943,33 @@ async function enforceDelegateCoverage(
 
   if (!itemShortfall && !lengthShortfall) return finalResponse;
 
+  // I14: Hallucinated-truncation detector. When the model's draft answer
+  // CLAIMS the evidence is truncated, cut off, abgeschnitten, or "not
+  // visible in my context" while substantial structured evidence is
+  // actually sitting in the most recent tool result, no amount of
+  // re-prompting will fix it — the model has convinced itself the data
+  // is gone. Detect that pattern and present the evidence verbatim
+  // instead of going through another LLM round-trip that will produce
+  // the same hallucination.
+  const HALLUCINATED_TRUNCATION_RE =
+    /\b(abgeschnitten|truncated|cut off|nicht sichtbar|in meinem Kontext nicht|not visible|content (is|was) (truncated|missing|cut)|Ergebnis(?:blöcke|inhalt) (?:wurden?|ist|sind)\s+(?:hier\s+)?(?:abgeschnitten|nicht)|cannot see|kann (?:ich)? (?:die|den)\s+\w+\s+nicht (?:sehen|finden))/i;
+  const evidenceIsRich = evidence.evidence.length >= 1500 && evidence.itemCount >= 5;
+  const draftClaimsTruncation = HALLUCINATED_TRUNCATION_RE.test(finalResponse);
+  if (evidenceIsRich && draftClaimsTruncation) {
+    logAudit(
+      "hallucinated_truncation_bypass",
+      {
+        evidenceLength: evidence.evidence.length,
+        evidenceItems: evidence.itemCount,
+        finalLength: finalResponse.length,
+        finalItems,
+        bypassReason: "model_claimed_truncation_with_evidence_present",
+      },
+      { sessionId: session.id, channel: session.channel, severity: "warn" },
+    );
+    return evidence.evidence;
+  }
+
   logAudit(
     "coverage_shortfall_resynthesis",
     {
@@ -964,17 +991,50 @@ async function enforceDelegateCoverage(
     "If the evidence covers multiple sources (e.g. several news outlets, several repositories, several findings), your answer MUST visibly cover ALL of them \u2014 do not keep only the first source.",
     "Preserve the structure (numbered list, bullets, table) and headings of the evidence.",
     "Do NOT summarize, do NOT trim, do NOT collapse rows into 'and others', do NOT add markers like '(truncated)' or '(abgeschnitten)'.",
+    "Do NOT claim the evidence is truncated, cut off, abgeschnitten, or invisible \u2014 the FULL evidence is in the tool result above and you MUST relay it verbatim.",
     "Do NOT call any tools \u2014 the evidence is already collected. Just rewrite the user-facing answer.",
   ].join(" ");
 
   const resynth = await forceSynthesis(session, provider, signal, instruction);
-  if (!resynth) return finalResponse;
+  if (!resynth) {
+    // Resynthesis failed entirely. If the original draft was a
+    // truncation hallucination and we have rich evidence, bypass.
+    if (evidenceIsRich && draftClaimsTruncation) {
+      return evidence.evidence;
+    }
+    return finalResponse;
+  }
   const cleanedResynth = sanitizeUserFacingAssistantResponse(resynth, 0);
   if (!cleanedResynth) return finalResponse;
+  // I14: If the resynthesis ALSO claims truncation while rich evidence
+  // exists, the model is locked into the hallucination. Bypass to the
+  // raw evidence rather than ship either bad draft.
+  if (evidenceIsRich && HALLUCINATED_TRUNCATION_RE.test(cleanedResynth)) {
+    logAudit(
+      "hallucinated_truncation_bypass",
+      {
+        evidenceLength: evidence.evidence.length,
+        evidenceItems: evidence.itemCount,
+        finalLength: finalResponse.length,
+        finalItems,
+        resynthLength: cleanedResynth.length,
+        bypassReason: "resynthesis_repeated_truncation_claim",
+      },
+      { sessionId: session.id, channel: session.channel, severity: "warn" },
+    );
+    return evidence.evidence;
+  }
   // Only accept if the resynthesis genuinely improved coverage.
   const newItems = countStructuredItems(cleanedResynth);
   const improved = cleanedResynth.length > finalResponse.length * 1.2 || newItems > finalItems;
-  if (!improved) return finalResponse;
+  if (!improved) {
+    // Resynthesis did not improve and original was a truncation
+    // hallucination with rich evidence \u2014 bypass to raw evidence.
+    if (evidenceIsRich && draftClaimsTruncation) {
+      return evidence.evidence;
+    }
+    return finalResponse;
+  }
   return await rewriteTerminalResponseIfNeeded(cleanedResynth, toolIterations, session, provider, signal);
 }
 

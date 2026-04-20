@@ -92,7 +92,8 @@ export type AuditEventType =
   // Observability
   | "turn_scorecard"
   | "coverage_shortfall_resynthesis"
-  | "sub_agent_synthesis_forced";
+  | "sub_agent_synthesis_forced"
+  | "hallucinated_truncation_bypass";
 
 export interface AuditEvent {
   id: string;
