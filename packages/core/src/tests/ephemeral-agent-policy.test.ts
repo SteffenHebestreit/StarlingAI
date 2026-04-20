@@ -215,6 +215,163 @@ describe("create_ephemeral_agent policy", () => {
     }
   }, 15000);
 
+  it("prefers a high-confidence catalog agent over architect fallback for current-news tasks", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ephemeral-high-confidence-route-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-4b" },
+        },
+        ephemeralGeneration: {
+          enabled: true,
+          skillMatchThreshold: 0.75,
+          architectAgentName: "agent_architect",
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds facts on the web and summarizes them.",
+          capabilities: ["web research", "documentation lookup", "source triangulation"],
+          tags: ["research", "web", "docs"],
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+        },
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
+          capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
+          tags: ["coordination", "web", "browser", "research"],
+          tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
+          maxIterations: 6,
+        },
+        agent_architect: {
+          description: "Designs ephemeral agents.",
+          tools: ["list_agents"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    collectTaskBidsMock.mockResolvedValue([]);
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("../tools/registry.js"),
+        import("../tools/sub-agent.js"),
+      ]);
+
+      const parallelDelegate = getTool("parallel_delegate");
+      expect(parallelDelegate).toBeTruthy();
+
+      const result = await parallelDelegate!.execute({
+        tasks: [
+          {
+            task: "Collect today's top headlines from major German and international sources.",
+            routingQuery: "today top headlines current news",
+            skillMatchThreshold: 0.75,
+          },
+        ],
+      }, {
+        sessionId: "high-confidence-route-session",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("web_task_coordinator");
+      expect(runSubAgentMock.mock.calls.some((call) => call[0]?.agentName === "agent_architect")).toBe(false);
+      expect(runSubAgentMock.mock.calls[0]?.[0]?.agentName).toBe("web_task_coordinator");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("accepts architect responses that append trailing text after the JSON object", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ephemeral-trailing-json-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-4b" },
+        },
+        ephemeralGeneration: {
+          enabled: true,
+          skillMatchThreshold: 0.75,
+          architectAgentName: "agent_architect",
+        },
+      },
+      subAgents: {
+        researcher: {
+          description: "Finds web documentation.",
+          tools: ["web_search"],
+          maxIterations: 4,
+        },
+        agent_architect: {
+          description: "Designs ephemeral agents.",
+          tools: ["list_agents"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    collectTaskBidsMock.mockResolvedValue([]);
+
+    runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => {
+      if (agentName === "agent_architect") {
+        return `${JSON.stringify({
+          agentName: "headline_fetcher",
+          description: "Fetches current headlines.",
+          systemPrompt: "Fetch current headlines and stop when enough evidence is collected.",
+          tools: ["web_search", "web_fetch"],
+          maxIterations: 4,
+          model: {
+            primary: "lmstudio/qwen3.6-35b-a3b",
+            temperature: 0.1,
+          },
+        })}\nNEXT ACTION: use the agent above.`;
+      }
+
+      if (agentName.startsWith("ephemeral:")) {
+        return `${agentName}:${task}:done`;
+      }
+
+      return `${agentName}:${task}`;
+    });
+
+    try {
+      const [{ getTool }] = await Promise.all([
+        import("../tools/registry.js"),
+        import("../tools/sub-agent.js"),
+      ]);
+
+      const parallelDelegate = getTool("parallel_delegate");
+      expect(parallelDelegate).toBeTruthy();
+
+      const result = await parallelDelegate!.execute({
+        tasks: [
+          {
+            task: "Collect today's top headlines.",
+            routingQuery: "today top headlines current news",
+            skillMatchThreshold: 0.75,
+          },
+        ],
+      }, {
+        sessionId: "trailing-json-session",
+        workspacePath: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("ephemeral:headline_fetcher");
+      expect(runSubAgentMock.mock.calls[0]?.[0]?.agentName).toBe("agent_architect");
+      expect(runSubAgentMock.mock.calls[1]?.[0]?.agentName).toBe("ephemeral:headline_fetcher");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it("treats architect-generated ephemeral agents that hit max iterations as failure", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ephemeral-failure-"));
     const configPath = join(tempDir, "starlingai.json");

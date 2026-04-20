@@ -20,6 +20,7 @@ import { registerSessionAbortController, deregisterSessionAbortController } from
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { lookupTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -403,7 +404,7 @@ function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unkn
 
 function extractAgentRoutingSuggestionFromMetadata(
   metadata: Record<string, unknown> | undefined,
-): { agentName: string; query?: string } | undefined {
+): { agentName: string; query?: string; fallbackAgents?: string[] } | undefined {
   const agentName = typeof metadata?.["topResult"] === "string"
     ? String(metadata["topResult"]).trim()
     : "";
@@ -412,10 +413,16 @@ function extractAgentRoutingSuggestionFromMetadata(
   const query = typeof metadata?.["query"] === "string"
     ? String(metadata["query"]).trim()
     : "";
+  const fallbackAgents = Array.isArray(metadata?.["suggestedFallbackAgents"])
+    ? (metadata?.["suggestedFallbackAgents"] as unknown[])
+      .map((value) => typeof value === "string" ? value.trim() : "")
+      .filter((value): value is string => Boolean(value) && value !== agentName)
+    : [];
 
   return {
     agentName,
     query: query || undefined,
+    fallbackAgents: fallbackAgents.length > 0 ? fallbackAgents : undefined,
   };
 }
 
@@ -717,9 +724,11 @@ function sanitizeUserFacingAssistantResponse(value: string, toolIterations: numb
   return sanitizeAssistantContent(value, toolIterations > 0);
 }
 
+const EMPTY_ASSISTANT_RESPONSE_FALLBACK = "I wasn't able to generate a usable reply for that turn. Please try again.";
+
 function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
-  if (toolIterations === 0) return false;
   if (!raw.trim() || cleaned.length === 0) return true;
+  if (toolIterations === 0) return false;
   if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
   return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
 }
@@ -839,7 +848,7 @@ async function finalizeUserFacingAssistantResponse(
 ): Promise<string> {
   const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
   if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
-    const stableResponse = cleaned || rawResponse.trim() || "(no response)";
+    const stableResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
     return await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
   }
 
@@ -856,7 +865,7 @@ async function finalizeUserFacingAssistantResponse(
     }
   }
 
-  const fallbackResponse = cleaned || rawResponse.trim() || "(no response)";
+  const fallbackResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
   return await rewriteTerminalResponseIfNeeded(fallbackResponse, toolIterations, session, provider, signal);
 }
 
@@ -953,6 +962,12 @@ export function classifyPostOrchestrationDisposition(
       return "failure";
     }
 
+    // A timed-out partial result carries enough evidence to synthesize from.
+    // Force "synthesize" immediately rather than letting the model re-delegate.
+    if (delegationPartial && terminalState === "timeout") {
+      return "synthesize";
+    }
+
     if (CONTINUATION_CUE_RE.test(text)) {
       sawContinuationCue = true;
     }
@@ -1038,11 +1053,16 @@ export function buildModelVisibleToolResult(
       return parts.join("\n");
     }
     if (delegationPartial) {
+      const terminalState = typeof metadata?.["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
+      const timedOut = terminalState === "timeout";
+      const importantNote = timedOut
+        ? "IMPORTANT: The specialist timed out with partial evidence. Use the evidence below to synthesize a final answer now. Do NOT delegate again for this task in this turn."
+        : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
       const parts = [
-        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL).`,
+        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL${timedOut ? ", TIMEOUT" : ""}).`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
         routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent toolsilure. Proceed with any dependent tools.",
+        importantNote,
         `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
       ].filter(Boolean);
       return parts.join("\n");
@@ -1334,6 +1354,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const TOOL_STREAK_THRESHOLD = 3;
   // Consecutive iterations where every tool call was blocked (per-turn limit / not-allowed).
   let _consecutiveFullyBlockedIterations = 0;
+  // D16: Consecutive delegation failures — when ≥2, escalate to warden-stop synthesis.
+  let _consecutiveDelegationFailures = 0;
+  // F29: Turn-level scorecard accumulators
+  let _turnDelegationCount = 0;
+  let _turnShareFindingCount = 0;
+  let _forcedSynthesisFired = false;
+  // G33: Collected share_finding texts for trajectory cache write
+  const sharedFindingsThisTurn: string[] = [];
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
@@ -1398,7 +1426,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let approvedRunCandidateEnforcementPrompt = "";
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
-  let pendingSearchAgentSuggestion: { agentName: string; query?: string } | undefined;
+  let pendingSearchAgentSuggestion: { agentName: string; query?: string; fallbackAgents?: string[] } | undefined;
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
@@ -1427,6 +1455,26 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       toolIterations: iterationCount,
     }),
   );
+
+  // ── G33: Trajectory cache lookup ─────────────────────────────────────────
+  // Before the first LLM call, check if we have a cached trajectory for a
+  // semantically similar recent query.  If yes, inject it as extra system context
+  // so the model can decide whether to reuse or re-research the evidence.
+  let trajectoryInjectionContext = "";
+  try {
+    const cachedTrajectory = await lookupTrajectory(
+      userMessage,
+      session.getWorkspacePath(),
+      initialDynamicGuidance?.freshnessSensitive ?? false,
+    );
+    if (cachedTrajectory && cachedTrajectory.finalAnswer.length > 50) {
+      const evidence = cachedTrajectory.sharedFindings.length > 0
+        ? `\n\nEvidence gathered:\n${cachedTrajectory.sharedFindings.slice(0, 5).map(f => `• ${f.slice(0, 300)}`).join("\n")}`
+        : "";
+      trajectoryInjectionContext =
+        `[CACHED RECENT EVIDENCE — verify before reuse, cached at ${cachedTrajectory.finishedAt}]\n${cachedTrajectory.finalAnswer.slice(0, 1500)}${evidence}`;
+    }
+  } catch { /* best-effort — never block the turn */ }
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -1507,6 +1555,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
+      // G33: Inject cached trajectory evidence on first iteration only
+      ...(iterationCount === 0 && trajectoryInjectionContext ? [{ role: "system" as const, content: trajectoryInjectionContext }] : []),
     ];
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
 
@@ -1932,6 +1982,30 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         channel: session.channel,
       });
 
+      // F29: Per-turn quality scorecard
+      logAudit("turn_scorecard", {
+        delegationCount: _turnDelegationCount,
+        shareFindingCount: _turnShareFindingCount,
+        forcedSynthesisFired: _forcedSynthesisFired,
+        wardenFailureCount: _consecutiveDelegationFailures,
+        finalAnswerLength: finalResponse.length,
+        toolIterations: iterationCount,
+      }, { sessionId: session.id, channel: session.channel });
+
+      // G33: Write trajectory for future cache reuse
+      if (_turnShareFindingCount > 0 && finalResponse.length > 50) {
+        writeTrajectory(
+          {
+            channel: session.channel,
+            normalizedQuery: userMessage.toLowerCase().trim().slice(0, 300),
+            sharedFindings: sharedFindingsThisTurn,
+            finalAnswer: finalResponse.slice(0, 2000),
+          },
+          session.getWorkspacePath(),
+          initialDynamicGuidance?.freshnessSensitive ?? false,
+        ).catch(() => undefined);
+      }
+
       return {
         response: finalResponse,
         toolCallsExecuted: iterationCount,
@@ -1986,10 +2060,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
       toolCallsRequested += 1;
-
-      const perTurnToolLimit = getPerTurnToolCallLimit(tc.name);
+      // F29: Count delegation and share_finding calls for the turn scorecard
+      if (
+        tc.name === "delegate_to_agent" ||
+        tc.name === "parallel_delegate" ||
+        tc.name === "run_task_graph" ||
+        tc.name === "swarm_delegate"
+      ) {
+        _turnDelegationCount += 1;
+      } else if (tc.name === "share_finding") {
+        _turnShareFindingCount += 1;
+        // G33: Collect finding text for trajectory cache
+        const findingText = typeof tc.arguments?.["finding"] === "string"
+          ? (tc.arguments["finding"] as string).slice(0, 500)
+          : typeof tc.arguments?.["content"] === "string"
+            ? (tc.arguments["content"] as string).slice(0, 500)
+            : "";
+        if (findingText) sharedFindingsThisTurn.push(findingText);
+      }
       const nextToolCallCount = (_turnToolCallCounts.get(tc.name) ?? 0) + 1;
       _turnToolCallCounts.set(tc.name, nextToolCallCount);
+      const perTurnToolLimit = getPerTurnToolCallLimit(tc.name);
 
       if (perTurnToolLimit && nextToolCallCount > perTurnToolLimit) {
         logAudit("tool_call_blocked", {
@@ -2035,6 +2126,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             channel: session.channel,
             severity: "warn",
           });
+
+          // F29: Per-turn quality scorecard (delegate-loop-terminated path)
+          logAudit("turn_scorecard", {
+            delegationCount: _turnDelegationCount,
+            shareFindingCount: _turnShareFindingCount,
+            forcedSynthesisFired: _forcedSynthesisFired,
+            wardenFailureCount: _consecutiveDelegationFailures,
+            finalAnswerLength: finalResponse.length,
+            toolIterations: iterationCount,
+            finishReason: "delegate_loop_terminated",
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
 
           return {
             response: finalResponse,
@@ -2161,6 +2263,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           tc.arguments = {
             ...(tc.arguments ?? {}),
             agentName: pendingSearchAgentSuggestion.agentName,
+            fallbackAgents: Array.isArray(tc.arguments?.["fallbackAgents"]) && tc.arguments["fallbackAgents"].length > 0
+              ? tc.arguments["fallbackAgents"]
+              : pendingSearchAgentSuggestion.fallbackAgents,
           };
           logAudit("tool_call_recovered", {
             originalTool: "delegate_to_agent",
@@ -2168,11 +2273,32 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             reason: "reuse_search_agents_top_result",
             recoveredAgentName: pendingSearchAgentSuggestion.agentName,
             routingQuery: pendingSearchAgentSuggestion.query ?? null,
+            recoveredFallbackAgents: pendingSearchAgentSuggestion.fallbackAgents ?? [],
           }, {
             sessionId: session.id,
             severity: "info",
           });
         }
+      } else if (tc.name === "swarm_delegate" && pendingSearchAgentSuggestion?.agentName && allowedToolNameSet.has("delegate_to_agent")) {
+        tc.name = "delegate_to_agent";
+        tc.arguments = {
+          ...(tc.arguments ?? {}),
+          agentName: pendingSearchAgentSuggestion.agentName,
+          fallbackAgents: Array.isArray(tc.arguments?.["fallbackAgents"]) && tc.arguments["fallbackAgents"].length > 0
+            ? tc.arguments["fallbackAgents"]
+            : pendingSearchAgentSuggestion.fallbackAgents,
+        };
+        logAudit("tool_call_recovered", {
+          originalTool: "swarm_delegate",
+          rewrittenTo: "delegate_to_agent",
+          reason: "reuse_search_agents_top_result",
+          recoveredAgentName: pendingSearchAgentSuggestion.agentName,
+          routingQuery: pendingSearchAgentSuggestion.query ?? null,
+          recoveredFallbackAgents: pendingSearchAgentSuggestion.fallbackAgents ?? [],
+        }, {
+          sessionId: session.id,
+          severity: "info",
+        });
       }
 
       const argsSig = JSON.stringify(tc.arguments ?? {});
@@ -2350,6 +2476,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               severity: "warn",
             });
 
+            // F29: Per-turn quality scorecard (identical-output loop terminated path)
+            logAudit("turn_scorecard", {
+              delegationCount: _turnDelegationCount,
+              shareFindingCount: _turnShareFindingCount,
+              forcedSynthesisFired: _forcedSynthesisFired,
+              wardenFailureCount: _consecutiveDelegationFailures,
+              finalAnswerLength: finalResponse.length,
+              toolIterations: iterationCount,
+              finishReason: "delegate_loop_terminated",
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+
             return {
               response: finalResponse,
               toolCallsExecuted: iterationCount,
@@ -2476,6 +2613,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     {
       const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
       if (disposition === "synthesize") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2485,6 +2623,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
         });
       } else if (disposition === "continue") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2494,6 +2633,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Treat delegated phrases like 'I will now attempt...' or 'the next step...' as proposed follow-up work, not proof that it already happened. Do NOT tell the user a next step 'has been executed' unless this turn includes the completed tool result for that action.",
         });
       } else if (disposition === "ask_user") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2501,12 +2641,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Ask the user yourself in one concise message and do NOT call more tools until they respond.",
         });
       } else if (disposition === "failure") {
-        session.addMessage({
-          role: "system",
-          content:
-            "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
-            "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
-        });
+        _consecutiveDelegationFailures += 1;
+        if (_consecutiveDelegationFailures >= 2) {
+          // D16: Warden escalation
+          _forcedSynthesisFired = true; // F29
+          session.addMessage({
+            role: "system",
+            content:
+              "[WARDEN STOP — FORCED SYNTHESIS] Two or more consecutive delegation attempts have failed. " +
+              "You MUST stop delegating and respond to the user now. " +
+              "If any partial evidence exists in the evidence blocks above, synthesize it into the best possible answer. " +
+              "If there is no usable evidence, tell the user honestly that the information could not be retrieved at this time and suggest what they could do next. " +
+              "Do NOT call any more delegation tools in this turn.",
+          });
+        } else {
+          session.addMessage({
+            role: "system",
+            content:
+              "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
+              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
+          });
+        }
       }
 
       if (toolResultMessages.length > 0) {

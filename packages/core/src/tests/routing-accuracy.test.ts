@@ -83,9 +83,10 @@ const ROUTING_FIXTURE = {
       maxIterations: 4,
     },
     web_task_coordinator: {
-      description: "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
-      capabilities: ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
-      tags: ["coordination", "web", "browser", "research"],
+      description: "Coordinator for freshness-sensitive web tasks including breaking news, headlines, weather forecasts, live scores, lottery results, and any task that requires the latest real-time data from the web. Delegates to researcher or browser_agent for live retrieval, then synthesises the findings.",
+      capabilities: ["multi-agent coordination", "breaking news", "headlines", "weather forecast", "live data retrieval", "web retrieval", "browser orchestration", "evidence synthesis", "current events", "real-time information"],
+      tags: ["coordination", "web", "browser", "research", "news", "headlines", "weather", "live", "freshness"],
+
       tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"],
       maxIterations: 6,
     },
@@ -266,6 +267,13 @@ const ROUTING_CASES: Array<{ query: string; expected: string; description: strin
   { query: "check why Slack webhook delivery is failing and fix it", expected: "channel_operator", description: "slack webhook diagnosis" },
   { query: "review the researcher agent system prompt and suggest improvements for convergence", expected: "prompt_optimizer", description: "prompt quality review" },
   { query: "the coder agent keeps looping without producing output, optimize its prompt", expected: "prompt_optimizer", description: "prompt convergence tuning" },
+  // D17: Real-world freshness-sensitive regression queries (audit 37d2f229)
+  { query: "Was sind die Headlines von Heute?", expected: "web_task_coordinator", description: "German breaking-news query" },
+  { query: "what are the headlines today", expected: "web_task_coordinator", description: "English breaking-news query" },
+  { query: "what's the weather in Heraklion next Friday?", expected: "web_task_coordinator", description: "weather forecast query" },
+  { query: "wie wird das Wetter nächste Woche in München", expected: "web_task_coordinator", description: "German weather forecast query" },
+  { query: "summarize today's CVE feed", expected: "web_task_coordinator", description: "live security feed summary" },
+  { query: "zeig mir die aktuellen Eurojackpot Zahlen", expected: "web_task_coordinator", description: "German live lottery results" },
 ];
 
 describe("routing accuracy benchmarks", () => {

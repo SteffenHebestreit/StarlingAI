@@ -99,6 +99,31 @@ function deriveAgentName(sessionId: string): string {
   return parts.length >= 3 ? parts[2]! : "orchestrator";
 }
 
+/**
+ * C13: Tokenize text for near-duplicate detection in share_finding.
+ * Returns a Set of lowercase word-level tokens (length ≥ 3).
+ */
+function tokenizeForDedup(text: string): Set<string> {
+  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]{3,}/g) ?? [];
+  return new Set(tokens);
+}
+
+/**
+ * C13: Jaccard-like token overlap score between new value tokens and existing value string.
+ * Returns 0–1 where 1 means identical token sets.
+ */
+function tokenOverlapScore(newTokens: Set<string>, existingValue: string): number {
+  if (newTokens.size === 0) return 0;
+  const existingTokens = tokenizeForDedup(existingValue);
+  if (existingTokens.size === 0) return 0;
+  let intersection = 0;
+  for (const token of newTokens) {
+    if (existingTokens.has(token)) intersection++;
+  }
+  const union = newTokens.size + existingTokens.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
 function resolveBroadcastTargets(fromAgent: string, args: Record<string, unknown>): string[] {
   const config = getConfig();
   const promotedAgents = readPromotedAgents(config.workspacePath);
@@ -972,6 +997,26 @@ registerTool({
 
     // Derive parent session ID from sub-agent sessionId (format: sub:parentId:agentName:ts)
     const parentSessionId = deriveSharedSessionId(ctx.sessionId);
+
+    // C13: Near-duplicate detection — reject findings that are substantially
+    // identical to an existing shared fact, to avoid polluting the session memory
+    // with redundant information across multiple browser/search iterations.
+    if (rawValue.length >= 50) {
+      const existingFacts = await readAllFacts(parentSessionId);
+      const newTokens = tokenizeForDedup(rawValue);
+      for (const [existingKey, existingValue] of Object.entries(existingFacts)) {
+        if (existingKey === key) continue; // same key overwrite is fine
+        const overlapScore = tokenOverlapScore(newTokens, existingValue);
+        if (overlapScore >= 0.85) {
+          log.info({ key, existingKey, overlapScore, parentSessionId }, "share_finding rejected as near-duplicate");
+          return {
+            success: true,
+            output: `Finding '${key}' is substantially similar to existing fact '${existingKey}' (${Math.round(overlapScore * 100)}% overlap). Skipped to avoid duplicate.`,
+            metadata: { key, parentSessionId, deduplicated: true, nearDuplicateKey: existingKey },
+          };
+        }
+      }
+    }
 
     await writeSharedFact(parentSessionId, key, value);
     log.info({ key, parentSessionId }, "Shared finding published");

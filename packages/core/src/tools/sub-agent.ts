@@ -11,7 +11,7 @@ import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
-import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
+import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { readPromotedAgents, promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -527,6 +527,8 @@ export async function resolveAgentRouting(
   // Pre-compute whether any agent in the pool declares GPU capability, so the
   // GPU-affinity penalty is only applied when a GPU-capable peer actually exists.
   const poolHasGpuAgents = entries.some(([, cfg]) => cfg.compute?.gpuPreferred && (cfg.compute?.gpuTier ?? "none") !== "none");
+  // G32: Task-class keywords for outcome-weighted routing multiplier
+  const queryKeywords = extractTaskKeywords(raw);
 
   let ranked = entries
     .map(([name, cfg]) => {
@@ -542,7 +544,9 @@ export async function resolveAgentRouting(
       ]) * 0.25;
       const taskShapeAdjustment = computeAgentTaskShapeAdjustment(raw, cfg);
       const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
-      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment));
+      // G32: Multiply by historical outcome weight (±20% max, requires ≥25 samples)
+      const outcomeMultiplier = computeOutcomeRoutingMultiplier(name, queryKeywords, config.workspacePath);
+      const boostedScore = Math.max(0, Math.min(1, (combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment) * outcomeMultiplier));
       return {
         name,
         cfg,
@@ -911,11 +915,66 @@ function shouldGenerateEphemeralAgent(bestScore: number | undefined, threshold: 
   return bestScore === undefined || bestScore < threshold;
 }
 
+function shouldPreferCatalogAgent(
+  bestScore: number | undefined,
+  bestConfidence: "high" | "medium" | "low" | undefined,
+  threshold: number,
+): boolean {
+  if (bestConfidence === "high") return true;
+  return !shouldGenerateEphemeralAgent(bestScore, threshold);
+}
+
+function extractFirstJsonObject(content: string): string {
+  const start = content.indexOf("{");
+  if (start === -1) {
+    throw new SyntaxError("No JSON object found in architect response");
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < content.length; index += 1) {
+    const char = content[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return content.slice(start, index + 1);
+      }
+    }
+  }
+
+  throw new SyntaxError("Unterminated JSON object in architect response");
+}
+
 function parseArchitectSpec(content: string): ArchitectEphemeralSpec {
   const trimmed = content.trim();
-  const jsonStr = trimmed.startsWith("{")
-    ? trimmed
-    : trimmed.slice(trimmed.indexOf("{"));
+  const jsonStr = extractFirstJsonObject(trimmed);
   return JSON.parse(jsonStr) as ArchitectEphemeralSpec;
 }
 
@@ -1268,7 +1327,7 @@ export function looksLikeFailureResult(result: string): boolean {
   if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
     return true;
   }
-  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
+  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {
     return true;
   }
 
@@ -1333,6 +1392,80 @@ function shouldAcceptPartialDelegation(
   }
 
   return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
+}
+
+/** Consolidated classification of a completed sub-agent delegation. */
+export type DelegationClassification =
+  | "success"               // usable, complete answer
+  | "partial"               // usable but incomplete evidence (accepted partial)
+  | "coordinator_noop"      // coordinator returned a planning stub without delegating or sharing evidence
+  | "failure"               // no usable output
+  | "infrastructure_failure"; // failure caused by an unreachable service — do not retry with a different agent
+
+/**
+ * D14: Single classification function that replaces the scattered combination of
+ * looksLikeFailureResult, looksLikePlanningOnlyResult, shouldAcceptPartialDelegation,
+ * terminalState checks, stats.outcome, and the coordinator no-op heuristic.
+ *
+ * Call AFTER <final_answer> tag parsing has already mutated `output` and
+ * `delegationOutcome`.
+ */
+export function classifyDelegationResult(
+  output: string,
+  delegationOutcome: string | undefined,
+  stats: { toolCount: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  agentName: string,
+  task: string,
+  artifacts: Record<string, unknown>[] = [],
+): DelegationClassification {
+  // ── Coordinator no-op ──────────────────────────────────────────────────
+  // A coordinator that completed without calling any delegation/evidence tools
+  // and returned a short or planning-only stub is treated as a no-op.
+  // Guard on terminalState === "completed" to avoid false positives from
+  // test mocks that leave terminalState undefined.
+  const isCoordinator =
+    (agentCfg?.tags ?? []).includes("coordination") || agentName.endsWith("_coordinator");
+  if (isCoordinator && stats?.terminalState === "completed" && delegationOutcome !== "failure") {
+    const COORDINATOR_WORK_TOOLS = new Set([
+      "delegate_to_agent", "parallel_delegate", "run_task_graph",
+      "swarm_delegate", "share_finding", "run_workflow",
+    ]);
+    const actuallyWorked = (stats.toolNames ?? []).some((n) => COORDINATOR_WORK_TOOLS.has(n));
+    if (!actuallyWorked && (output.trim().length < 80 || looksLikePlanningOnlyResult(output))) {
+      return "coordinator_noop";
+    }
+  }
+
+  // ── Partial acceptance ─────────────────────────────────────────────────
+  const acceptPartial = shouldAcceptPartialDelegation(agentName, task, stats, artifacts);
+
+  // ── Failure detection ──────────────────────────────────────────────────
+  const isExplicitFailure = delegationOutcome === "failure";
+  const isNeedsInfoUnaccepted = delegationOutcome === "needs_info" && !acceptPartial;
+  const isIncompleteUnaccepted =
+    !acceptPartial
+    && (
+      (stats?.terminalState !== undefined && stats.terminalState !== "completed")
+      || looksLikeFailureResult(output)
+    );
+
+  if (isExplicitFailure || isNeedsInfoUnaccepted || isIncompleteUnaccepted) {
+    // Even in a failing result, partial content may still be usable
+    const hasPartialContent =
+      delegationOutcome === "partial"
+      || (stats?.outcome === "partial" && delegationOutcome !== "success");
+    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
+      return "partial";
+    }
+    return looksLikeInfrastructureFailure(output) ? "infrastructure_failure" : "failure";
+  }
+
+  // ── Success / partial-accepted ─────────────────────────────────────────
+  if (acceptPartial || delegationOutcome === "partial") {
+    return "partial";
+  }
+  return "success";
 }
 
 function formatArtifactReferencesForSharedContext(artifacts: Record<string, unknown>[]): string {
@@ -1909,6 +2042,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   ]);
   let biddingTried = false;
   let bestAutoMatchScore: number | undefined;
+  let bestAutoMatchConfidence: "high" | "medium" | "low" | undefined;
   let lastFailureWasInfrastructure = false;
   let bestPartialResult:
     | {
@@ -1975,9 +2109,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
+          bestAutoMatchConfidence = topCandidate.confidence;
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
-            || !shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold);
+            || shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold);
           if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
               confidence: topCandidate.confidence,
@@ -2020,7 +2155,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         biddingTried = true;
         const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
-        if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+        bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
+        if (shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold)) {
           for (const bid of bids) {
             routingCandidateMap.set(bid.agentName, {
               confidence: bid.confidence,
@@ -2143,10 +2279,30 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         };
       }
 
+      // B7: Cross-agent context handoff — when this is a fallback agent (prior attempts
+      // already exist), prepend a brief summary of what was tried so the new agent does
+      // not repeat the same failing approaches. Pass as context (not task) so it goes
+      // into the system prompt area and won't contaminate the agent's output text.
+      let handoffContext = enrichedContext;
+      const priorAttempts = taskState.attempts.slice(0, -1); // all but the one just pushed
+      if (priorAttempts.length > 0) {
+        const priorLines = priorAttempts.map((a) => {
+          const status = a.status === "partial" ? "partial evidence" : "failed";
+          // Omit the raw error summary to avoid accidentally leaking failure-detection
+          // patterns into the new agent's context in a confusing way.
+          return `  - ${a.agentName} (${status})`;
+        });
+        const handoffPrefix =
+          `[PRIOR AGENT ACTIVITY]\n` +
+          priorLines.join("\n") +
+          "\nDo NOT repeat these exact approaches. Use a different strategy or source.\n";
+        handoffContext = handoffPrefix + (enrichedContext ? `\n${enrichedContext}` : "");
+      }
+
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
-        context: enrichedContext,
+        context: handoffContext,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         allowedAgents: ctx.allowedAgents,
@@ -2165,6 +2321,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
+        // E18: Soft deadline — give the specialist 70% of its effective timeout so
+        // it starts wrapping up before the hard timeout fires.
+        softDeadlineMs: (() => {
+          const effective = ctx.turnTimeoutOverrideMs ?? agentCfg?.turnTimeoutMs ?? 60_000;
+          return Date.now() + Math.floor(effective * 0.70);
+        })(),
       };
 
       let output: string;
@@ -2224,28 +2386,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         output = parsedOutcome.data || output;
       }
 
-      const acceptPartial = shouldAcceptPartialDelegation(candidate, request.task, stats, artifacts);
+      // D14: Consolidated classification — replaces the scattered acceptPartial /
+      // coordinatorMicroCompletion / weak variables that used to live here.
+      const classification = classifyDelegationResult(
+        output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
+      );
       const routingInfo = routingCandidateMap.get(candidate);
-      const weak = delegationOutcome === "failure"
-        || (delegationOutcome === "needs_info" && !acceptPartial)
-        || (!acceptPartial && (
-          (stats?.terminalState !== undefined && stats.terminalState !== "completed")
-          || looksLikeFailureResult(output)
-        ));
+
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
       finalizeAttemptBudget(ctx, taskState, attempt);
 
-      if (weak) {
-        // Use stats.outcome as fallback — <final_answer> tag parsing can
-        // override delegationOutcome to "failure" even when the sub-agent
-        // runner classified the result as "partial" (max_iterations with content).
-        const partial = delegationOutcome === "partial"
-          || (stats?.outcome === "partial" && delegationOutcome !== "success");
-        attempt.status = partial ? "partial" : "failed";
+      if (classification !== "success" && classification !== "partial") {
+        // "weak_partial", "coordinator_noop", "failure", "infrastructure_failure" —
+        // all of these continue to the next candidate.
+        const isPartialContent = classification === "weak_partial";
+        attempt.status = isPartialContent ? "partial" : "failed";
         taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
-        taskState.status = partial ? "partial" : "failed";
-        if (partial && output.trim() && !looksLikePlanningOnlyResult(output)) {
+        taskState.status = isPartialContent ? "partial" : "failed";
+        if (isPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
           if (!bestPartialResult || output.trim().length > bestPartialResult.output.trim().length) {
             bestPartialResult = {
               agentName: candidate,
@@ -2256,13 +2415,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             };
           }
         }
-        lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
+        lastFailureWasInfrastructure = classification === "infrastructure_failure";
         publishSwarmState(ctx);
-        emitSwarmEvent(partial ? "task_partial" : "task_failed", {
+        emitSwarmEvent(isPartialContent ? "task_partial" : "task_failed", {
           sessionId: ctx.sessionId,
           taskId,
           agentName: candidate,
-          data: { reason: partial ? "partial_result" : "weak_result" },
+          data: { reason: isPartialContent ? "partial_result" : "weak_result" },
         });
         announceAgentCapability({
           sessionId: ctx.sessionId,
@@ -2295,7 +2454,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         graphPromoteFact(k, v, candidate, ctx.sessionId).catch(() => {});
       }
 
-      const partial = delegationOutcome === "partial";
+      const partial = classification === "partial";
       attempt.status = partial ? "partial" : "completed";
       taskState.status = partial ? "partial" : "completed";
       taskState.output = output;
@@ -3128,6 +3287,7 @@ registerTool({
         topResult: topAgent.name,
         topResultConfidence: topAgent.confidence,
         topResultScore: topAgent.score,
+        suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
       },
     };
   },

@@ -87,7 +87,9 @@ export type AuditEventType =
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health
-  | "docker_daemon_unreachable";
+  | "docker_daemon_unreachable"
+  // Observability
+  | "turn_scorecard";
 
 export interface AuditEvent {
   id: string;

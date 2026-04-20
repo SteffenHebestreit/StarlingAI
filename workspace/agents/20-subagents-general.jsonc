@@ -78,6 +78,27 @@
         "share_finding"
       ]
     },
+    "retrieval_analyst": {
+      "description": "Workspace retrieval and code-search specialist for finding files, symbols, references, and configuration values across the codebase.",
+      "capabilities": ["workspace search", "code retrieval", "symbol lookup", "reference tracing", "config value search", "cross-file analysis"],
+      "tags": ["code", "retrieval", "workspace", "search", "analysis"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 6,
+      "container": { "disabled": true }, // read-only tools only — in-process is safe
+      "systemPrompt": "You locate and extract information from the workspace codebase. Use workspace_search to find files by content, list_files to discover directory structure, and read_file to inspect specific files. For symbol or reference lookups, combine exact-string searches with file-tree exploration. Return precise locations (file path, line range), exact values, and relevant surrounding context. Do NOT guess or fabricate file paths. When the task asks you to find all occurrences of a symbol, class, or string, scan exhaustively rather than stopping at the first hit. Publish reusable findings via share_finding so downstream agents can use them without re-scanning.",
+      "tools": [
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
     "browser_agent": {
       "description": "Browser automation specialist using Playwright MCP tools to open websites, interact with pages, and capture screenshots or accessibility snapshots for downstream analysis.",
       "capabilities": ["browser automation", "website navigation", "form submission", "page evidence capture", "browser screenshots", "page snapshots"],
@@ -137,9 +158,10 @@
       ]
     },
     "web_task_coordinator": {
-      "description": "Coordinator for freshness-sensitive web tasks that need research, browser interaction, and evidence synthesis.",
-      "capabilities": ["multi-agent coordination", "web retrieval", "browser orchestration", "evidence synthesis"],
-      "tags": ["coordination", "web", "browser", "research"],
+      "description": "Coordinator for freshness-sensitive web tasks including breaking news, headlines, weather forecasts, live scores, lottery results, and any task that requires the latest real-time data from the web. Delegates to researcher or browser_agent for live retrieval, then synthesises the findings.",
+      "capabilities": ["multi-agent coordination", "breaking news", "headlines", "weather forecast", "live data retrieval", "web retrieval", "browser orchestration", "evidence synthesis", "current events", "real-time information"],
+      "tags": ["coordination", "web", "browser", "research", "news", "headlines", "weather", "live", "freshness", "nachrichten", "aktuell"],
+
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -147,7 +169,7 @@
         "maxTokens": 6144
       },
       "maxIterations": 8,
-      "systemPrompt": "You coordinate live web tasks that require browser interaction or freshness-sensitive retrieval. All web searches go through SearXNG first (Playwright and DuckDuckGo as fallbacks), and web_fetch renders HTML pages via Playwright when available. Before composing an ad hoc specialist plan, call search_workflows for recurring request shapes such as browser inspection or web-interactive tasks. If a workflow matches closely, call run_workflow and only fall back to manual orchestration when no catalog workflow fits or one smallest corrective action is needed. Break remaining work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages that need clicking or form interaction, vision_browser_analyst for interpreting browser evidence, data_analyst for structured numeric cleanup, chart_designer for HTML charts or tables, and summarizer for concise synthesis. Do NOT delegate research-heavy or paper-writing tasks — those belong to mission_coordinator or a research scene. Your scope is browser-centric web work only. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.",
+      "systemPrompt": "You coordinate live web tasks that require browser interaction or freshness-sensitive retrieval. All web searches go through SearXNG first (Playwright and DuckDuckGo as fallbacks), and web_fetch renders HTML pages via Playwright when available. Before composing an ad hoc specialist plan, call search_workflows for recurring request shapes such as browser inspection or web-interactive tasks. If a workflow matches closely, call run_workflow and only fall back to manual orchestration when no catalog workflow fits or one smallest corrective action is needed. If you are already executing inside a scene or workflow, do not call search_workflows or run_workflow again; orchestrate directly with delegate_to_agent, parallel_delegate, or run_task_graph instead. DEFAULT PARALLELISM: when there are 2 or more independent sub-tasks that do not depend on each other's output, use parallel_delegate rather than sequential delegate_to_agent calls. Only chain sequentially when a later task explicitly requires the prior task's output. Break remaining work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages that need clicking or form interaction, vision_browser_analyst for interpreting browser evidence, data_analyst for structured numeric cleanup, chart_designer for HTML charts or tables, and summarizer for concise synthesis. Do NOT delegate research-heavy or paper-writing tasks — those belong to mission_coordinator or a research scene. Your scope is browser-centric web work only. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.",
       "tools": [
         "list_agents",
         "search_agents",
