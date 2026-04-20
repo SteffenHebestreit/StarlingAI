@@ -6,7 +6,11 @@ import { join } from "node:path";
 describe("site credential resolution", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_MASTER_KEY"];
+    delete process.env["SAI_CRED_STORE"];
     delete process.env["N8N_PASSWORD"];
+    delete process.env["N8N_USERNAME"];
+    delete process.env["N8N_KEY"];
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
@@ -98,6 +102,71 @@ describe("site credential resolution", () => {
         hasSelectors: true,
         source: "config",
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves env refs from store-backed site credentials", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-store-env-"));
+
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["N8N_USERNAME"] = "admin@n8n.local";
+    process.env["N8N_KEY"] = "super-secret-from-env";
+    vi.resetModules();
+
+    try {
+      const sites = await import("../credentials/sites.js");
+
+      sites.saveSiteCredential("n8n.k2o", {
+        username: "$N8N_USERNAME",
+        password: "$N8N_KEY",
+        loginUrl: "http://n8n.k2o/signin",
+      });
+
+      expect(sites.getStoredSiteCredentialRecord("n8n.k2o")).toMatchObject({
+        hostname: "n8n.k2o",
+        username: "$N8N_USERNAME",
+        password: "$N8N_KEY",
+      });
+
+      expect(sites.resolveSiteCredential("n8n")).toMatchObject({
+        hostname: "n8n.k2o",
+        username: "admin@n8n.local",
+        password: "super-secret-from-env",
+        loginUrl: "http://n8n.k2o/signin",
+        source: "store",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves store-backed credentials across equivalent TLD variants", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-store-tld-"));
+
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    vi.resetModules();
+
+    try {
+      const sites = await import("../credentials/sites.js");
+
+      sites.saveSiteCredential("www.freelancermap.de", {
+        username: "user@example.com",
+        password: "stored-secret",
+        loginUrl: "https://www.freelancermap.de/login",
+      });
+
+      expect(sites.resolveSiteCredential("freelancermap.com")).toMatchObject({
+        hostname: "freelancermap.de",
+        username: "user@example.com",
+        password: "stored-secret",
+        loginUrl: "https://www.freelancermap.de/login",
+        source: "store",
+      });
+      expect(sites.resolveSiteCredential("www.freelancermap.com")?.hostname).toBe("freelancermap.de");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

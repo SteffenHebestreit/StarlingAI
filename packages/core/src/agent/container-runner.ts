@@ -25,6 +25,7 @@ import type { SubAgentRunOptions } from "./sub-agent.js";
 import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
+import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("agent:container-runner");
 
@@ -74,6 +75,47 @@ export type ContainerDiagnosticEvent =
 // Tools that need internet access — these agents run with --network=bridge
 const NEEDS_INTERNET = new Set(["researcher", "source_verifier", "browser_agent"]);
 
+/**
+ * Patterns the Docker CLI emits when it cannot reach the daemon. Used to
+ * distinguish "daemon is down" from normal container-side errors so the Warden
+ * can raise a distinct alert operators act on differently.
+ */
+const DOCKER_UNREACHABLE_PATTERNS = /cannot connect to the docker daemon|is the docker daemon running|error response from daemon.*dial|docker daemon is not running|docker endpoint.*not found|error during connect: this error may indicate that the docker daemon/i;
+
+/**
+ * Rate-limit repeated unreachable-daemon alerts: if the daemon is down every
+ * delegation will trip this path and we would otherwise flood the audit log.
+ */
+const DOCKER_UNREACHABLE_COOLDOWN_MS = 60_000;
+let _lastDockerUnreachableAt = 0;
+
+/** Test-only — reset the cooldown so successive tests can each observe the alert. */
+export function resetDockerUnreachableCooldownForTests(): void {
+  _lastDockerUnreachableAt = 0;
+}
+
+function reportDockerUnreachable(
+  agentName: string,
+  parentSessionId: string,
+  errorMessage: string,
+  source: "spawn_error" | "stderr",
+): void {
+  const now = Date.now();
+  if (now - _lastDockerUnreachableAt < DOCKER_UNREACHABLE_COOLDOWN_MS) return;
+  _lastDockerUnreachableAt = now;
+  log.error({ agentName, source, errorMessage: errorMessage.slice(0, 500) },
+    "Docker daemon appears unreachable during containerized delegation");
+  logAudit(
+    "docker_daemon_unreachable",
+    {
+      agentName,
+      source,
+      errorMessage: errorMessage.slice(0, 500),
+    },
+    { sessionId: parentSessionId, severity: "error" },
+  );
+}
+
 /** Send SIGTERM, then SIGKILL after grace period, swallowing errors if already gone. */
 function gracefulKill(pid: number | undefined, proc: ReturnType<typeof spawn>): void {
   try { proc.kill("SIGTERM"); } catch { /* already dead */ }
@@ -103,7 +145,7 @@ export async function runSubAgentInContainer(
   providerBaseUrl: string,
   providerApiKey: string,
 ): Promise<ContainerRunResult> {
-  const container = agentCfg.container!;
+  const container = agentCfg.container ?? {} as NonNullable<SubAgentConfig["container"]>;
   const image = container.image ?? "starlingai/agent-worker:dev";
   const memoryMb = container.memoryMb ?? 512;
   const cpus = container.cpus ?? 0.5;
@@ -294,6 +336,9 @@ export async function runSubAgentInContainer(
         // Non-zero exit with no valid JSON — try to recover partial output
         const partial = recoverPartialOutput(stdout);
         log.error({ agentName: opts.agentName, code, stdout: stdout.slice(0, 500) }, "Container output parse failed");
+        if (DOCKER_UNREACHABLE_PATTERNS.test(stderr)) {
+          reportDockerUnreachable(opts.agentName, opts.parentSessionId, stderr, "stderr");
+        }
         settle(
           `Sub-agent '${opts.agentName}' exited with code ${code}.` +
           (partial ? ` Partial: ${partial}` : ` Output: ${stdout.slice(0, 300)}`),
@@ -311,6 +356,10 @@ export async function runSubAgentInContainer(
     proc.on("error", (err) => {
       cleanup();
       log.error({ err, agentName: opts.agentName }, "Failed to spawn container");
+      const errWithCode = err as NodeJS.ErrnoException;
+      if (errWithCode.code === "ENOENT" || DOCKER_UNREACHABLE_PATTERNS.test(err.message)) {
+        reportDockerUnreachable(opts.agentName, opts.parentSessionId, err.message, "spawn_error");
+      }
       settle(`Failed to spawn sub-agent container: ${err.message}`);
     });
 
@@ -352,4 +401,72 @@ export function parseContainerDiagnosticLine(line: string): ContainerDiagnosticE
       : { type: "ready" };
   }
   return null;
+}
+
+export interface DockerReachability {
+  reachable: boolean;
+  /** docker server version reported by `docker version --format`. Present only when reachable. */
+  serverVersion?: string;
+  /** Captured stderr / spawn error message when unreachable. */
+  error?: string;
+  /** Time taken by the probe in ms. */
+  durationMs: number;
+}
+
+/**
+ * Probe whether Docker is reachable from this process. Used at gateway startup
+ * when `agents.defaultContainerized` is enabled — if Docker is down, we want to
+ * abort loud rather than silently fall back to in-process execution and lose
+ * the isolation guarantee that operators are relying on.
+ *
+ * Pure read-only — runs `docker version --format '{{.Server.Version}}'` with a
+ * short timeout. Never spawns a container.
+ */
+export async function probeDockerReachability(timeoutMs = 5000): Promise<DockerReachability> {
+  const start = Date.now();
+  return new Promise<DockerReachability>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const settle = (result: DockerReachability) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn("docker", ["version", "--format", "{{.Server.Version}}"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      settle({ reachable: false, error: `docker spawn failed: ${message}`, durationMs: Date.now() - start });
+      return;
+    }
+
+    const killTimer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      settle({ reachable: false, error: `docker probe timed out after ${timeoutMs}ms`, durationMs: Date.now() - start });
+    }, timeoutMs);
+    killTimer.unref?.();
+
+    proc.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    proc.on("error", (err) => {
+      clearTimeout(killTimer);
+      settle({ reachable: false, error: `docker spawn error: ${err.message}`, durationMs: Date.now() - start });
+    });
+    proc.on("close", (code) => {
+      clearTimeout(killTimer);
+      const durationMs = Date.now() - start;
+      const serverVersion = stdout.trim();
+      if (code === 0 && serverVersion) {
+        settle({ reachable: true, serverVersion, durationMs });
+      } else {
+        const errMsg = stderr.trim() || `docker exited with code ${code}`;
+        settle({ reachable: false, error: errMsg, durationMs });
+      }
+    });
+  });
 }

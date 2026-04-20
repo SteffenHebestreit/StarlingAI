@@ -19,7 +19,7 @@ import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { runSubAgentInContainer } from "./container-runner.js";
-import { appendOutcome, computeAdaptiveSubAgentTimeoutMs } from "./outcomes.js";
+import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
@@ -27,6 +27,7 @@ import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { consumeAgentMessages } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
+import { truncateToolResult } from "../tools/result-shaping.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
 // that register their own mocks before importing this module.
@@ -825,6 +826,13 @@ export interface SubAgentRunOptions {
   _workflowExecutionStack?: string[];
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
   inlineConfig?: import("../config/schema.js").SubAgentConfig;
+  /**
+   * E18: Soft deadline — when Date.now() >= softDeadlineMs the runner injects a
+   * wrap-up nudge so the agent calls share_finding and produces a final answer
+   * before the hard timeout fires. Set by coordinators to allocate a fraction
+   * of their own budget to each delegated specialist.
+   */
+  softDeadlineMs?: number;
 }
 
 export interface SubAgentProgressEvent {
@@ -1105,6 +1113,31 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
     let workflowPassthroughOutput: string | null = null;
+    // Observability: per-tool byte totals for context-budget runaway detection
+    const bytesByTool = new Map<string, number>();
+    // E21: Source-diversity — detect when research plateaus on repeated domains
+    const visitedSourceDomains = new Set<string>();
+    let consecutiveStaleDomainFetches = 0;
+    // E18: Soft-deadline nudge — fire once when softDeadlineMs is reached
+    let softDeadlineInjected = false;
+    // Phase A5: nudge agents to call share_finding after collecting substantive evidence
+    let substantiveEvidenceCount = 0;
+    let shareFindinCalledThisRun = false;
+    // Phase B8: stop heuristic — count share_finding calls to detect "enough evidence collected"
+    let shareFindinCallCount = 0;
+    // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
+    const taskKeywords = extractTaskKeywords(sanitizedTask);
+
+    /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount. */
+    const recordOutcome = (
+      fields: Parameters<typeof appendOutcome>[1],
+    ): void => {
+      appendOutcome(opts.workspacePath, {
+        ...fields,
+        taskKeywords,
+        sharedFindingsCount: shareFindinCallCount,
+      });
+    };
 
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
@@ -1151,6 +1184,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           durationMs: Date.now() - runStartedAt,
           outcome: stats.outcome,
           terminalState: stats.terminalState,
+          bytesByTool: Object.fromEntries(bytesByTool),
           ...extra,
         },
         { sessionId: subSessionId, severity },
@@ -1301,7 +1335,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           return suspicious;
         }
 
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1406,7 +1440,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
       const accountsResult = await executeTrackedMailTool("mail_list_accounts", {});
       if (!accountsResult.success) {
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1438,7 +1472,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
       if (accountIds.length === 0) {
         const result = "No mail accounts are configured.";
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1455,7 +1489,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
 
       const unreadResult = await executeTrackedMailTool("mail_list_unread", { accountIds, limit: 5 });
       if (!unreadResult.success) {
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1534,7 +1568,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         result = outputScan.redacted;
       }
 
-      appendOutcome(opts.workspacePath, {
+      recordOutcome({
         ts: new Date().toISOString(),
         agent: opts.agentName,
         task: opts.task.slice(0, 200),
@@ -1562,7 +1596,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             artifacts,
             swarmState: toolContext.swarmState,
           });
-          appendOutcome(opts.workspacePath, {
+          recordOutcome({
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
@@ -1594,7 +1628,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           artifacts,
           swarmState: toolContext.swarmState,
         });
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1669,6 +1703,47 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
       }
 
+      // E18: Soft deadline — inject a wrap-up nudge once when the caller-supplied
+      // deadline expires. Coordinators set this to ~70% of their own budget so
+      // specialists begin wrapping up before the hard timeout fires.
+      if (
+        opts.softDeadlineMs !== undefined
+        && !softDeadlineInjected
+        && Date.now() >= opts.softDeadlineMs
+        && toolCount > 0
+      ) {
+        softDeadlineInjected = true;
+        effectiveSystemPrompt +=
+          "\n\n⚠️ SOFT DEADLINE REACHED: Your allocated time budget for this task is expiring. " +
+          "Plan to wrap up within the next 1–2 iterations: " +
+          "call share_finding with any important evidence you have gathered, " +
+          "then produce your complete final answer.";
+        log.info(
+          { agentName: opts.agentName, iterations, softDeadlineMs: opts.softDeadlineMs },
+          "Soft deadline reached — injecting wrap-up nudge",
+        );
+      }
+
+      // §12: Iteration-budget nudge — fire when many iterations pass without
+      // any tool calls, even if the soft-deadline hasn't expired.  Prevents
+      // agents that are "thinking aloud" from consuming the entire budget
+      // without making progress.
+      if (
+        !softDeadlineInjected
+        && toolCount === 0
+        && iterations >= Math.floor(maxIterations * 0.7)
+      ) {
+        softDeadlineInjected = true; // reuse the flag so this fires only once
+        effectiveSystemPrompt +=
+          "\n\n⚠️ ITERATION BUDGET WARNING: You have used many iterations without calling any tools. " +
+          "If you need to gather information, call the appropriate tools now. " +
+          "If you already have enough context, produce your final answer immediately.";
+        log.info(
+          { agentName: opts.agentName, iterations, maxIterations, toolCount },
+          "§12: Iteration-budget nudge injected (no tool calls at 70% of budget)",
+        );
+      }
+
       const messages: LLMMessage[] = [
         { role: "system", content: effectiveSystemPrompt },
         ...history,
@@ -1695,7 +1770,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             artifacts,
             swarmState: toolContext.swarmState,
           });
-          appendOutcome(opts.workspacePath, {
+          recordOutcome({
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
@@ -1728,7 +1803,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             artifacts,
             swarmState: toolContext.swarmState,
           });
-          appendOutcome(opts.workspacePath, {
+          recordOutcome({
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
@@ -1756,7 +1831,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           });
         }
         log.error({ err, agentName: opts.agentName }, "Sub-agent LLM call failed");
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -1868,7 +1943,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         );
 
         // Detect likely failure patterns from the output text
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -2038,8 +2113,26 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           );
         }
 
+        // Hard-cap individual tool results to prevent large pages (e.g. Wikipedia) from
+        // exhausting the sub-agent's context budget and dropping subsequent tool calls.
+        resultContent = truncateToolResult(resultContent, tc.name);
+
         if (result.success) {
           successfulToolCount += 1;
+          // Track substantive evidence for share_finding nudge (Phase A5)
+          const SUBSTANTIVE_THRESHOLDS: Record<string, number> = {
+            web_search: 1_024,
+            web_fetch: 5_120,
+            browser_navigate: 5_120,
+          };
+          const threshold = SUBSTANTIVE_THRESHOLDS[tc.name];
+          if (threshold !== undefined && resultContent.length >= threshold) {
+            substantiveEvidenceCount += 1;
+          }
+        }
+        if (tc.name === "share_finding") {
+          shareFindinCalledThisRun = true;
+          shareFindinCallCount += 1;
         }
         if (tc.name === "run_workflow" && result.success) {
           workflowPassthroughOutput = result.output;
@@ -2053,6 +2146,25 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           decisiveDirectRemoteToolName = tc.name;
         }
         lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent, success: result.success });
+        // Track bytes per tool for observability
+        bytesByTool.set(tc.name, (bytesByTool.get(tc.name) ?? 0) + resultContent.length);
+
+        // E21: Track source domain diversity for research plateau detection
+        if (result.success && (tc.name === "web_fetch" || tc.name === "browser_navigate")) {
+          const rawUrl = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
+          const urlStr = typeof rawUrl === "string" ? rawUrl : null;
+          if (urlStr) {
+            try {
+              const domain = new URL(urlStr).hostname.replace(/^www\./i, "");
+              if (visitedSourceDomains.has(domain)) {
+                consecutiveStaleDomainFetches += 1;
+              } else {
+                visitedSourceDomains.add(domain);
+                consecutiveStaleDomainFetches = 0;
+              }
+            } catch { /* invalid URL */ }
+          }
+        }
 
         // When web_search reports degraded/hard-blocked, remove it from the
         // tools array so the LLM cannot call it on subsequent iterations.
@@ -2110,7 +2222,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         iterations += 1;
         const directOutcome: SubAgentOutcome = decisiveDirectRemoteToolResult.success ? "success" : "partial";
         const stats = buildStats("completed", directOutcome);
-        appendOutcome(opts.workspacePath, {
+        recordOutcome({
           ts: new Date().toISOString(),
           agent: opts.agentName,
           task: opts.task.slice(0, 200),
@@ -2137,6 +2249,35 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         lastTR.content += "\n\n[⚠️ BUDGET: You have 1 iteration left after this one. " +
           "On your next turn you will have NO tools available. " +
           "Produce your COMPLETE final answer NOW or on the very next turn.]";
+      }
+
+      // Phase A5: when substantial evidence has been gathered but share_finding hasn't
+      // been called yet, inject a nudge so the agent publishes its findings before
+      // running out of iterations or dropping evidence.
+      if (substantiveEvidenceCount >= 2 && !shareFindinCalledThisRun && toolResults.length > 0) {
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content += "\n\n[EVIDENCE CHECKPOINT] You have collected substantial evidence (" +
+          substantiveEvidenceCount + " tool results \u2265 size threshold). " +
+          "Call share_finding with the strongest facts you have gathered so far, then continue or finish.";
+      }
+
+      // Phase B8: when the agent has called share_finding enough times it has
+      // gathered sufficient evidence. Inject a stop nudge to prevent endless loops.
+      if (shareFindinCallCount >= 3 && toolResults.length > 0) {
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content += "\n\n[EVIDENCE COMPLETE] You have called share_finding " +
+          shareFindinCallCount + " times and gathered sufficient evidence. " +
+          "Do NOT call more web_search or web_fetch. Synthesize your findings into a final answer now.";
+      }
+
+      // E21: Source-diversity plateau — inject breadth-sufficient nudge when the agent
+      // has not visited a new source domain in 2+ consecutive fetches.
+      if (consecutiveStaleDomainFetches >= 2 && visitedSourceDomains.size >= 2 && toolResults.length > 0) {
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content += "\n\n[BREADTH SUFFICIENT] You have fetched from " +
+          visitedSourceDomains.size + " unique domain(s) with no new source in the last " +
+          consecutiveStaleDomainFetches + " fetches. " +
+          "Source coverage has plateaued. Stop fetching — call share_finding with your best evidence and synthesize a final answer.";
       }
 
       history.push(...toolResults);
@@ -2237,7 +2378,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           if (suspicious) {
             return suspicious;
           }
-          appendOutcome(opts.workspacePath, {
+          recordOutcome({
             ts: new Date().toISOString(),
             agent: opts.agentName,
             task: opts.task.slice(0, 200),
@@ -2271,7 +2412,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       }
     }
 
-    appendOutcome(opts.workspacePath, {
+    recordOutcome({
       ts: new Date().toISOString(),
       agent: opts.agentName,
       task: opts.task.slice(0, 200),

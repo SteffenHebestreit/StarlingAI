@@ -44,6 +44,14 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "git_diff",
   // HTTP request — available directly for API interaction
   "http_request",
+  // Real-time data feeds (free public APIs)
+  "get_weather",
+  "get_news_headlines",
+  "read_rss_feed",
+  "get_fx_rate",
+  "get_crypto_price",
+  "wikipedia_lookup",
+  "list_data_feeds",
   // computer_* and vscode_* tools are delegated to the computer_use_agent
   // sub-agent to prevent hallucinated tool-call patterns in the orchestrator.
   // Pentest tools — available to main assistant; active tools require PENTEST_SCOPE
@@ -69,6 +77,7 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "parallel_delegate",
   "create_ephemeral_agent",
   "get_swarm_state",
+  "get_swarm_budget",
   "run_task_graph",
 ] as const;
 

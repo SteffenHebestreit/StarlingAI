@@ -339,3 +339,57 @@ describe("Warden — stats and lifecycle", () => {
     stopWarden();
   });
 });
+
+describe("Warden — docker daemon unreachable detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("fires an alert immediately when container-runner reports the daemon unreachable", () => {
+    fireEvent({
+      type: "docker_daemon_unreachable",
+      sessionId: "sess-infra-1",
+      data: {
+        agentName: "researcher",
+        source: "stderr",
+        errorMessage: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+      },
+    });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    expect(calls).toHaveLength(1);
+    const [, data, opts] = calls[0]!;
+    expect(data).toMatchObject({ alertType: "docker_daemon_unreachable" });
+    expect(opts).toMatchObject({ severity: "error" });
+  });
+
+  it("includes the agent name and session prefix in the subject", () => {
+    fireEvent({
+      type: "docker_daemon_unreachable",
+      sessionId: "sess-infra-subject",
+      data: { agentName: "pentest_scanner", source: "spawn_error", errorMessage: "ENOENT" },
+    });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    const payload = calls[0]?.[1] as Record<string, unknown>;
+    expect(String(payload["subject"])).toMatch(/^pentest_scanner@sess-infra-subject/);
+  });
+
+  it("attaches an intervention notice guiding operators to check Docker", () => {
+    fireEvent({
+      type: "docker_daemon_unreachable",
+      sessionId: "sess-infra-2",
+      data: { agentName: "researcher", source: "stderr", errorMessage: "cannot connect to the docker daemon" },
+    });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    const payload = calls[0]?.[1] as Record<string, unknown>;
+    const intervention = payload["intervention"] as Record<string, unknown>;
+    expect(intervention).toBeDefined();
+    expect(intervention["reasonCode"]).toBe("docker_daemon_unreachable");
+    expect(String(intervention["detail"])).toMatch(/Docker Desktop|dockerd|defaultContainerized/);
+  });
+});

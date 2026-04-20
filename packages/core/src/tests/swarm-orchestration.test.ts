@@ -109,6 +109,78 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
   }, 30_000);
 
+  it("treats sub-agent exit-code stubs as failures and continues to fallback agents", async () => {
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName === "web_task_coordinator") {
+        return {
+          output: "Sub-agent 'web_task_coordinator' exited with code 125. Output:",
+          stats: {
+            agentName: args.agentName,
+            sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+            promptChars: 0,
+            userContentChars: String(args.task ?? "").length,
+            toolCount: 0,
+            toolNames: [],
+            iterations: 0,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            maxIterations: 5,
+            model: "mock",
+            capabilities: [],
+            terminalState: "completed",
+            outcome: "success",
+          },
+        };
+      }
+
+      return {
+        output: `${args.agentName}: gathered live headlines`,
+        stats: {
+          agentName: args.agentName,
+          sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+          promptChars: 0,
+          userContentChars: String(args.task ?? "").length,
+          toolCount: 2,
+          toolNames: ["web_search", "web_fetch"],
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          terminalState: "completed",
+          outcome: "success",
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const result = await delegate!.execute({
+      agentName: "web_task_coordinator",
+      fallbackAgents: ["researcher"],
+      task: "Ermittle die aktuellen Top-Headlines von heute.",
+    }, {
+      sessionId: "session-exit-code-fallback",
+      workspacePath: "/workspace",
+      swarmState: {
+        objective: "Fetch headlines",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        tasks: {},
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("researcher");
+    expect(result.metadata?.["attemptedAgents"]).toEqual(["web_task_coordinator", "researcher"]);
+    expect(runSubAgentWithStatsMock.mock.calls.map((call) => call[0].agentName)).toEqual(["web_task_coordinator", "researcher"]);
+  }, 30_000);
+
   it("reuses session/task memory for duplicate research delegations instead of spawning another researcher", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-memory-reuse-"));
     tempDirs.push(tempDir);

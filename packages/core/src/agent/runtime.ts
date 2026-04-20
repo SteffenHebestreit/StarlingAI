@@ -20,6 +20,7 @@ import { registerSessionAbortController, deregisterSessionAbortController } from
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { lookupTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -228,10 +229,156 @@ interface WorkflowCatalogMatch {
   matchedTerms: string[];
 }
 
+function serializeWorkflowParamHints(
+  params: Record<string, { description?: string; default?: string }> | undefined,
+): string {
+  if (!params) return "";
+
+  return Object.entries(params)
+    .map(([paramName, paramDef]) => [
+      paramName,
+      paramDef.description ?? "",
+      paramDef.default ?? "",
+    ].filter(Boolean).join(" "))
+    .filter(Boolean)
+    .join("\n");
+}
+
 interface WorkflowCatalogSignal {
   required: boolean;
   reason: "explicit_request" | "catalog_match" | "hint_terms" | "none";
   strongestMatch?: WorkflowCatalogMatch;
+}
+
+interface ApprovedWorkflowFollowUp {
+  workflowName: string;
+  workflowType: "scene";
+  params: Record<string, string>;
+  candidateName: string;
+}
+
+const RUN_CANDIDATE_RE = /(?:^|\n)\s*RUN_CANDIDATE:\s*(.+?)\s*$/im;
+const AFFIRMATIVE_WORKFLOW_APPROVAL_RE = /^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|please do(?: that)?|do it|go ahead|run (?:it|that)|start (?:it|that)|ja|jep|klar|ja bitte|mach(?:\s+es)?|tu(?:\s+es)?|bitte(?:\s+(?:mach(?:\s+es)?|starte(?:\s+es)?|ausf(?:ü|ue)hren))?|starte(?:\s+es)?|ausf(?:ü|ue)hren(?:\s+bitte)?)\s*[.!?]*\s*$/i;
+
+function extractRunCandidateName(content: string | null | undefined): string | null {
+  if (typeof content !== "string" || content.length === 0) return null;
+  const match = content.match(RUN_CANDIDATE_RE);
+  if (!match) return null;
+
+  const candidateName = match[1]?.trim().replace(/^["'`]+|["'`]+$/g, "") ?? "";
+  return candidateName.length > 0 ? candidateName : null;
+}
+
+function parseToolCallArguments(raw: string | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectApprovedRunCandidateFollowUp(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown>; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }[],
+  userMessage: string,
+): ApprovedWorkflowFollowUp | null {
+  const normalizedMessage = userMessage.trim();
+  if (!normalizedMessage || normalizedMessage.length > 80 || !AFFIRMATIVE_WORKFLOW_APPROVAL_RE.test(normalizedMessage)) {
+    return null;
+  }
+
+  let foundCurrentUser = false;
+  let candidateName: string | null = null;
+  let sawProjectListWorkflow = false;
+
+  for (let index = history.length - 1; index >= Math.max(0, history.length - 30); index -= 1) {
+    const message = history[index];
+    if (!message) continue;
+
+    if (message.role === "user") {
+      if (!foundCurrentUser) {
+        foundCurrentUser = true;
+        continue;
+      }
+      break;
+    }
+
+    if (!foundCurrentUser) continue;
+
+    if (!candidateName) {
+      candidateName = extractRunCandidateName(message.content) ?? candidateName;
+    }
+
+    if (message.role === "tool") {
+      const workflowName = typeof message.metadata?.["workflowName"] === "string"
+        ? String(message.metadata["workflowName"])
+        : "";
+      const workflowType = typeof message.metadata?.["workflowType"] === "string"
+        ? String(message.metadata["workflowType"])
+        : "";
+      if (workflowName === "n8n_project_list" && workflowType === "scene") {
+        sawProjectListWorkflow = true;
+      }
+    }
+
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue;
+
+    for (const toolCall of message.tool_calls) {
+      if (toolCall?.function?.name !== "run_workflow") continue;
+      const args = parseToolCallArguments(toolCall.function.arguments);
+      const workflowName = typeof args?.["name"] === "string" ? String(args["name"]) : "";
+      const workflowType = typeof args?.["workflowType"] === "string" ? String(args["workflowType"]) : "auto";
+      if (workflowName === "n8n_project_list" && (workflowType === "scene" || workflowType === "auto")) {
+        sawProjectListWorkflow = true;
+      }
+    }
+  }
+
+  if (!candidateName || !sawProjectListWorkflow) return null;
+
+  return {
+    workflowName: "n8n_run_workflow",
+    workflowType: "scene",
+    params: {
+      workflowName: candidateName,
+    },
+    candidateName,
+  };
+}
+
+function buildApprovedRunCandidateGuidance(followUp: ApprovedWorkflowFollowUp): string {
+  return [
+    "Approved workflow follow-up detected for this turn.",
+    `The previous n8n_project_list result ended with RUN_CANDIDATE: ${followUp.candidateName}.`,
+    "The user just approved running that exact workflow.",
+    `Call run_workflow now with name \"${followUp.workflowName}\", workflowType \"${followUp.workflowType}\", and params.workflowName \"${followUp.candidateName}\".`,
+    "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, or run_task_graph first.",
+    "Do NOT answer in natural language before issuing that run_workflow call.",
+  ].join(" ");
+}
+
+function isApprovedRunCandidateToolCall(
+  toolCall: { name: string; arguments?: Record<string, unknown> },
+  followUp: ApprovedWorkflowFollowUp,
+): boolean {
+  if (toolCall.name !== "run_workflow") return false;
+
+  const workflowName = typeof toolCall.arguments?.["name"] === "string"
+    ? String(toolCall.arguments["name"])
+    : "";
+  const workflowType = typeof toolCall.arguments?.["workflowType"] === "string"
+    ? String(toolCall.arguments["workflowType"])
+    : "auto";
+  const params = toolCall.arguments?.["params"];
+  const workflowParamName = params && typeof params === "object" && !Array.isArray(params) && typeof (params as Record<string, unknown>)["workflowName"] === "string"
+    ? String((params as Record<string, unknown>)["workflowName"])
+    : "";
+
+  return workflowName === followUp.workflowName
+    && (workflowType === followUp.workflowType || workflowType === "auto")
+    && workflowParamName.trim() === followUp.candidateName;
 }
 
 function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unknown> | undefined): WorkflowCatalogMatch[] {
@@ -253,6 +400,30 @@ function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unkn
     })
     .filter((match): match is WorkflowCatalogMatch => Boolean(match))
     .sort((left, right) => right.score - left.score);
+}
+
+function extractAgentRoutingSuggestionFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): { agentName: string; query?: string; fallbackAgents?: string[] } | undefined {
+  const agentName = typeof metadata?.["topResult"] === "string"
+    ? String(metadata["topResult"]).trim()
+    : "";
+  if (!agentName) return undefined;
+
+  const query = typeof metadata?.["query"] === "string"
+    ? String(metadata["query"]).trim()
+    : "";
+  const fallbackAgents = Array.isArray(metadata?.["suggestedFallbackAgents"])
+    ? (metadata?.["suggestedFallbackAgents"] as unknown[])
+      .map((value) => typeof value === "string" ? value.trim() : "")
+      .filter((value): value is string => Boolean(value) && value !== agentName)
+    : [];
+
+  return {
+    agentName,
+    query: query || undefined,
+    fallbackAgents: fallbackAgents.length > 0 ? fallbackAgents : undefined,
+  };
 }
 
 function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][]): WorkflowCatalogMatch[] {
@@ -362,7 +533,12 @@ function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
   const sceneHints = listAllScenes().map((scene) => ({
     name: scene.name,
     workflowType: "scene" as const,
-    searchableText: [scene.name, scene.description, scene.task].filter(Boolean).join("\n"),
+    searchableText: [
+      scene.name,
+      scene.description,
+      scene.task,
+      serializeWorkflowParamHints(scene.params),
+    ].filter(Boolean).join("\n"),
   }));
   const jobHints = listAllJobs().map((job) => ({
     name: job.name,
@@ -370,6 +546,7 @@ function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
     searchableText: [
       job.name,
       job.description,
+      serializeWorkflowParamHints(job.params),
       ...(job.steps ?? []).map((step) => `${step.label ?? ""} ${step.scene}`.trim()),
     ].filter(Boolean).join("\n"),
   }));
@@ -547,9 +724,11 @@ function sanitizeUserFacingAssistantResponse(value: string, toolIterations: numb
   return sanitizeAssistantContent(value, toolIterations > 0);
 }
 
+const EMPTY_ASSISTANT_RESPONSE_FALLBACK = "I wasn't able to generate a usable reply for that turn. Please try again.";
+
 function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
-  if (toolIterations === 0) return false;
   if (!raw.trim() || cleaned.length === 0) return true;
+  if (toolIterations === 0) return false;
   if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
   return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
 }
@@ -669,7 +848,7 @@ async function finalizeUserFacingAssistantResponse(
 ): Promise<string> {
   const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
   if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
-    const stableResponse = cleaned || rawResponse.trim() || "(no response)";
+    const stableResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
     return await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
   }
 
@@ -686,7 +865,7 @@ async function finalizeUserFacingAssistantResponse(
     }
   }
 
-  const fallbackResponse = cleaned || rawResponse.trim() || "(no response)";
+  const fallbackResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
   return await rewriteTerminalResponseIfNeeded(fallbackResponse, toolIterations, session, provider, signal);
 }
 
@@ -783,6 +962,12 @@ export function classifyPostOrchestrationDisposition(
       return "failure";
     }
 
+    // A timed-out partial result carries enough evidence to synthesize from.
+    // Force "synthesize" immediately rather than letting the model re-delegate.
+    if (delegationPartial && terminalState === "timeout") {
+      return "synthesize";
+    }
+
     if (CONTINUATION_CUE_RE.test(text)) {
       sawContinuationCue = true;
     }
@@ -868,11 +1053,16 @@ export function buildModelVisibleToolResult(
       return parts.join("\n");
     }
     if (delegationPartial) {
+      const terminalState = typeof metadata?.["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
+      const timedOut = terminalState === "timeout";
+      const importantNote = timedOut
+        ? "IMPORTANT: The specialist timed out with partial evidence. Use the evidence below to synthesize a final answer now. Do NOT delegate again for this task in this turn."
+        : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
       const parts = [
-        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL).`,
+        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL${timedOut ? ", TIMEOUT" : ""}).`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
         routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent toolsilure. Proceed with any dependent tools.",
+        importantNote,
         `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
       ].filter(Boolean);
       return parts.join("\n");
@@ -1114,6 +1304,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
+  const approvedRunCandidateFollowUp = detectApprovedRunCandidateFollowUp(session.getHistory(), userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
   // When autoApprove is set, wrap the approvalCallback to always return true.
   const resolvedApprovalCallback = opts.autoApprove
@@ -1163,6 +1354,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const TOOL_STREAK_THRESHOLD = 3;
   // Consecutive iterations where every tool call was blocked (per-turn limit / not-allowed).
   let _consecutiveFullyBlockedIterations = 0;
+  // D16: Consecutive delegation failures — when ≥2, escalate to warden-stop synthesis.
+  let _consecutiveDelegationFailures = 0;
+  // F29: Turn-level scorecard accumulators
+  let _turnDelegationCount = 0;
+  let _turnShareFindingCount = 0;
+  let _forcedSynthesisFired = false;
+  // G33: Collected share_finding texts for trajectory cache write
+  const sharedFindingsThisTurn: string[] = [];
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
@@ -1183,6 +1382,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   );
   const workflowCatalogGuidance = !isWorkflowExecutionTurn && !workflowCatalogSuppressedForMaintenance && workflowCatalogSignal.required
     ? buildWorkflowCatalogGuidance(workflowCatalogSignal)
+    : "";
+  const approvedRunCandidateGuidance = !isWorkflowExecutionTurn && approvedRunCandidateFollowUp
+    ? buildApprovedRunCandidateGuidance(approvedRunCandidateFollowUp)
     : "";
   const workflowCatalogRequired = Boolean(
     (allowedToolNameSet.has("search_workflows") || allowedToolNameSet.has("run_workflow"))
@@ -1220,8 +1422,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let workflowExecutionRetryUsed = false;
   let workflowExecutionCorrectionRetryUsed = false;
   let workflowExecutionEnforcementPrompt = "";
+  let approvedRunCandidateRetryUsed = false;
+  let approvedRunCandidateEnforcementPrompt = "";
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
+  let pendingSearchAgentSuggestion: { agentName: string; query?: string; fallbackAgents?: string[] } | undefined;
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
@@ -1250,6 +1455,26 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       toolIterations: iterationCount,
     }),
   );
+
+  // ── G33: Trajectory cache lookup ─────────────────────────────────────────
+  // Before the first LLM call, check if we have a cached trajectory for a
+  // semantically similar recent query.  If yes, inject it as extra system context
+  // so the model can decide whether to reuse or re-research the evidence.
+  let trajectoryInjectionContext = "";
+  try {
+    const cachedTrajectory = await lookupTrajectory(
+      userMessage,
+      session.getWorkspacePath(),
+      initialDynamicGuidance?.freshnessSensitive ?? false,
+    );
+    if (cachedTrajectory && cachedTrajectory.finalAnswer.length > 50) {
+      const evidence = cachedTrajectory.sharedFindings.length > 0
+        ? `\n\nEvidence gathered:\n${cachedTrajectory.sharedFindings.slice(0, 5).map(f => `• ${f.slice(0, 300)}`).join("\n")}`
+        : "";
+      trajectoryInjectionContext =
+        `[CACHED RECENT EVIDENCE — verify before reuse, cached at ${cachedTrajectory.finishedAt}]\n${cachedTrajectory.finalAnswer.slice(0, 1500)}${evidence}`;
+    }
+  } catch { /* best-effort — never block the turn */ }
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -1321,13 +1546,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
+      ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: maintenanceDelegationEnforcementPrompt }] : []),
       ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
       ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
+      ...(approvedRunCandidateEnforcementPrompt ? [{ role: "system" as const, content: approvedRunCandidateEnforcementPrompt }] : []),
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
+      // G33: Inject cached trajectory evidence on first iteration only
+      ...(iterationCount === 0 && trajectoryInjectionContext ? [{ role: "system" as const, content: trajectoryInjectionContext }] : []),
     ];
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
 
@@ -1398,8 +1627,48 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     const workflowCatalogToolRequested = llmResponse.tool_calls.some((toolCall) => isWorkflowCatalogToolName(toolCall.name));
     const runWorkflowRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "run_workflow");
+    const approvedRunCandidateToolRequested = approvedRunCandidateFollowUp
+      ? llmResponse.tool_calls.some((toolCall) => isApprovedRunCandidateToolCall(toolCall, approvedRunCandidateFollowUp))
+      : false;
     if (workflowCatalogToolRequested) {
       workflowCatalogAttemptedThisTurn = true;
+    }
+
+    if (approvedRunCandidateFollowUp && !workflowRunCompletedThisTurn && !approvedRunCandidateToolRequested) {
+      if (!approvedRunCandidateRetryUsed) {
+        approvedRunCandidateRetryUsed = true;
+        approvedRunCandidateEnforcementPrompt = [
+          "COMPLIANCE CORRECTION: the user just approved a recent n8n RUN_CANDIDATE follow-up.",
+          `You MUST call run_workflow now with name \"${approvedRunCandidateFollowUp.workflowName}\", workflowType \"${approvedRunCandidateFollowUp.workflowType}\", and params.workflowName \"${approvedRunCandidateFollowUp.candidateName}\".`,
+          "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, run_task_graph, or give a tool-free answer first.",
+          "Any response that skips this exact run_workflow call is invalid for this turn.",
+        ].join(" ");
+        guardrailEvents.push({ type: "workflow_required", details: "approved_run_candidate_follow_up_rejected" });
+        logAudit("guardrail_flagged", {
+          type: "approved_run_candidate_follow_up_rejected",
+          candidateName: approvedRunCandidateFollowUp.candidateName,
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        }, { sessionId: session.id, severity: "warn" });
+        continue;
+      }
+
+      return blocked(
+        "This turn required running the approved n8n workflow candidate, but the model still skipped the required run_workflow call.",
+        toolContext.swarmState,
+        buildTurnPerformanceMetrics({
+          turnStartedAt,
+          firstModelResponseMs,
+          llmCalls,
+          llmTimeMs,
+          toolCallsRequested,
+          toolExecutionTimeMs,
+          lastPromptMetrics,
+          completionChars: 0,
+          finishReason: "missing_approved_run_candidate_execution",
+          blocked: true,
+          toolIterations: iterationCount,
+        }),
+      );
     }
 
     const nonWorkflowOrchestrationRequested = llmResponse.tool_calls.some((toolCall) =>
@@ -1713,6 +1982,30 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         channel: session.channel,
       });
 
+      // F29: Per-turn quality scorecard
+      logAudit("turn_scorecard", {
+        delegationCount: _turnDelegationCount,
+        shareFindingCount: _turnShareFindingCount,
+        forcedSynthesisFired: _forcedSynthesisFired,
+        wardenFailureCount: _consecutiveDelegationFailures,
+        finalAnswerLength: finalResponse.length,
+        toolIterations: iterationCount,
+      }, { sessionId: session.id, channel: session.channel });
+
+      // G33: Write trajectory for future cache reuse
+      if (_turnShareFindingCount > 0 && finalResponse.length > 50) {
+        writeTrajectory(
+          {
+            channel: session.channel,
+            normalizedQuery: userMessage.toLowerCase().trim().slice(0, 300),
+            sharedFindings: sharedFindingsThisTurn,
+            finalAnswer: finalResponse.slice(0, 2000),
+          },
+          session.getWorkspacePath(),
+          initialDynamicGuidance?.freshnessSensitive ?? false,
+        ).catch(() => undefined);
+      }
+
       return {
         response: finalResponse,
         toolCallsExecuted: iterationCount,
@@ -1729,7 +2022,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // requesting tool calls, it is stuck in a regeneration loop.  Break early.
     // Only update _lastAssistantContent when the model actually produced text;
     // tool-only iterations (content=null) should NOT reset the comparison.
-    if (llmResponse.content && iterationCount >= 2) {
+    // Whitespace-only content (e.g. "\n\n" left after stripping Qwen3 thinking
+    // tags) is not meaningful text — skip the check to avoid false positives.
+    if (llmResponse.content && llmResponse.content.trim() && iterationCount >= 2) {
       if (_lastAssistantContent) {
         const curPrefix = llmResponse.content.slice(0, 200);
         const prevPrefix = _lastAssistantContent.slice(0, 200);
@@ -1765,10 +2060,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
       toolCallsRequested += 1;
-
-      const perTurnToolLimit = getPerTurnToolCallLimit(tc.name);
+      // F29: Count delegation and share_finding calls for the turn scorecard
+      if (
+        tc.name === "delegate_to_agent" ||
+        tc.name === "parallel_delegate" ||
+        tc.name === "run_task_graph" ||
+        tc.name === "swarm_delegate"
+      ) {
+        _turnDelegationCount += 1;
+      } else if (tc.name === "share_finding") {
+        _turnShareFindingCount += 1;
+        // G33: Collect finding text for trajectory cache
+        const findingText = typeof tc.arguments?.["finding"] === "string"
+          ? (tc.arguments["finding"] as string).slice(0, 500)
+          : typeof tc.arguments?.["content"] === "string"
+            ? (tc.arguments["content"] as string).slice(0, 500)
+            : "";
+        if (findingText) sharedFindingsThisTurn.push(findingText);
+      }
       const nextToolCallCount = (_turnToolCallCounts.get(tc.name) ?? 0) + 1;
       _turnToolCallCounts.set(tc.name, nextToolCallCount);
+      const perTurnToolLimit = getPerTurnToolCallLimit(tc.name);
 
       if (perTurnToolLimit && nextToolCallCount > perTurnToolLimit) {
         logAudit("tool_call_blocked", {
@@ -1814,6 +2126,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             channel: session.channel,
             severity: "warn",
           });
+
+          // F29: Per-turn quality scorecard (delegate-loop-terminated path)
+          logAudit("turn_scorecard", {
+            delegationCount: _turnDelegationCount,
+            shareFindingCount: _turnShareFindingCount,
+            forcedSynthesisFired: _forcedSynthesisFired,
+            wardenFailureCount: _consecutiveDelegationFailures,
+            finalAnswerLength: finalResponse.length,
+            toolIterations: iterationCount,
+            finishReason: "delegate_loop_terminated",
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
 
           return {
             response: finalResponse,
@@ -1932,6 +2255,52 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
+      if (tc.name === "delegate_to_agent") {
+        const requestedAgentName = typeof tc.arguments?.["agentName"] === "string"
+          ? String(tc.arguments["agentName"]).trim()
+          : "";
+        if (!requestedAgentName && pendingSearchAgentSuggestion?.agentName) {
+          tc.arguments = {
+            ...(tc.arguments ?? {}),
+            agentName: pendingSearchAgentSuggestion.agentName,
+            fallbackAgents: Array.isArray(tc.arguments?.["fallbackAgents"]) && tc.arguments["fallbackAgents"].length > 0
+              ? tc.arguments["fallbackAgents"]
+              : pendingSearchAgentSuggestion.fallbackAgents,
+          };
+          logAudit("tool_call_recovered", {
+            originalTool: "delegate_to_agent",
+            rewrittenTo: "delegate_to_agent",
+            reason: "reuse_search_agents_top_result",
+            recoveredAgentName: pendingSearchAgentSuggestion.agentName,
+            routingQuery: pendingSearchAgentSuggestion.query ?? null,
+            recoveredFallbackAgents: pendingSearchAgentSuggestion.fallbackAgents ?? [],
+          }, {
+            sessionId: session.id,
+            severity: "info",
+          });
+        }
+      } else if (tc.name === "swarm_delegate" && pendingSearchAgentSuggestion?.agentName && allowedToolNameSet.has("delegate_to_agent")) {
+        tc.name = "delegate_to_agent";
+        tc.arguments = {
+          ...(tc.arguments ?? {}),
+          agentName: pendingSearchAgentSuggestion.agentName,
+          fallbackAgents: Array.isArray(tc.arguments?.["fallbackAgents"]) && tc.arguments["fallbackAgents"].length > 0
+            ? tc.arguments["fallbackAgents"]
+            : pendingSearchAgentSuggestion.fallbackAgents,
+        };
+        logAudit("tool_call_recovered", {
+          originalTool: "swarm_delegate",
+          rewrittenTo: "delegate_to_agent",
+          reason: "reuse_search_agents_top_result",
+          recoveredAgentName: pendingSearchAgentSuggestion.agentName,
+          routingQuery: pendingSearchAgentSuggestion.query ?? null,
+          recoveredFallbackAgents: pendingSearchAgentSuggestion.fallbackAgents ?? [],
+        }, {
+          sessionId: session.id,
+          severity: "info",
+        });
+      }
+
       const argsSig = JSON.stringify(tc.arguments ?? {});
       const cachedToolCall = _lastToolCallSig.get(tc.name);
       if (tc.name !== "delegate_to_agent" && cachedToolCall && cachedToolCall.args === argsSig) {
@@ -1959,6 +2328,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
+
+        pendingSearchAgentSuggestion = tc.name === "search_agents"
+          ? extractAgentRoutingSuggestionFromMetadata(cachedToolCall.metadata)
+          : undefined;
         continue;
       }
 
@@ -2004,6 +2377,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       } else if (tc.name === "run_workflow" && result.success) {
         workflowRunCompletedThisTurn = true;
       }
+
+      pendingSearchAgentSuggestion = tc.name === "search_agents"
+        ? extractAgentRoutingSuggestionFromMetadata(result.metadata)
+        : undefined;
 
       if (
         tc.name === "run_workflow"
@@ -2098,6 +2475,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               channel: session.channel,
               severity: "warn",
             });
+
+            // F29: Per-turn quality scorecard (identical-output loop terminated path)
+            logAudit("turn_scorecard", {
+              delegationCount: _turnDelegationCount,
+              shareFindingCount: _turnShareFindingCount,
+              forcedSynthesisFired: _forcedSynthesisFired,
+              wardenFailureCount: _consecutiveDelegationFailures,
+              finalAnswerLength: finalResponse.length,
+              toolIterations: iterationCount,
+              finishReason: "delegate_loop_terminated",
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
 
             return {
               response: finalResponse,
@@ -2225,6 +2613,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     {
       const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
       if (disposition === "synthesize") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2234,6 +2623,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
         });
       } else if (disposition === "continue") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2243,6 +2633,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Treat delegated phrases like 'I will now attempt...' or 'the next step...' as proposed follow-up work, not proof that it already happened. Do NOT tell the user a next step 'has been executed' unless this turn includes the completed tool result for that action.",
         });
       } else if (disposition === "ask_user") {
+        _consecutiveDelegationFailures = 0;
         session.addMessage({
           role: "system",
           content:
@@ -2250,12 +2641,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Ask the user yourself in one concise message and do NOT call more tools until they respond.",
         });
       } else if (disposition === "failure") {
-        session.addMessage({
-          role: "system",
-          content:
-            "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
-            "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
-        });
+        _consecutiveDelegationFailures += 1;
+        if (_consecutiveDelegationFailures >= 2) {
+          // D16: Warden escalation
+          _forcedSynthesisFired = true; // F29
+          session.addMessage({
+            role: "system",
+            content:
+              "[WARDEN STOP — FORCED SYNTHESIS] Two or more consecutive delegation attempts have failed. " +
+              "You MUST stop delegating and respond to the user now. " +
+              "If any partial evidence exists in the evidence blocks above, synthesize it into the best possible answer. " +
+              "If there is no usable evidence, tell the user honestly that the information could not be retrieved at this time and suggest what they could do next. " +
+              "Do NOT call any more delegation tools in this turn.",
+          });
+        } else {
+          session.addMessage({
+            role: "system",
+            content:
+              "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
+              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
+          });
+        }
       }
 
       if (toolResultMessages.length > 0) {

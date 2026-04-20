@@ -81,6 +81,7 @@ import "./tools/research-scratch.js";
 import "./tools/sql.js";
 import "./tools/spreadsheet.js";
 import "./tools/pdf-forms.js";
+import "./tools/data-feeds/index.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";

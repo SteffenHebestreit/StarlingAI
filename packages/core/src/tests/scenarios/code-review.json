@@ -1,0 +1,15 @@
+{
+  "id": "code-review",
+  "description": "Code review request routes to code_analyst",
+  "agentName": "code_analyst",
+  "task": "Review this TypeScript file for potential security vulnerabilities and architectural issues.",
+  "subAgentMocks": {
+    "code_analyst": "Code review complete. Found 2 issues: (1) Missing input validation on user-supplied path argument — susceptible to path traversal. (2) Async error not caught in fetchData() — may cause unhandled rejection. Recommend adding zod validation and try/catch wrappers.",
+    "coder": "I can fix both issues: added zod validation and error handling."
+  },
+  "assertFinal": {
+    "success": true,
+    "maxDelegations": 1,
+    "outputContainsAny": ["review", "security", "validation", "issue", "vulnerability"]
+  }
+}

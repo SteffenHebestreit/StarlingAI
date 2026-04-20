@@ -18,6 +18,11 @@
  *   computer_clipboard_exfiltration — ≥5 clipboard reads in 1 min → emergency stop
  *   computer_stale_loop           — 3 identical screenshot hashes in a row
  *
+ * Infrastructure health (Stage 10):
+ *   docker_daemon_unreachable    — a containerized delegation failed because the
+ *                                  Docker daemon went away mid-session. Fires
+ *                                  immediately on detection.
+ *
  * On detection:
  *   - A `warden_alert` audit event is emitted (visible in dashboard and JSONL).
  *   - For `repeated_failures` and `tool_escape_attempt`, synthetic failure
@@ -154,10 +159,15 @@ export function deregisterSessionAbortController(sessionId: string): void {
   _sessionAbortControllers.delete(sessionId);
 }
 
+export function isSessionTurnActive(sessionId: string): boolean {
+  const controller = _sessionAbortControllers.get(sessionId);
+  return Boolean(controller && !controller.signal.aborted);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood";
+  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "docker_daemon_unreachable";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -326,6 +336,24 @@ export function startWarden(): void {
         "warn",
         `${toolName}@${event.sessionId.slice(0, 20)}`,
         `Tool '${toolName}' returned identical output repeatedly in session ${event.sessionId.slice(0, 20)} — loop detected`,
+        "logged",
+      );
+      emitAlert(alert);
+    }
+
+    // ── Docker daemon unreachable (mid-session infra failure) ───────────────
+    // Container-runner reports this when a containerized delegation fails because
+    // the Docker CLI cannot reach the daemon. It is rate-limited at the source
+    // (1/min), so we simply surface each emission as an operator-visible alert.
+    if (event.type === "docker_daemon_unreachable") {
+      const agentName = String(event.data["agentName"] ?? "unknown");
+      const source = String(event.data["source"] ?? "unknown");
+      const errorMessage = String(event.data["errorMessage"] ?? "").slice(0, 200);
+      const alert = makeAlert(
+        "docker_daemon_unreachable",
+        "error",
+        event.sessionId ? `${agentName}@${event.sessionId.slice(0, 20)}` : agentName,
+        `Docker daemon unreachable while delegating to '${agentName}' (source: ${source})${errorMessage ? `: ${errorMessage}` : ""}`,
         "logged",
       );
       emitAlert(alert);
