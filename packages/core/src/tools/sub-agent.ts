@@ -2568,11 +2568,37 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   clearTaskBids(taskId);
   ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
   publishSwarmState(ctx);
+
+  // I9: Surface timeout cascades explicitly. When every attempt in this
+  // delegation hit `terminalState === "timeout"`, the operator's per-agent
+  // `turnTimeoutMs` is too tight for the chosen model to finish the work,
+  // not a routing failure. Append (don't replace) so the rich per-attempt
+  // diagnostic text from the sub-agent (e.g. "Partial progress before
+  // interruption: ...") is preserved for the coordinator and audit log.
+  const timeoutAttempts = taskState.attempts.filter((a) => a.terminalState === "timeout");
+  const allAttemptsTimedOut = taskState.attempts.length > 0
+    && timeoutAttempts.length === taskState.attempts.length;
+  const baseError = taskState.error ?? "No suitable agent completed the task.";
+  const errorBody = allAttemptsTimedOut
+    ? `${baseError}\n\nTimeout cascade: every delegated attempt hit its per-agent turnTimeoutMs (${timeoutAttempts.length} attempt(s) on ${[...new Set(timeoutAttempts.map((a) => a.agentName))].join(", ")}). The model did not finish within the configured budget — this is a timeout, not a routing failure. Either raise turnTimeoutMs for these agents in starlingai.json, switch them to a faster model, or split the task into smaller pieces. Do NOT re-delegate the same work in this turn.`
+    : baseError;
+
   return {
     success: false,
     output: "",
-    error: buildDelegationFailureMessage(title, taskState.error ?? "No suitable agent completed the task."),
-    metadata: { taskId, attemptedAgents, delegationSucceeded: false },
+    error: buildDelegationFailureMessage(title, errorBody),
+    metadata: {
+      taskId,
+      attemptedAgents,
+      delegationSucceeded: false,
+      ...(allAttemptsTimedOut
+        ? {
+          delegationOutcome: "timeout_cascade",
+          timeoutCascade: true,
+          timedOutAgents: [...new Set(timeoutAttempts.map((a) => a.agentName))],
+        }
+        : {}),
+    },
   };
 }
 
@@ -3263,9 +3289,21 @@ registerTool({
     const resultSelfExclusionNote = selfExcluded && currentAgentName
       ? `\nℹ Self excluded from routing suggestions: ${currentAgentName}`
       : "";
+    // I10: Only emit the assertive "NEXT ACTION: Call delegate_to_agent(<topAgent>)"
+    // pointer when the top match is genuinely strong. Low-confidence top results
+    // (or scores < 0.5) routinely surface bad agents — e.g. accessibility_tester
+    // for "research news headlines" — and the imperative wording pushed weaker
+    // models to delegate to the wrong specialist. For weak top results, present
+    // the candidate list neutrally and let the LLM choose, including the option
+    // to call list_agents or create_ephemeral_agent.
+    const topResultIsStrong = topAgent.confidence === "high"
+      || (topAgent.confidence === "medium" && topAgent.score >= 0.5);
+    const nextActionLine = topResultIsStrong
+      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+      : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or call list_agents / create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
       success: true,
-      output: `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
+      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
       metadata: {
         query: raw,
         minConfidence,
