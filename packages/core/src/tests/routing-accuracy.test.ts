@@ -229,6 +229,7 @@ const ROUTING_CASES: Array<{ query: string; expected: string; description: strin
   { query: "review this code for potential security vulnerabilities", expected: "code_analyst", description: "code review" },
   { query: "log into the client portal and download the latest invoice", expected: "browser_agent", description: "browser login" },
   { query: "fill out the job application form on the website", expected: "browser_agent", description: "form filling" },
+  { query: "browser freelancermap login", expected: "browser_agent", description: "known-site browser login" },
   { query: "draft a follow-up email to the client about the project timeline", expected: "email_drafter", description: "email drafting" },
   { query: "write a professional reply to a job offer in English", expected: "email_drafter", description: "business email" },
   { query: "translate this German paragraph to English", expected: "translator", description: "translation" },
