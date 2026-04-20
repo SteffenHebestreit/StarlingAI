@@ -91,7 +91,8 @@ export type AuditEventType =
   | "docker_daemon_unreachable"
   // Observability
   | "turn_scorecard"
-  | "coverage_shortfall_resynthesis";
+  | "coverage_shortfall_resynthesis"
+  | "sub_agent_synthesis_forced";
 
 export interface AuditEvent {
   id: string;
