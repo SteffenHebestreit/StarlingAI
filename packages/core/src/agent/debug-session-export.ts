@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { AuditEvent } from "../audit/schema.js";
 import { flushAuditLog, resolveAuditLogPath } from "../audit/logger.js";
@@ -34,7 +34,11 @@ interface SessionExportSnapshot {
   rawHistory: SessionHistoryMessage[];
 }
 
-const AUDIT_PARSE_YIELD_INTERVAL = 250;
+// Yield to the event loop after this many lines while streaming the audit
+// file. Lower numbers keep /healthz and in-flight LLM streams responsive at
+// the cost of slightly slower audit exports; higher numbers favour throughput.
+// 100 is a good balance for multi-MB audit logs on a busy gateway.
+const AUDIT_PARSE_YIELD_INTERVAL = 100;
 const MARKDOWN_APPEND_YIELD_INTERVAL = 25;
 
 export async function buildSessionAuditMarkdown(sessionId: string): Promise<string> {
@@ -343,25 +347,48 @@ async function readSessionAuditEventsAsync(sessionId: string, workspacePath?: st
 }
 
 async function readMatchingAuditEventsFromFileAsync(filePath: string, sessionId: string): Promise<AuditEvent[]> {
-  const raw = await readFile(filePath, "utf8");
-  const lines = raw.split(/\r?\n/);
+  // Stream line-by-line instead of slurping the whole audit.jsonl into memory.
+  // The audit log accumulates indefinitely and a `readFile + split` on a busy
+  // gateway can block the event loop for seconds, which causes Docker's
+  // /healthz check to fail mid-run when an operator triggers an audit export.
+  //
+  // Cheap substring pre-filter: skip JSON.parse entirely for lines that don't
+  // mention the session id. The audit format always embeds the session id as
+  // `"sessionId":"<id>"`, so a literal `.includes` is safe and dramatically
+  // reduces CPU when the file is dominated by other sessions.
+  const sessionMarker = `"sessionId":"${sessionId}"`;
+  const subSessionMarker = `"sessionId":"sub:${sessionId}:`;
   const events: AuditEvent[] = [];
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line || line.trim().length === 0) continue;
+  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const reader = createInterface({ input: stream, crlfDelay: Infinity });
 
-    const event = safeParseAuditEvent(line);
-    if (!event) continue;
-    if (event.sessionId !== sessionId && !event.sessionId?.startsWith(`sub:${sessionId}:`)) {
-      continue;
+  let processed = 0;
+  try {
+    for await (const rawLine of reader) {
+      processed += 1;
+      if ((processed % AUDIT_PARSE_YIELD_INTERVAL) === 0) {
+        // Hand control back to the event loop so /healthz, in-flight LLM
+        // streams, and audit writes don't starve while we drain the file.
+        await yieldToEventLoop();
+      }
+
+      if (!rawLine) continue;
+      // Cheap pre-filter — avoids JSON.parse on the (typically large) majority
+      // of lines that belong to other sessions.
+      if (!rawLine.includes(sessionMarker) && !rawLine.includes(subSessionMarker)) continue;
+
+      const event = safeParseAuditEvent(rawLine);
+      if (!event) continue;
+      if (event.sessionId !== sessionId && !event.sessionId?.startsWith(`sub:${sessionId}:`)) {
+        continue;
+      }
+
+      events.push(event);
     }
-
-    events.push(event);
-
-    if ((index + 1) % AUDIT_PARSE_YIELD_INTERVAL === 0) {
-      await yieldToEventLoop();
-    }
+  } finally {
+    reader.close();
+    stream.destroy();
   }
 
   return events;
