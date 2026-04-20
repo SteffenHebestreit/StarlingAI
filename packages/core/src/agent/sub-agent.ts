@@ -1410,9 +1410,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             role: "system",
             content: systemPrompt +
               "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
-              "You have used 75% of your execution budget. Stop calling tools. " +
+              "You have used most of your execution budget. Stop calling tools. " +
               "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
-              "Include the key facts, headlines, URLs, page snapshots, and evidence you already retrieved — even partial information is more useful than no answer at all. " +
+              "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
+              "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
+              "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
               "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
               "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
           },
@@ -1745,7 +1747,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         && history.some((message) => message.role === "tool")
       ) {
         const elapsed = Date.now() - runStartedAt;
-        const reservedSynthesisMs = Math.max(20_000, Math.min(60_000, Math.round(turnTimeoutMs * 0.25)));
+        // I11.1: Bumped reservation to 33% (min 30s, max 75s). The previous
+        // 25% / 20s window was repeatedly eaten by an in-flight tool call
+        // that started just before the soft-deadline check, leaving only
+        // a couple of seconds before the hard wall. A larger reservation
+        // gives the synthesis pass a real chance to fire even when the
+        // last tool round took 30-40s.
+        const reservedSynthesisMs = Math.max(30_000, Math.min(75_000, Math.round(turnTimeoutMs * 0.33)));
         if (elapsed >= turnTimeoutMs - reservedSynthesisMs) {
           softDeadlineSynthesisAttempted = true;
           logAudit(
