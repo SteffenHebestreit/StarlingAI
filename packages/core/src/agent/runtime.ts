@@ -878,6 +878,15 @@ async function finalizeUserFacingAssistantResponse(
 const DELEGATE_TOOL_RESULT_RE = /^(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
 const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
 
+function looksLikeDelegateMetadata(meta: Record<string, unknown> | undefined): boolean {
+  if (!meta) return false;
+  if (typeof meta["delegationOutcome"] === "string") return true;
+  if (typeof meta["agentName"] === "string") return true;
+  if (meta["delegationSucceeded"] === true) return true;
+  if (typeof meta["taskCount"] === "number" || typeof meta["succeeded"] === "number") return true;
+  return false;
+}
+
 function countStructuredItems(text: string): number {
   if (!text) return 0;
   const tableRows = (text.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
@@ -893,13 +902,14 @@ function findRecentDelegateEvidence(
   for (const message of recent) {
     if (message.role !== "tool") continue;
     const content = String(message.content ?? "");
-    if (!DELEGATE_TOOL_RESULT_RE.test(content)) continue;
-
     const meta = message.metadata ?? {};
     const outcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : undefined;
     if (outcome === "failure") continue;
+
+    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
+    if (!isDelegate) continue;
 
     const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
     const evidence = evidenceMatch
@@ -1082,7 +1092,7 @@ export function buildModelVisibleToolResult(
 ): string {
   const fallback = truncateForContext(resultText, 600);
 
-  if (toolName === "delegate_to_agent") {
+  if (toolName === "delegate_to_agent" || toolName === "swarm_delegate") {
     const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "delegated agent";
     const attemptedAgents = Array.isArray(metadata?.["attemptedAgents"])
       ? (metadata?.["attemptedAgents"] as unknown[]).map(String).filter(Boolean)
