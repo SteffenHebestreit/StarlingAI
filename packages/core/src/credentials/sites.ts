@@ -263,6 +263,10 @@ function findHostAlias(hostname: string, candidates: string[]): string | null {
   const host = normalizeHost(hostname);
   if (candidates.includes(host)) return host;
 
+  // Handle stored keys that still carry a www. prefix (saved by older code).
+  const wwwMatch = candidates.find(c => normalizeHost(c) === host);
+  if (wwwMatch) return wwwMatch;
+
   // Allow short aliases like "n8n" to match configured hosts such as "n8n.k2o".
   if (!host.includes(".")) {
     const prefixMatches = candidates
@@ -272,7 +276,25 @@ function findHostAlias(hostname: string, candidates: string[]): string | null {
     if (prefixMatches.length === 1) return prefixMatches[0]!;
   }
 
+  const hostWithoutTld = stripTopLevelDomain(host);
+  if (hostWithoutTld) {
+    const tldMatches = candidates
+      .map((candidate) => ({ raw: candidate, normalized: normalizeHost(candidate) }))
+      .filter(({ normalized }) => stripTopLevelDomain(normalized) === hostWithoutTld);
+
+    const uniqueMatches = [...new Map(tldMatches.map(({ normalized, raw }) => [normalized, raw])).values()]
+      .sort((left, right) => normalizeHost(left).length - normalizeHost(right).length);
+
+    if (uniqueMatches.length === 1) return uniqueMatches[0]!;
+  }
+
   return null;
+}
+
+function stripTopLevelDomain(hostname: string): string | null {
+  const labels = normalizeHost(hostname).split(".").filter(Boolean);
+  if (labels.length < 2) return null;
+  return labels.slice(0, -1).join(".");
 }
 
 function resolveStoredCredentialRef(
