@@ -401,6 +401,24 @@ function extractWorkflowCatalogMatchesFromMetadata(metadata: Record<string, unkn
     .sort((left, right) => right.score - left.score);
 }
 
+function extractAgentRoutingSuggestionFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): { agentName: string; query?: string } | undefined {
+  const agentName = typeof metadata?.["topResult"] === "string"
+    ? String(metadata["topResult"]).trim()
+    : "";
+  if (!agentName) return undefined;
+
+  const query = typeof metadata?.["query"] === "string"
+    ? String(metadata["query"]).trim()
+    : "";
+
+  return {
+    agentName,
+    query: query || undefined,
+  };
+}
+
 function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][]): WorkflowCatalogMatch[] {
   const merged = new Map<string, WorkflowCatalogMatch>();
 
@@ -1380,6 +1398,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let approvedRunCandidateEnforcementPrompt = "";
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
+  let pendingSearchAgentSuggestion: { agentName: string; query?: string } | undefined;
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
@@ -1929,7 +1948,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // requesting tool calls, it is stuck in a regeneration loop.  Break early.
     // Only update _lastAssistantContent when the model actually produced text;
     // tool-only iterations (content=null) should NOT reset the comparison.
-    if (llmResponse.content && iterationCount >= 2) {
+    // Whitespace-only content (e.g. "\n\n" left after stripping Qwen3 thinking
+    // tags) is not meaningful text — skip the check to avoid false positives.
+    if (llmResponse.content && llmResponse.content.trim() && iterationCount >= 2) {
       if (_lastAssistantContent) {
         const curPrefix = llmResponse.content.slice(0, 200);
         const prevPrefix = _lastAssistantContent.slice(0, 200);
@@ -2132,6 +2153,28 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
+      if (tc.name === "delegate_to_agent") {
+        const requestedAgentName = typeof tc.arguments?.["agentName"] === "string"
+          ? String(tc.arguments["agentName"]).trim()
+          : "";
+        if (!requestedAgentName && pendingSearchAgentSuggestion?.agentName) {
+          tc.arguments = {
+            ...(tc.arguments ?? {}),
+            agentName: pendingSearchAgentSuggestion.agentName,
+          };
+          logAudit("tool_call_recovered", {
+            originalTool: "delegate_to_agent",
+            rewrittenTo: "delegate_to_agent",
+            reason: "reuse_search_agents_top_result",
+            recoveredAgentName: pendingSearchAgentSuggestion.agentName,
+            routingQuery: pendingSearchAgentSuggestion.query ?? null,
+          }, {
+            sessionId: session.id,
+            severity: "info",
+          });
+        }
+      }
+
       const argsSig = JSON.stringify(tc.arguments ?? {});
       const cachedToolCall = _lastToolCallSig.get(tc.name);
       if (tc.name !== "delegate_to_agent" && cachedToolCall && cachedToolCall.args === argsSig) {
@@ -2159,6 +2202,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
+
+        pendingSearchAgentSuggestion = tc.name === "search_agents"
+          ? extractAgentRoutingSuggestionFromMetadata(cachedToolCall.metadata)
+          : undefined;
         continue;
       }
 
@@ -2204,6 +2251,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       } else if (tc.name === "run_workflow" && result.success) {
         workflowRunCompletedThisTurn = true;
       }
+
+      pendingSearchAgentSuggestion = tc.name === "search_agents"
+        ? extractAgentRoutingSuggestionFromMetadata(result.metadata)
+        : undefined;
 
       if (
         tc.name === "run_workflow"
