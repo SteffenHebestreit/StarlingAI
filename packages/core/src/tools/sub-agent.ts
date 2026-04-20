@@ -2012,6 +2012,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const taskId = request.taskId ?? reusableTask?.id ?? `task_${Object.keys(ensureSwarmState(ctx, request.task).tasks).length + 1}`;
   const taskState = getOrCreateSwarmTask(ctx, taskId, title, request.dependsOn ?? [], signature);
   const attemptedAgents: string[] = [];
+  // I12: Track candidates skipped because they had already exhausted their
+  // per-agent delegation cap this turn. Without this, when every routed
+  // candidate is already maxed out (e.g. researcher already called 2/2
+  // times by an earlier parallel_delegate) we silently fall through to
+  // "No suitable agent completed the task" which makes the coordinator
+  // think it's a routing problem and re-delegate the same work.
+  const cappedCandidates: string[] = [];
   const usesAutonomousBidding = !request.agentName;
 
   if (usesAutonomousBidding) {
@@ -2177,6 +2184,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     // Per-agent repeat cap: skip if this agent has already been called its allowed number of times this turn
     const prevCalls = ctx._turnAgentCounts.get(candidate) ?? 0;
     if (prevCalls >= getPerAgentDelegationLimit(ctx, candidate)) {
+      // I12: Remember WHO got skipped so the failure path can produce an
+      // honest "these agents are already maxed out for this turn"
+      // diagnostic instead of pretending nothing matched.
+      if (!cappedCandidates.includes(candidate)) {
+        cappedCandidates.push(candidate);
+      }
       continue;
     }
     ctx._turnAgentCounts.set(candidate, prevCalls + 1);
@@ -2578,10 +2591,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const timeoutAttempts = taskState.attempts.filter((a) => a.terminalState === "timeout");
   const allAttemptsTimedOut = taskState.attempts.length > 0
     && timeoutAttempts.length === taskState.attempts.length;
+  // I12: When every routed candidate was skipped due to the per-agent
+  // delegation cap, that's the actual cause of failure — not routing.
+  // Tell the coordinator plainly so it stops re-delegating the same work.
+  const allCandidatesCapped = taskState.attempts.length === 0
+    && cappedCandidates.length > 0;
   const baseError = taskState.error ?? "No suitable agent completed the task.";
-  const errorBody = allAttemptsTimedOut
-    ? `${baseError}\n\nTimeout cascade: every delegated attempt hit its per-agent turnTimeoutMs (${timeoutAttempts.length} attempt(s) on ${[...new Set(timeoutAttempts.map((a) => a.agentName))].join(", ")}). The model did not finish within the configured budget — this is a timeout, not a routing failure. Either raise turnTimeoutMs for these agents in starlingai.json, switch them to a faster model, or split the task into smaller pieces. Do NOT re-delegate the same work in this turn.`
-    : baseError;
+  let errorBody = baseError;
+  if (allAttemptsTimedOut) {
+    errorBody = `${baseError}\n\nTimeout cascade: every delegated attempt hit its per-agent turnTimeoutMs (${timeoutAttempts.length} attempt(s) on ${[...new Set(timeoutAttempts.map((a) => a.agentName))].join(", ")}). The model did not finish within the configured budget — this is a timeout, not a routing failure. Either raise turnTimeoutMs for these agents in starlingai.json, switch them to a faster model, or split the task into smaller pieces. Do NOT re-delegate the same work in this turn.`;
+  } else if (allCandidatesCapped) {
+    errorBody = `Per-agent delegation cap exhausted: every routed candidate (${cappedCandidates.join(", ")}) has already been delegated to its per-turn maximum (${DEFAULT_MAX_AGENT_CALLS_PER_TURN} call(s)) earlier in this turn. This is NOT a routing failure — the same agents already ran for this work. Stop re-delegating to them. Either accept what those earlier delegations returned (look back at the prior parallel_delegate / delegate_to_agent results in this conversation), or escalate the task back to the user with what you have.`;
+  }
 
   return {
     success: false,
@@ -2596,6 +2617,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           delegationOutcome: "timeout_cascade",
           timeoutCascade: true,
           timedOutAgents: [...new Set(timeoutAttempts.map((a) => a.agentName))],
+        }
+        : {}),
+      ...(allCandidatesCapped
+        ? {
+          delegationOutcome: "per_agent_cap_exhausted",
+          perAgentCapExhausted: true,
+          cappedCandidates: [...cappedCandidates],
         }
         : {}),
     },

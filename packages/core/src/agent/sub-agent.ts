@@ -1120,6 +1120,9 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     let iterations = 0;
     let toolCount = 0;
     let successfulToolCount = 0;
+    // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
+    // soft-deadline synthesis at most once per sub-agent run.
+    let softDeadlineSynthesisAttempted = false;
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
     const toolNames: string[] = [];
@@ -1382,6 +1385,120 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       }
     };
 
+    // I11: Pre-emptive (soft-deadline) synthesis. Same shape as
+    // `attemptTimeoutSynthesis` but runs BEFORE the hard deadline with a
+    // real budget so the model has a full inference window to convert its
+    // accumulated tool results into a useful answer. Without this, leaf
+    // agents on slow local models routinely die with web_search hits and
+    // page snapshots in conversation history but no final synthesis,
+    // and the coordinator above sees only "Sub-agent timed out" with
+    // none of the actually-collected data.
+    const attemptPreDeadlineSynthesis = async (budgetMs: number): Promise<SubAgentRunResult | null> => {
+      if (toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
+        return null;
+      }
+
+      const synthAbort = new AbortController();
+      const synthTimer = setTimeout(() => synthAbort.abort(), budgetMs);
+      const synthSignal = opts.signal
+        ? AbortSignal.any([opts.signal, synthAbort.signal])
+        : synthAbort.signal;
+
+      try {
+        const synthMessages: LLMMessage[] = [
+          {
+            role: "system",
+            content: systemPrompt +
+              "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
+              "You have used 75% of your execution budget. Stop calling tools. " +
+              "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
+              "Include the key facts, headlines, URLs, page snapshots, and evidence you already retrieved — even partial information is more useful than no answer at all. " +
+              "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
+              "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
+          },
+          ...history,
+        ];
+        const synthResponse = await provider.complete(synthMessages, [], synthSignal);
+        usage.promptTokens += synthResponse.usage.promptTokens;
+        usage.completionTokens += synthResponse.usage.completionTokens;
+        usage.totalTokens += synthResponse.usage.totalTokens;
+
+        // If the model still tried to call tools despite the explicit "no
+        // tools" instruction, fall through and let the iteration loop
+        // either succeed normally or hit the hard timeout.
+        if (synthResponse.tool_calls.length > 0) {
+          return null;
+        }
+
+        let result = normalizeSubAgentOutput(synthResponse.content);
+        if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+        result = await rescueSanitizedEmptyResult(result);
+        const recovered = recoverNoResponseAfterSubstantiveWork(result);
+        result = recovered.result;
+        result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+        if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+
+        const outputScan = scanOutput(result);
+        if (!outputScan.safe && outputScan.redacted) {
+          logAudit(
+            "output_redacted",
+            { agentName: opts.agentName, types: outputScan.detectedTypes },
+            { sessionId: subSessionId, severity: "warn" }
+          );
+          result = outputScan.redacted;
+        }
+
+        const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
+          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
+            ? "partial"
+            : "success");
+        const stats = buildStats("completed", semanticOutcome);
+        const suspicious = rejectSuspiciousNoToolOutput(
+          opts,
+          stats,
+          result,
+          turnTimeoutMs,
+          runStartedAt,
+        );
+        if (suspicious) {
+          return suspicious;
+        }
+
+        recordOutcome({
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: semanticOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+        });
+        logSubAgentCompletionAudit(
+          stats,
+          result,
+          { synthesizedAtSoftDeadline: true, softDeadlineBudgetMs: budgetMs, timeoutMs: turnTimeoutMs },
+          semanticOutcome === "success" ? "info" : "warn",
+        );
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "completed",
+          iteration: iterations,
+          summary: `Completed delegated work in ${opts.agentName} via pre-deadline synthesis.`,
+        });
+        return withArtifacts({ output: result, stats });
+      } catch (synthErr) {
+        log.warn({ synthErr, agentName: opts.agentName }, "Pre-deadline synthesis failed");
+        return null;
+      } finally {
+        clearTimeout(synthTimer);
+      }
+    };
+
     const emitSubAgentToolAudit = (params: Parameters<typeof buildSubAgentToolAuditPayload>[0]): void => {
       const payload = buildSubAgentToolAuditPayload(params);
       const isWarn = params.phase === "done" && (payload["success"] === false || typeof payload["skippedReason"] === "string");
@@ -1601,6 +1718,57 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     }
 
     while (iterations < maxIterations) {
+      // I11: Pre-emptive soft-deadline synthesis.
+      // The hard `turnTimeoutMs` deadline triggers `attemptTimeoutSynthesis`
+      // with only ~5s of grace, which is not enough on a 35B local model
+      // where each LLM call takes 10-20s. The leaf agent then dies with
+      // useful tool results (web_search hits, navigation snapshots, etc.)
+      // sitting in conversation history but no final answer for the
+      // coordinator to reuse. Reserve a real synthesis budget BEFORE the
+      // hard deadline so the model has one full inference window to turn
+      // its accumulated evidence into an answer.
+      //
+      // Reserved budget = max(20s, min(60s, turnTimeoutMs * 0.25)).
+      // For a 180s leaf timeout that's a 45s synthesis window starting at
+      // 135s elapsed. For a 900s leaf that's a 60s window starting at
+      // 840s. Tool calls are blocked during this window — only synthesis
+      // is allowed. We only fire the soft deadline once and only when
+      // (a) the hard timeout hasn't already triggered, (b) we have real
+      // tool output to synthesize from, and (c) the soft deadline has
+      // genuinely been crossed.
+      if (
+        turnTimeoutMs
+        && turnTimeoutMs >= 60_000
+        && !timeoutAbort?.signal.aborted
+        && !softDeadlineSynthesisAttempted
+        && toolCount > 0
+        && history.some((message) => message.role === "tool")
+      ) {
+        const elapsed = Date.now() - runStartedAt;
+        const reservedSynthesisMs = Math.max(20_000, Math.min(60_000, Math.round(turnTimeoutMs * 0.25)));
+        if (elapsed >= turnTimeoutMs - reservedSynthesisMs) {
+          softDeadlineSynthesisAttempted = true;
+          logAudit(
+            "sub_agent_soft_deadline",
+            {
+              agentName: opts.agentName,
+              elapsedMs: elapsed,
+              turnTimeoutMs,
+              reservedSynthesisMs,
+              iterations,
+              toolCount,
+            },
+            { sessionId: subSessionId, severity: "info" }
+          );
+          const synthesized = await attemptPreDeadlineSynthesis(reservedSynthesisMs);
+          if (synthesized) {
+            return synthesized;
+          }
+          // Synthesis attempt failed — fall through and keep iterating until
+          // the hard deadline. The hard-deadline branch below will retry.
+        }
+      }
+
       if (signal?.aborted) {
         if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
           const synthesized = await attemptTimeoutSynthesis();
