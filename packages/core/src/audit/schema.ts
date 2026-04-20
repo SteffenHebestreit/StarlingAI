@@ -90,7 +90,8 @@ export type AuditEventType =
   // Infrastructure health
   | "docker_daemon_unreachable"
   // Observability
-  | "turn_scorecard";
+  | "turn_scorecard"
+  | "coverage_shortfall_resynthesis";
 
 export interface AuditEvent {
   id: string;

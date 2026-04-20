@@ -847,26 +847,125 @@ async function finalizeUserFacingAssistantResponse(
   signal: AbortSignal,
 ): Promise<string> {
   const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
+  let resolved: string;
   if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
     const stableResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
-    return await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
-  }
-
-  const synthesized = await forceSynthesis(
-    session,
-    provider,
-    signal,
-    "You have already executed the necessary tools. Write the final user-facing answer now. Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
-  );
-  if (synthesized) {
-    const cleanedSynthesized = sanitizeUserFacingAssistantResponse(synthesized, 0);
-    if (cleanedSynthesized) {
-      return await rewriteTerminalResponseIfNeeded(cleanedSynthesized, toolIterations, session, provider, signal);
+    resolved = await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
+  } else {
+    const synthesized = await forceSynthesis(
+      session,
+      provider,
+      signal,
+      "You have already executed the necessary tools. Write the final user-facing answer now. Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
+    );
+    if (synthesized) {
+      const cleanedSynthesized = sanitizeUserFacingAssistantResponse(synthesized, 0);
+      if (cleanedSynthesized) {
+        resolved = await rewriteTerminalResponseIfNeeded(cleanedSynthesized, toolIterations, session, provider, signal);
+      } else {
+        const fallback = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+        resolved = await rewriteTerminalResponseIfNeeded(fallback, toolIterations, session, provider, signal);
+      }
+    } else {
+      const fallback = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+      resolved = await rewriteTerminalResponseIfNeeded(fallback, toolIterations, session, provider, signal);
     }
   }
 
-  const fallbackResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
-  return await rewriteTerminalResponseIfNeeded(fallbackResponse, toolIterations, session, provider, signal);
+  return await enforceDelegateCoverage(resolved, toolIterations, session, provider, signal);
+}
+
+const DELEGATE_TOOL_RESULT_RE = /^(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
+const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
+
+function countStructuredItems(text: string): number {
+  if (!text) return 0;
+  const tableRows = (text.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
+  const numbered = (text.match(/^\s*\d{1,3}[.)]\s+\S/gm) ?? []).length;
+  const bullets = (text.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
+  return Math.max(tableRows, numbered, bullets);
+}
+
+function findRecentDelegateEvidence(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+): { evidence: string; itemCount: number } | null {
+  const recent = [...history].reverse().slice(0, 16);
+  for (const message of recent) {
+    if (message.role !== "tool") continue;
+    const content = String(message.content ?? "");
+    if (!DELEGATE_TOOL_RESULT_RE.test(content)) continue;
+
+    const meta = message.metadata ?? {};
+    const outcome = typeof meta["delegationOutcome"] === "string"
+      ? String(meta["delegationOutcome"]).toLowerCase()
+      : undefined;
+    if (outcome === "failure") continue;
+
+    const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
+    const evidence = evidenceMatch
+      ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
+      : content.trim();
+    if (!evidence || evidence.length < 400) continue;
+
+    return { evidence, itemCount: countStructuredItems(evidence) };
+  }
+  return null;
+}
+
+async function enforceDelegateCoverage(
+  finalResponse: string,
+  toolIterations: number,
+  session: AgentSession,
+  provider: ChatProvider,
+  signal: AbortSignal,
+): Promise<string> {
+  if (toolIterations === 0) return finalResponse;
+  if (!finalResponse || finalResponse.length < 50) return finalResponse;
+
+  const evidence = findRecentDelegateEvidence(session.getHistory());
+  if (!evidence) return finalResponse;
+
+  const finalItems = countStructuredItems(finalResponse);
+  const itemShortfall = evidence.itemCount >= 5
+    && finalItems < Math.ceil(evidence.itemCount * 0.6);
+  const lengthShortfall = evidence.evidence.length >= 1500
+    && finalResponse.length < Math.ceil(evidence.evidence.length * 0.4);
+
+  if (!itemShortfall && !lengthShortfall) return finalResponse;
+
+  logAudit(
+    "coverage_shortfall_resynthesis",
+    {
+      evidenceLength: evidence.evidence.length,
+      evidenceItems: evidence.itemCount,
+      finalLength: finalResponse.length,
+      finalItems,
+      itemShortfall,
+      lengthShortfall,
+    },
+    { sessionId: session.id, channel: session.channel, severity: "warn" },
+  );
+
+  const instruction = [
+    "COVERAGE CORRECTION: Your previous draft answer dropped material from the most recent delegated tool result.",
+    `The delegated evidence contained ${evidence.itemCount} structured items (bullets, numbered list rows, or table rows) and ${evidence.evidence.length} characters of content,`,
+    `but your draft contained only ${finalItems} items and ${finalResponse.length} characters.`,
+    "Rewrite the answer NOW so it includes EVERY item, headline, source, URL, name, number, and source attribution from the delegated evidence above.",
+    "If the evidence covers multiple sources (e.g. several news outlets, several repositories, several findings), your answer MUST visibly cover ALL of them \u2014 do not keep only the first source.",
+    "Preserve the structure (numbered list, bullets, table) and headings of the evidence.",
+    "Do NOT summarize, do NOT trim, do NOT collapse rows into 'and others', do NOT add markers like '(truncated)' or '(abgeschnitten)'.",
+    "Do NOT call any tools \u2014 the evidence is already collected. Just rewrite the user-facing answer.",
+  ].join(" ");
+
+  const resynth = await forceSynthesis(session, provider, signal, instruction);
+  if (!resynth) return finalResponse;
+  const cleanedResynth = sanitizeUserFacingAssistantResponse(resynth, 0);
+  if (!cleanedResynth) return finalResponse;
+  // Only accept if the resynthesis genuinely improved coverage.
+  const newItems = countStructuredItems(cleanedResynth);
+  const improved = cleanedResynth.length > finalResponse.length * 1.2 || newItems > finalItems;
+  if (!improved) return finalResponse;
+  return await rewriteTerminalResponseIfNeeded(cleanedResynth, toolIterations, session, provider, signal);
 }
 
 function collapseWhitespace(value: string): string {

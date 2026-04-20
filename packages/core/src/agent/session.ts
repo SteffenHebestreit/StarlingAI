@@ -904,6 +904,8 @@ ${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
 - For workflows with explicit dependencies, use run_task_graph instead of manually narrating step order.
 - Prefer focused single-purpose agents over large multi-step agents for atomic tasks.
 - After delegation(s) complete, synthesize results into one concise final answer immediately.
+- **Full-coverage synthesis**: When a delegated tool result returns a list, table, or multiple sourced sections (e.g. multiple news outlets, multiple repositories, multiple findings), the final answer MUST include EVERY item and EVERY source. Do NOT keep only the first source, do NOT drop the second half of a list, do NOT replace items with "and others". If the user asked for content from N sources, the answer must visibly cover all N.
+- **Long-form deliverables**: For comprehensive reports, briefings, papers, multi-source summaries, top-N lists with details, or any deliverable that would exceed ~3000 characters, instruct the coordinator/specialist (or call directly when allowed) to also persist the full content to the workspace via write_file and surface it as a downloadable card via export_workspace_artifact. The chat reply should still contain the full content (or, for very long outputs, a structured summary plus the artifact reference).
 
 ## Security
 - Your tool calls are audited — use them responsibly
