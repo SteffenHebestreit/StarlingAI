@@ -1,0 +1,15 @@
+{
+  "id": "pdf-summarize",
+  "description": "Document summarization routes to summarizer",
+  "agentName": "summarizer",
+  "task": "Summarize this 50-page PDF report about renewable energy adoption in Europe into 5 bullet points.",
+  "subAgentMocks": {
+    "summarizer": "Key findings from the renewable energy report:\n• Solar capacity grew 18% YoY across EU member states\n• Germany leads wind energy deployment with 65 GW installed\n• Grid storage investment up 40% in 2024\n• Policy targets require 42% renewable mix by 2030\n• Cost parity with fossil fuels achieved in 12 of 27 member states",
+    "media_analyst": "Extracted PDF text: The report covers solar, wind, and grid storage trends across EU countries."
+  },
+  "assertFinal": {
+    "success": true,
+    "maxDelegations": 1,
+    "outputContainsAny": ["solar", "renewable", "wind", "energy", "bullet", "•"]
+  }
+}

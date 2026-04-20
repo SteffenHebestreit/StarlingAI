@@ -660,6 +660,26 @@ describe("runtime delegated-loop regressions", () => {
     expect(completeMock).toHaveBeenCalledTimes(2);
   });
 
+  it("resynthesizes empty direct replies instead of surfacing a no-response placeholder", async () => {
+    streamMock.mockImplementation(() => createTextStream(""));
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Eine Zusammenfassung der wichtigsten Ereignisse",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(result.response).not.toBe("(no response)");
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("continues the same turn when delegated evidence exposes a concrete new follow-up action", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
@@ -1290,6 +1310,7 @@ describe("runtime delegated-loop regressions", () => {
         topResult: "web_task_coordinator",
         topResultConfidence: "high",
         topResultScore: 0.72,
+        suggestedFallbackAgents: ["browser_agent", "researcher"],
         resultCount: 5,
         routingMode: "hybrid",
       },
@@ -1337,7 +1358,100 @@ describe("runtime delegated-loop regressions", () => {
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
       agentName: "web_task_coordinator",
+      fallbackAgents: ["browser_agent", "researcher"],
       task: "Gehe auf freelancermap.com und prüfe, ob ich neue Nachrichten habe.",
+    });
+  });
+
+  it("reuses the top search_agents result for the next swarm_delegate call", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("search_1", "search_agents", {
+          query: "web search news headlines",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("swarm_1", "swarm_delegate", {
+          task: "Ermittle die aktuellen Top-Headlines von heute.",
+        });
+      }
+      return createTextStream("Ich habe den bereits gefundenen Web-Koordinator direkt verwendet.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: '➡ NEXT ACTION: Call delegate_to_agent(agentName="web_task_coordinator", task="<your task>") NOW. Do NOT call search_agents again.',
+      metadata: {
+        query: "web search news headlines",
+        topResult: "web_task_coordinator",
+        topResultConfidence: "high",
+        topResultScore: 0.72,
+        suggestedFallbackAgents: ["researcher"],
+        resultCount: 5,
+        routingMode: "hybrid",
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from web_task_coordinator — TASK COMPLETED.\nObserved evidence:\nThe coordinator ran with the routed agent.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    const swarmDelegateExecuteMock = vi.fn(async () => ({
+      success: false,
+      output: "",
+      error: "swarm_delegate should have been recovered to delegate_to_agent",
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    registerTool({
+      name: "swarm_delegate",
+      description: "Delegate to the swarm.",
+      parameters: { type: "object", properties: {} },
+      execute: swarmDelegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Was sind die Headlines von Heute?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Web-Koordinator");
+    expect(searchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(swarmDelegateExecuteMock).not.toHaveBeenCalled();
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "web_task_coordinator",
+      fallbackAgents: ["researcher"],
+      task: "Ermittle die aktuellen Top-Headlines von heute.",
     });
   });
 

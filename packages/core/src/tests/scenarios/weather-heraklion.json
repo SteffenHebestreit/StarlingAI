@@ -1,0 +1,15 @@
+{
+  "id": "weather-heraklion",
+  "description": "Freshness-sensitive weather forecast routes to web_task_coordinator",
+  "agentName": "web_task_coordinator",
+  "task": "What's the weather in Heraklion next Friday?",
+  "subAgentMocks": {
+    "web_task_coordinator": "Heraklion weather next Friday: sunny with highs around 24°C, light sea breeze, UV index 6. Source: met.no.",
+    "researcher": "Weather.com shows Heraklion at 24C next Friday with clear skies."
+  },
+  "assertFinal": {
+    "success": true,
+    "maxDelegations": 2,
+    "outputContainsAny": ["Heraklion", "weather", "Friday", "°C", "sunny"]
+  }
+}

@@ -8,7 +8,7 @@
  * The orchestrator reads recent failures at session start so it can
  * route smarter without repeating known-broken paths.
  */
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 
@@ -26,6 +26,13 @@ export interface OutcomeEntry {
   error?: string;
   /** Human-readable lesson the agent or system recorded */
   lesson?: string;
+  /**
+   * G32: Coarse task-class fingerprint — top 3 content words from the task,
+   * lower-cased, sorted.  Used for outcome-weighted routing.
+   */
+  taskKeywords?: string[];
+  /** G32: Number of share_finding calls made during this run (quality signal). */
+  sharedFindingsCount?: number;
 }
 
 const OUTCOMES_FILE = ".starlingai/agent_outcomes.ndjson";
@@ -34,10 +41,31 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
   try {
     const dir = resolve(workspacePath, ".starlingai");
     mkdirSync(dir, { recursive: true });
-    appendFileSync(resolve(workspacePath, OUTCOMES_FILE), JSON.stringify(entry) + "\n", "utf-8");
+    const filePath = resolve(workspacePath, OUTCOMES_FILE);
+    appendFileSync(filePath, JSON.stringify(entry) + "\n", "utf-8");
+    // Rolling-window trim: keep only the last MAX_OUTCOMES_LINES lines so very
+    // long-lived workspaces do not pay O(n) read cost on every routing call.
+    _trimOutcomesIfNeeded(filePath);
   } catch (err) {
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");
   }
+}
+
+const MAX_OUTCOMES_LINES = 50_000;
+const TRIM_CHECK_INTERVAL = 200; // only count lines every N writes
+let _outcomesWriteCount = 0;
+
+function _trimOutcomesIfNeeded(filePath: string): void {
+  _outcomesWriteCount++;
+  if (_outcomesWriteCount % TRIM_CHECK_INTERVAL !== 0) return;
+  try {
+    const raw = readFileSync(filePath, "utf-8").trim();
+    const lines = raw.split("\n").filter(Boolean);
+    if (lines.length > MAX_OUTCOMES_LINES) {
+      const kept = lines.slice(lines.length - MAX_OUTCOMES_LINES);
+      writeFileSync(filePath, kept.join("\n") + "\n", "utf-8");
+    }
+  } catch { /* best-effort */ }
 }
 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
@@ -182,4 +210,79 @@ function percentile(values: number[], ratio: number): number {
 
 function clampTimeout(timeoutMs: number): number {
   return Math.max(MIN_ADAPTIVE_TIMEOUT_MS, Math.min(MAX_ADAPTIVE_TIMEOUT_MS, timeoutMs));
+}
+
+// ── G32: Task-class fingerprint helpers ────────────────────────────────────
+
+const STOP_WORDS = new Set([
+  "the","a","an","is","are","was","were","be","been","being","have","has","had",
+  "do","does","did","will","would","should","could","may","might","shall","can",
+  "i","we","you","he","she","it","they","this","that","these","those","of","in",
+  "on","at","to","for","with","by","from","up","about","into","through","during",
+  "what","which","who","how","when","where","why","please","me","my","our","your",
+  "gibt","mir","ich","bitte","die","der","das","ein","eine","und","oder","von",
+]);
+
+/**
+ * G32: Extract a stable 3-word fingerprint from a task description.
+ * Used to group outcomes into coarse task classes for routing weight adjustment.
+ */
+export function extractTaskKeywords(task: string): string[] {
+  return task
+    .toLowerCase()
+    .replace(/[^a-z0-9äöüß\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 4 && !STOP_WORDS.has(w))
+    .slice(0, 3)
+    .sort();
+}
+
+/**
+ * G32: Jaccard similarity between two keyword arrays.
+ * Returns 0–1. Used to identify "similar task class" outcomes.
+ */
+function keywordJaccard(a: string[], b: string[]): number {
+  if (a.length === 0 && b.length === 0) return 1;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const intersection = [...setA].filter(w => setB.has(w)).length;
+  const union = new Set([...a, ...b]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * G32: Outcome-weighted routing multiplier for a specific agent on a given task.
+ *
+ * Algorithm:
+ *   1. Find recent outcomes for this agent whose task keywords have Jaccard ≥ 0.4
+ *      with the current query keywords (similar task class).
+ *   2. Compute blended success rate (success=1, partial=0.5, failure=0).
+ *   3. Return a multiplier in [0.80, 1.20] via tanh — neutral at 0.5 success rate.
+ *
+ * Minimum 25 similar-class samples required before applying any adjustment.
+ * Below threshold returns 1.0 (no change).
+ */
+const MIN_OUTCOME_WEIGHT_SAMPLES = 25;
+const OUTCOME_WEIGHT_MAX_DELTA = 0.20; // ±20% cap
+
+export function computeOutcomeRoutingMultiplier(
+  agentName: string,
+  queryKeywords: string[],
+  workspacePath: string,
+): number {
+  const outcomes = readRecentOutcomes(workspacePath, 200);
+  const similar = outcomes.filter(o => {
+    if (o.agent !== agentName) return false;
+    const kws = o.taskKeywords ?? extractTaskKeywords(o.task);
+    return keywordJaccard(queryKeywords, kws) >= 0.4;
+  });
+  if (similar.length < MIN_OUTCOME_WEIGHT_SAMPLES) return 1.0;
+  const successRate =
+    (similar.filter(o => o.outcome === "success").length +
+     similar.filter(o => o.outcome === "partial").length * 0.5) /
+    similar.length;
+  // tanh maps [-∞,+∞] → (-1,+1); here we map [0,1] success rate so that
+  // 0.5 → multiplier 1.0, 1.0 → ~1.20, 0.0 → ~0.80.
+  const delta = Math.tanh((successRate - 0.5) * 4) * OUTCOME_WEIGHT_MAX_DELTA;
+  return 1.0 + delta;
 }

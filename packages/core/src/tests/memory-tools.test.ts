@@ -345,4 +345,58 @@ describe("memory tools", () => {
     expect(searchResult.success).toBe(true);
     expect(searchResult.output).toContain("[user/preference]");
   });
+
+  it("rejects near-duplicate share_finding when token overlap ≥85%", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    // Write first finding
+    const first = await executeTool("share_finding", {
+      key: "headline_bbc",
+      value: "BBC: UK economy grows for second consecutive quarter, beating analyst expectations.",
+    }, { sessionId: "sub:dedup-sess:researcher:1" });
+    expect(first.success).toBe(true);
+    expect(first.metadata?.["deduplicated"]).toBeUndefined();
+
+    // Write near-duplicate (same tokens, different key)
+    const second = await executeTool("share_finding", {
+      key: "headline_bbc_copy",
+      value: "BBC: UK economy grows for second consecutive quarter, beating analyst expectations.",
+    }, { sessionId: "sub:dedup-sess:researcher:1" });
+    expect(second.success).toBe(true);
+    expect(second.metadata?.["deduplicated"]).toBe(true);
+    expect(second.output).toContain("similar to existing fact");
+  });
+
+  it("allows share_finding when values are sufficiently different", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    await executeTool("share_finding", {
+      key: "headline_weather",
+      value: "Sunny skies expected in Berlin throughout the week.",
+    }, { sessionId: "sub:dedup-sess2:researcher:1" });
+
+    const second = await executeTool("share_finding", {
+      key: "headline_stocks",
+      value: "DAX index closes up 1.4% driven by technology gains.",
+    }, { sessionId: "sub:dedup-sess2:researcher:1" });
+    expect(second.success).toBe(true);
+    expect(second.metadata?.["deduplicated"]).toBeUndefined();
+  });
+
+  it("always allows overwriting the same key via share_finding", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    await executeTool("share_finding", {
+      key: "current_price",
+      value: "Apple stock: $195.00",
+    }, { sessionId: "sub:dedup-sess3:researcher:1" });
+
+    const update = await executeTool("share_finding", {
+      key: "current_price",
+      value: "Apple stock: $195.00",
+    }, { sessionId: "sub:dedup-sess3:researcher:1" });
+    expect(update.success).toBe(true);
+    // Same key → no dedup rejection (overwrite is expected)
+    expect(update.metadata?.["deduplicated"]).toBeUndefined();
+  });
 });
