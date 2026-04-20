@@ -1144,6 +1144,21 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     let shareFindinCalledThisRun = false;
     // Phase B8: stop heuristic — count share_finding calls to detect "enough evidence collected"
     let shareFindinCallCount = 0;
+    // I13: In-loop sufficiency / cascade-failure guard.
+    //   • cumulativeTimeoutSignalCount counts "timed out after Nms" markers
+    //     observed in delegation tool results across the whole run. When
+    //     this hits ≥2, we strip delegation tools and force the agent to
+    //     write an honest final answer from whatever fragments exist
+    //     instead of dispatching yet another doomed parallel_delegate.
+    //   • cumulativeUsefulEvidenceBytes accumulates non-boilerplate bytes
+    //     from successful tool results. Once it crosses the sufficiency
+    //     threshold, we inject a one-shot nudge telling the agent it has
+    //     enough material — answer now unless one specific fact is still
+    //     missing. Both flags fire at most once per run.
+    let cumulativeTimeoutSignalCount = 0;
+    let cumulativeUsefulEvidenceBytes = 0;
+    let cascadeSynthesisForced = false;
+    let sufficiencySynthesisNudged = false;
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
@@ -2341,6 +2356,38 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         // Track bytes per tool for observability
         bytesByTool.set(tc.name, (bytesByTool.get(tc.name) ?? 0) + resultContent.length);
 
+        // I13: Cascade-timeout detector. Delegation tools wrap one or many
+        // child sub-agents; when those children hit their hard timeout, the
+        // delegation result content carries one "timed out after Nms" marker
+        // per timed-out child. Count them so the post-tool guard below can
+        // decide whether the swarm has cascade-failed.
+        const isDelegationTool = tc.name === "delegate_to_agent"
+          || tc.name === "parallel_delegate"
+          || tc.name === "swarm_delegate"
+          || tc.name === "run_task_graph";
+        if (isDelegationTool) {
+          const timeoutMatches = resultContent.match(/timed out after \d+ms/gi);
+          if (timeoutMatches) {
+            cumulativeTimeoutSignalCount += timeoutMatches.length;
+          }
+        }
+
+        // I13: Useful-evidence accumulator. Sum non-boilerplate bytes from
+        // successful tool results so the post-tool guard can decide whether
+        // the agent already has enough material to answer. Strip the
+        // timeout-summary stanzas so we don't double-count them as
+        // "evidence" — they are negative signal, already counted above.
+        if (
+          result.success
+          && !/^(All candidate agents failed|Tool '[^']+' has been called|Tool '[^']+' is)/i.test(resultContent)
+        ) {
+          const usefulPortion = resultContent.replace(
+            /Sub-agent '[^']+' timed out after \d+ms[\s\S]{0,400}?(?=\n\n|$)/g,
+            "",
+          );
+          cumulativeUsefulEvidenceBytes += usefulPortion.length;
+        }
+
         // E21: Track source domain diversity for research plateau detection
         if (result.success && (tc.name === "web_fetch" || tc.name === "browser_navigate")) {
           const rawUrl = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
@@ -2470,6 +2517,83 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           visitedSourceDomains.size + " unique domain(s) with no new source in the last " +
           consecutiveStaleDomainFetches + " fetches. " +
           "Source coverage has plateaued. Stop fetching — call share_finding with your best evidence and synthesize a final answer.";
+      }
+
+      // I13: In-loop sufficiency / cascade-failure guard. Runs after tool
+      // results have been collected for this iteration but before they are
+      // pushed into history and the next LLM call is made. This is the
+      // "do I have enough?" / "did the swarm cascade-fail?" gate that was
+      // previously missing — without it the coordinator would keep
+      // dispatching new delegations even when 6 children had already
+      // timed out, eventually hit the per-agent cap, and only then
+      // produce a 1097-char shrug ignoring whatever real fragments came
+      // back. Both branches fire at most once per run.
+      if (!cascadeSynthesisForced && cumulativeTimeoutSignalCount >= 2 && toolResults.length > 0) {
+        cascadeSynthesisForced = true;
+        const beforeLen = tools.length;
+        tools = tools.filter((t) =>
+          t.name !== "delegate_to_agent"
+          && t.name !== "parallel_delegate"
+          && t.name !== "swarm_delegate"
+          && t.name !== "run_task_graph",
+        );
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content +=
+          "\n\n[⚠️ CASCADE TIMEOUT DETECTED] " +
+          cumulativeTimeoutSignalCount + " sub-agent invocation(s) have timed out this run. " +
+          "Delegation tools are now DISABLED for the rest of this turn — do NOT attempt more delegations. " +
+          "Write your final answer NOW from whatever evidence is already in this conversation. " +
+          "If the gathered evidence is genuinely insufficient, be HONEST: list which sub-agents you tried, " +
+          "state that they timed out, and report what (if anything) was actually retrieved. " +
+          "Do NOT invent results. Do NOT pretend the timeouts succeeded.";
+        logAudit(
+          "sub_agent_synthesis_forced",
+          {
+            agentName: opts.agentName,
+            reason: "cascade_timeout",
+            timeoutSignals: cumulativeTimeoutSignalCount,
+            usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+            delegationToolsRemoved: beforeLen - tools.length,
+            iterations,
+          },
+          { sessionId: subSessionId, severity: "warn" },
+        );
+        log.warn(
+          { agentName: opts.agentName, timeoutSignals: cumulativeTimeoutSignalCount, iterations },
+          "Cascade timeout detected — stripping delegation tools and forcing honest synthesis",
+        );
+      } else if (
+        !sufficiencySynthesisNudged
+        && !cascadeSynthesisForced
+        && cumulativeUsefulEvidenceBytes >= 3_000
+        && toolResults.length > 0
+        && toolNames.some((name) =>
+          name === "delegate_to_agent"
+          || name === "parallel_delegate"
+          || name === "swarm_delegate"
+          || name === "run_task_graph"
+          || name === "web_search"
+          || name === "web_fetch"
+          || name === "browser_navigate")
+      ) {
+        sufficiencySynthesisNudged = true;
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content +=
+          "\n\n[✓ EVIDENCE SUFFICIENT] You have gathered approximately " +
+          cumulativeUsefulEvidenceBytes + " characters of useful tool output. " +
+          "Before calling any more tools, ask yourself: do I really need MORE data, " +
+          "or can I answer the user's question NOW from what I already have? " +
+          "Default to answering. Only call another tool if a SPECIFIC, NAMED fact is still missing.";
+        logAudit(
+          "sub_agent_synthesis_forced",
+          {
+            agentName: opts.agentName,
+            reason: "sufficient_evidence",
+            usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+            iterations,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
       }
 
       history.push(...toolResults);
