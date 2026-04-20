@@ -1365,6 +1365,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let _consecutiveFullyBlockedIterations = 0;
   // D16: Consecutive delegation failures — when ≥2, escalate to warden-stop synthesis.
   let _consecutiveDelegationFailures = 0;
+  // I8: Reused-delegation counter — `executeDelegationWithFallback` returns
+  // metadata.reused=true when a coordinator paraphrases a task whose
+  // signature already completed in this session. After 2 reuses in one turn
+  // the coordinator is clearly stuck re-asking for finished work; we stop and
+  // synthesize from the cached output instead of burning more LLM iterations.
+  let _turnReusedDelegationCount = 0;
+  const REUSED_DELEGATION_LOOP_THRESHOLD = 2;
   // F29: Turn-level scorecard accumulators
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
@@ -2420,6 +2427,57 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
 
       _lastToolResultByName.set(tc.name, resultText);
+
+      // ── Reused-delegation loop detection ─────────────────────────────────
+      // When a coordinator keeps paraphrasing the same task, the underlying
+      // signature still matches and `executeDelegationWithFallback` returns
+      // the cached output with metadata.reused=true. Counting these in-turn
+      // catches semantic loops that the byte-equality fingerprint below
+      // misses (because each paraphrase mutates the args).
+      if (
+        tc.name === "delegate_to_agent"
+        && result.success
+        && (result.metadata as { reused?: unknown } | undefined)?.reused === true
+      ) {
+        _turnReusedDelegationCount += 1;
+        if (_turnReusedDelegationCount >= REUSED_DELEGATION_LOOP_THRESHOLD) {
+          logAudit(
+            "tool_call_completed",
+            {
+              tool: tc.name,
+              success: true,
+              outputChars: result.output.length,
+              reusedDelegationLoop: true,
+              reusedDelegationCount: _turnReusedDelegationCount,
+            },
+            { sessionId: session.id, severity: "warn" },
+          );
+          const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
+          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+          const performance = buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: finalResponse.length,
+            finishReason: "delegate_loop_terminated",
+            blocked: false,
+            toolIterations: iterationCount,
+          });
+          return {
+            response: finalResponse,
+            toolCallsExecuted: toolCallsRequested,
+            guardrailEvents,
+            usage: totalUsage,
+            blocked: false,
+            swarmState: toolContext.swarmState,
+            performance,
+          };
+        }
+      }
 
       // ── Identical output loop detection ──────────────────────────────────
       // Track BOTH successes and failures — repeated errors are loops too.
