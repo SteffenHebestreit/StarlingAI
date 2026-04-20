@@ -890,9 +890,17 @@ function looksLikeDelegateMetadata(meta: Record<string, unknown> | undefined): b
 function countStructuredItems(text: string): number {
   if (!text) return 0;
   const tableRows = (text.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
+  // Plain numbered list: "1. foo" / "1) foo".
   const numbered = (text.match(/^\s*\d{1,3}[.)]\s+\S/gm) ?? []).length;
+  // Bold-prefixed numbered headlines/sections, common in coordinator
+  // markdown output: "**1. Title**" or "**1) Title**". The plain regex
+  // above misses these because the line starts with "*".
+  const boldNumbered = (text.match(/^\s*\*\*\d{1,3}[.)]\s+\S/gm) ?? []).length;
   const bullets = (text.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
-  return Math.max(tableRows, numbered, bullets);
+  // Headings (markdown ###/####) used as item separators in long
+  // structured deliverables.
+  const headings = (text.match(/^\s*#{1,6}\s+\S/gm) ?? []).length;
+  return Math.max(tableRows, numbered, boldNumbered, bullets, headings);
 }
 
 function findRecentDelegateEvidence(
@@ -953,7 +961,14 @@ async function enforceDelegateCoverage(
   // the same hallucination.
   const HALLUCINATED_TRUNCATION_RE =
     /\b(abgeschnitten|truncated|cut off|nicht sichtbar|in meinem Kontext nicht|not visible|content (is|was) (truncated|missing|cut)|Ergebnis(?:blöcke|inhalt) (?:wurden?|ist|sind)\s+(?:hier\s+)?(?:abgeschnitten|nicht)|cannot see|kann (?:ich)? (?:die|den)\s+\w+\s+nicht (?:sehen|finden))/i;
-  const evidenceIsRich = evidence.evidence.length >= 1500 && evidence.itemCount >= 5;
+  // Evidence is "rich" when EITHER it has many structured items OR it
+  // is large in absolute terms relative to the draft. The item-only
+  // gate misses unstructured prose deliverables and bold-numbered
+  // headlines that the counter previously missed.
+  const evidenceIsRich =
+    (evidence.evidence.length >= 1500 && evidence.itemCount >= 5)
+    || (evidence.evidence.length >= 1500
+        && finalResponse.length < Math.ceil(evidence.evidence.length * 0.3));
   const draftClaimsTruncation = HALLUCINATED_TRUNCATION_RE.test(finalResponse);
   if (evidenceIsRich && draftClaimsTruncation) {
     logAudit(
@@ -1034,6 +1049,32 @@ async function enforceDelegateCoverage(
       return evidence.evidence;
     }
     return finalResponse;
+  }
+  // I14.1: Even when the resynthesis "improved" by the +20%/items gate,
+  // it may still be drastically shorter than the evidence (e.g. 496
+  // chars of summary against 3982 chars of full deliverable). When the
+  // evidence is substantial and the rewrite still falls below the
+  // length-coverage threshold, bypass to raw evidence rather than ship
+  // a coverage-failed summary.
+  const resynthStillShort =
+    evidence.evidence.length >= 1500
+    && cleanedResynth.length < Math.ceil(evidence.evidence.length * 0.4)
+    && newItems < Math.ceil(Math.max(evidence.itemCount, 1) * 0.6);
+  if (resynthStillShort) {
+    logAudit(
+      "hallucinated_truncation_bypass",
+      {
+        evidenceLength: evidence.evidence.length,
+        evidenceItems: evidence.itemCount,
+        finalLength: finalResponse.length,
+        finalItems,
+        resynthLength: cleanedResynth.length,
+        resynthItems: newItems,
+        bypassReason: "resynthesis_still_under_coverage_threshold",
+      },
+      { sessionId: session.id, channel: session.channel, severity: "warn" },
+    );
+    return evidence.evidence;
   }
   return await rewriteTerminalResponseIfNeeded(cleanedResynth, toolIterations, session, provider, signal);
 }
