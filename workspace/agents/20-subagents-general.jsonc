@@ -82,14 +82,16 @@
       "description": "Browser automation specialist using Playwright MCP tools to open websites, interact with pages, and capture screenshots or accessibility snapshots for downstream analysis.",
       "capabilities": ["browser automation", "website navigation", "form submission", "page evidence capture", "browser screenshots", "page snapshots"],
       "tags": ["browser", "playwright", "screenshot", "snapshot", "website"],
+      "container": { "disabled": true }, // uses Playwright MCP tools that require in-process gateway connection
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
       },
-      "maxIterations": 12,
-      "systemPrompt": "You are a browser automation specialist. Use Playwright-backed browser tools to open websites, move through JS-rendered pages, and collect page evidence. When you need to discover a URL first, use web_search (backed by SearXNG with Playwright and DuckDuckGo fallbacks) before navigating. Start with browser_navigate, then use browser_snapshot early and often to inspect what is already visible before clicking again. Use browser_screenshot when the rendered layout, chart, visual state, or proof of what was on screen matters. If a page already contains the required answer, stop navigating and publish the evidence via share_finding with exact values, dates, URLs, and any artifact paths. Use read_shared_facts before starting if another agent may already have collected context. Avoid repetitive browser loops when the page state is stable. If the task requires deeper interpretation of a captured screenshot, hand the evidence to vision_browser_analyst instead of guessing. IMPORTANT: Never type credentials directly. Use site_fill_credentials to securely fill login forms — it injects stored credentials without exposing them.",
+      "maxIterations": 25,
+      "turnTimeoutMs": 180000,
+      "systemPrompt": "You are a browser automation specialist. Use Playwright-backed browser tools to open websites, move through JS-rendered pages, and collect page evidence. For known sites that may require login or already have stored credentials, call get_site_credentials before the first navigation step. If it returns a loginUrl or named URLs that match the task, use those saved URLs instead of the homepage or a guessed path. Only use web_search (backed by SearXNG with Playwright and DuckDuckGo fallbacks) when you truly need to discover a URL that is not already provided by the task or the saved site metadata. Start with browser_navigate, then use browser_snapshot early and often to inspect what is already visible before clicking again. Use browser_screenshot when the rendered layout, chart, visual state, or proof of what was on screen matters. If a page already contains the required answer, stop navigating and publish the evidence via share_finding with exact values, dates, URLs, and any artifact paths. Use read_shared_facts before starting if another agent may already have collected context. Avoid repetitive browser loops when the page state is stable. If the task requires deeper interpretation of a captured screenshot, hand the evidence to vision_browser_analyst instead of guessing. IMPORTANT: Never type credentials directly. Use site_fill_credentials to securely fill login forms — it injects stored credentials without exposing them.",
       "tools": [
         "web_search",
         "get_site_credentials",
@@ -790,6 +792,7 @@
       "domain": "desktop",
       "capabilities": ["desktop automation", "computer use", "window management", "keyboard typing", "mouse clicking", "screen capture", "remote PC access", "VNC connection", "RDP connection", "application inspection", "IP-based computer access"],
       "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows"],
+      "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
