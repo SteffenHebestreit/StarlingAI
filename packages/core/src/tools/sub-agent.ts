@@ -2398,30 +2398,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       finalizeAttemptBudget(ctx, taskState, attempt);
 
       if (classification !== "success" && classification !== "partial") {
-        // "weak_partial", "coordinator_noop", "failure", "infrastructure_failure" —
-        // all of these continue to the next candidate.
-        const isPartialContent = classification === "weak_partial";
-        attempt.status = isPartialContent ? "partial" : "failed";
+        // "coordinator_noop", "failure", and "infrastructure_failure"
+        // all continue to the next candidate.
+        attempt.status = "failed";
         taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
-        taskState.status = isPartialContent ? "partial" : "failed";
-        if (isPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
-          if (!bestPartialResult || output.trim().length > bestPartialResult.output.trim().length) {
-            bestPartialResult = {
-              agentName: candidate,
-              output,
-              terminalState: stats?.terminalState,
-              routingInfo,
-              artifacts: artifacts.map((artifact) => ({ ...artifact })),
-            };
-          }
-        }
+        taskState.status = "failed";
         lastFailureWasInfrastructure = classification === "infrastructure_failure";
         publishSwarmState(ctx);
-        emitSwarmEvent(isPartialContent ? "task_partial" : "task_failed", {
+        emitSwarmEvent("task_failed", {
           sessionId: ctx.sessionId,
           taskId,
           agentName: candidate,
-          data: { reason: isPartialContent ? "partial_result" : "weak_result" },
+          data: { reason: "weak_result" },
         });
         announceAgentCapability({
           sessionId: ctx.sessionId,
