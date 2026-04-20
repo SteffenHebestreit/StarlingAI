@@ -514,4 +514,27 @@ describe("runtime turn guidance", () => {
 
     expect(first).toBe(second);
   });
+
+  it("classifies consecutive delegation failures so the warden escalation can trigger", () => {
+    // Both calls must return "failure" so the _consecutiveDelegationFailures counter
+    // can reach 2 inside _runTurn() and inject the WARDEN STOP message.
+    const failureResult = [
+      {
+        role: "tool" as const,
+        tool_call_id: "call_f1",
+        content: "Delegated result from researcher — TASK FAILED.\nObserved evidence:\nAll candidate agents failed.",
+        metadata: {
+          agentName: "researcher",
+          delegationSucceeded: false,
+          delegationOutcome: "failure",
+          terminalState: "completed",
+        },
+      },
+    ];
+
+    const d1 = classifyPostOrchestrationDisposition(failureResult);
+    const d2 = classifyPostOrchestrationDisposition(failureResult);
+    expect(d1).toBe("failure");
+    expect(d2).toBe("failure");
+  });
 });

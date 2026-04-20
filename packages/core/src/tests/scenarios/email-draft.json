@@ -1,0 +1,14 @@
+{
+  "id": "email-draft",
+  "description": "Professional email drafting routes to email_drafter",
+  "agentName": "email_drafter",
+  "task": "Draft a professional follow-up email to a client asking for feedback on last week's product demo.",
+  "subAgentMocks": {
+    "email_drafter": "Subject: Following Up on Last Week's Product Demo\n\nDear [Client Name],\n\nI hope you are doing well. I wanted to follow up on the product demonstration we held last week and ask if you had any initial thoughts or feedback.\n\nWe value your perspective greatly and would love to understand how the demo addressed your needs. If you have any questions or would like to explore specific features further, I am happy to schedule a follow-up call at your convenience.\n\nBest regards,\n[Your Name]"
+  },
+  "assertFinal": {
+    "success": true,
+    "maxDelegations": 1,
+    "outputContainsAny": ["email", "Subject", "Dear", "follow", "demo"]
+  }
+}

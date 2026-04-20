@@ -44,6 +44,7 @@ export type AuditEventType =
   | "architect_fallback_failed"
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
+  | "task_budget_exceeded"
   | "turn_guidance_applied"
   | "turn_slo_breach"
   | "computer_action"
@@ -84,7 +85,11 @@ export type AuditEventType =
   | "task_checkpoint_completed"
   | "delegate_agent_pinned"
   | "warden:tool_dev_stuck"
-  | "warden:tool_dev_runaway";
+  | "warden:tool_dev_runaway"
+  // Infrastructure health
+  | "docker_daemon_unreachable"
+  // Observability
+  | "turn_scorecard";
 
 export interface AuditEvent {
   id: string;

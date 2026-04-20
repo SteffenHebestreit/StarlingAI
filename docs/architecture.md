@@ -81,7 +81,7 @@ The hard boundary is secrets and privilege escalation. Stored credentials must n
 
 Every agent action passes through a four-layer guardrail stack before it can affect the outside world. Tool calls are classified into five tiers at compile time — not runtime-configurable. A shell command always runs inside a Docker sandbox, never on the host. Outputs are scanned for secrets before being returned to the user.
 
-The **Warden agent** (`agent/warden.ts`) subscribes to the live audit stream and autonomously detects erratic behavior: `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, and `turn_slo_breach`. On detection it can halt containers, revoke capabilities, or escalate to a human operator. Swarm morphing enforces per-agent concurrency semaphores with FIFO queuing and emits backpressure events when the swarm is under load.
+The **Warden agent** (`agent/warden.ts`) subscribes to the live audit stream and autonomously detects erratic behavior: `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, `turn_slo_breach`, and infrastructure failures such as `docker_daemon_unreachable` when containerized delegations lose access to the Docker daemon mid-session. On detection it can halt containers, revoke capabilities, or escalate to a human operator. Swarm morphing enforces per-agent concurrency semaphores with FIFO queuing and emits backpressure events when the swarm is under load.
 
 The **human-in-the-loop approval system** (`approval/`) adds a third layer of oversight beyond guardrails and the Warden. Per-scene `humanInLoopSteps` configuration gates specific tool calls or delegation chains behind explicit human approval via Slack Block Kit, outbound webhook, or synchronous webhook. One-click HTTP callbacks and a WebSocket `approval.respond` RPC allow operators to approve or reject in seconds without leaving their existing tooling.
 
@@ -110,7 +110,7 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
-| **Warden agent** | 3 | Implemented | Detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach, **config_proposal_flood** (v0.3.2) |
+| **Warden agent** | 3 | Implemented | Detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach, **config_proposal_flood** (v0.3.2), **docker_daemon_unreachable** (mid-session infra health, rate-limited to 1/min per process) |
 | **Swarm morphing** | 3 | Implemented | Per-agent concurrency semaphores with FIFO queuing and backpressure events |
 | **Collective memory** | 3 | Implemented | Redis Hash+List shared facts, `write_shared_fact`, `read_shared_facts`, embedding-backed semantic lookup, `share_finding` tool |
 | **Adaptive routing** | 3 | Implemented | Circuit breaker (>60% failure rate), `allLowConfidence` flag, routing rationale output |
@@ -126,7 +126,7 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
 | **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
-| **Container opt-out model** | 8 | Implemented (v0.3.2) | `agents.defaultContainerized: true` global flag + per-agent `container.disabled: true` escape hatch; 15 trusted read-only agents pre-opted-out (see GAP-1 in ROADMAP) |
+| **Container opt-out model** | 8 | Implemented (v0.3.2, default flipped post-v0.6.4) | `agents.defaultContainerized: true` global flag (set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out in tests) + per-agent `container.disabled: true` escape hatch; 27 trusted agents pre-opted-out in the workspace catalog (see GAP-1 in ROADMAP) |
 | **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
 | **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
 | **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |

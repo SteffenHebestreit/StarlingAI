@@ -1,0 +1,15 @@
+{
+  "id": "headlines-de",
+  "description": "German breaking-news query routes to web_task_coordinator",
+  "agentName": "web_task_coordinator",
+  "task": "Was sind die Headlines von Heute?",
+  "subAgentMocks": {
+    "web_task_coordinator": "Heute Schlagzeilen: Tagesschau berichtet über Bundesrat-Beschlüsse. Reuters meldet: Konjunkturpaket verabschiedet. DPA: Unwetterwarnungen für Norddeutschland.",
+    "researcher": "Aktuelle Nachrichten von Tagesschau, Reuters und DPA zeigen steigende Energiepreise und neue Konjunkturmassnahmen."
+  },
+  "assertFinal": {
+    "success": true,
+    "maxDelegations": 2,
+    "outputContainsAny": ["Tagesschau", "Reuters", "Headlines", "Schlagzeilen"]
+  }
+}

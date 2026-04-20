@@ -15,8 +15,15 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
-import { buildSessionAuditMarkdown, buildSessionDebugMarkdown } from "../agent/debug-session-export.js";
-import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, resolveSiteCredential, hasConfigSiteCredential } from "../credentials/sites.js";
+import { probeDockerReachability } from "../agent/container-runner.js";
+import {
+  buildSessionAuditMarkdown,
+  buildSessionAuditMarkdownDetached,
+  buildSessionDebugMarkdown,
+  buildSessionDebugMarkdownDetached,
+  SessionExportBusyError,
+} from "../agent/debug-session-export.js";
+import { listSiteCredentials, saveSiteCredential, deleteSiteCredential, getStoredSiteCredentialRecord, hasConfigSiteCredential } from "../credentials/sites.js";
 import { listAllScenes, getScene, saveScene, deleteScene } from "../credentials/scenes.js";
 import {
   listAllJobs as listJobDefinitions,
@@ -2204,13 +2211,16 @@ export function createGateway() {
     }
 
     try {
-      const markdown = await buildSessionDebugMarkdown(sessionId);
+      const markdown = await buildSessionDebugMarkdownDetached(sessionId);
       const filename = `starlingai-session-${sessionId.slice(0, 8)}-debug.md`;
       return c.body(markdown, 200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": buildContentDisposition(filename, "attachment"),
       });
     } catch (error) {
+      if (error instanceof SessionExportBusyError) {
+        return c.json({ error: error.message }, 409);
+      }
       if (error instanceof Error && error.message.includes("Session not found")) {
         return c.json({ error: error.message }, 404);
       }
@@ -2228,13 +2238,16 @@ export function createGateway() {
     }
 
     try {
-      const markdown = await buildSessionAuditMarkdown(sessionId);
+      const markdown = await buildSessionAuditMarkdownDetached(sessionId);
       const filename = `starlingai-session-${sessionId.slice(0, 8)}-audit.md`;
       return c.body(markdown, 200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": buildContentDisposition(filename, "attachment"),
       });
     } catch (error) {
+      if (error instanceof SessionExportBusyError) {
+        return c.json({ error: error.message }, 409);
+      }
       if (error instanceof Error && error.message.includes("Session not found")) {
         return c.json({ error: error.message }, 404);
       }
@@ -2269,9 +2282,9 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const username = String(body["username"] ?? "").trim();
-    const existing = resolveSiteCredential(hostname);
-    const password = String(body["password"] ?? "").trim() || (existing?.source === "store" ? existing.password : "");
+    const existing = getStoredSiteCredentialRecord(hostname);
+    const username = String(body["username"] ?? "").trim() || (existing?.username ?? "");
+    const password = String(body["password"] ?? "").trim() || (existing?.password ?? "");
     if (!username || !password) {
       return c.json({ error: "username and password are required" }, 400);
     }
@@ -3575,9 +3588,27 @@ export function createGateway() {
   });
 
   return {
-    start(): Promise<void> {
+    async start(): Promise<void> {
+      // Docker reachability gate. When the operator has enabled
+      // agents.defaultContainerized, sub-agents will be expected to run inside
+      // Docker by default. If Docker is unreachable, refusing to start is the
+      // only safe choice — silently falling back to in-process execution would
+      // erase the isolation guarantee the operator turned the flag on for.
+      if (config.agents.defaultContainerized) {
+        const probe = await probeDockerReachability();
+        if (!probe.reachable) {
+          const msg = `agents.defaultContainerized is true but Docker is unreachable (${probe.error ?? "unknown"}). ` +
+            `Refusing to start — sub-agents would silently fall back to in-process execution. ` +
+            `Either start Docker, set agents.defaultContainerized to false explicitly, or mark each agent with container.disabled: true.`;
+          log.error({ probe }, msg);
+          throw new Error(msg);
+        }
+        log.info({ serverVersion: probe.serverVersion, durationMs: probe.durationMs },
+          "Docker reachable — defaultContainerized sub-agents enabled");
+      }
+
       const port = config.gateway.port;
-      return new Promise((resolve, reject) => {
+      return new Promise<void>((resolve, reject) => {
         const handleError = (error: Error) => {
           httpServer.off("error", handleError);
           reject(error);

@@ -660,6 +660,26 @@ describe("runtime delegated-loop regressions", () => {
     expect(completeMock).toHaveBeenCalledTimes(2);
   });
 
+  it("resynthesizes empty direct replies instead of surfacing a no-response placeholder", async () => {
+    streamMock.mockImplementation(() => createTextStream(""));
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Eine Zusammenfassung der wichtigsten Ereignisse",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(result.response).not.toBe("(no response)");
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("continues the same turn when delegated evidence exposes a concrete new follow-up action", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
@@ -1265,6 +1285,176 @@ describe("runtime delegated-loop regressions", () => {
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses the top search_agents result for the next agent-less delegation", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("search_1", "search_agents", {
+          query: "browser login freelancermap",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_1", {
+          task: "Gehe auf freelancermap.com und prüfe, ob ich neue Nachrichten habe.",
+        });
+      }
+      return createTextStream("Ich habe den bereits gefundenen Web-Koordinator verwendet.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: '➡ NEXT ACTION: Call delegate_to_agent(agentName="web_task_coordinator", task="<your task>") NOW. Do NOT call search_agents again.',
+      metadata: {
+        query: "browser login freelancermap",
+        topResult: "web_task_coordinator",
+        topResultConfidence: "high",
+        topResultScore: 0.72,
+        suggestedFallbackAgents: ["browser_agent", "researcher"],
+        resultCount: 5,
+        routingMode: "hybrid",
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from web_task_coordinator — TASK COMPLETED.\nObserved evidence:\nThe coordinator ran with the routed agent.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "check auf freelancermap ob ich neue nachrichten habe",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Web-Koordinator");
+    expect(searchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "web_task_coordinator",
+      fallbackAgents: ["browser_agent", "researcher"],
+      task: "Gehe auf freelancermap.com und prüfe, ob ich neue Nachrichten habe.",
+    });
+  });
+
+  it("reuses the top search_agents result for the next swarm_delegate call", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("search_1", "search_agents", {
+          query: "web search news headlines",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("swarm_1", "swarm_delegate", {
+          task: "Ermittle die aktuellen Top-Headlines von heute.",
+        });
+      }
+      return createTextStream("Ich habe den bereits gefundenen Web-Koordinator direkt verwendet.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: '➡ NEXT ACTION: Call delegate_to_agent(agentName="web_task_coordinator", task="<your task>") NOW. Do NOT call search_agents again.',
+      metadata: {
+        query: "web search news headlines",
+        topResult: "web_task_coordinator",
+        topResultConfidence: "high",
+        topResultScore: 0.72,
+        suggestedFallbackAgents: ["researcher"],
+        resultCount: 5,
+        routingMode: "hybrid",
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from web_task_coordinator — TASK COMPLETED.\nObserved evidence:\nThe coordinator ran with the routed agent.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    const swarmDelegateExecuteMock = vi.fn(async () => ({
+      success: false,
+      output: "",
+      error: "swarm_delegate should have been recovered to delegate_to_agent",
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    registerTool({
+      name: "swarm_delegate",
+      description: "Delegate to the swarm.",
+      parameters: { type: "object", properties: {} },
+      execute: swarmDelegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Was sind die Headlines von Heute?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Web-Koordinator");
+    expect(searchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(swarmDelegateExecuteMock).not.toHaveBeenCalled();
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "web_task_coordinator",
+      fallbackAgents: ["researcher"],
+      task: "Ermittle die aktuellen Top-Headlines von heute.",
+    });
+  });
+
   it("forces specialist-agent orchestration for explicit online lookup requests instead of allowing direct web tool calls", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation((_messages, tools) => {
@@ -1491,6 +1681,228 @@ describe("runtime delegated-loop regressions", () => {
     expect(toolMessages[0]?.content).toContain("Workflow protocol_comparison_paper [scene] completed");
 
     freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("forces the reusable n8n project-list workflow for plain project-list checks", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      scenes: {
+        n8n_project_list: {
+          description: "Open the n8n Projektliste, check for neue Einträge, and stop after listing the visible workflows.",
+          task: "Open {{targetUrl}}, use the named project-list URL hinted by {{projectListUrlHint}}, and list the visible workflows.",
+          params: {
+            targetUrl: {
+              description: "Initial URL to open",
+              default: "http://n8n.k2o",
+            },
+            projectListUrlHint: {
+              description: "Labels for the project-list destination",
+              default: "project-list, project-list-url, projects, projektliste",
+            },
+          },
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("n8n_project_list_search_agents_1", "search_agents", {
+          query: "n8n workflow project list files",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("n8n_project_list_run_1", "run_workflow", {
+          name: "n8n_project_list",
+          workflowType: "scene",
+        });
+      }
+      return createTextStream("I used the reusable n8n project-list workflow and stopped after listing the visible workflows.");
+    });
+
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: "shell_agent",
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow n8n_project_list [scene] completed.\n\nProject list retrieved.",
+      metadata: {
+        workflowName: "n8n_project_list",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "search_agents",
+      description: "Search specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "check meine n8n-projektliste ob ich neue einträge habe",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("reusable n8n project-list workflow");
+    expect(searchAgentsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toContain("Workflow n8n_project_list [scene] completed");
+
+    freshRuntime.unregisterTool("search_agents");
+    freshRuntime.unregisterTool("run_workflow");
+  });
+
+  it("runs the reusable n8n follow-up workflow after a bare approval of the project-list candidate", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      scenes: {
+        n8n_project_list: {
+          description: "List the visible n8n workflows and ask whether the highlighted candidate should be run.",
+          task: "Open the project list and stop after listing the visible workflows.",
+        },
+        n8n_run_workflow: {
+          description: "Run an explicitly named n8n workflow from the project list.",
+          task: "Open the project list, locate {{workflowName}}, and start it.",
+          params: {
+            workflowName: {
+              description: "Workflow to run",
+            },
+          },
+        },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("n8n_candidate_followup_search_1", "search_agents", {
+          query: "start highlighted n8n workflow",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("n8n_candidate_followup_run_1", "run_workflow", {
+          name: "n8n_run_workflow",
+          workflowType: "scene",
+          params: {
+            workflowName: "Daily Sync Workflow",
+          },
+        });
+      }
+      return createTextStream("I started the approved n8n workflow.");
+    });
+
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: "shell_agent",
+    }));
+    const runWorkflowMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow n8n_run_workflow [scene] completed.\n\nStarted Daily Sync Workflow.",
+      metadata: {
+        workflowName: "n8n_run_workflow",
+        workflowType: "scene",
+        blocked: false,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "search_agents",
+      description: "Search specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    freshRuntime.registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "check meine n8n-projektliste ob ich neue einträge habe" });
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: "prior_n8n_project_list_run",
+        type: "function",
+        function: {
+          name: "run_workflow",
+          arguments: JSON.stringify({
+            name: "n8n_project_list",
+            workflowType: "scene",
+          }),
+        },
+      }],
+    });
+    session.addMessage({
+      role: "tool",
+      content: "Workflow n8n_project_list [scene] completed.\n\nVisible workflows:\n- Daily Sync Workflow\n\nShould I run Daily Sync Workflow?\nRUN_CANDIDATE: Daily Sync Workflow",
+      tool_call_id: "prior_n8n_project_list_run",
+      metadata: {
+        workflowName: "n8n_project_list",
+        workflowType: "scene",
+        blocked: false,
+      },
+    });
+    session.addMessage({
+      role: "assistant",
+      content: "I found Daily Sync Workflow. Should I run it?\nRUN_CANDIDATE: Daily Sync Workflow",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "ja",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("approved n8n workflow");
+    expect(searchAgentsMock).not.toHaveBeenCalled();
+    expect(runWorkflowMock).toHaveBeenCalledTimes(1);
+    expect((runWorkflowMock.mock.calls[0] as unknown as [Record<string, unknown>] | undefined)?.[0]).toEqual(expect.objectContaining({
+      name: "n8n_run_workflow",
+      workflowType: "scene",
+      params: {
+        workflowName: "Daily Sync Workflow",
+      },
+    }));
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "approved_run_candidate_follow_up_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[1]?.content).toContain("Workflow n8n_run_workflow [scene] completed");
+
+    freshRuntime.unregisterTool("search_agents");
     freshRuntime.unregisterTool("run_workflow");
   });
 

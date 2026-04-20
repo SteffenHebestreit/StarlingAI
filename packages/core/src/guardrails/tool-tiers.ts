@@ -52,6 +52,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  get_swarm_budget: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Aggregate token, tool-call, and wall-clock spending across swarm tasks; flags budget breaches",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   read_file: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Read file within workspace directory",
@@ -289,6 +295,50 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   list_capability_gaps: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List detected capability gaps and their status",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
+  // ─── Tier 0: Real-time data feeds (free public APIs) ────────────────────
+  get_weather: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Fetch current weather and short-term forecast for a lat/lon (Open-Meteo by default)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  get_news_headlines: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Fetch recent news headlines from a free public source (Hacker News, Reddit, RSS)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  read_rss_feed: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read latest items from a public RSS or Atom feed URL (SSRF-guarded)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  get_fx_rate: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Convert fiat currencies using free ECB reference rates (Frankfurter)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  get_crypto_price: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Fetch real-time crypto-asset prices in any quote currency (CoinGecko)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  wikipedia_lookup: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Look up a Wikipedia article summary by title or free-text term",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  list_data_feeds: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List all registered data-feed providers and whether they are enabled",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

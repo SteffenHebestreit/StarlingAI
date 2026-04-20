@@ -146,6 +146,9 @@ describe("AgentSession collapsed history", () => {
         prompt.includes("Use delegate_to_agent for every non-trivial action")
         || prompt.includes("Use orchestration tools to route every non-trivial action to specialists"),
       ).toBe(true);
+      expect(prompt).toContain("prefer browser_agent directly");
+      expect(prompt).toContain("call get_site_credentials first");
+      expect(prompt).toContain("Do not ask the user to paste credentials that may already be stored");
     }
   });
 

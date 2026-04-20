@@ -1030,7 +1030,7 @@ export function scoreAgentKeywordMatch(
   return { score: adjustedScore, matchedTerms: [...matchedTerms] };
 }
 
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i]! * b[i]!;
@@ -1117,6 +1117,20 @@ export function rebuildAgentIndex(
 
 export function isEmbeddingAvailable(): boolean {
   return _available;
+}
+
+/**
+ * G33: Compute an embedding for an arbitrary query string using the currently
+ * configured embedding provider.  Returns `null` if unavailable.
+ */
+export async function computeQueryEmbedding(text: string): Promise<Float32Array | null> {
+  if (!_available || !_lastProvider || !_embeddingModel) return null;
+  try {
+    const [vec] = await _lastProvider.embed([text], _embeddingModel);
+    return vec ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function resetEmbeddingSearchStateForTests(): void {

@@ -5,13 +5,13 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, type SwarmState, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
-import { readRecentOutcomes, computeAgentCostProfile, type AgentCostProfile } from "../agent/outcomes.js";
+import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { readPromotedAgents, promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -54,6 +54,7 @@ interface HeuristicRoutingSignals {
   looksSynthesisHeavy: boolean;
   looksMultiStageEvidenceWorkflow: boolean;
   looksRenderFromProvidedData: boolean;
+  looksBrowserLoginTask: boolean;
   looksComputerUse: boolean;
   looksServerAdmin: boolean;
   looksServiceTroubleshooting: boolean;
@@ -88,6 +89,12 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     && !looksFresh
     && !looksExternalData
     && !looksSequential;
+  // Require both a login/form/auth signal AND a site/navigation/target signal so that
+  // isolated keywords like "login" in unrelated contexts (e.g. "login taxonomy regulatory")
+  // do not over-match.
+  const hasLoginSignal = /\b(log[ -]?in|login|sign[ -]?in|signin|anmeld(?:en|ung)?|zugangsdaten|credentials?|username|password|portal|account|dashboard|inbox|mailbox|form|formular|apply|application|bewerb(?:en|ung)?|submit|checkout|invoice|rechnung)\b/i.test(normalized);
+  const hasBrowserTargetSignal = /\b(browser|website|web\s?site|webseite|seite|page|url|https?:\/\/|\.(?:com|de|org|net|io|co|app|dev|gov|edu)(?:\/|\b)|site|login[- ]?url|freelancermap|github|gitlab|twitter|linkedin|xing|amazon|ebay|facebook|instagram|portal|dashboard|inbox|mailbox|nachrichten?|messages?|fill|navigate|navigation|open|browse|visit|check|retrieve|download|upload|click|type)\b/i.test(normalized);
+  const looksBrowserLoginTask = hasLoginSignal && hasBrowserTargetSignal;
   const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
     && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
     && (!looksRenderFromProvidedData || looksSequential);
@@ -96,7 +103,9 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
   const hasDesktopAppContext = /\b(rdp|vnc|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
   const hasServerTarget = /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|ssh)\b/i.test(normalized);
-  const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|logs?|tail|ps\s+aux|df\s+-h|top|htop|container|containers)\b/i.test(normalized);
+  const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|tail(?:\s+-f)?|ps\s+aux|df\s+-h|container|containers)\b/i.test(normalized)
+    || /\b(?:show|view|check|inspect|read|tail)\s+logs?\b/i.test(normalized)
+    || /(?:^|\s)(?:top|htop)(?=$|\s|[.,;:!?])/i.test(normalized);
   const looksServiceTroubleshooting = (
     /\b(logs?|health|healthy|unhealthy|restart|restarted|crash|crashed|failing|failed|failure|down|stopped|error|incident|debug|diagnos(?:e|ing|is)|investigat(?:e|ing|ion)|why)\b/i.test(normalized)
       && /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|docker|systemctl|journalctl|service)\b/i.test(normalized)
@@ -141,6 +150,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     looksSynthesisHeavy,
     looksMultiStageEvidenceWorkflow,
     looksRenderFromProvidedData,
+    looksBrowserLoginTask,
     looksComputerUse,
     looksServerAdmin,
     looksServiceTroubleshooting,
@@ -210,6 +220,10 @@ function buildChartDesignerMatchedTerms(signals: HeuristicRoutingSignals): strin
 function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
   if (!(signals.looksWebTask || signals.looksSourceHeavy || signals.looksFresh)) {
+    return false;
+  }
+
+  if (signals.looksBrowserLoginTask) {
     return false;
   }
 
@@ -513,6 +527,8 @@ export async function resolveAgentRouting(
   // Pre-compute whether any agent in the pool declares GPU capability, so the
   // GPU-affinity penalty is only applied when a GPU-capable peer actually exists.
   const poolHasGpuAgents = entries.some(([, cfg]) => cfg.compute?.gpuPreferred && (cfg.compute?.gpuTier ?? "none") !== "none");
+  // G32: Task-class keywords for outcome-weighted routing multiplier
+  const queryKeywords = extractTaskKeywords(raw);
 
   let ranked = entries
     .map(([name, cfg]) => {
@@ -528,7 +544,9 @@ export async function resolveAgentRouting(
       ]) * 0.25;
       const taskShapeAdjustment = computeAgentTaskShapeAdjustment(raw, cfg);
       const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
-      const boostedScore = Math.max(0, Math.min(1, combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment));
+      // G32: Multiply by historical outcome weight (±20% max, requires ≥25 samples)
+      const outcomeMultiplier = computeOutcomeRoutingMultiplier(name, queryKeywords, config.workspacePath);
+      const boostedScore = Math.max(0, Math.min(1, (combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment) * outcomeMultiplier));
       return {
         name,
         cfg,
@@ -593,6 +611,7 @@ export async function resolveAgentRouting(
       && (preferenceSignals.looksVisualization || preferenceSignals.looksExternalData || preferenceSignals.looksSourceHeavy || preferenceSignals.looksDataHeavy));
   const preferWebCoordinatorInSearch = !preferenceSignals.looksMultiStageEvidenceWorkflow
     && !sourceGroundedDocumentWorkflowInSearch
+    && !preferenceSignals.looksBrowserLoginTask
     && !preferenceSignals.looksDataHeavy
     && !preferenceSignals.looksVisualization
     && !preferenceSignals.looksDocumentDeliverable
@@ -609,6 +628,7 @@ export async function resolveAgentRouting(
       ? (preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent")
       : null,
     preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
+    preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
     preferMissionInSearch ? "mission_coordinator" : null,
     preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
@@ -648,6 +668,9 @@ export async function resolveAgentRouting(
   }
   if (preferenceSignals.looksComputerUse) {
     maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+  if (preferenceSignals.looksBrowserLoginTask) {
+    maybeAppendHeuristicCandidate("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
   }
   if (preferenceSignals.looksRenderFromProvidedData) {
     maybeAppendHeuristicCandidate("chart_designer", 0.72, buildChartDesignerMatchedTerms(preferenceSignals));
@@ -892,11 +915,66 @@ function shouldGenerateEphemeralAgent(bestScore: number | undefined, threshold: 
   return bestScore === undefined || bestScore < threshold;
 }
 
+function shouldPreferCatalogAgent(
+  bestScore: number | undefined,
+  bestConfidence: "high" | "medium" | "low" | undefined,
+  threshold: number,
+): boolean {
+  if (bestConfidence === "high") return true;
+  return !shouldGenerateEphemeralAgent(bestScore, threshold);
+}
+
+function extractFirstJsonObject(content: string): string {
+  const start = content.indexOf("{");
+  if (start === -1) {
+    throw new SyntaxError("No JSON object found in architect response");
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < content.length; index += 1) {
+    const char = content[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return content.slice(start, index + 1);
+      }
+    }
+  }
+
+  throw new SyntaxError("Unterminated JSON object in architect response");
+}
+
 function parseArchitectSpec(content: string): ArchitectEphemeralSpec {
   const trimmed = content.trim();
-  const jsonStr = trimmed.startsWith("{")
-    ? trimmed
-    : trimmed.slice(trimmed.indexOf("{"));
+  const jsonStr = extractFirstJsonObject(trimmed);
   return JSON.parse(jsonStr) as ArchitectEphemeralSpec;
 }
 
@@ -1022,6 +1100,84 @@ function getOrCreateSwarmTask(ctx: ToolContext, taskId: string, title: string, d
 function summarizeText(text: string, maxLength = 180): string {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+}
+
+/**
+ * Resolve the per-task soft budgets from config.
+ * Returns 0 for any disabled limit. Kept inline so config changes are picked up
+ * each call without restart.
+ */
+function getTaskBudgets(): { tokens: number; toolCalls: number; durationMs: number } {
+  const budgets = getConfig().agents.budgets;
+  return {
+    tokens: budgets?.maxTokensPerTask ?? 0,
+    toolCalls: budgets?.maxToolCallsPerTask ?? 0,
+    durationMs: budgets?.maxDurationMsPerTask ?? 0,
+  };
+}
+
+/**
+ * Finalize a SwarmTaskAttempt with duration, budget breach detection, and
+ * task-level totals rollup. Always pair `attempt.startedAt` with this call so
+ * `durationMs` is correct. Logs a `task_budget_exceeded` audit when caps trip.
+ *
+ * Idempotent — safe to call once per attempt at the point where finishedAt is set.
+ */
+function finalizeAttemptBudget(
+  ctx: ToolContext,
+  task: SwarmTaskState,
+  attempt: SwarmTaskAttempt,
+): void {
+  if (!attempt.finishedAt) attempt.finishedAt = new Date().toISOString();
+  const startedMs = Date.parse(attempt.startedAt);
+  const finishedMs = Date.parse(attempt.finishedAt);
+  if (Number.isFinite(startedMs) && Number.isFinite(finishedMs) && finishedMs >= startedMs) {
+    attempt.durationMs = finishedMs - startedMs;
+  }
+
+  const budgets = getTaskBudgets();
+  const breaches: string[] = [];
+  if (budgets.tokens > 0 && (attempt.totalTokens ?? 0) > budgets.tokens) breaches.push("tokens");
+  if (budgets.toolCalls > 0 && (attempt.toolCount ?? 0) > budgets.toolCalls) breaches.push("toolCalls");
+  if (budgets.durationMs > 0 && (attempt.durationMs ?? 0) > budgets.durationMs) breaches.push("durationMs");
+  if (breaches.length > 0) {
+    attempt.budgetExceeded = true;
+    attempt.budgetBreaches = breaches;
+    logAudit(
+      "task_budget_exceeded",
+      {
+        taskId: task.id,
+        agentName: attempt.agentName,
+        breaches,
+        totalTokens: attempt.totalTokens ?? 0,
+        toolCount: attempt.toolCount ?? 0,
+        durationMs: attempt.durationMs ?? 0,
+        limits: budgets,
+      },
+      { sessionId: ctx.sessionId, severity: "warn" },
+    );
+  }
+
+  recomputeTaskTotals(task);
+}
+
+/** Recompute per-task rollup totals from its attempts. Called by finalizeAttemptBudget. */
+function recomputeTaskTotals(task: SwarmTaskState): void {
+  let toolCount = 0, iterations = 0, promptTokens = 0, completionTokens = 0, totalTokens = 0, durationMs = 0;
+  for (const a of task.attempts) {
+    toolCount += a.toolCount ?? 0;
+    iterations += a.iterations ?? 0;
+    promptTokens += a.promptTokens ?? 0;
+    completionTokens += a.completionTokens ?? 0;
+    totalTokens += a.totalTokens ?? 0;
+    durationMs += a.durationMs ?? 0;
+  }
+  task.totals = {
+    attempts: task.attempts.length,
+    toolCount, iterations,
+    promptTokens, completionTokens, totalTokens,
+    durationMs,
+  };
 }
 
 function buildTaskSignature(title: string, task: string, dependsOn: string[] = []): string {
@@ -1171,7 +1327,7 @@ export function looksLikeFailureResult(result: string): boolean {
   if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
     return true;
   }
-  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
+  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {
     return true;
   }
 
@@ -1236,6 +1392,80 @@ function shouldAcceptPartialDelegation(
   }
 
   return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
+}
+
+/** Consolidated classification of a completed sub-agent delegation. */
+export type DelegationClassification =
+  | "success"               // usable, complete answer
+  | "partial"               // usable but incomplete evidence (accepted partial)
+  | "coordinator_noop"      // coordinator returned a planning stub without delegating or sharing evidence
+  | "failure"               // no usable output
+  | "infrastructure_failure"; // failure caused by an unreachable service — do not retry with a different agent
+
+/**
+ * D14: Single classification function that replaces the scattered combination of
+ * looksLikeFailureResult, looksLikePlanningOnlyResult, shouldAcceptPartialDelegation,
+ * terminalState checks, stats.outcome, and the coordinator no-op heuristic.
+ *
+ * Call AFTER <final_answer> tag parsing has already mutated `output` and
+ * `delegationOutcome`.
+ */
+export function classifyDelegationResult(
+  output: string,
+  delegationOutcome: string | undefined,
+  stats: { toolCount: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  agentName: string,
+  task: string,
+  artifacts: Record<string, unknown>[] = [],
+): DelegationClassification {
+  // ── Coordinator no-op ──────────────────────────────────────────────────
+  // A coordinator that completed without calling any delegation/evidence tools
+  // and returned a short or planning-only stub is treated as a no-op.
+  // Guard on terminalState === "completed" to avoid false positives from
+  // test mocks that leave terminalState undefined.
+  const isCoordinator =
+    (agentCfg?.tags ?? []).includes("coordination") || agentName.endsWith("_coordinator");
+  if (isCoordinator && stats?.terminalState === "completed" && delegationOutcome !== "failure") {
+    const COORDINATOR_WORK_TOOLS = new Set([
+      "delegate_to_agent", "parallel_delegate", "run_task_graph",
+      "swarm_delegate", "share_finding", "run_workflow",
+    ]);
+    const actuallyWorked = (stats.toolNames ?? []).some((n) => COORDINATOR_WORK_TOOLS.has(n));
+    if (!actuallyWorked && (output.trim().length < 80 || looksLikePlanningOnlyResult(output))) {
+      return "coordinator_noop";
+    }
+  }
+
+  // ── Partial acceptance ─────────────────────────────────────────────────
+  const acceptPartial = shouldAcceptPartialDelegation(agentName, task, stats, artifacts);
+
+  // ── Failure detection ──────────────────────────────────────────────────
+  const isExplicitFailure = delegationOutcome === "failure";
+  const isNeedsInfoUnaccepted = delegationOutcome === "needs_info" && !acceptPartial;
+  const isIncompleteUnaccepted =
+    !acceptPartial
+    && (
+      (stats?.terminalState !== undefined && stats.terminalState !== "completed")
+      || looksLikeFailureResult(output)
+    );
+
+  if (isExplicitFailure || isNeedsInfoUnaccepted || isIncompleteUnaccepted) {
+    // Even in a failing result, partial content may still be usable
+    const hasPartialContent =
+      delegationOutcome === "partial"
+      || (stats?.outcome === "partial" && delegationOutcome !== "success");
+    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
+      return "partial";
+    }
+    return looksLikeInfrastructureFailure(output) ? "infrastructure_failure" : "failure";
+  }
+
+  // ── Success / partial-accepted ─────────────────────────────────────────
+  if (acceptPartial || delegationOutcome === "partial") {
+    return "partial";
+  }
+  return "success";
 }
 
 function formatArtifactReferencesForSharedContext(artifacts: Record<string, unknown>[]): string {
@@ -1494,6 +1724,10 @@ function buildHeuristicRoutingCandidates(
 
   if (signals.looksComputerUse) {
     maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+
+  if (signals.looksBrowserLoginTask) {
+    maybeAdd("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
   }
 
   if (signals.looksServerAdmin) {
@@ -1808,6 +2042,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   ]);
   let biddingTried = false;
   let bestAutoMatchScore: number | undefined;
+  let bestAutoMatchConfidence: "high" | "medium" | "low" | undefined;
   let lastFailureWasInfrastructure = false;
   let bestPartialResult:
     | {
@@ -1874,9 +2109,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
+          bestAutoMatchConfidence = topCandidate.confidence;
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
-            || !shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold);
+            || shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold);
           if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
               confidence: topCandidate.confidence,
@@ -1919,7 +2155,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         biddingTried = true;
         const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
-        if (!shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold)) {
+        bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
+        if (shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold)) {
           for (const bid of bids) {
             routingCandidateMap.set(bid.agentName, {
               confidence: bid.confidence,
@@ -2000,6 +2237,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolCount = 0;
         attempt.iterations = 0;
         attempt.toolNames = [];
+        finalizeAttemptBudget(ctx, taskState, attempt);
         taskState.status = "completed";
         taskState.output = reusableSessionEvidence.output;
         taskState.error = undefined;
@@ -2041,10 +2279,30 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         };
       }
 
+      // B7: Cross-agent context handoff — when this is a fallback agent (prior attempts
+      // already exist), prepend a brief summary of what was tried so the new agent does
+      // not repeat the same failing approaches. Pass as context (not task) so it goes
+      // into the system prompt area and won't contaminate the agent's output text.
+      let handoffContext = enrichedContext;
+      const priorAttempts = taskState.attempts.slice(0, -1); // all but the one just pushed
+      if (priorAttempts.length > 0) {
+        const priorLines = priorAttempts.map((a) => {
+          const status = a.status === "partial" ? "partial evidence" : "failed";
+          // Omit the raw error summary to avoid accidentally leaking failure-detection
+          // patterns into the new agent's context in a confusing way.
+          return `  - ${a.agentName} (${status})`;
+        });
+        const handoffPrefix =
+          `[PRIOR AGENT ACTIVITY]\n` +
+          priorLines.join("\n") +
+          "\nDo NOT repeat these exact approaches. Use a different strategy or source.\n";
+        handoffContext = handoffPrefix + (enrichedContext ? `\n${enrichedContext}` : "");
+      }
+
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
-        context: enrichedContext,
+        context: handoffContext,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         allowedAgents: ctx.allowedAgents,
@@ -2063,10 +2321,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
+        // E18: Soft deadline — give the specialist 70% of its effective timeout so
+        // it starts wrapping up before the hard timeout fires.
+        softDeadlineMs: (() => {
+          const effective = ctx.turnTimeoutOverrideMs ?? agentCfg?.turnTimeoutMs ?? 60_000;
+          return Date.now() + Math.floor(effective * 0.70);
+        })(),
       };
 
       let output: string;
-      let stats: { toolCount: number; iterations: number; toolNames: string[]; terminalState?: string; outcome?: string } | undefined;
+      let stats: {
+        toolCount: number;
+        iterations: number;
+        toolNames: string[];
+        terminalState?: string;
+        outcome?: string;
+        usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+      } | undefined;
       let artifacts: Record<string, unknown>[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
@@ -2093,6 +2364,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         attempt.toolCount = stats.toolCount;
         attempt.iterations = stats.iterations;
         attempt.toolNames = [...stats.toolNames];
+        if (stats.usage) {
+          attempt.promptTokens = stats.usage.promptTokens;
+          attempt.completionTokens = stats.usage.completionTokens;
+          attempt.totalTokens = stats.usage.totalTokens;
+        }
+        if (stats.terminalState) {
+          attempt.terminalState = stats.terminalState;
+        }
       }
 
       let delegationOutcome = stats?.outcome;
@@ -2107,27 +2386,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         output = parsedOutcome.data || output;
       }
 
-      const acceptPartial = shouldAcceptPartialDelegation(candidate, request.task, stats, artifacts);
+      // D14: Consolidated classification — replaces the scattered acceptPartial /
+      // coordinatorMicroCompletion / weak variables that used to live here.
+      const classification = classifyDelegationResult(
+        output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
+      );
       const routingInfo = routingCandidateMap.get(candidate);
-      const weak = delegationOutcome === "failure"
-        || (delegationOutcome === "needs_info" && !acceptPartial)
-        || (!acceptPartial && (
-          (stats?.terminalState !== undefined && stats.terminalState !== "completed")
-          || looksLikeFailureResult(output)
-        ));
+
       attempt.finishedAt = new Date().toISOString();
       attempt.summary = summarizeText(output);
+      finalizeAttemptBudget(ctx, taskState, attempt);
 
-      if (weak) {
-        // Use stats.outcome as fallback — <final_answer> tag parsing can
-        // override delegationOutcome to "failure" even when the sub-agent
-        // runner classified the result as "partial" (max_iterations with content).
-        const partial = delegationOutcome === "partial"
-          || (stats?.outcome === "partial" && delegationOutcome !== "success");
-        attempt.status = partial ? "partial" : "failed";
+      if (classification !== "success" && classification !== "partial") {
+        // "weak_partial", "coordinator_noop", "failure", "infrastructure_failure" —
+        // all of these continue to the next candidate.
+        const isPartialContent = classification === "weak_partial";
+        attempt.status = isPartialContent ? "partial" : "failed";
         taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
-        taskState.status = partial ? "partial" : "failed";
-        if (partial && output.trim() && !looksLikePlanningOnlyResult(output)) {
+        taskState.status = isPartialContent ? "partial" : "failed";
+        if (isPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
           if (!bestPartialResult || output.trim().length > bestPartialResult.output.trim().length) {
             bestPartialResult = {
               agentName: candidate,
@@ -2138,13 +2415,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             };
           }
         }
-        lastFailureWasInfrastructure = looksLikeInfrastructureFailure(output);
+        lastFailureWasInfrastructure = classification === "infrastructure_failure";
         publishSwarmState(ctx);
-        emitSwarmEvent(partial ? "task_partial" : "task_failed", {
+        emitSwarmEvent(isPartialContent ? "task_partial" : "task_failed", {
           sessionId: ctx.sessionId,
           taskId,
           agentName: candidate,
-          data: { reason: partial ? "partial_result" : "weak_result" },
+          data: { reason: isPartialContent ? "partial_result" : "weak_result" },
         });
         announceAgentCapability({
           sessionId: ctx.sessionId,
@@ -2177,7 +2454,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         graphPromoteFact(k, v, candidate, ctx.sessionId).catch(() => {});
       }
 
-      const partial = delegationOutcome === "partial";
+      const partial = classification === "partial";
       attempt.status = partial ? "partial" : "completed";
       taskState.status = partial ? "partial" : "completed";
       taskState.output = output;
@@ -2218,6 +2495,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       attempt.finishedAt = new Date().toISOString();
       attempt.status = "failed";
       attempt.summary = summarizeText(message);
+      finalizeAttemptBudget(ctx, taskState, attempt);
       taskState.status = "failed";
       taskState.error = summarizeText(message);
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
@@ -2317,11 +2595,120 @@ function formatSwarmState(state: SwarmState): string {
   }
 
   const lines = tasks.map((task) => {
-    const attempts = task.attempts.map((attempt) => `${attempt.agentName}:${attempt.status}`).join(", ");
-    return `- ${task.id} [${task.status}] ${task.title}${task.selectedAgent ? ` via ${task.selectedAgent}` : ""}${attempts ? ` | attempts: ${attempts}` : ""}`;
+    const attempts = task.attempts
+      .map((attempt) => {
+        const flag = attempt.budgetExceeded ? `!budget(${(attempt.budgetBreaches ?? []).join("/")})` : "";
+        return `${attempt.agentName}:${attempt.status}${flag ? ` ${flag}` : ""}`;
+      })
+      .join(", ");
+    const totals = task.totals
+      ? ` | totals: ${task.totals.totalTokens}tok, ${task.totals.toolCount}tools, ${task.totals.durationMs}ms`
+      : "";
+    return `- ${task.id} [${task.status}] ${task.title}${task.selectedAgent ? ` via ${task.selectedAgent}` : ""}${attempts ? ` | attempts: ${attempts}` : ""}${totals}`;
   });
 
   return `Objective: ${state.objective}\nUpdated: ${state.updatedAt}\nTasks:\n${lines.join("\n")}`;
+}
+
+function formatSwarmBudget(state: SwarmState): { output: string; metadata: Record<string, unknown> } {
+  const tasks = Object.values(state.tasks);
+  const budgets = getTaskBudgets();
+
+  const overall = {
+    attempts: 0,
+    toolCount: 0,
+    iterations: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    durationMs: 0,
+  };
+  const perAgent = new Map<string, typeof overall>();
+  const breachedAttempts: Array<{ taskId: string; agentName: string; breaches: string[]; totalTokens: number; toolCount: number; durationMs: number }> = [];
+
+  for (const task of tasks) {
+    if (task.totals) {
+      overall.attempts += task.totals.attempts;
+      overall.toolCount += task.totals.toolCount;
+      overall.iterations += task.totals.iterations;
+      overall.promptTokens += task.totals.promptTokens;
+      overall.completionTokens += task.totals.completionTokens;
+      overall.totalTokens += task.totals.totalTokens;
+      overall.durationMs += task.totals.durationMs;
+    }
+    for (const a of task.attempts) {
+      const slot = perAgent.get(a.agentName) ?? {
+        attempts: 0, toolCount: 0, iterations: 0,
+        promptTokens: 0, completionTokens: 0, totalTokens: 0, durationMs: 0,
+      };
+      slot.attempts += 1;
+      slot.toolCount += a.toolCount ?? 0;
+      slot.iterations += a.iterations ?? 0;
+      slot.promptTokens += a.promptTokens ?? 0;
+      slot.completionTokens += a.completionTokens ?? 0;
+      slot.totalTokens += a.totalTokens ?? 0;
+      slot.durationMs += a.durationMs ?? 0;
+      perAgent.set(a.agentName, slot);
+
+      if (a.budgetExceeded) {
+        breachedAttempts.push({
+          taskId: task.id,
+          agentName: a.agentName,
+          breaches: a.budgetBreaches ?? [],
+          totalTokens: a.totalTokens ?? 0,
+          toolCount: a.toolCount ?? 0,
+          durationMs: a.durationMs ?? 0,
+        });
+      }
+    }
+  }
+
+  const lines: string[] = [];
+  lines.push(`Objective: ${state.objective}`);
+  lines.push(`Tasks tracked: ${tasks.length}`);
+  lines.push("");
+  lines.push("## Configured per-task budgets");
+  lines.push(`- maxTokensPerTask: ${budgets.tokens > 0 ? budgets.tokens : "(unset)"}`);
+  lines.push(`- maxToolCallsPerTask: ${budgets.toolCalls > 0 ? budgets.toolCalls : "(unset)"}`);
+  lines.push(`- maxDurationMsPerTask: ${budgets.durationMs > 0 ? budgets.durationMs : "(unset)"}`);
+  lines.push("");
+  lines.push("## Overall totals");
+  lines.push(`- attempts: ${overall.attempts}`);
+  lines.push(`- iterations: ${overall.iterations}`);
+  lines.push(`- toolCount: ${overall.toolCount}`);
+  lines.push(`- promptTokens: ${overall.promptTokens}`);
+  lines.push(`- completionTokens: ${overall.completionTokens}`);
+  lines.push(`- totalTokens: ${overall.totalTokens}`);
+  lines.push(`- durationMs: ${overall.durationMs}`);
+  lines.push("");
+  lines.push("## Per-agent breakdown");
+  if (perAgent.size === 0) {
+    lines.push("- (no attempts recorded yet)");
+  } else {
+    const sorted = [...perAgent.entries()].sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+    for (const [agent, totals] of sorted) {
+      lines.push(`- ${agent}: ${totals.attempts} attempts, ${totals.totalTokens}tok, ${totals.toolCount}tools, ${totals.durationMs}ms`);
+    }
+  }
+  lines.push("");
+  lines.push("## Budget breaches");
+  if (breachedAttempts.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const b of breachedAttempts) {
+      lines.push(`- task ${b.taskId} via ${b.agentName}: ${b.breaches.join(", ")} | ${b.totalTokens}tok, ${b.toolCount}tools, ${b.durationMs}ms`);
+    }
+  }
+
+  return {
+    output: lines.join("\n"),
+    metadata: {
+      budgets,
+      overall,
+      perAgent: Object.fromEntries(perAgent),
+      breaches: breachedAttempts,
+    },
+  };
 }
 
 function validateTaskGraphNodes(nodes: TaskGraphNodeInput[]): string[] {
@@ -2359,6 +2746,24 @@ registerTool({
       success: true,
       output: formatSwarmState(state),
       metadata: { swarmState: state },
+    };
+  },
+});
+
+registerTool({
+  name: "get_swarm_budget",
+  description: "Aggregate token, tool-call, and wall-clock spending across all swarm tasks this turn. Shows configured per-task budgets, overall totals, per-agent breakdown, and any attempts that breached a budget.",
+  parameters: {
+    type: "object",
+    properties: {},
+  },
+  async execute(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const state = ensureSwarmState(ctx, "Current turn");
+    const { output, metadata } = formatSwarmBudget(state);
+    return {
+      success: true,
+      output,
+      metadata,
     };
   },
 });
@@ -2830,6 +3235,14 @@ registerTool({
       return {
         success: true,
         output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}${selfExclusionNote}`,
+        metadata: {
+          query: raw,
+          minConfidence,
+          routingMode: resolution.mode,
+          resultCount: 0,
+          weakCount: 0,
+          topResult: null,
+        },
       };
     }
 
@@ -2844,6 +3257,14 @@ registerTool({
       return {
         success: true,
         output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
+        metadata: {
+          query: raw,
+          minConfidence,
+          routingMode: resolution.mode,
+          resultCount: 0,
+          weakCount: resolution.weakCandidates.length,
+          topResult: null,
+        },
       };
     }
 
@@ -2857,6 +3278,17 @@ registerTool({
     return {
       success: true,
       output: `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
+      metadata: {
+        query: raw,
+        minConfidence,
+        routingMode: resolution.mode,
+        resultCount: resolution.results.length,
+        weakCount: resolution.weakCandidates.length,
+        topResult: topAgent.name,
+        topResultConfidence: topAgent.confidence,
+        topResultScore: topAgent.score,
+        suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
+      },
     };
   },
 });
