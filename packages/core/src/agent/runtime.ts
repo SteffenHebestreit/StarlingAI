@@ -1067,15 +1067,24 @@ export function buildModelVisibleToolResult(
       ].filter(Boolean);
       return parts.join("\n");
     }
-    // For long completed deliverables (papers, reports, analyses) keep markdown
-    // intact and pass the full content so the orchestrator LLM can relay it verbatim.
-    const isLongDeliverable = cleaned.length > 2500;
+    // For long completed deliverables (papers, reports, analyses) and
+    // structured tabular/list content (markdown tables, numbered lists with
+    // many rows) keep markdown intact and pass the full content so the
+    // orchestrator LLM can relay it verbatim. Smaller models are otherwise
+    // prone to summarising a 27-row headline table down to 2 rows and
+    // appending an invented "(truncated)" marker.
+    const tableRowCount = (cleaned.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
+    const numberedListCount = (cleaned.match(/^\s*\d{1,3}[.)]\s+\S/gm) ?? []).length;
+    const bulletListCount = (cleaned.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
+    const looksStructured =
+      tableRowCount >= 4 || numberedListCount >= 5 || bulletListCount >= 8;
+    const isLongDeliverable = cleaned.length > 2500 || looksStructured;
     const successEvidence = isLongDeliverable
       ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), 10_000)
       : evidence;
     const importantNote = isLongDeliverable
-      ? "IMPORTANT: Present the full content below VERBATIM to the user. Do NOT summarize, shorten, rephrase, or omit any section. Output it exactly as-is, preserving all headings, bullet points, and structure."
-      : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names.";
+      ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
+      : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names. Do NOT add markers like '(truncated)' or '(abgeschnitten)'.";
     const parts = [
       `Delegated result from ${agentName} — TASK COMPLETED.`,
       attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
