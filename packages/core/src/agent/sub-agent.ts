@@ -966,9 +966,25 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     //   a) its own config has container.enabled: true  (explicit opt-in), OR
     //   b) agents.defaultContainerized is true globally AND container.disabled !== true
     //      (opt-out model — closed GAP-1 from ROADMAP)
+    //
+    // EXCEPTION: agents whose tool list contains any orchestration/discovery tool
+    // (delegate_to_agent, swarm_delegate, parallel_delegate, run_task_graph,
+    // run_workflow, search_agents, search_workflows, list_agents) must run
+    // in-process. Those tools require access to the parent process's tool
+    // registry and Docker socket; inside a sandboxed `--network none --read-only`
+    // worker the LLM call or the very first orchestration tool dispatch fails
+    // before any iteration runs — surfacing as a near-instant `exited with code
+    // 125` from the daemon. Forcing in-process for these agents avoids the
+    // unavoidable cold failure and keeps the existing per-agent
+    // `container.disabled: true` opt-out as the manual override.
+    const requiresHostRegistry = (agentCfg.tools ?? []).some((t: string) =>
+      ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t),
+    );
     const isContainerized =
-      agentCfg.container?.enabled === true ||
-      (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true);
+      !requiresHostRegistry && (
+        agentCfg.container?.enabled === true ||
+        (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
+      );
     if (isContainerized) {
       const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
       await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
