@@ -6,7 +6,7 @@ import JSON5 from "json5";
 const agentsPath = fileURLToPath(new URL("../../../../workspace/agents/20-subagents-general.jsonc", import.meta.url));
 const scenesPath = fileURLToPath(new URL("../../../../workspace/scenes/10-scenes.jsonc", import.meta.url));
 
-type AgentCatalog = { subAgents: Record<string, { description?: string; tools?: string[] }> };
+type AgentCatalog = { subAgents: Record<string, { description?: string; tools?: string[]; systemPrompt?: string }> };
 type SceneCatalog = { scenes: Record<string, { allowedAgents?: string[]; description?: string }> };
 
 function readJsonFile<T>(path: string): T {
@@ -36,6 +36,8 @@ describe("workspace catalog integrity", () => {
       "browser_snapshot",
       "browser_screenshot",
     ]));
+    expect(browserAgent?.systemPrompt).toContain("call get_site_credentials before the first navigation step");
+    expect(browserAgent?.systemPrompt).toContain("use those saved URLs instead of the homepage or a guessed path");
   });
 
   it("keeps the new scenes present in the workspace catalog", () => {
