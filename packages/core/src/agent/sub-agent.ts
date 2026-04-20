@@ -924,7 +924,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
   const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs ?? defaultTimeoutMs;
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
-  const effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
+  // I13: Mutable so the cascade-timeout fallback can inject web_search +
+  // web_fetch when all delegations have failed and a coordinator agent
+  // would otherwise be left with no working capability.
+  let effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
   const timeoutAbort = turnTimeoutMs ? new AbortController() : undefined;
   const timeoutHandle = timeoutAbort
     ? setTimeout(() => timeoutAbort.abort(), turnTimeoutMs)
@@ -2537,13 +2540,44 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           && t.name !== "swarm_delegate"
           && t.name !== "run_task_graph",
         );
+        // I13.2: Direct-fallback tool injection. After delegation has
+        // cascade-failed, a delegation-only coordinator agent (e.g.
+        // web_task_coordinator) is left with NO working capability and
+        // can only apologize. If the runtime exposes web_search /
+        // web_fetch and they are not already in the agent's allow-list,
+        // inject them so the coordinator can do the gather itself in
+        // the same turn instead of returning a refusal. We extend BOTH
+        // the loop-local `tools` (visible to the model) and the
+        // `effectiveToolNames` allow-list (enforced at the call site).
+        const fallbackToolNames: string[] = [];
+        if (effectiveToolNames) {
+          const candidates = ["web_search", "web_fetch"];
+          const fallbackDefs = getToolsAsLLMDefs(candidates).filter(
+            (def) => !tools.some((t) => t.name === def.name),
+          );
+          if (fallbackDefs.length > 0) {
+            tools = [...tools, ...fallbackDefs];
+            const newAllowList = [...effectiveToolNames];
+            for (const def of fallbackDefs) {
+              if (!newAllowList.includes(def.name)) {
+                newAllowList.push(def.name);
+                fallbackToolNames.push(def.name);
+              }
+            }
+            effectiveToolNames = newAllowList;
+          }
+        }
         const lastTR = toolResults[toolResults.length - 1]!;
+        const fallbackHint = fallbackToolNames.length > 0
+          ? " You now have direct access to " + fallbackToolNames.join(" and ") +
+            " — use them YOURSELF to finish the task in this same turn. Do NOT delegate."
+          : "";
         lastTR.content +=
           "\n\n[⚠️ CASCADE TIMEOUT DETECTED] " +
           cumulativeTimeoutSignalCount + " sub-agent invocation(s) have timed out this run. " +
-          "Delegation tools are now DISABLED for the rest of this turn — do NOT attempt more delegations. " +
-          "Write your final answer NOW from whatever evidence is already in this conversation. " +
-          "If the gathered evidence is genuinely insufficient, be HONEST: list which sub-agents you tried, " +
+          "Delegation tools are now DISABLED for the rest of this turn — do NOT attempt more delegations." +
+          fallbackHint +
+          " If you still cannot complete the task, write a HONEST final answer NOW: list which sub-agents you tried, " +
           "state that they timed out, and report what (if anything) was actually retrieved. " +
           "Do NOT invent results. Do NOT pretend the timeouts succeeded.";
         logAudit(
@@ -2553,14 +2587,15 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
             reason: "cascade_timeout",
             timeoutSignals: cumulativeTimeoutSignalCount,
             usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
-            delegationToolsRemoved: beforeLen - tools.length,
+            delegationToolsRemoved: beforeLen - (tools.length - fallbackToolNames.length),
+            fallbackToolsInjected: fallbackToolNames,
             iterations,
           },
           { sessionId: subSessionId, severity: "warn" },
         );
         log.warn(
-          { agentName: opts.agentName, timeoutSignals: cumulativeTimeoutSignalCount, iterations },
-          "Cascade timeout detected — stripping delegation tools and forcing honest synthesis",
+          { agentName: opts.agentName, timeoutSignals: cumulativeTimeoutSignalCount, fallbackToolsInjected: fallbackToolNames, iterations },
+          "Cascade timeout detected — stripped delegation tools and injected direct fallbacks",
         );
       } else if (
         !sufficiencySynthesisNudged
