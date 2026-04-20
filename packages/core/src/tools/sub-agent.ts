@@ -54,6 +54,7 @@ interface HeuristicRoutingSignals {
   looksSynthesisHeavy: boolean;
   looksMultiStageEvidenceWorkflow: boolean;
   looksRenderFromProvidedData: boolean;
+  looksBrowserLoginTask: boolean;
   looksComputerUse: boolean;
   looksServerAdmin: boolean;
   looksServiceTroubleshooting: boolean;
@@ -88,6 +89,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     && !looksFresh
     && !looksExternalData
     && !looksSequential;
+  const looksBrowserLoginTask = /\b(log[ -]?in|login|sign[ -]?in|signin|anmeld(?:en|ung)?|zugangsdaten|credentials?|username|password|portal|account|dashboard|inbox|mailbox|nachrichten?|messages?|form|formular|apply|application|bewerb(?:en|ung)?|submit|checkout|invoice|rechnung)\b/i.test(normalized);
   const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
     && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
     && (!looksRenderFromProvidedData || looksSequential);
@@ -96,7 +98,9 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
   const hasDesktopAppContext = /\b(rdp|vnc|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
   const hasServerTarget = /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|ssh)\b/i.test(normalized);
-  const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|logs?|tail|ps\s+aux|df\s+-h|top|htop|container|containers)\b/i.test(normalized);
+  const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|tail(?:\s+-f)?|ps\s+aux|df\s+-h|container|containers)\b/i.test(normalized)
+    || /\b(?:show|view|check|inspect|read|tail)\s+logs?\b/i.test(normalized)
+    || /(?:^|\s)(?:top|htop)(?=$|\s|[.,;:!?])/i.test(normalized);
   const looksServiceTroubleshooting = (
     /\b(logs?|health|healthy|unhealthy|restart|restarted|crash|crashed|failing|failed|failure|down|stopped|error|incident|debug|diagnos(?:e|ing|is)|investigat(?:e|ing|ion)|why)\b/i.test(normalized)
       && /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|docker|systemctl|journalctl|service)\b/i.test(normalized)
@@ -141,6 +145,7 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
     looksSynthesisHeavy,
     looksMultiStageEvidenceWorkflow,
     looksRenderFromProvidedData,
+    looksBrowserLoginTask,
     looksComputerUse,
     looksServerAdmin,
     looksServiceTroubleshooting,
@@ -210,6 +215,10 @@ function buildChartDesignerMatchedTerms(signals: HeuristicRoutingSignals): strin
 function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
   const signals = analyzeHeuristicRoutingQuery(query);
   if (!(signals.looksWebTask || signals.looksSourceHeavy || signals.looksFresh)) {
+    return false;
+  }
+
+  if (signals.looksBrowserLoginTask) {
     return false;
   }
 
@@ -593,6 +602,7 @@ export async function resolveAgentRouting(
       && (preferenceSignals.looksVisualization || preferenceSignals.looksExternalData || preferenceSignals.looksSourceHeavy || preferenceSignals.looksDataHeavy));
   const preferWebCoordinatorInSearch = !preferenceSignals.looksMultiStageEvidenceWorkflow
     && !sourceGroundedDocumentWorkflowInSearch
+    && !preferenceSignals.looksBrowserLoginTask
     && !preferenceSignals.looksDataHeavy
     && !preferenceSignals.looksVisualization
     && !preferenceSignals.looksDocumentDeliverable
@@ -609,6 +619,7 @@ export async function resolveAgentRouting(
       ? (preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent")
       : null,
     preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
+    preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
     preferMissionInSearch ? "mission_coordinator" : null,
     preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
@@ -648,6 +659,9 @@ export async function resolveAgentRouting(
   }
   if (preferenceSignals.looksComputerUse) {
     maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+  if (preferenceSignals.looksBrowserLoginTask) {
+    maybeAppendHeuristicCandidate("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
   }
   if (preferenceSignals.looksRenderFromProvidedData) {
     maybeAppendHeuristicCandidate("chart_designer", 0.72, buildChartDesignerMatchedTerms(preferenceSignals));
@@ -1572,6 +1586,10 @@ function buildHeuristicRoutingCandidates(
 
   if (signals.looksComputerUse) {
     maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+
+  if (signals.looksBrowserLoginTask) {
+    maybeAdd("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
   }
 
   if (signals.looksServerAdmin) {
@@ -3053,6 +3071,14 @@ registerTool({
       return {
         success: true,
         output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}${selfExclusionNote}`,
+        metadata: {
+          query: raw,
+          minConfidence,
+          routingMode: resolution.mode,
+          resultCount: 0,
+          weakCount: 0,
+          topResult: null,
+        },
       };
     }
 
@@ -3067,6 +3093,14 @@ registerTool({
       return {
         success: true,
         output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
+        metadata: {
+          query: raw,
+          minConfidence,
+          routingMode: resolution.mode,
+          resultCount: 0,
+          weakCount: resolution.weakCandidates.length,
+          topResult: null,
+        },
       };
     }
 
@@ -3080,6 +3114,16 @@ registerTool({
     return {
       success: true,
       output: `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
+      metadata: {
+        query: raw,
+        minConfidence,
+        routingMode: resolution.mode,
+        resultCount: resolution.results.length,
+        weakCount: resolution.weakCandidates.length,
+        topResult: topAgent.name,
+        topResultConfidence: topAgent.confidence,
+        topResultScore: topAgent.score,
+      },
     };
   },
 });
