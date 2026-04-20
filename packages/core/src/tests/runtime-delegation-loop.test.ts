@@ -1265,6 +1265,82 @@ describe("runtime delegated-loop regressions", () => {
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses the top search_agents result for the next agent-less delegation", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("search_1", "search_agents", {
+          query: "browser login freelancermap",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_1", {
+          task: "Gehe auf freelancermap.com und prüfe, ob ich neue Nachrichten habe.",
+        });
+      }
+      return createTextStream("Ich habe den bereits gefundenen Web-Koordinator verwendet.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: '➡ NEXT ACTION: Call delegate_to_agent(agentName="web_task_coordinator", task="<your task>") NOW. Do NOT call search_agents again.',
+      metadata: {
+        query: "browser login freelancermap",
+        topResult: "web_task_coordinator",
+        topResultConfidence: "high",
+        topResultScore: 0.72,
+        resultCount: 5,
+        routingMode: "hybrid",
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from web_task_coordinator — TASK COMPLETED.\nObserved evidence:\nThe coordinator ran with the routed agent.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "check auf freelancermap ob ich neue nachrichten habe",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Web-Koordinator");
+    expect(searchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "web_task_coordinator",
+      task: "Gehe auf freelancermap.com und prüfe, ob ich neue Nachrichten habe.",
+    });
+  });
+
   it("forces specialist-agent orchestration for explicit online lookup requests instead of allowing direct web tool calls", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation((_messages, tools) => {
