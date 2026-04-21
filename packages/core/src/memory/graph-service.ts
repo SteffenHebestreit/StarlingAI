@@ -496,6 +496,48 @@ export async function graphMarkSessionRetrievalsUseful(
 }
 
 /**
+ * Close the retrieval feedback loop for an unsuccessful session.
+ *
+ * Counterpart to graphMarkSessionRetrievalsUseful: marks the still-pending
+ * RETRIEVED edges for this sessionId as wasUseful=false and nudges the target
+ * memories' importance downward by `penalty` (clamped to ≥ floor).
+ *
+ * Used when the turn terminated in failure, an apology, or a stub answer —
+ * a stronger signal than the slow decay applied by graphDecayUnusedMemories,
+ * because we know the retrieved memories were present and still didn't help.
+ *
+ * Returns the number of edges updated. Returns 0 on unavailable graph.
+ */
+export async function graphMarkSessionRetrievalsUnhelpful(
+  sessionId: string,
+  opts: { penalty?: number; floor?: number } = {},
+): Promise<number> {
+  if (!isNeo4jAvailable() || !sessionId) return 0;
+  const penalty = Math.max(0.001, Math.min(0.2, opts.penalty ?? 0.03));
+  const floor = Math.max(0, Math.min(0.5, opts.floor ?? 0.05));
+
+  try {
+    const result = await runCypher(`
+      MATCH (a:Agent)-[ret:RETRIEVED]->(m:MemoryRecord)
+      WHERE ret.sessionId = $sessionId AND ret.wasUseful IS NULL
+      SET ret.wasUseful = false,
+          m.importance  = CASE
+            WHEN coalesce(m.importance, 0.5) - $penalty < $floor THEN $floor
+            ELSE coalesce(m.importance, 0.5) - $penalty
+          END
+      RETURN count(ret) AS marked
+    `, { sessionId, penalty, floor }, { write: true });
+
+    const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
+    if (marked > 0) log.debug({ sessionId, marked, penalty }, "Retrieval negative feedback applied");
+    return marked;
+  } catch (err) {
+    log.debug({ err, sessionId }, "Marking session retrievals unhelpful failed");
+    return 0;
+  }
+}
+
+/**
  * Importance decay for memories that were retrieved repeatedly but never
  * contributed to a useful outcome — and for memories that have not been
  * touched in a long time.

@@ -21,6 +21,9 @@ import {
   resetWardenForTests,
   getWardenStats,
   isAgentMessagingSuppressed,
+  isSessionDegraded,
+  markSessionDegraded,
+  clearSessionDegraded,
   startWarden,
   stopWarden,
 } from "../agent/warden.js";
@@ -103,6 +106,34 @@ describe("Warden — tool storm detection", () => {
     const alerts2 = sweepAnomaliesNow();
     expect(alerts2.filter(a => a.type === "tool_storm_imminent")).toHaveLength(0);
   });
+
+  it("graceful-degradation: tool_storm_imminent marks session as degraded", () => {
+    // Subject must match extractSessionIdFromSubject's pattern — use a
+    // UUID-like session ID so the warden recognises it as a session subject.
+    const sid = "abcdef0123456789";
+    for (let i = 0; i < 8; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: sid, data: {} });
+    }
+    sweepAnomaliesNow();
+    expect(isSessionDegraded(sid)).toBe(true);
+  });
+
+  it("graceful-degradation: non-imminent sessions stay non-degraded", () => {
+    const sid = "fedcba9876543210";
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: sid, data: {} });
+    }
+    sweepAnomaliesNow();
+    expect(isSessionDegraded(sid)).toBe(false);
+  });
+
+  it("graceful-degradation: clearSessionDegraded lifts the flag", () => {
+    markSessionDegraded("sess-degrade-3");
+    expect(isSessionDegraded("sess-degrade-3")).toBe(true);
+    clearSessionDegraded("sess-degrade-3");
+    expect(isSessionDegraded("sess-degrade-3")).toBe(false);
+  });
+
 });
 
 describe("Warden — repeated failures detection", () => {

@@ -191,16 +191,23 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
  * when no tier model is configured so callers can fall back to the default
  * provider without building a second one.
  *
+ * Callers may pass additional overrides (temperature, maxTokens, etc.) that
+ * layer on top of the tier model; the tier's `primary` is still preserved.
+ *
  * Current wiring:
- *   - "routing"   → reserved; no runtime consumer yet
+ *   - "routing"   → consumed by translate_text and lightweight
+ *                   classifier-style LLM tool calls
  *   - "synthesis" → consumed by runtime.forceSynthesis to run the final
  *                   user-facing rewrite on a lighter / faster model
  */
-export function getChatProviderForTier(tier: "routing" | "synthesis"): ChatProvider | null {
+export function getChatProviderForTier(
+  tier: "routing" | "synthesis",
+  override: Partial<ModelConfig> = {},
+): ChatProvider | null {
   const config = getConfig();
   const tierModel = config.agents.defaults.model.tiers?.[tier];
   if (!tierModel) return null;
-  return getChatProviderWithOverride({ primary: tierModel });
+  return getChatProviderWithOverride({ ...override, primary: tierModel });
 }
 
 export function getEmbeddingProvider(): LMStudioProvider {

@@ -25,7 +25,8 @@ import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurre
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
-import { graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
+import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
+import { isSessionDegraded } from "./warden.js";
 import { consumeAgentMessages } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult } from "../tools/result-shaping.js";
@@ -1059,9 +1060,19 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     const agentDiscoveryGuidance = isOrchestrationCapableRun(effectiveToolNames)
       ? buildSubAgentAgentDiscoveryGuidance(opts.agentName, opts.allowedAgents)
       : "";
+    // E19 graceful-degradation ladder: short velocity-warning nudge injected
+    // when the warden has flagged this session with an imminent storm/flood
+    // alert. Tells the model to narrow scope and finish quickly instead of
+    // fanning out further. Paired with a tool-list cap below.
+    const isDegraded = isSessionDegraded(subSessionId);
+    const degradedNudge = isDegraded
+      ? "VELOCITY WARNING: Your session is approaching a tool-storm / messaging-flood threshold. "
+        + "Narrow scope, batch tool calls, and finish quickly. Do not spawn further delegations "
+        + "or parallel tool fan-out unless strictly required to complete the task."
+      : "";
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent. E20: rerank by semantic
     // relevance to the current task so the model sees the most relevant
@@ -1074,6 +1085,18 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       } catch (err) {
         log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
       }
+    }
+
+    // E19 graceful-degradation ladder: if the warden flagged this session
+    // with an imminent storm/flood alert, tighten the tool budget so the
+    // model can't fan out further. Kept after rerank so the top-ranked tools
+    // are the ones retained.
+    if (isDegraded && tools.length > 6) {
+      tools = tools.slice(0, 6);
+      log.info(
+        { agentName: opts.agentName, subSessionId, remainingTools: tools.length },
+        "Sub-agent running in degraded mode — tool list capped",
+      );
     }
 
     const toolContext: ToolContext = {
@@ -1193,6 +1216,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         // because some of the retrieved memories *did* contribute.
         const boost = fields.outcome === "success" ? 0.05 : 0.02;
         graphMarkSessionRetrievalsUseful(subSessionId, { boost }).catch(() => {});
+      } else if (fields.outcome === "failure") {
+        // Negative signal: the turn terminated in failure with retrieved
+        // memories still pending. Mark them wasUseful=false and nudge
+        // importance downward — a stronger signal than slow decay because
+        // we know the memories were present and still didn't help.
+        graphMarkSessionRetrievalsUnhelpful(subSessionId, { penalty: 0.03 }).catch(() => {});
       }
     };
 
