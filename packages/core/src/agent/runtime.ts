@@ -2,7 +2,7 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { getChatProvider, getChatProviderWithOverride } from "../providers/index.js";
+import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
@@ -21,6 +21,7 @@ import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { lookupTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
+import { graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -998,6 +999,12 @@ async function enforceDelegateCoverage(
     { sessionId: session.id, channel: session.channel, severity: "warn" },
   );
 
+  // E24: structured synthesis template with evidence enumeration. We give
+  // the model a fill-in-the-blanks checklist so it has to visibly account
+  // for each item rather than drift into a summary that drops rows.
+  const enumerationTemplate = evidence.itemCount >= 3
+    ? ` Use this structure:\n\n### All items from the evidence\n1. <first item — full text with source>\n2. <second item — full text with source>\n... continue for all ${evidence.itemCount} items.\n\n### Summary\n<one short paragraph>\n\n`
+    : "";
   const instruction = [
     "COVERAGE CORRECTION: Your previous draft answer dropped material from the most recent delegated tool result.",
     `The delegated evidence contained ${evidence.itemCount} structured items (bullets, numbered list rows, or table rows) and ${evidence.evidence.length} characters of content,`,
@@ -1008,7 +1015,8 @@ async function enforceDelegateCoverage(
     "Do NOT summarize, do NOT trim, do NOT collapse rows into 'and others', do NOT add markers like '(truncated)' or '(abgeschnitten)'.",
     "Do NOT claim the evidence is truncated, cut off, abgeschnitten, or invisible \u2014 the FULL evidence is in the tool result above and you MUST relay it verbatim.",
     "Do NOT call any tools \u2014 the evidence is already collected. Just rewrite the user-facing answer.",
-  ].join(" ");
+    enumerationTemplate ? `\n\nREQUIRED OUTPUT TEMPLATE:${enumerationTemplate}` : "",
+  ].filter(Boolean).join(" ");
 
   const resynth = await forceSynthesis(session, provider, signal, instruction);
   if (!resynth) {
@@ -2232,6 +2240,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         ).catch(() => undefined);
       }
 
+      // E26: close the graph-memory retrieval feedback loop for this turn.
+      // A non-blocked turn that produced a substantive answer is treated as a
+      // successful outcome — memories retrieved during the turn get credited
+      // (wasUseful=true + importance boost). Same signal the sub-agent uses.
+      if (finalResponse.length > 50 && !finalResponse.toLowerCase().startsWith("i apologize")) {
+        graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
+      }
+
       return {
         response: finalResponse,
         toolCallsExecuted: iterationCount,
@@ -3097,8 +3113,13 @@ async function forceSynthesis(
     const synthAbort = new AbortController();
     const synthTimer = setTimeout(() => synthAbort.abort(), 60_000);
 
+    // E25: prefer the synthesis-tier provider when configured — smaller,
+    // instruction-tuned models produce tighter final answers and avoid the
+    // reasoning-model tendency to re-narrate tool calls during rewrite.
+    const synthesisProvider = getChatProviderForTier("synthesis") ?? provider;
+
     try {
-      const response = await provider.complete(messages, [], synthAbort.signal);
+      const response = await synthesisProvider.complete(messages, [], synthAbort.signal);
       const text = response.content?.trim();
       return text || null;
     } finally {

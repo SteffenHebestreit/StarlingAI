@@ -267,6 +267,26 @@ export function buildWardenIntervention(
     };
   }
 
+  if (reasonCode === "tool_storm_imminent") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Tool-call velocity is high — storm imminent",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} The session is heading for the hard tool-storm threshold if the current rate continues. Consider narrowing the scope or stopping the run if the agent is thrashing.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
+  if (reasonCode === "agent_message_flood_imminent") {
+    return {
+      reasonCode,
+      severity: "warn",
+      summary: "Agent-to-agent messaging velocity is high",
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} This agent is about to hit the messaging suppression threshold. If chatter is unintentional, stop the run and start fresh with a tighter scope.`,
+      actions: DEFAULT_ACTIONS,
+    };
+  }
+
   if (reasonCode === "turn_slo_breach") {
     return {
       reasonCode,

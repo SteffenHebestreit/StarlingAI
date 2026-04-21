@@ -450,6 +450,127 @@ export async function graphDetectOutliers(): Promise<GraphOutlier[]> {
   }
 }
 
+// ── Feedback loop closure ─────────────────────────────────────────────────────
+
+/**
+ * Close the retrieval feedback loop for a successful session.
+ *
+ * Finds all RETRIEVED edges created for this sessionId where wasUseful is
+ * still null, marks them wasUseful=true, and nudges the target memory's
+ * importance upward by `boost` (clamped to ≤ 1.0).
+ *
+ * Call fire-and-forget from sub-agent / orchestrator outcome sinks when a
+ * turn completes with outcome=success. The opposite case (unused/stale
+ * memories) is handled by graphDecayUnusedMemories so that retrieved memories
+ * that never pan out gradually lose rank instead of being marked `false`
+ * after a single failure.
+ *
+ * Returns the number of edges updated. Returns 0 on unavailable graph.
+ */
+export async function graphMarkSessionRetrievalsUseful(
+  sessionId: string,
+  opts: { boost?: number } = {},
+): Promise<number> {
+  if (!isNeo4jAvailable() || !sessionId) return 0;
+  const boost = Math.max(0.001, Math.min(0.2, opts.boost ?? 0.05));
+
+  try {
+    const result = await runCypher(`
+      MATCH (a:Agent)-[ret:RETRIEVED]->(m:MemoryRecord)
+      WHERE ret.sessionId = $sessionId AND ret.wasUseful IS NULL
+      SET ret.wasUseful = true,
+          m.importance  = CASE
+            WHEN coalesce(m.importance, 0.5) + $boost > 1.0 THEN 1.0
+            ELSE coalesce(m.importance, 0.5) + $boost
+          END
+      RETURN count(ret) AS marked
+    `, { sessionId, boost }, { write: true });
+
+    const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
+    if (marked > 0) log.debug({ sessionId, marked, boost }, "Retrieval feedback closed");
+    return marked;
+  } catch (err) {
+    log.debug({ err, sessionId }, "Marking session retrievals useful failed");
+    return 0;
+  }
+}
+
+/**
+ * Importance decay for memories that were retrieved repeatedly but never
+ * contributed to a useful outcome — and for memories that have not been
+ * touched in a long time.
+ *
+ * Two rules, applied independently:
+ *   1. A memory has ≥ minRetrievalsForDecay RETRIEVED edges with wasUseful
+ *      still null AND no RETRIEVED edge with wasUseful=true → it is getting
+ *      surfaced but is not actually helping. Nudge importance down by decay.
+ *   2. A memory has not been updated in ≥ staleDays and has accessCount=0 →
+ *      it was never used after being written. Nudge importance down by decay.
+ *
+ * Importance never falls below the floor (default 0.05) — decayed memories
+ * remain addressable by exact ID and may still surface in narrow searches;
+ * they just lose their rerank boost.
+ *
+ * Callers schedule this periodically (e.g. once per day alongside centrality
+ * updates). Returns the number of nodes whose importance changed.
+ */
+export async function graphDecayUnusedMemories(opts: {
+  staleDays?: number;
+  minRetrievalsForDecay?: number;
+  decay?: number;
+  floor?: number;
+} = {}): Promise<number> {
+  if (!isNeo4jAvailable()) return 0;
+  const staleDays = Math.max(1, opts.staleDays ?? 14);
+  const minRetrievals = Math.max(1, opts.minRetrievalsForDecay ?? 3);
+  const decay = Math.max(0.001, Math.min(0.2, opts.decay ?? 0.02));
+  const floor = Math.max(0, Math.min(0.5, opts.floor ?? 0.05));
+  const cutoff = new Date(Date.now() - staleDays * 86_400_000).toISOString();
+
+  try {
+    // Rule 1: retrieved repeatedly but never useful
+    const unusefulResult = await runCypher(`
+      MATCH (m:MemoryRecord)
+      WHERE m.importance > $floor
+      OPTIONAL MATCH (m)<-[useful:RETRIEVED]-()
+        WHERE useful.wasUseful = true
+      OPTIONAL MATCH (m)<-[pending:RETRIEVED]-()
+        WHERE pending.wasUseful IS NULL
+      WITH m,
+           count(DISTINCT useful)  AS usefulCount,
+           count(DISTINCT pending) AS pendingCount
+      WHERE usefulCount = 0 AND pendingCount >= $minRetrievals
+      SET m.importance = CASE
+        WHEN m.importance - $decay < $floor THEN $floor
+        ELSE m.importance - $decay
+      END
+      RETURN count(m) AS decayed
+    `, { floor, minRetrievals, decay }, { write: true });
+
+    // Rule 2: stale and never accessed
+    const staleResult = await runCypher(`
+      MATCH (m:MemoryRecord)
+      WHERE m.importance > $floor
+        AND coalesce(m.accessCount, 0) = 0
+        AND coalesce(m.updatedAt, '') < $cutoff
+      SET m.importance = CASE
+        WHEN m.importance - $decay < $floor THEN $floor
+        ELSE m.importance - $decay
+      END
+      RETURN count(m) AS decayed
+    `, { floor, cutoff, decay }, { write: true });
+
+    const decayedUnuseful = asInt(toPlainRecords(unusefulResult ?? null as never)[0]?.["decayed"], 0);
+    const decayedStale = asInt(toPlainRecords(staleResult ?? null as never)[0]?.["decayed"], 0);
+    const total = decayedUnuseful + decayedStale;
+    if (total > 0) log.info({ decayedUnuseful, decayedStale, total }, "Graph importance decay applied");
+    return total;
+  } catch (err) {
+    log.warn({ err }, "Graph importance decay failed");
+    return 0;
+  }
+}
+
 // ── MAGE background jobs ──────────────────────────────────────────────────────
 
 /**

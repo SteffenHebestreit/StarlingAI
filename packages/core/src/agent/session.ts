@@ -201,7 +201,14 @@ export class AgentSession {
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
           const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
           const snippetLimit = isDelegation ? 2000 : 500;
-          const resultSnippet = result.length > snippetLimit ? result.substring(0, snippetLimit) + "…" : result;
+          // Use an explicit marker instead of a bare ellipsis. Local models
+          // sometimes mistake "…" for evidence that was cut off in the
+          // current turn and then falsely claim "abgeschnitten" /
+          // "truncated" in their synthesis. Naming the condition removes
+          // the ambiguity. (Source: hallucinated_truncation_bypass events.)
+          const resultSnippet = result.length > snippetLimit
+            ? result.substring(0, snippetLimit) + ` [snippet summarized for prior-turn history; full result preserved in the original tool call above, ${result.length} chars total]`
+            : result;
           return `[Tool: ${call.function.name}(${argsStr}) → ${resultSnippet}]`;
         });
 
@@ -810,6 +817,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
 - Mirror the user's language in every reply when it is reasonably clear. If the language is ambiguous or mixed and no explicit preference is set, reply in German.
 - When an answer materially depends on current, external, or source-sensitive facts, validate it with up-to-date evidence whenever feasible. If the current tool mode does not expose direct web tools, route to a research-capable specialist instead of guessing from stale memory.
 - When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
+- Do NOT claim that delegated evidence is "truncated", "cut off", "abgeschnitten", "nicht sichtbar", "not visible in my context", or similar — the full tool result is in your context and you MUST relay every item, source, number, and URL it contains. If you see a "…" marker inside a tool-result snippet, treat it as content that was summarized for the previous turn only, not as the current authoritative evidence. Do not append truncation markers like "(abgeschnitten)" or "(truncated)" to your own answer
 - Never attempt to access systems, files, or data outside your authorized scope
 - If asked to do something harmful or that violates security policies, decline clearly
 - If the request is missing necessary identifiers, scope, or target details, ask one concise clarifying question instead of guessing
@@ -879,6 +887,7 @@ ${personalityGuidance}
 - Do NOT call search_workflows repeatedly for the same request. One discovery pass is enough before choosing run_workflow or agent orchestration.
 - Call get_swarm_state when you need to inspect current swarm progress instead of re-planning from scratch.
 - When unsure which agent handles a task, prefer delegate_to_agent(task: "...") without agentName first. The runtime uses autonomous bidding plus semantic routing to choose the specialist. Use search_agents only when you need to inspect or justify the candidate set explicitly.
+- Prefer swarm_delegate(task: "...") when you want the routing system to pick the specialist based on current outcome-weighted bidding (better recall than an LLM guess when the candidate set is large). Use delegate_to_agent(agentName: "...") only when you already know the exact right specialist from prior context.
 - Exception: for known maintenance requests about improving StarlingAI itself, skip search_agents and delegate directly to swarm_maintainer when it exists.
 - **NEVER pass minConfidence="high" to search_agents. Always use the default "medium". Only use "low" if "medium" returns no results.**
 - **If search_agents returns no results (empty or "No agents matched"), do NOT stop. Immediately retry with minConfidence="low" to inspect weak candidates, then delegate to the top candidate or use create_ephemeral_agent.**

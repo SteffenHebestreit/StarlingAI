@@ -49,6 +49,19 @@ const log = childLogger("agent:warden");
 const TOOL_STORM_WINDOW_MS = 5 * 60 * 1_000;  // 5 min
 const TOOL_STORM_THRESHOLD = 15;               // tool calls per session
 
+// E19: Predictive window — if a session accumulates enough tool calls in a
+// short sub-window to suggest it will hit the storm threshold on trajectory,
+// fire a warning early so operators / interventions can react before the
+// hard threshold trips. Pick a 60s window with an 8-call bar: any session
+// sustaining ≥8 calls/min will cross the 15-in-5-min hard line if unabated.
+const TOOL_STORM_PREDICT_WINDOW_MS = 60 * 1_000;
+const TOOL_STORM_PREDICT_THRESHOLD = 8;
+const TOOL_STORM_PREDICT_COOLDOWN_MS = 5 * 60 * 1_000;
+
+const AGENT_MESSAGE_PREDICT_WINDOW_MS = 20 * 1_000;
+const AGENT_MESSAGE_PREDICT_THRESHOLD = 10;
+const AGENT_MESSAGE_PREDICT_COOLDOWN_MS = 60 * 1_000;
+
 const FAILURE_WINDOW_MS = 2 * 60 * 1_000;     // 2 min
 const FAILURE_THRESHOLD = 3;                   // rapid consecutive failures per agent
 const TOOL_ISSUE_WINDOW_MS = 2 * 60 * 1_000;   // 2 min
@@ -129,6 +142,12 @@ const _computerScreenshotHashes = new Map<string, string[]>();
 /** sessionId → config proposal timestamps (self-improvement abuse detection) */
 const _configProposalsBySession = new Map<string, number[]>();
 
+/** sessionId → expiry ts for imminent-storm alert cooldown (E19). */
+const _toolStormImminentCooldown = new Map<string, number>();
+
+/** key → expiry ts for imminent-message-flood alert cooldown (E19). */
+const _agentMessageImminentCooldown = new Map<string, number>();
+
 let _alertsEmitted = 0;
 let _wardenInterval: ReturnType<typeof setInterval> | null = null;
 let _unsubscribeAudit: (() => void) | null = null;
@@ -167,7 +186,7 @@ export function isSessionTurnActive(sessionId: string): boolean {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "docker_daemon_unreachable";
+  type: "tool_storm" | "tool_storm_imminent" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "agent_message_flood_imminent" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "docker_daemon_unreachable";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -440,6 +459,8 @@ export function resetWardenForTests(): void {
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
   _configProposalsBySession.clear();
+  _toolStormImminentCooldown.clear();
+  _agentMessageImminentCooldown.clear();
   _sessionAbortControllers.clear();
   _alertRing.length = 0;
   _alertsEmitted = 0;
@@ -472,6 +493,28 @@ function sweepAnomalies(): WardenAlert[] {
       alerts.push(alert);
       // Reset window so we don't re-fire on the same spike
       _toolCallsBySession.set(sessionId, []);
+      continue;
+    }
+
+    // E19: Predictive check — fire a soft warning when the short-window
+    // velocity suggests the hard threshold will trip if unabated. Guarded
+    // by a cooldown so a single session can only fire once per 5-minute
+    // burst.
+    const cooldownUntil = _toolStormImminentCooldown.get(sessionId) ?? 0;
+    if (cooldownUntil > now) continue;
+
+    const velocityRecent = recent.filter(t => now - t < TOOL_STORM_PREDICT_WINDOW_MS);
+    if (velocityRecent.length >= TOOL_STORM_PREDICT_THRESHOLD) {
+      _toolStormImminentCooldown.set(sessionId, now + TOOL_STORM_PREDICT_COOLDOWN_MS);
+      const alert = makeAlert(
+        "tool_storm_imminent",
+        "warn",
+        sessionId,
+        `Session is on a tool-storm trajectory: ${velocityRecent.length} tool calls in the last 60s (hard threshold: ${TOOL_STORM_THRESHOLD}/5min)`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
     }
   }
 
@@ -608,6 +651,25 @@ function sweepAnomalies(): WardenAlert[] {
       emitAlert(alert);
       alerts.push(alert);
       _agentMessagesBySender.set(key, []);
+      continue;
+    }
+
+    // E19: Predictive imminent-flood warning.
+    const imminentUntil = _agentMessageImminentCooldown.get(key) ?? 0;
+    if (imminentUntil > now) continue;
+
+    const velocityRecent = recent.filter(t => now - t < AGENT_MESSAGE_PREDICT_WINDOW_MS);
+    if (velocityRecent.length >= AGENT_MESSAGE_PREDICT_THRESHOLD) {
+      _agentMessageImminentCooldown.set(key, now + AGENT_MESSAGE_PREDICT_COOLDOWN_MS);
+      const alert = makeAlert(
+        "agent_message_flood_imminent",
+        "warn",
+        key,
+        `Agent '${key}' is on a flood trajectory: ${velocityRecent.length} messages in the last 20s (hard threshold: ${AGENT_MESSAGE_THRESHOLD}/1min)`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
     }
   }
 

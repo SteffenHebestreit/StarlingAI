@@ -22,6 +22,7 @@ import {
   graphUpdateCentrality,
   graphUpdateCommunities,
   graphBuildSimilarityLinks,
+  graphDecayUnusedMemories,
 } from "../memory/graph-service.js";
 import { childLogger } from "../logger.js";
 
@@ -75,5 +76,21 @@ export function startGraphJobs(): void {
     },
   );
 
-  log.info("MemGraph background jobs registered (centrality hourly, communities nightly, similarity every 30m)");
+  // ── Importance decay — nightly at 03:40 UTC ────────────────────────────────
+  // E26: closes the retrieval feedback loop from the opposite side. Memories
+  // that keep surfacing without ever being marked useful lose rerank weight,
+  // as do memories that were written but never touched in weeks.
+  createCronJob(
+    "40 3 * * *",
+    "graph-decay",
+    "Decay importance for unused / never-useful MemoryRecord nodes",
+    async () => {
+      const decayed = await graphDecayUnusedMemories();
+      if (decayed > 0) {
+        log.info({ decayed }, "Importance decay job complete");
+      }
+    },
+  );
+
+  log.info("MemGraph background jobs registered (centrality hourly, communities nightly, similarity every 30m, decay nightly)");
 }

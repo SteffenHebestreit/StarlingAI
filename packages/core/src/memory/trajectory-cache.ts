@@ -11,9 +11,10 @@
  * - TTL enforced on read: stale entries are never returned.
  */
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
+import { appendJsonLine, readLastRecords } from "./bounded-ndjson-store.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -77,26 +78,11 @@ export async function writeTrajectory(
       finalAnswer: entry.finalAnswer,
     };
 
-    const dir = resolve(workspacePath, ".starlingai");
-    mkdirSync(dir, { recursive: true });
     const filePath = resolve(workspacePath, CACHE_FILE);
-    appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8");
-
-    // Rolling-window: keep only the last MAX_CACHE_LINES entries
-    _trimCacheIfNeeded(filePath);
+    appendJsonLine(filePath, record, { maxLines: MAX_CACHE_LINES });
   } catch {
     // Best-effort — trajectory cache write is never critical
   }
-}
-
-function _trimCacheIfNeeded(filePath: string): void {
-  try {
-    const raw = readFileSync(filePath, "utf-8").trim();
-    const lines = raw.split("\n").filter(Boolean);
-    if (lines.length > MAX_CACHE_LINES) {
-      writeFileSync(filePath, lines.slice(lines.length - MAX_CACHE_LINES).join("\n") + "\n", "utf-8");
-    }
-  } catch { /* best-effort */ }
 }
 
 // ── Read ───────────────────────────────────────────────────────────────────
@@ -135,28 +121,25 @@ export async function lookupTrajectory(
   let bestEntry: TrajectoryEntry | null = null;
   let bestSim = 0;
 
-  try {
-    const lines = readFileSync(filePath, "utf-8").trim().split("\n").filter(Boolean);
-    for (const line of lines) {
-      try {
-        const entry: TrajectoryEntry = JSON.parse(line);
-        // TTL check
-        const finishedMs = new Date(entry.finishedAt).getTime();
-        if (Number.isNaN(finishedMs) || (now - finishedMs) > entry.ttlSeconds * 1000) continue;
-        // Security: skip credential-shaped entries
-        if (CREDENTIAL_RE.test(line)) continue;
-        // Embedding similarity
-        if (!Array.isArray(entry.queryEmbedding) || entry.queryEmbedding.length === 0) continue;
-        const entryVec = new Float32Array(entry.queryEmbedding);
-        const sim = cosineSimilarity(queryEmbedding, entryVec);
-        if (sim >= SIMILARITY_THRESHOLD && sim > bestSim) {
-          bestSim = sim;
-          bestEntry = entry;
-        }
-      } catch { /* skip malformed line */ }
+  // Only the most recent tail of the cache is useful — older entries are
+  // either expired or dominated by newer ones.  Reading the tail keeps the
+  // hot-path cost bounded even as the file grows toward MAX_CACHE_LINES.
+  const entries = readLastRecords<TrajectoryEntry>(filePath, 500);
+  for (const entry of entries) {
+    // TTL check
+    const finishedMs = new Date(entry.finishedAt).getTime();
+    if (Number.isNaN(finishedMs) || (now - finishedMs) > entry.ttlSeconds * 1000) continue;
+    // Security: skip credential-shaped entries (defence in depth — should not exist)
+    const serialized = JSON.stringify(entry);
+    if (CREDENTIAL_RE.test(serialized)) continue;
+    // Embedding similarity
+    if (!Array.isArray(entry.queryEmbedding) || entry.queryEmbedding.length === 0) continue;
+    const entryVec = new Float32Array(entry.queryEmbedding);
+    const sim = cosineSimilarity(queryEmbedding, entryVec);
+    if (sim >= SIMILARITY_THRESHOLD && sim > bestSim) {
+      bestSim = sim;
+      bestEntry = entry;
     }
-  } catch {
-    return null;
   }
 
   return bestEntry;
