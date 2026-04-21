@@ -2275,7 +2275,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // certainly stale or wrong. Invalidate it so future similar
         // queries don't keep inheriting the same bad outcome.
         if (injectedTrajectoryIdentity) {
-          invalidateTrajectory(injectedTrajectoryIdentity);
+          invalidateTrajectory(session.getWorkspacePath(), injectedTrajectoryIdentity);
           logAudit(
             "trajectory_cache_invalidated",
             {
