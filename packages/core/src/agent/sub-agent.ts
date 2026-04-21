@@ -1176,6 +1176,14 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     let consecutiveStaleDomainFetches = 0;
     // E18: Soft-deadline nudge — fire once when softDeadlineMs is reached
     let softDeadlineInjected = false;
+    // E19 wave 2 follow-up: mid-turn graceful-degradation enforcement.
+    //   Turn-start `isDegraded` (above) only catches sessions already flagged
+    //   when the sub-agent boots. If the warden raises tool_storm_imminent /
+    //   agent_message_flood_imminent *while* the loop is mid-flight, the
+    //   in-progress iteration would otherwise continue with the full tool
+    //   list and no velocity nudge. We re-check per iteration and apply the
+    //   same nudge + tool cap once, logging a single transition event.
+    let degradedMidTurnApplied = isDegraded;
     // Phase A5: nudge agents to call share_finding after collecting substantive evidence
     let substantiveEvidenceCount = 0;
     let shareFindinCalledThisRun = false;
@@ -2000,6 +2008,33 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
           "§12: Iteration-budget nudge injected (no tool calls at 70% of budget)",
+        );
+      }
+
+      // E19 wave 2 follow-up: mid-turn degradation flip. If the warden
+      // marked this session degraded after the turn already started, apply
+      // the velocity nudge + tool cap to *this* iteration so the in-flight
+      // loop tightens immediately instead of finishing the current turn at
+      // full fan-out.
+      if (!degradedMidTurnApplied && isSessionDegraded(subSessionId)) {
+        degradedMidTurnApplied = true;
+        effectiveSystemPrompt +=
+          "\n\n⚠️ VELOCITY WARNING (mid-turn): The warden flagged this session "
+          + "as approaching a tool-storm / messaging-flood threshold while you were "
+          + "running. Narrow scope, batch tool calls, and finish quickly. Do not "
+          + "spawn further delegations or parallel tool fan-out unless strictly "
+          + "required to complete the task.";
+        if (effectiveTools.length > 6) {
+          effectiveTools = effectiveTools.slice(0, 6);
+        }
+        log.info(
+          {
+            agentName: opts.agentName,
+            subSessionId,
+            iteration: iterations + 1,
+            remainingTools: effectiveTools.length,
+          },
+          "Sub-agent entered degraded mode mid-turn — nudge injected, tool list capped",
         );
       }
 
