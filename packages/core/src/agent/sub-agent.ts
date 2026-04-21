@@ -22,7 +22,7 @@ import { runSubAgentInContainer } from "./container-runner.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
-import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
+import { createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -1038,6 +1038,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     }
 
     const provider = createChatProvider(modelConfig, providerEndpoint);
+    // E25: prefer the synthesis-tier provider for the three sub-agent
+    // synthesis paths (timeout, pre-deadline soft, max-iterations) — same
+    // rationale as runtime.ts:3127. Falls back to the primary `provider`
+    // when no tier is configured. Resolved once per run so we don't pay
+    // the lookup cost in every synthesis branch.
+    const synthProvider = getChatProviderForTier("synthesis") ?? provider;
 
     // Build system prompt
     const today = new Date().toLocaleDateString("en-US", {
@@ -1382,7 +1388,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           },
           ...history,
         ];
-        const synthResponse = await provider.complete(synthMessages, [], graceSignal);
+        const synthResponse = await synthProvider.complete(synthMessages, [], graceSignal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
@@ -1495,7 +1501,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           },
           ...history,
         ];
-        const synthResponse = await provider.complete(synthMessages, [], synthSignal);
+        const synthResponse = await synthProvider.complete(synthMessages, [], synthSignal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
@@ -2744,7 +2750,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           },
           ...history,
         ];
-        const synthResponse = await provider.complete(synthMessages, [], signal);
+        const synthResponse = await synthProvider.complete(synthMessages, [], signal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
