@@ -1,7 +1,7 @@
 {
   "scenes": {
     "apply_jobs": {
-      "description": "Run a browser-assisted application workflow for one approved freelance lead.",
+      "description": "Run a browser-assisted application workflow for one approved freelance lead. Example triggers: 'apply to the approved freelance lead', 'bewerbe mich auf den freigegebenen Auftrag', 'submit the application form for this project', 'Bewerbung für den genehmigten Lead einreichen'.",
       "task": "Use web_task_coordinator to review one approved lead, gather any missing context, and delegate browser submission steps only when stored credentials exist for the target site and secure credential fill has been approved.",
       "webhookKey": "$SCENE_APPLY_JOBS_KEY",
       "allowedAgents": [
@@ -23,7 +23,7 @@
       }
     },
     "browser_inspection": {
-      "description": "Open a website, capture Playwright browser evidence, and summarize what is visible or blocked on the page.",
+      "description": "Open a website, capture Playwright browser evidence, and summarize what is visible or blocked on the page. Example triggers: 'check what's currently shown on example.com', 'prüfe welche Inhalte auf der Webseite sichtbar sind', 'inspect the landing page and report visible text', 'schaue dir die Seite an und beschreibe was zu sehen ist', 'verify the page loaded correctly after login', 'Browser-Snapshot mit Zusammenfassung erstellen'.",
       "task": "Use web_task_coordinator first when the page may be JS-rendered, multi-step, or ambiguous. Delegate browser_agent to open the target website, wait for the relevant page state, and capture browser_snapshot plus browser_screenshot evidence when the rendered view matters. Use vision_browser_analyst or evidence_analyst to interpret the captured page evidence, then summarizer to produce a concise grounded inspection result with exact visible text, URLs, blockers, and next steps.",
       "allowedAgents": [
         "web_task_coordinator",
@@ -105,7 +105,7 @@
       }
     },
     "source_backed_paper": {
-      "description": "Produce a paper, report, or research brief grounded in official sources and verified citations.",
+      "description": "Produce a paper, report, or research brief grounded in official sources and verified citations. Example triggers: 'write a research paper on quantum-safe cryptography', 'erstelle ein Forschungsdossier zum Thema KI-Regulierung', 'produce a cited technical brief', 'verfasse einen quellenbasierten Report', 'research and write up the GDPR compliance overview', 'Forschungsbericht mit Quellennachweisen schreiben'.",
       "task": "When attachments or prior reports are provided, start with document_intake. Use researcher for source discovery — it handles both broad web research and citation-grade official sources. Use evidence_analyst to reconcile findings into a clean evidence ledger, and research_librarian to persist durable notes and graph links when the evidence base is large. For short briefs, use summarizer to produce the final deliverable. For full papers or reports, draft only from collected evidence with paper_author. Use source_verifier only to validate citations or claim-level gaps. Run exactly one final quality pass with quality_supervisor before finalizing. Do not create an ephemeral writer and do not rerun the whole pipeline after a viable draft already exists unless the quality pass names one smallest corrective action. Do not delegate to mission_coordinator from this scene — the research pipeline is already defined here.",
       "allowedAgents": [
         "document_intake",
@@ -134,7 +134,7 @@
       }
     },
     "deep_research": {
-      "description": "Run a multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate.",
+      "description": "Run a multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate. Example triggers: 'conduct deep research on the battery supply chain', 'führe eine Tiefenrecherche zum Thema Energiewende durch', 'do a thorough investigation into this topic', 'umfassende Recherche mit Visualisierungen erstellen', 'full research dossier with evidence and timeline', 'Deep-Dive Recherche mit Qualitätsprüfung'.",
       "task": "Use mission_coordinator to partition the work into the smallest viable specialist graph. Use researcher for all source collection — it handles both broad web research and citation-grade official sources in a single agent. Use research_librarian to persist notes, graph links, and timelines. Use evidence_analyst to reconcile the ledger. Use data_analyst only when structured numbers matter. Use chart_designer for HTML charts or tables based on verified numeric evidence. Use diagram_designer when a structural visual model would clarify the answer. Use paper_author for the final deliverable when a full paper is requested, or summarizer for a short brief. Use quality_supervisor to decide whether one targeted corrective pass is justified before finalizing. IMPORTANT: mission_coordinator must NOT call search_workflows or run_workflow from inside this scene — the research pipeline is already defined. Delegate directly to the named specialists.",
       "allowedAgents": [
         "mission_coordinator",
@@ -173,7 +173,7 @@
       }
     },
     "meeting_briefing_packet": {
-      "description": "Produce a concise meeting brief or handoff packet from attached material, prior findings, and project context.",
+      "description": "Produce a concise meeting brief or handoff packet from attached material, prior findings, and project context. Example triggers: 'prepare a briefing for tomorrow's stakeholder meeting', 'erstelle ein Briefing für das Meeting mit dem Kunden', 'put together a handoff packet for the new PM', 'Übergabepaket für das Projektteam vorbereiten', 'summarize these notes into a meeting brief', 'Meeting-Brief mit Aktionspunkten und Risiken'.",
       "task": "Use document_intake first when source material includes files or long notes, data_analyst for tabular attachments, evidence_analyst to reconcile the evidence ledger, policy_compliance_reviewer when approvals or constraints matter, and meeting_briefing_agent to produce the final brief or handoff packet. Use qa_guard when the packet needs an explicit verification pass.",
       "allowedAgents": [
         "document_intake",
@@ -196,7 +196,7 @@
       }
     },
     "code_review": {
-      "description": "Git-based code review workflow: inspect changes, analyze quality, and produce a structured review report.",
+      "description": "Git-based code review workflow: inspect changes, analyze quality, and produce a structured review report. Example triggers: 'review the latest commits on this branch', 'führe ein Code-Review der letzten Änderungen durch', 'analyze the diff for quality issues', 'prüfe den Pull Request auf Probleme', 'review HEAD~3..HEAD for bugs', 'Code-Review mit strukturiertem Bericht'.",
       "task": "Use git_developer to inspect the current diff and recent commits, code_analyst to review code quality and identify issues, qa_guard to verify the findings, and summarizer to produce the final review report. When a target branch or commit range is specified, use git_diff with the appropriate ref parameter.",
       "allowedAgents": [
         "git_developer",
@@ -216,7 +216,7 @@
       }
     },
     "api_test_suite": {
-      "description": "Test and validate API endpoints with structured request/response analysis and documentation.",
+      "description": "Test and validate API endpoints with structured request/response analysis and documentation. Example triggers: 'test the REST API endpoints of this service', 'teste die API-Endpunkte gegen die Spezifikation', 'validate the response schemas for /users and /orders', 'API-Test-Report für den neuen Service erstellen', 'run a smoke test suite against the staging API', 'API-Endpunkte systematisch prüfen'.",
       "task": "Use api_integrator to execute HTTP requests against the target API, researcher to gather API documentation if needed, code_analyst to review response schemas, and qa_guard to validate the test results. Produce a structured test report with pass/fail status, response details, and identified issues.",
       "allowedAgents": [
         "api_integrator",
@@ -237,7 +237,7 @@
       }
     },
     "multi_channel_broadcast": {
-      "description": "Draft and send a coordinated message across multiple communication channels with platform-appropriate formatting.",
+      "description": "Draft and send a coordinated message across multiple communication channels with platform-appropriate formatting. Example triggers: 'announce the release on Slack, Discord, and email', 'verkünde die Wartung auf allen Kanälen', 'broadcast the incident status to the team channels', 'Nachricht an Telegram, Slack und E-Mail senden', 'coordinated announcement across Telegram and email', 'Multi-Channel-Nachricht mit angepasstem Format'.",
       "task": "Use summarizer or paper_author to draft the core message based on the user's input and any shared evidence, then notification_agent to send platform-adapted versions to the requested channels. Use qa_guard to review the draft before sending when accuracy is critical.",
       "allowedAgents": [
         "notification_agent",

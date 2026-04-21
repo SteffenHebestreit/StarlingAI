@@ -47,6 +47,7 @@ function multimodalServiceConfigured(baseUrl: string | undefined): boolean {
 registerTool({
   name: "extract_file_content",
   description: "Convert a workspace file into Markdown using the configured file-conversion backend.",
+  embeddingDescription: "Extract, convert, read text from PDF, DOCX, PPTX, XLSX, images, binary documents. Text aus PDF extrahieren, DOCX lesen, Dokument in Markdown konvertieren. OCR, document parsing.",
   parameters: {
     type: "object",
     properties: {
@@ -82,6 +83,7 @@ registerTool({
 registerTool({
   name: "transcribe_audio",
   description: "Transcribe an audio file from the workspace using the configured STT backend.",
+  embeddingDescription: "Transcribe, convert, speech-to-text, STT, audio to text. Audio transkribieren, Sprache zu Text, Tonaufnahme abtippen, Mitschrift erzeugen. Whisper, voice recognition.",
   parameters: {
     type: "object",
     properties: {
@@ -261,6 +263,7 @@ registerTool({
 registerTool({
   name: "analyze_image",
   description: "Analyze an image file from the workspace with the configured vision-capable LLM.",
+  embeddingDescription: "Analyze, describe, interpret, caption an image, photo, screenshot, diagram. Bild analysieren, Foto beschreiben, Screenshot interpretieren, visuelle Analyse. Image understanding, OCR visual.",
   parameters: {
     type: "object",
     properties: {
@@ -307,6 +310,7 @@ registerTool({
 registerTool({
   name: "generate_image",
   description: "Generate an image from a text prompt using the configured image-generation backend and save it to the workspace.",
+  embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
   parameters: {
     type: "object",
     properties: {

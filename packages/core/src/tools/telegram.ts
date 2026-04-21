@@ -14,6 +14,7 @@ registerTool({
     "Send a text message to a Telegram chat via the running Telegram bot. " +
     "Requires the Telegram channel to be enabled and the bot to be running. " +
     "The chatId is the numeric Telegram chat/user ID.",
+  embeddingDescription: "Send message via Telegram bot, push alert to Telegram chat. Telegram-Nachricht senden, Nachricht an Telegram-Bot, kurze Alarmmeldung verschicken.",
   parameters: {
     type: "object",
     properties: {

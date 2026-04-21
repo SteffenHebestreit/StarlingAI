@@ -1,7 +1,7 @@
 {
   "jobs": {
     "daily_ops_brief": {
-      "description": "Prepare a verified research brief and then distribute it through the configured channels.",
+      "description": "Prepare a verified research brief and then distribute it through the configured channels. Example triggers: 'send the daily ops brief', 'tägliches Ops-Briefing verteilen', '/ops-brief platform status', 'operations digest mit aktuellen Risiken'.",
       "params": {
         "topic": {
           "description": "Topic or incident to summarize",
@@ -51,7 +51,7 @@
       ]
     },
     "deep_research_packet": {
-      "description": "Run a deep-research dossier workflow with optional Mermaid visuals.",
+      "description": "Run a deep-research dossier workflow with optional Mermaid visuals. Example triggers: '/deep-research electric grid storage', 'Tiefenrecherche zum Thema Quantencomputer', 'deep-dive dossier on the supply chain', 'Dossier mit Visualisierungen erstellen'.",
       "params": {
         "topic": {
           "description": "Research topic or question",
@@ -95,7 +95,7 @@
       ]
     },
     "source_grounded_paper_packet": {
-      "description": "Collect evidence and draft a source-grounded paper with one final quality gate.",
+      "description": "Collect evidence and draft a source-grounded paper with one final quality gate. Example triggers: 'write a cited paper on federated learning', 'quellenbasiertes Paper zum Thema KI-Ethik verfassen', 'produce a technical report with references', 'Fachartikel mit Quellenangaben schreiben'.",
       "params": {
         "topic": {
           "description": "Topic, protocol set, or question to cover",
@@ -118,7 +118,7 @@
       ]
     },
     "research_visual_digest": {
-      "description": "Produce a fast visual research brief for a topic that benefits from one high-signal Mermaid diagram.",
+      "description": "Produce a fast visual research brief for a topic that benefits from one high-signal Mermaid diagram. Example triggers: 'give me a visual brief on our stack', 'visuelle Kurzrecherche mit Diagramm', 'one-diagram summary of the architecture', 'Kompakt-Briefing mit Mermaid-Diagramm'.",
       "params": {
         "topic": {
           "description": "Topic or system to summarize visually",
@@ -145,7 +145,7 @@
       ]
     },
     "weekly_security_digest": {
-      "description": "Research the latest CVEs, security advisories, and threat intelligence for the configured stack, produce a prioritized risk report, and broadcast it to the configured channels.",
+      "description": "Research the latest CVEs, security advisories, and threat intelligence for the configured stack, produce a prioritized risk report, and broadcast it to the configured channels. Example triggers: '/security-digest Node.js', 'wöchentliches Sicherheits-Update verteilen', 'send the weekly CVE digest', 'Sicherheits-Digest mit Risiken broadcasten'.",
       "params": {
         "scope": {
           "description": "Software stack, services, or dependency set to cover",
@@ -200,7 +200,7 @@
       ]
     },
     "release_broadcast": {
-      "description": "Generate release notes from git history for a specified version range and broadcast them to the configured channels.",
+      "description": "Generate release notes from git history for a specified version range and broadcast them to the configured channels. Example triggers: '/release v2.3', 'Release Notes für Version 2.3 verteilen', 'publish the release announcement', 'Versionshinweise broadcasten'.",
       "params": {
         "version": {
           "description": "Release version label",
@@ -260,7 +260,7 @@
       ]
     },
     "incident_postmortem": {
-      "description": "Triage a live or recent incident, guide remediation, and produce a structured post-incident report that is broadcast to the ops channel.",
+      "description": "Triage a live or recent incident, guide remediation, and produce a structured post-incident report that is broadcast to the ops channel. Example triggers: '/incident database outage at 14:00', 'Postmortem für den Ausfall erstellen', 'run incident response and generate postmortem', 'Vorfallsbericht mit Zeitleiste erzeugen'.",
       "params": {
         "incident": {
           "description": "Description of the failure or alert",
@@ -323,7 +323,7 @@
       ]
     },
     "competitive_snapshot": {
-      "description": "Run a competitive analysis for one or more products, produce a visual intelligence brief, and optionally broadcast it.",
+      "description": "Run a competitive analysis for one or more products, produce a visual intelligence brief, and optionally broadcast it. Example triggers: '/competitive ProductA, ProductB, ProductC', 'Wettbewerbsanalyse für drei Produkte durchführen', 'compare these competitors on pricing and features', 'Wettbewerbsübersicht mit Vergleichstabelle'.",
       "params": {
         "competitors": {
           "description": "Comma-separated competitor names or products",
@@ -370,7 +370,7 @@
       ]
     },
     "data_quality_report": {
-      "description": "Inspect a data source or attached files for schema quality, completeness, and anomalies, then broadcast a structured data quality report.",
+      "description": "Inspect a data source or attached files for schema quality, completeness, and anomalies, then broadcast a structured data quality report. Example triggers: 'run a data quality check on the orders table', 'Datenqualitätsprüfung für die Kundendatei', 'analyze schema and null rates in the attached CSV', 'Datenqualitätsbericht mit Auffälligkeiten erstellen'.",
       "params": {
         "dataSource": {
           "description": "File path, database name, or description of the data source",
@@ -408,7 +408,7 @@
       ]
     },
     "morning_briefing": {
-      "description": "Produce a combined morning briefing: today's calendar, overnight ops alerts, key news or research on the configured topic, and any pending notifications — delivered to the configured channel.",
+      "description": "Produce a combined morning briefing: today's calendar, overnight ops alerts, key news or research on the configured topic, and any pending notifications — delivered to the configured channel. Example triggers: '/morning', 'Morgen-Briefing erstellen', 'send me the daily morning digest', 'täglicher Morgenüberblick mit Kalender und News'.",
       "params": {
         "topic": {
           "description": "Background topic for the research section (platform news, industry, project)",
@@ -463,7 +463,7 @@
       ]
     },
     "scheduled_code_review": {
-      "description": "Perform a structured code review of recent commits, produce a review report, and broadcast it to the engineering channel.",
+      "description": "Perform a structured code review of recent commits, produce a review report, and broadcast it to the engineering channel. Example triggers: '/code-review HEAD~10..HEAD', 'geplantes Code-Review der letzten Commits', 'review recent changes and notify the team', 'Code-Review-Bericht an Engineering-Kanal'.",
       "params": {
         "targetRef": {
           "description": "Git ref range to review",
@@ -517,7 +517,7 @@
       ]
     },
     "onboarding_delivery": {
-      "description": "Build an onboarding packet for a new team member or project and deliver it via the configured channel.",
+      "description": "Build an onboarding packet for a new team member or project and deliver it via the configured channel. Example triggers: '/onboard StarlingAI platform', 'Onboarding-Paket für neuen Entwickler erstellen', 'create an onboarding packet for the new PM', 'Einarbeitungsdokument mit Quick-Reference verteilen'.",
       "params": {
         "topic": {
           "description": "What the person is being onboarded to",
@@ -576,7 +576,7 @@
       ]
     },
     "content_pipeline": {
-      "description": "Research a topic, produce audience-ready written content, and publish a summary notification to the configured channel.",
+      "description": "Research a topic, produce audience-ready written content, and publish a summary notification to the configured channel. Example triggers: '/content launch announcement', 'Content-Pipeline für Blogartikel starten', 'produce a blog post about our new release', 'Content-Workflow: Recherche und Entwurf'.",
       "params": {
         "topic": {
           "description": "Topic, angle, or key message for the content",
@@ -637,7 +637,7 @@
       ]
     },
     "database_analysis": {
-      "description": "Run a scheduled schema inspection and data quality check against a configured database, then broadcast a weekly digest summarising findings, anomalies, and recommended actions.",
+      "description": "Run a scheduled schema inspection and data quality check against a configured database, then broadcast a weekly digest summarising findings, anomalies, and recommended actions. Example triggers: '/db-analysis production', 'wöchentliche Datenbankanalyse durchführen', 'inspect the schema and broadcast the quality report', 'Schema-Prüfung und Qualitätsdigest verteilen'.",
       "params": {
         "dataSource": {
           "description": "Database name, connection alias, or file path to analyse",

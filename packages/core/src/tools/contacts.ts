@@ -37,6 +37,7 @@ registerTool({
 registerTool({
   name: "contacts_search",
   description: "Search or list contacts in a CardDAV address book. Filters by name, email, or organization when a query is provided.",
+  embeddingDescription: "Search, find, look up a contact, person, phone number, email in address book. Kontakt suchen, Adressbuch durchsuchen, Telefonnummer finden, Person nachschlagen.",
   parameters: {
     type: "object",
     properties: {

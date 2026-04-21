@@ -13,6 +13,7 @@ function parseStringArray(value: unknown): string[] | undefined {
 registerTool({
   name: "mail_list_accounts",
   description: "List configured mail accounts from the headless mail service.",
+  embeddingDescription: "List, show, enumerate available mail accounts or mailboxes configured. Verfügbare Mail-Konten auflisten, E-Mail-Konten anzeigen, konfigurierte Postfächer. Account discovery.",
   parameters: { type: "object", properties: {} },
   async execute(): Promise<ToolResult> {
     const response = await callMailService<Array<{ id: string; address: string; displayName?: string }>>("/api/accounts");
@@ -104,6 +105,7 @@ registerTool({
 registerTool({
   name: "mail_search",
   description: "Search messages across one or more configured mail accounts.",
+  embeddingDescription: "Search, find, look up, query emails or mail messages. E-Mails durchsuchen, Nachrichten finden, Postfach durchsuchen. Find mail by sender, subject, content, date.",
   parameters: {
     type: "object",
     properties: {
@@ -149,6 +151,7 @@ registerTool({
 registerTool({
   name: "mail_list_unread",
   description: "List unread messages across one or more configured mail accounts.",
+  embeddingDescription: "List, show, check unread emails or new messages in inbox. Ungelesene E-Mails anzeigen, neue Nachrichten prüfen, Posteingang checken. Unread inbox overview.",
   parameters: {
     type: "object",
     properties: {
@@ -185,6 +188,7 @@ registerTool({
 registerTool({
   name: "mail_read",
   description: "Read a specific mail message by account, mailbox, and UID.",
+  embeddingDescription: "Read, open, view, display the full content of an email message. E-Mail öffnen, Nachricht lesen, Mailinhalt anzeigen. Get full message body and headers.",
   parameters: {
     type: "object",
     properties: {
@@ -224,6 +228,7 @@ registerTool({
 registerTool({
   name: "mail_prepare_draft",
   description: "Create a draft email for a specific configured mail account.",
+  embeddingDescription: "Compose, write, draft, create a new email or reply. E-Mail verfassen, Entwurf erstellen, Antwort schreiben. Draft outbound mail with subject and body.",
   parameters: {
     type: "object",
     properties: {
@@ -451,6 +456,7 @@ registerTool({
 registerTool({
   name: "mail_send_draft",
   description: "Send a prepared mail draft through the configured mail account. This tool always requires user approval.",
+  embeddingDescription: "Send, dispatch, deliver, transmit an email or message. E-Mail senden, verschicken, abschicken, verschicken. Requires approval. Final step after drafting.",
   parameters: {
     type: "object",
     properties: {

@@ -42,6 +42,7 @@ interface ParsedGeocodeQuery {
 registerTool({
   name: "geocode_location",
   description: "Resolve a place name or street address to geographic coordinates using OpenStreetMap Nominatim. Returns multiple candidates when the query is ambiguous.",
+  embeddingDescription: "Resolve, look up coordinates for a place, address, city. Ort finden, Adresse zu Koordinaten auflösen, Geokodierung, Standortabfrage.",
   parameters: {
     type: "object",
     properties: {
@@ -157,6 +158,7 @@ registerTool({
 registerTool({
   name: "route_distance_time",
   description: "Calculate route distance and estimated travel time between two coordinates using OSRM for car or walking mode.",
+  embeddingDescription: "Calculate route, driving distance, walking distance, travel time between two places. Fahrzeit berechnen, Route planen, Entfernung zwischen Orten, Reisedauer ermitteln.",
   parameters: {
     type: "object",
     properties: {

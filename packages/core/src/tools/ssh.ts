@@ -19,6 +19,7 @@ const EXEC_TIMEOUT_MS = 60_000;
 registerTool({
   name: "ssh_exec",
   description: "Execute a command remotely over SSH from the host. Use for privileged operations on infrastructure you control.",
+  embeddingDescription: "Run, execute command remotely via SSH on a remote server or host. SSH-Befehl ausführen, Remote-Kommando, Fernwartung, Server-Shell. Remote shell, privileged operations.",
   parameters: {
     type: "object",
     properties: {

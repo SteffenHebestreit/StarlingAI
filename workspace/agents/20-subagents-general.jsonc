@@ -1,9 +1,9 @@
 {
   "subAgents": {
     "researcher": {
-      "description": "General-purpose web research and citation specialist for public web lookup, official source discovery, documentation, news, security advisories, CVE tracking, vulnerability reports, threat intelligence, bibliography preparation, and fact-checking across any domain.",
-      "capabilities": ["web research", "documentation lookup", "source triangulation", "fact checking", "citation research", "official source lookup", "specification discovery", "bibliography prep", "security advisory research", "CVE lookup", "vulnerability research", "threat intelligence", "news research", "technical investigation"],
-      "tags": ["research", "docs", "sources", "verification", "citations", "papers", "cve", "vulnerability", "security", "advisory", "news", "investigation"],
+      "description": "Web research, citation, and security intelligence specialist. Covers public web lookup, official source discovery, documentation, news, academic papers, CVE tracking, vulnerability advisories, CVSS scoring, exploit availability, patch status, threat intelligence, bibliography preparation, and fact-checking across any domain. Also handles security-specific intel (NVD, Exploit-DB, GitHub Security Advisories, vendor bulletins). Example queries: 'find the latest Node.js release notes', 'search NVD for CVE-2024-1234', 'was ist neu in Python 3.13', 'aktuelle Sicherheitslücken in nginx', 'Bibliographie für wissenschaftliche Arbeit', 'summarize today's CVE feed', 'threat intelligence for recent ransomware', 'offizielle Quellen und Zitate für einen MCP-Forschungsartikel sammeln'.",
+      "capabilities": ["web research", "Recherche", "Web-Recherche", "documentation lookup", "Dokumentationssuche", "source triangulation", "Quellenprüfung", "fact checking", "Faktenprüfung", "citation research", "Zitationsrecherche", "official source lookup", "offizielle Quellen", "specification discovery", "Spezifikationssuche", "bibliography prep", "Bibliographie", "security advisory research", "Sicherheitsadvisory", "CVE lookup", "CVE-Suche", "vulnerability research", "Schwachstellenrecherche", "Sicherheitslücken", "CVSS scoring", "exploit-db search", "NVD queries", "threat intelligence", "Bedrohungsaufklärung", "news research", "Nachrichtenrecherche", "technical investigation", "patch status research", "Patch-Status", "malware analysis research"],
+      "tags": ["research", "recherche", "docs", "sources", "quellen", "verification", "citations", "papers", "cve", "vulnerability", "schwachstelle", "sicherheitsluecke", "security", "sicherheit", "advisory", "news", "nachrichten", "investigation", "cvss", "nvd", "exploit", "infosec", "threat", "patch", "malware", "pentest-intel", "bibliographie"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -13,7 +13,7 @@
       "maxIterations": 8,
       "turnTimeoutMs": 180000,
       "container": { "disabled": true }, // read-only tools only — in-process is safe, avoids container cold-start
-      "systemPrompt": "You are a web research and citation specialist. Use web_search to identify the freshest likely sources (backed by SearXNG, with Playwright and DuckDuckGo fallbacks), then use web_fetch to read them — web_fetch renders HTML pages via Playwright when available, so JavaScript-heavy sites work out of the box. When gathering sources for papers, briefs, or reports, prefer official specifications, maintainer-authored repositories, standards documents, release notes, vendor documentation, academic papers, and government or institutional publications over secondary summaries. For each useful source, capture title, canonical URL, publisher or maintainer, publication or last-updated date when available, and a one-line relevance note. Cover multiple source classes when the topic allows: official documentation, maintainer-authored repositories, release notes, standards bodies, academic or government sources, and only then reputable secondary reporting. Capture exact dates, version numbers, prices, scores, or other time-sensitive values exactly as shown. Cross-check important factual claims against at least two independent sources whenever possible; if only one reliable source exists, say that explicitly and mark it as single-source evidence. If sources disagree, report the disagreement instead of smoothing it over. In every result, mention the sources you used with title or publisher, URL, and date when available. IMPORTANT: Publish findings early and incrementally via share_finding after each successful source rather than waiting until you have all sources. If you are running low on time, publish what you have so far. Other agents can build on partial findings instead of redoing your work. Never invent publications, authors, dates, quotes, statistics, or URLs that you did not open.",
+      "systemPrompt": "You are a web research, citation, and security intelligence specialist. Use web_search to identify the freshest likely sources (backed by SearXNG, with Playwright and DuckDuckGo fallbacks), then use web_fetch to read them — web_fetch renders HTML pages via Playwright when available, so JavaScript-heavy sites work out of the box. When gathering sources for papers, briefs, or reports, prefer official specifications, maintainer-authored repositories, standards documents, release notes, vendor documentation, academic papers, and government or institutional publications over secondary summaries. For each useful source, capture title, canonical URL, publisher or maintainer, publication or last-updated date when available, and a one-line relevance note. Cover multiple source classes when the topic allows: official documentation, maintainer-authored repositories, release notes, standards bodies, academic or government sources, and only then reputable secondary reporting. Capture exact dates, version numbers, prices, scores, or other time-sensitive values exactly as shown. Cross-check important factual claims against at least two independent sources whenever possible; if only one reliable source exists, say that explicitly and mark it as single-source evidence. If sources disagree, report the disagreement instead of smoothing it over. In every result, mention the sources you used with title or publisher, URL, and date when available.\n\nSECURITY INTEL MODE — when the task involves CVEs, vulnerabilities, advisories, exploits, CVSS scoring, patch status, or threat intelligence: search NVD (https://nvd.nist.gov/vuln/search), Exploit-DB (https://www.exploit-db.com), MITRE CVE (https://cve.mitre.org), vendor security bulletins, and GitHub Security Advisories. For each CVE capture: CVE ID, publication date, CVSS v3 score, affected products and versions, vulnerability type (RCE, privilege escalation, DoS, etc.), exploit availability, patch/mitigation status, and technical impact. Prioritize high-severity remotely-exploitable unpatched issues. Cross-verify CVSS scores between NVD and the vendor advisory when both exist; if they disagree, report both.\n\nIMPORTANT: Publish findings early and incrementally via share_finding after each successful source rather than waiting until you have all sources. Other agents can build on partial findings instead of redoing your work. Never invent publications, authors, dates, quotes, statistics, CVE IDs, CVSS scores, or URLs that you did not open.",
       "tools": [
         "web_search",
         "web_fetch",
@@ -31,57 +31,10 @@
         "graph_find_paths"
       ]
     },
-    "security_researcher": {
-      "description": "Security research specialist for CVE lookup, vulnerability advisories, threat intelligence, CVSS scoring, exploit availability, patch status, and infosec news. Use for any question about recent vulnerabilities, CVE IDs, affected products, CVSS scores, NVD, Exploit-DB, or security bulletins.",
-      "capabilities": ["CVE research", "vulnerability advisory lookup", "CVSS scoring", "exploit-db search", "NVD queries", "threat intelligence", "security news", "patch status research", "infosec investigation", "malware analysis research"],
-      "tags": ["security", "cve", "vulnerability", "advisory", "exploit", "cvss", "nvd", "infosec", "threat", "patch", "malware", "pentest-intel"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": false,
-        "temperature": 0.1,
-        "maxTokens": 6144
-      },
-      "maxIterations": 8,
-      "container": { "disabled": true },
-      "systemPrompt": "You are a security research specialist. For CVE and vulnerability research: search NVD (https://nvd.nist.gov/vuln/search), Exploit-DB (https://www.exploit-db.com), MITRE CVE (https://cve.mitre.org), vendor security bulletins, and GitHub Security Advisories. For each CVE or vulnerability you find, capture: CVE ID, publication date, CVSS score (v3 preferred), affected products and versions, vulnerability type (RCE, privilege escalation, DoS, etc.), exploit availability, patch/mitigation status, and a concise technical impact summary. Prioritize high-severity, remotely exploitable, or unpatched vulnerabilities. Cross-verify CVSS scores between NVD and the vendor advisory when both are available. If sources disagree on severity, report both. Always cite your sources with URL and retrieval date. Publish structured findings via share_finding so downstream agents can synthesize without repeating the searches.",
-      "tools": [
-        "web_search",
-        "web_fetch",
-        "read_shared_facts",
-        "share_finding",
-        "write_file",
-        "research_note",
-        "research_notes_read",
-        "research_notes_summary",
-        "research_notes_clear"
-      ]
-    },
     "code_analyst": {
-      "description": "Code analysis specialist for workspace inspection and bug diagnosis.",
-      "capabilities": ["code reading", "architecture review", "bug diagnosis", "workspace search"],
-      "tags": ["code", "analysis"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
-      },
-      "maxIterations": 5,
-      "container": { "disabled": true }, // read-only tools only — in-process is safe
-      "systemPrompt": "You analyze code in the workspace. Start with workspace_search or list_files to locate relevant files before reading them. Focus on structure, logic errors, potential bugs, security issues, and missing edge cases. When you find an issue, describe the file, line range, symptom, and likely fix. Publish durable findings via share_finding so other agents can act on them without re-reading the same files.",
-      "tools": [
-        "read_file",
-        "list_files",
-        "workspace_search",
-        "write_file",
-        "read_shared_facts",
-        "share_finding"
-      ]
-    },
-    "retrieval_analyst": {
-      "description": "Workspace retrieval and code-search specialist for finding files, symbols, references, and configuration values across the codebase.",
-      "capabilities": ["workspace search", "code retrieval", "symbol lookup", "reference tracing", "config value search", "cross-file analysis"],
-      "tags": ["code", "retrieval", "workspace", "search", "analysis"],
+      "description": "Code analysis, workspace retrieval, and bug diagnosis specialist. Reads source files, locates symbols, traces references, reviews architecture, flags logic errors, security issues, missing edge cases, and extracts exact config values or code locations from the codebase. Example queries: 'find all callers of resolveAgentRouting', 'why does auth middleware reject valid tokens', 'wo wird die Funktion buildAgentSearchDocument aufgerufen', 'zeige alle Vorkommen von FEATURE_FLAG_X', 'review packages/core/src/tools/registry.ts for bugs', 'Architekturprüfung des Retrieval-Moduls', 'locate every .env reference in the TS codebase', 'Codeanalyse für den neuen Worker-Pool'.",
+      "capabilities": ["code reading", "Codeanalyse", "architecture review", "Architekturprüfung", "bug diagnosis", "Fehlerdiagnose", "workspace search", "Workspace-Suche", "code retrieval", "Code-Abruf", "symbol lookup", "Symbolsuche", "reference tracing", "Referenzverfolgung", "config value search", "Konfigurationssuche", "cross-file analysis", "dateiübergreifende Analyse", "security review", "Sicherheitsreview", "edge case review", "Randfallprüfung"],
+      "tags": ["code", "analysis", "analyse", "retrieval", "workspace", "search", "suche", "symbol", "references", "referenzen", "review", "bug", "fehler", "architecture", "architektur"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -90,19 +43,20 @@
       },
       "maxIterations": 6,
       "container": { "disabled": true }, // read-only tools only — in-process is safe
-      "systemPrompt": "You locate and extract information from the workspace codebase. Use workspace_search to find files by content, list_files to discover directory structure, and read_file to inspect specific files. For symbol or reference lookups, combine exact-string searches with file-tree exploration. Return precise locations (file path, line range), exact values, and relevant surrounding context. Do NOT guess or fabricate file paths. When the task asks you to find all occurrences of a symbol, class, or string, scan exhaustively rather than stopping at the first hit. Publish reusable findings via share_finding so downstream agents can use them without re-scanning.",
+      "systemPrompt": "You analyze and retrieve information from the workspace codebase. Start with workspace_search to find files by content or list_files to discover directory structure, then use read_file to inspect specific files. Handle two styles of task: (1) RETRIEVAL — locate files, symbols, references, or exact config values; return precise locations (file path, line range), exact values, and surrounding context; when asked to find all occurrences, scan exhaustively. (2) ANALYSIS — focus on structure, logic errors, potential bugs, security issues, missing edge cases; describe file, line range, symptom, and likely fix. For symbol or reference lookups, combine exact-string searches with file-tree exploration. Do NOT guess or fabricate file paths. Publish durable findings via share_finding so other agents can act on them without re-reading the same files.",
       "tools": [
         "read_file",
         "list_files",
         "workspace_search",
+        "write_file",
         "read_shared_facts",
         "share_finding"
       ]
     },
     "browser_agent": {
-      "description": "Browser automation specialist using Playwright MCP tools to open websites, interact with pages, and capture screenshots or accessibility snapshots for downstream analysis.",
-      "capabilities": ["browser automation", "website navigation", "form submission", "page evidence capture", "browser screenshots", "page snapshots"],
-      "tags": ["browser", "playwright", "screenshot", "snapshot", "website"],
+      "description": "Browser automation specialist using Playwright MCP tools to open websites, interact with pages, submit forms, click through flows, and capture screenshots or accessibility snapshots for downstream analysis. Example queries: 'log into the portal and download the PDF', 'fill out the contact form on example.com', 'klicke den Download-Button und mache einen Screenshot', 'auf Webseite X einloggen und Bestellhistorie abrufen', 'extract the pricing table from this page', 'open https://... and capture the status dashboard', 'Screenshot der Startseite machen'.",
+      "capabilities": ["browser automation", "Browser-Automatisierung", "website navigation", "Webseiten-Navigation", "form submission", "Formular ausfüllen", "page evidence capture", "Seiteninhalte erfassen", "browser screenshots", "Browser-Screenshots", "page snapshots", "Seiten-Snapshots", "js-rendered pages", "JS-gerenderte Seiten", "login flows", "Login-Abläufe"],
+      "tags": ["browser", "playwright", "screenshot", "snapshot", "website", "webseite", "form", "formular", "click", "klick", "navigation", "automation", "automatisierung", "login", "anmeldung"],
       "container": { "disabled": true }, // uses Playwright MCP tools that require in-process gateway connection
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
@@ -130,9 +84,9 @@
       ]
     },
     "accessibility_tester": {
-      "description": "Website accessibility testing specialist for WCAG 2.2 audits, semantic HTML review, keyboard-flow checks, form labeling, heading structure, alt text, and Playwright-driven browser evidence capture.",
-      "capabilities": ["accessibility testing", "wcag 2.2 audits", "semantic html review", "keyboard navigation review", "landmark and heading audit", "form labeling review", "alt text review", "browser automation"],
-      "tags": ["accessibility", "a11y", "wcag", "playwright", "html", "audit", "qa"],
+      "description": "Website accessibility testing specialist for WCAG 2.2 audits, semantic HTML review, keyboard-flow checks, form labeling, heading structure, alt text, and Playwright-driven browser evidence capture. Example queries: 'audit this site for WCAG 2.2 AA', 'check keyboard navigation on the checkout page', 'Barrierefreiheit prüfen für die Startseite', 'alt-Texte auf der Produktseite kontrollieren', 'review heading hierarchy and landmarks', 'sind alle Formularfelder korrekt beschriftet', 'accessibility audit for this dashboard'.",
+      "capabilities": ["accessibility testing", "Barrierefreiheitstests", "wcag 2.2 audits", "WCAG-Audits", "semantic html review", "semantische HTML-Prüfung", "keyboard navigation review", "Tastaturnavigation", "landmark and heading audit", "Landmark- und Überschriftenprüfung", "form labeling review", "Formularbeschriftung", "alt text review", "Alt-Text-Prüfung", "browser automation", "Browser-Automatisierung", "focus visibility audit", "Fokus-Sichtbarkeit"],
+      "tags": ["accessibility", "barrierefreiheit", "a11y", "wcag", "playwright", "html", "audit", "qa", "keyboard", "tastatur", "screen-reader", "alt-text", "landmark", "headings", "ueberschriften"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -158,9 +112,9 @@
       ]
     },
     "web_task_coordinator": {
-      "description": "Coordinator for freshness-sensitive web tasks including breaking news, headlines, weather forecasts, live scores, lottery results, and any task that requires the latest real-time data from the web. Delegates to researcher or browser_agent for live retrieval, then synthesises the findings.",
-      "capabilities": ["multi-agent coordination", "breaking news", "headlines", "weather forecast", "live data retrieval", "web retrieval", "browser orchestration", "evidence synthesis", "current events", "real-time information"],
-      "tags": ["coordination", "web", "browser", "research", "news", "headlines", "weather", "live", "freshness", "nachrichten", "aktuell"],
+      "description": "Coordinator for freshness-sensitive web tasks including breaking news, headlines, weather forecasts, live scores, lottery results, stock quotes, and any task that requires the latest real-time data from the web. Delegates to researcher or browser_agent for live retrieval, then synthesises the findings. Example queries: 'what's in the news today', 'weather forecast for Berlin tomorrow', 'welches Spiel hat Bayern gestern gespielt', 'aktuelle Schlagzeilen zur Klimakonferenz', 'live score of the Chelsea match', 'was sagen heute die Börsen', 'Lottozahlen von gestern', 'breaking news about the tech industry'.",
+      "capabilities": ["multi-agent coordination", "Multi-Agenten-Koordination", "breaking news", "Eilmeldungen", "headlines", "Schlagzeilen", "weather forecast", "Wettervorhersage", "live data retrieval", "Live-Datenabfrage", "web retrieval", "Web-Abruf", "browser orchestration", "Browser-Orchestrierung", "evidence synthesis", "Evidenz-Synthese", "current events", "aktuelle Ereignisse", "real-time information", "Echtzeit-Informationen", "live scores", "Live-Ergebnisse", "lottery results", "Lottozahlen", "stock quotes", "Börsenkurse"],
+      "tags": ["coordination", "koordination", "web", "browser", "research", "news", "nachrichten", "headlines", "schlagzeilen", "weather", "wetter", "live", "freshness", "aktuell", "scores", "ergebnisse", "lottery", "lotto", "stocks", "boerse", "realtime", "echtzeit"],
 
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
@@ -184,9 +138,9 @@
       ]
     },
     "distance_specialist": {
-      "description": "Navigation-only specialist for resolving locations and calculating driving or walking route distance and travel time between geographic places. Use only for map routing and geocoding questions.",
-      "capabilities": ["driving distance", "walking distance", "travel time estimation", "geocoding", "route planning", "osm routing", "fahrzeit berechnen", "reisezeit berechnen", "entfernung berechnen", "streckenplanung"],
-      "tags": ["navigation", "distance", "travel", "maps", "osm", "osrm", "fahrzeit", "reisezeit", "entfernung", "route", "weg", "anfahrt"],
+      "description": "Navigation-only specialist for resolving locations and calculating driving or walking route distance and travel time between geographic places. Use only for map routing and geocoding questions. Example queries: 'how long does it take to drive from Berlin to Hamburg?', 'wie weit ist es von München nach Salzburg mit dem Auto?', 'walking time from central station to the conference venue', 'Fahrzeit von Köln zum Flughafen Frankfurt', 'resolve the coordinates for this address', 'Reisezeit und Distanz zwischen zwei Orten berechnen', 'how far is A from B on foot?', 'Autoroute Berlin Hamburg mit Zeit und Kilometer'.",
+      "capabilities": ["driving distance", "Fahrentfernung", "walking distance", "Fußweg-Distanz", "travel time estimation", "Reisezeit-Schätzung", "geocoding", "Geokodierung", "route planning", "Routenplanung", "osm routing", "OSM-Routing", "fahrzeit berechnen", "reisezeit berechnen", "entfernung berechnen", "streckenplanung", "coordinate resolution", "Koordinatenauflösung"],
+      "tags": ["navigation", "navigation", "distance", "entfernung", "travel", "reise", "maps", "karten", "osm", "osrm", "fahrzeit", "reisezeit", "route", "weg", "anfahrt", "drive", "fahren", "walking", "laufen", "geocode", "geokodierung"],
       "domain": "navigation",
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
@@ -205,9 +159,9 @@
       ]
     },
     "vision_browser_analyst": {
-      "description": "Interprets browser snapshots and screenshots, then publishes exact page evidence for downstream synthesis.",
-      "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction"],
-      "tags": ["browser", "vision", "analysis"],
+      "description": "Interprets browser snapshots and screenshots, then publishes exact page evidence for downstream synthesis. Reads visible text, numbers, dates, table cells, control labels, and layout cues from browser-captured visuals. Example queries: 'what does this screenshot show', 'read the price table in this snapshot', 'extract form field labels from the page image', 'welche Werte stehen auf dem erfassten Dashboard', 'interpret the chart captured by browser_agent', 'Tabelle aus Browser-Screenshot auslesen'.",
+      "capabilities": ["browser evidence interpretation", "Browser-Evidenz-Interpretation", "visual inspection", "visuelle Inspektion", "exact value extraction", "exakte Wertextraktion", "screenshot reading", "Screenshot-Analyse", "snapshot reading", "Snapshot-Analyse", "table extraction from images", "Tabellenextraktion aus Bildern"],
+      "tags": ["browser", "vision", "sicht", "analysis", "analyse", "screenshot", "snapshot", "bild", "image", "ocr", "extraction", "extraktion"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -225,35 +179,10 @@
         "write_file"
       ]
     },
-    "file_analyst": {
-      "description": "Attachment and document analysis specialist for PDFs, images, and mixed file payloads.",
-      "capabilities": ["document extraction", "attachment analysis", "exact text extraction"],
-      "tags": ["files", "documents", "analysis"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": false,
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 5,
-      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
-      "systemPrompt": "You analyze files and attachments. Prefer extract_file_content for PDFs, office files, audio, and video before falling back to raw file reads. Capture exact text, dates, table values, and metadata. Publish reusable evidence with share_finding so sibling agents can cite the extracted content without rereading the file.",
-      "tools": [
-        "extract_file_content",
-        "read_file",
-        "list_files",
-        "list_pdf_form_fields",
-        "pdf_fill",
-        "spreadsheet_read",
-        "read_shared_facts",
-        "share_finding",
-        "write_file"
-      ]
-    },
     "document_intake": {
-      "description": "Document intake specialist for classifying, extracting, and normalizing long reports, PDFs, DOCX files, and mixed attachments into reusable facts.",
-      "capabilities": ["document intake", "attachment classification", "content normalization", "metadata extraction", "handoff preparation"],
-      "tags": ["documents", "intake", "attachments", "pdf", "docx"],
+      "description": "Attachment, document, and file analysis specialist for PDFs, DOCX, images, audio, video, spreadsheets, and mixed payloads. Classifies, extracts, normalizes, and prepares reusable facts and exact text for downstream agents. Example queries: 'extract all line items from this invoice PDF', 'summarize this 40-page report', 'was steht auf der gescannten Rechnung', 'Metadaten aus dem DOCX lesen', 'fill in this PDF form', 'analyze the screenshots in this ZIP', 'Tabelle aus dem Excel-Sheet extrahieren', 'OCR für das eingescannte Dokument'.",
+      "capabilities": ["document intake", "Dokument-Intake", "attachment analysis", "Anhangsanalyse", "attachment classification", "Anhangsklassifizierung", "document extraction", "Dokumentenextraktion", "content normalization", "Inhaltsnormalisierung", "metadata extraction", "Metadaten-Extraktion", "exact text extraction", "Textextraktion", "PDF form filling", "PDF-Formularausfüllung", "spreadsheet reading", "Tabellenkalkulation lesen", "image OCR prep", "Bildanalyse", "handoff preparation", "Übergabevorbereitung"],
+      "tags": ["documents", "dokumente", "files", "dateien", "intake", "attachments", "anhaenge", "pdf", "docx", "xlsx", "csv", "analysis", "analyse", "extraction", "extraktion", "ocr", "metadata", "metadaten"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -279,9 +208,9 @@
       ]
     },
     "evidence_analyst": {
-      "description": "Synthesizes fetched pages, shared facts, files, and visual evidence into a grounded evidence ledger.",
-      "capabilities": ["evidence synthesis", "cross-source reconciliation", "document grounding", "research handoff"],
-      "tags": ["evidence", "analysis", "research", "grounding"],
+      "description": "Synthesizes fetched pages, shared facts, files, and visual evidence into a grounded evidence ledger. Reconciles conflicting sources, separates confirmed facts from tentative claims, and preserves exact source attribution. Example queries: 'build an evidence ledger from the shared facts', 'reconcile the conflicting revenue numbers from the reports', 'Evidenz aus den Quellen zusammenführen', 'widersprüchliche Angaben aus Datei A und B abgleichen', 'ground these claims against the source documents'.",
+      "capabilities": ["evidence synthesis", "Evidenz-Synthese", "cross-source reconciliation", "Quellenabgleich", "document grounding", "Dokumentengrundlage", "research handoff", "Forschungsübergabe", "claim verification", "Aussagenprüfung", "conflict detection", "Konflikterkennung"],
+      "tags": ["evidence", "evidenz", "analysis", "analyse", "research", "forschung", "grounding", "reconciliation", "abgleich", "verification", "pruefung", "ledger"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -302,9 +231,9 @@
       ]
     },
     "data_analyst": {
-      "description": "Analyzes structured data such as CSV, JSON, spreadsheets, metrics snapshots, and exported reports.",
-      "capabilities": ["data analysis", "csv review", "json inspection", "metrics interpretation", "tabular summarization"],
-      "tags": ["data", "analysis", "csv", "json", "metrics"],
+      "description": "Analyzes structured data such as CSV, JSON, spreadsheets, metrics snapshots, and exported reports. Computes aggregations, trends, summaries, and anomalies from tabular evidence while preserving exact values, units, and caveats. Example queries: 'compute monthly revenue from this CSV', 'summarize the metrics in this JSON export', 'analysiere die Verkaufszahlen aus der Excel-Tabelle', 'welche Auffälligkeiten zeigen die KPIs', 'group this dataset by region and compute average', 'Trendanalyse der letzten 6 Monate', 'read CSV and compute averages by category'.",
+      "capabilities": ["data analysis", "Datenanalyse", "csv review", "CSV-Auswertung", "json inspection", "JSON-Inspektion", "metrics interpretation", "Metrik-Interpretation", "tabular summarization", "Tabellen-Zusammenfassung", "aggregation", "Aggregation", "trend analysis", "Trendanalyse", "anomaly detection", "Anomalieerkennung", "kpi computation", "KPI-Berechnung"],
+      "tags": ["data", "daten", "analysis", "analyse", "csv", "json", "xlsx", "spreadsheet", "tabelle", "metrics", "metriken", "kpi", "trend", "aggregation", "statistik"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -333,9 +262,9 @@
       ]
     },
     "research_librarian": {
-      "description": "Deep-research organizer that structures findings into scratchpad notes, graph entities, timelines, and reusable evidence handoffs.",
-      "capabilities": ["research organization", "evidence indexing", "knowledge graph curation", "timeline logging", "scratchpad maintenance"],
-      "tags": ["research", "librarian", "scratchpad", "graph", "timeline", "evidence"],
+      "description": "Deep-research organizer that structures findings into scratchpad notes, graph entities, timelines, and reusable evidence handoffs. Indexes long-running research so other agents can build on curated facts instead of rediscovering them. Example queries: 'organize the findings from this research session', 'build a knowledge graph from the shared facts', 'Zeitleiste aus den Quellen erstellen', 'Rechercheergebnisse strukturieren und indexieren', 'deduplicate the scratchpad notes', 'persist these entities and relations for later'.",
+      "capabilities": ["research organization", "Forschungsorganisation", "evidence indexing", "Evidenz-Indexierung", "knowledge graph curation", "Wissensgraph-Pflege", "timeline logging", "Zeitleistenführung", "scratchpad maintenance", "Notizbuch-Pflege", "entity extraction", "Entitätenextraktion", "relation extraction", "Beziehungsextraktion"],
+      "tags": ["research", "forschung", "librarian", "bibliothek", "scratchpad", "notizen", "graph", "wissensgraph", "timeline", "zeitleiste", "evidence", "evidenz", "indexing", "indexierung"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -363,9 +292,9 @@
       ]
     },
     "diagram_designer": {
-      "description": "Creates Mermaid diagrams and visual knowledge maps from verified evidence, workflows, architectures, and timelines.",
-      "capabilities": ["mermaid diagrams", "workflow visualization", "architecture mapping", "timeline visualization", "evidence visualization"],
-      "tags": ["diagram", "mermaid", "visualization", "workflow", "architecture", "timeline"],
+      "description": "Creates Mermaid diagrams and visual knowledge maps from verified evidence, workflows, architectures, and timelines. Turns facts into flowcharts, sequence diagrams, timelines, graphs, and mindmaps. Example queries: 'diagram the deployment pipeline', 'Sequence-Diagramm für den Auth-Flow', 'Flussdiagramm der Bestellabwicklung', 'render a mindmap of the research topics', 'zeichne die Systemarchitektur als Mermaid-Graph', 'visualize the incident timeline'.",
+      "capabilities": ["mermaid diagrams", "Mermaid-Diagramme", "workflow visualization", "Workflow-Visualisierung", "architecture mapping", "Architektur-Darstellung", "timeline visualization", "Zeitleisten-Visualisierung", "evidence visualization", "Evidenz-Visualisierung", "flowchart design", "Flussdiagramm-Entwurf", "sequence diagrams", "Sequenzdiagramme", "mindmap creation", "Mindmap-Erstellung"],
+      "tags": ["diagram", "diagramm", "mermaid", "visualization", "visualisierung", "workflow", "architecture", "architektur", "timeline", "zeitleiste", "flowchart", "flussdiagramm", "sequence", "mindmap"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -390,9 +319,9 @@
       ]
     },
     "chart_designer": {
-      "description": "Creates grounded HTML charts, tables, and lightweight visual summaries from verified numeric evidence and sourced time series.",
-      "capabilities": ["html charts", "data visualization", "time-series charting", "table design", "artifact rendering"],
-      "tags": ["chart", "html", "visualization", "data", "table", "plot"],
+      "description": "Creates grounded HTML charts, tables, and lightweight visual summaries from verified numeric evidence and sourced time series. Supports line, bar, area, scatter, and combo charts plus HTML tables. Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'render a scatter plot of price vs. quality', 'Tabelle der KPIs als HTML', 'create a time-series chart from the verified metrics', 'Kombi-Diagramm aus Umsatz und Marge'.",
+      "capabilities": ["html charts", "HTML-Diagramme", "data visualization", "Datenvisualisierung", "time-series charting", "Zeitreihen-Diagramme", "table design", "Tabellen-Entwurf", "artifact rendering", "Artefakt-Rendering", "line charts", "Liniendiagramme", "bar charts", "Balkendiagramme", "scatter plots", "Streudiagramme"],
+      "tags": ["chart", "diagramm", "html", "visualization", "visualisierung", "data", "daten", "table", "tabelle", "plot", "graph", "timeseries", "zeitreihe"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -416,9 +345,9 @@
       ]
     },
     "integration_builder": {
-      "description": "Integration specialist for APIs, webhooks, MCP wiring, and automation glue between services.",
-      "capabilities": ["api integration", "webhook design", "mcp setup", "automation glue", "workflow handoff"],
-      "tags": ["integration", "api", "webhook", "mcp", "automation"],
+      "description": "Integration specialist for APIs, webhooks, MCP wiring, and automation glue between services. Designs source/target contracts, retries, and failure handling. Example queries: 'wire up a webhook from Stripe to our order service', 'design the MCP server for this tool', 'Integration zwischen CRM und E-Mail-Versand entwerfen', 'connect the n8n flow to our internal API', 'API-Glue zwischen Kalender und Slack bauen', 'entwirf eine Webhook-Anbindung für neue Bestellungen'.",
+      "capabilities": ["api integration", "API-Integration", "webhook design", "Webhook-Entwurf", "mcp setup", "MCP-Setup", "automation glue", "Automatisierungs-Kleber", "workflow handoff", "Workflow-Übergabe", "retry design", "Retry-Entwurf", "contract documentation", "Vertragsdokumentation"],
+      "tags": ["integration", "api", "webhook", "mcp", "automation", "automatisierung", "glue", "anbindung", "contract", "vertrag", "endpoint", "endpunkt"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -440,9 +369,9 @@
       ]
     },
     "shell_agent": {
-      "description": "Shell and SSH CLI specialist for commands, build checks, remote server inspection, and quick environment diagnosis.",
-      "capabilities": ["shell execution", "CLI diagnostics", "SSH execution", "remote server inspection"],
-      "tags": ["shell", "cli", "ops", "ssh", "server"],
+      "description": "Shell and SSH CLI specialist for commands, build checks, remote server inspection, and quick environment diagnosis. Runs targeted single commands like docker ps, systemctl status, whoami, df -h, journalctl, git status. Example queries: 'run df -h on the prod host', 'show docker ps on remote server', 'führe npm run build aus', 'Prüfe den Festplattenplatz auf dem Server', 'ssh to the VM and show systemctl status', 'welche Prozesse laufen gerade', 'check the build output'.",
+      "capabilities": ["shell execution", "Shell-Ausführung", "CLI diagnostics", "CLI-Diagnose", "SSH execution", "SSH-Ausführung", "remote server inspection", "Remote-Server-Inspektion", "build checks", "Build-Prüfungen", "command execution", "Befehlsausführung"],
+      "tags": ["shell", "cli", "kommandozeile", "ops", "ssh", "server", "remote", "command", "befehl", "bash", "powershell", "terminal"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -462,9 +391,9 @@
       ]
     },
     "qa_guard": {
-      "description": "Regression and verification specialist for reproducing issues, running tests, and checking whether a change actually solved the task.",
-      "capabilities": ["test execution", "regression verification", "bug reproduction", "implementation review"],
-      "tags": ["qa", "tests", "verification", "regression"],
+      "description": "Regression and verification specialist for reproducing issues, running tests, and checking whether a change actually solved the task. Runs unit/integration tests, reproduces bugs, and verifies fixes end-to-end. Example queries: 'run the test suite and report failures', 'verify that the fix for bug X actually works', 'reproduziere den Fehler im Checkout-Flow', 'Tests ausführen und Regressionen prüfen', 'run vitest for the changed files', 'prüfe ob die Implementierung die Akzeptanzkriterien erfüllt'.",
+      "capabilities": ["test execution", "Testausführung", "regression verification", "Regressionsprüfung", "bug reproduction", "Fehlerreproduktion", "implementation review", "Implementierungsprüfung", "acceptance criteria check", "Akzeptanzkriterien-Prüfung"],
+      "tags": ["qa", "qs", "tests", "verification", "pruefung", "regression", "bug", "fehler", "reproduction", "reproduktion", "vitest", "jest", "pytest"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -484,9 +413,9 @@
       ]
     },
     "ops_triage": {
-      "description": "Operational triage specialist for service health, deployment failures, log-driven diagnosis, and container/runtime issues.",
-      "capabilities": ["service triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis", "SSH diagnostics"],
-      "tags": ["ops", "triage", "logs", "containers", "reliability", "ssh", "server"],
+      "description": "Operational triage and runtime-incident specialist for service health, deployment failures, log-driven diagnosis, container/runtime issues, provider and gateway faults, configuration drift, and model-identifier problems. Example queries: 'why is the API returning 502', 'diagnose failing deployment on prod', 'LM Studio gateway times out', 'warum läuft der Container nicht', 'Health-Check für die staging-Umgebung', 'Log-Analyse für den letzten Absturz', 'provider returned invalid model id', 'Konfigurationsdrift zwischen Prod und Staging prüfen', 'SSH auf den Host und prüfe den Dienststatus'.",
+      "capabilities": ["service triage", "Service-Triage", "runtime incident triage", "Laufzeit-Incident-Triage", "deployment diagnosis", "Deployment-Diagnose", "log inspection", "Log-Analyse", "container troubleshooting", "Container-Fehlerbehebung", "health-check analysis", "Health-Check-Analyse", "SSH diagnostics", "SSH-Diagnose", "provider troubleshooting", "Provider-Diagnose", "gateway diagnosis", "Gateway-Diagnose", "config drift detection", "Konfigurationsdrift", "invalid model id detection", "root cause analysis", "Ursachenanalyse"],
+      "tags": ["ops", "triage", "logs", "logdateien", "containers", "container", "reliability", "zuverlaessigkeit", "ssh", "server", "incident", "vorfall", "provider", "gateway", "debugging", "fehlersuche", "health", "gesundheit", "rootcause", "ursache", "config", "konfiguration"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -494,7 +423,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 6,
-      "systemPrompt": "You triage operational failures before remediation starts. Begin with the cheapest evidence: service_check for availability, relevant config or log files, and narrow shell or SSH commands that confirm process, container, network, or startup state. Use ssh_exec when the failing component is on a remote server or host. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Hand provider, model, or gateway config faults to incident_responder when the problem is primarily runtime configuration, and hand infrastructure changes to infrastructure_agent when the diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and next corrective action via share_finding.",
+      "systemPrompt": "You triage operational and runtime failures before remediation starts. Begin with the cheapest evidence: service_check for endpoint availability, relevant config or log files, and narrow shell or SSH commands that confirm process, container, network, or startup state. Use ssh_exec when the failing component is on a remote server or host. Distinguish clearly between provider issues, invalid model identifiers, gateway faults, stale runtime configuration, container/deployment problems, and network issues. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Hand infrastructure changes to infrastructure_agent when diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and minimum corrective action via share_finding.",
       "tools": [
         "service_check",
         "shell_exec",
@@ -509,9 +438,9 @@
       ]
     },
     "policy_compliance_reviewer": {
-      "description": "Policy and approval specialist for checking planned actions, outputs, and workflows against guardrails, approvals, and compliance constraints.",
-      "capabilities": ["policy review", "approval analysis", "compliance screening", "risk flagging", "workflow constraints"],
-      "tags": ["policy", "compliance", "approval", "risk", "review"],
+      "description": "Policy and approval specialist for checking planned actions, outputs, and workflows against guardrails, approvals, compliance, credential handling, and data-sensitivity rules. Example queries: 'review this deployment plan for compliance risk', 'check if this workflow needs explicit approval', 'prüfe den Plan auf Datenschutzrisiken', 'welche Freigaben sind für diese Aktion nötig', 'flag any policy violations in this output', 'Compliance-Prüfung für den geplanten Export'.",
+      "capabilities": ["policy review", "Policy-Prüfung", "approval analysis", "Freigabeanalyse", "compliance screening", "Compliance-Prüfung", "risk flagging", "Risikomarkierung", "workflow constraints", "Workflow-Einschränkungen", "credential-handling review", "Credential-Prüfung", "data-sensitivity assessment", "Datenklassifizierung"],
+      "tags": ["policy", "richtlinie", "compliance", "compliance-pruefung", "approval", "freigabe", "risk", "risiko", "review", "pruefung", "guardrail", "leitplanke", "privacy", "datenschutz"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -531,9 +460,9 @@
       ]
     },
     "meeting_briefing_agent": {
-      "description": "Briefing specialist for turning long threads, files, findings, and project updates into concise handoff notes and executive-ready summaries.",
-      "capabilities": ["meeting briefings", "handoff notes", "status packets", "executive summaries", "action lists"],
-      "tags": ["briefing", "handoff", "meetings", "summary", "status"],
+      "description": "Briefing specialist for turning long threads, files, findings, and project updates into concise handoff notes and executive-ready summaries. Example queries: 'prepare the Monday stand-up briefing', 'executive summary of last week's incidents', 'Briefing für das Vorstandsmeeting erstellen', 'fasse den Status des Projekts für das Team zusammen', 'handoff notes for the night shift', 'Statuspaket mit offenen Punkten und nächsten Schritten'.",
+      "capabilities": ["meeting briefings", "Meeting-Briefings", "handoff notes", "Übergabe-Notizen", "status packets", "Statuspakete", "executive summaries", "Executive Summaries", "action lists", "Aktionslisten", "stand-up prep", "Stand-up-Vorbereitung"],
+      "tags": ["briefing", "handoff", "uebergabe", "meetings", "besprechungen", "summary", "zusammenfassung", "status", "executive", "fuehrungskraefte", "standup"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -556,34 +485,10 @@
         "write_file"
       ]
     },
-    "incident_responder": {
-      "description": "Runtime incident triage specialist for provider, gateway, and configuration failures.",
-      "capabilities": ["incident triage", "provider troubleshooting", "gateway diagnosis", "config drift detection", "SSH diagnostics"],
-      "tags": ["ops", "incident", "reliability", "providers", "debugging", "ssh", "server"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 6,
-      "systemPrompt": "You diagnose runtime incidents. Prefer quick configuration checks, health checks, and targeted shell or SSH commands before proposing fixes. Use service_check to verify endpoint availability before deeper diagnosis, and use ssh_exec when the failing service lives on a remote server. Distinguish clearly between provider issues, invalid model identifiers, network problems, and stale runtime configuration. Publish the root cause and the minimum corrective action via share_finding.",
-      "tools": [
-        "service_check",
-        "shell_exec",
-        "ssh_exec",
-        "read_file",
-        "list_files",
-        "web_fetch",
-        "read_shared_facts",
-        "share_finding",
-        "write_file"
-      ]
-    },
     "infrastructure_agent": {
-      "description": "Infrastructure automation specialist for provisioning systems and deploying applications with Proxmox, Terraform, readiness checks, Ansible, SSH, and SCP file transfers.",
-      "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
-      "tags": ["infrastructure", "ops", "terraform", "ansible", "vault", "ssh", "scp", "docker", "proxmox", "readiness"],
+      "description": "Infrastructure automation specialist for provisioning systems and deploying applications with Proxmox, Terraform, readiness checks, Ansible (incl. Vault), SSH, and SCP file transfers. Example queries: 'provision a new VM on Proxmox', 'apply the terraform plan for staging', 'deploy the container stack to prod', 'Ansible-Playbook für die Nginx-Konfiguration ausführen', 'VM einrichten und Docker installieren', 'terraform apply mit gespeichertem Plan', 'upload the deployment artifact via SSH', 'Dienst-Readiness prüfen bevor die Pipeline weitergeht'.",
+      "capabilities": ["infrastructure automation", "Infrastruktur-Automatisierung", "vm provisioning", "VM-Bereitstellung", "terraform workflows", "Terraform-Workflows", "terraform plan review", "Terraform-Plan-Prüfung", "service readiness checks", "Dienst-Readiness-Prüfung", "ansible playbooks", "Ansible-Playbooks", "ansible tasks", "Ansible-Tasks", "ansible vault", "Ansible-Vault", "ssh execution", "SSH-Ausführung", "ssh uploads", "SSH-Uploads", "ssh downloads", "SSH-Downloads", "docker deployment", "Docker-Deployment"],
+      "tags": ["infrastructure", "infrastruktur", "ops", "devops", "terraform", "ansible", "vault", "ssh", "scp", "docker", "proxmox", "readiness", "bereitstellung", "provisioning", "deployment"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -610,9 +515,9 @@
       ]
     },
     "image_creator": {
-      "description": "Image generation specialist for prompt refinement and final image creation.",
-      "capabilities": ["image generation", "prompt refinement"],
-      "tags": ["image", "design", "multimodal"],
+      "description": "Image generation specialist for prompt refinement and final image creation. Produces illustrations, concept art, diagrams-as-image, and marketing visuals with verified output. Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a cover illustration in watercolor style', 'Bildgenerierung für Produktwerbung', 'design a minimalist logo concept', 'Bild eines Cyberpunk-Stadtbilds rendern'.",
+      "capabilities": ["image generation", "Bildgenerierung", "prompt refinement", "Prompt-Verfeinerung", "illustration creation", "Illustrationserstellung", "concept art", "Konzeptkunst", "visual design", "visuelles Design"],
+      "tags": ["image", "bild", "design", "multimodal", "illustration", "art", "kunst", "generation", "generierung", "visual", "visuell"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -631,9 +536,9 @@
       ]
     },
     "coder": {
-      "description": "JS and TS sandbox execution specialist.",
-      "capabilities": ["code generation", "sandbox execution"],
-      "tags": ["code", "sandbox"],
+      "description": "JavaScript and TypeScript sandbox execution specialist. Writes and runs JS/TS scripts in an isolated environment for quick calculations, data transforms, ad-hoc logic, and scriptable problem-solving. Example queries: 'write a TypeScript function that parses ISO dates', 'run a JS script to compute the factorial of 20', 'schreibe ein TypeScript-Skript, das eine CSV-Datei einliest', 'sandbox: transform this JSON to XML', 'prototype a small utility function in JS', 'berechne die Fibonacci-Zahlen bis 1000 in TS'.",
+      "capabilities": ["code generation", "Code-Generierung", "sandbox execution", "Sandbox-Ausführung", "javascript scripting", "JavaScript-Skripting", "typescript scripting", "TypeScript-Skripting", "data transformation", "Datentransformation", "prototype code", "Prototypen-Code"],
+      "tags": ["code", "programmierung", "sandbox", "javascript", "js", "typescript", "ts", "script", "skript", "prototype", "prototyp"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -653,9 +558,9 @@
       ]
     },
     "summarizer": {
-      "description": "Short structured summaries for files and fetched pages.",
-      "capabilities": ["summarization"],
-      "tags": ["summary"],
+      "description": "Produces short, faithful, structured summaries for files, fetched pages, shared findings, and long documents. Preserves exact values, dates, and caveats. Example queries: 'summarize this 500-word article in three bullets', 'fasse den Bericht in 5 Sätzen zusammen', 'TL;DR for this thread', 'Zusammenfassung der heutigen E-Mails', 'extract the key points from this document', 'Kurzzusammenfassung des Meetings-Transkripts'.",
+      "capabilities": ["summarization", "Zusammenfassung", "structured summaries", "strukturierte Zusammenfassungen", "bullet summaries", "Bullet-Zusammenfassungen", "tl;dr creation", "TL;DR-Erstellung", "key-point extraction", "Kernpunkt-Extraktion"],
+      "tags": ["summary", "zusammenfassung", "summarize", "tldr", "kurzfassung", "key-points", "kernpunkte", "bullets"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -675,9 +580,9 @@
       ]
     },
     "paper_author": {
-      "description": "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence.",
-      "capabilities": ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports"],
-      "tags": ["papers", "reports", "citations", "research", "drafting"],
+      "description": "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence. Works only from verified facts and provided sources; never fabricates authors, titles, DOIs, or quotes. Example queries: 'write a technical paper from the collected notes', 'schreibe einen Literaturüberblick zu MCP und A2A', 'draft a source-backed report on LLM safety', 'wissenschaftlicher Bericht aus den Quellen verfassen', 'build an evidence-grounded white paper', 'akademischen Artikel über Vektorsuche entwerfen'.",
+      "capabilities": ["scientific writing", "wissenschaftliches Schreiben", "paper drafting", "Paper-Verfassen", "literature review drafting", "Literaturüberblick verfassen", "source-grounded reports", "quellenbasierte Berichte", "white paper drafting", "White-Paper-Entwurf", "citation management", "Zitationsverwaltung"],
+      "tags": ["papers", "paper", "reports", "berichte", "citations", "zitate", "research", "forschung", "drafting", "entwurf", "whitepaper", "academic", "akademisch", "scientific", "wissenschaftlich"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -698,9 +603,9 @@
       ]
     },
     "source_verifier": {
-      "description": "Checks drafts for unsupported claims, broken citations, and fabricated references.",
-      "capabilities": ["citation verification", "fact checking", "source validation", "bibliography audit"],
-      "tags": ["verification", "citations", "fact-checking", "research", "bibliography"],
+      "description": "Checks drafts for unsupported claims, broken citations, fabricated references, and quote drift. Spot-checks doubtful sources and flags places where a citation does not actually support the claim. Example queries: 'check this paper for fabricated citations', 'verify every claim in the draft against the evidence', 'prüfe den Text auf unbelegte Aussagen', 'Zitate und Quellenangaben kontrollieren', 'validate the bibliography of this article', 'sind alle Fakten durch Quellen belegt'.",
+      "capabilities": ["citation verification", "Zitationsprüfung", "fact checking", "Faktenprüfung", "source validation", "Quellenvalidierung", "bibliography audit", "Bibliographie-Audit", "quote drift detection", "Zitat-Abweichungserkennung", "unsupported claim detection", "Erkennung unbelegter Aussagen"],
+      "tags": ["verification", "pruefung", "citations", "zitate", "fact-checking", "faktencheck", "research", "bibliography", "bibliographie", "validation", "validierung", "sources", "quellen"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -720,9 +625,9 @@
       ]
     },
     "prompt_optimizer": {
-      "description": "Reviews agent prompts for convergence, grounding, and tool-use quality.",
-      "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review"],
-      "tags": ["prompts", "quality", "agents", "optimization"],
+      "description": "Reviews agent prompts for convergence, grounding, and tool-use quality. Proposes the smallest prompt change that improves routing fit, stopping behavior, and grounded output. Example queries: 'review the researcher agent prompt', 'optimize the coder system prompt to avoid infinite loops', 'prüfe den Systemprompt auf Konvergenz', 'Prompt-Qualität für den Prompt des data_analyst analysieren', 'the agent keeps looping, fix its prompt', 'Systemprompt überarbeiten damit er schneller zum Ziel kommt'.",
+      "capabilities": ["prompt analysis", "Prompt-Analyse", "prompt rewriting", "Prompt-Umschreibung", "tool-use convergence", "Tool-Use-Konvergenz", "agent quality review", "Agenten-Qualitätsprüfung", "grounding improvement", "Verbesserung der Quellentreue", "stopping-condition tuning", "Abbruchbedingungs-Feintuning"],
+      "tags": ["prompts", "prompt", "quality", "qualitaet", "agents", "agenten", "optimization", "optimierung", "convergence", "konvergenz", "tuning"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -741,9 +646,9 @@
       ]
     },
     "swarm_maintainer": {
-      "description": "Maintains and extends StarlingAI itself: creates new scenes, jobs, and workflow catalog entries, updates agent prompts, tool routing, workspace swarm definitions, and repo wiring. Use for any 'create new workflow/scene/job' request, not just explicit self-improvement tasks.",
-      "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement", "scene creation", "job creation", "workflow catalog editing"],
-      "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace", "workflow", "scene", "job", "create", "catalog"],
+      "description": "Maintains and extends StarlingAI itself: creates new scenes, jobs, and workflow catalog entries, updates agent prompts, tool routing, workspace swarm definitions, and repo wiring. Use for any 'create new workflow/scene/job' request, not just explicit self-improvement tasks. Example queries: 'create a new scene for weekly reports', 'add a job that runs security audits nightly', 'neue Szene für tägliches Monitoring anlegen', 'Agentenprompt für den coder verbessern', 'add a new workflow to the catalog', 'StarlingAI um einen neuen Workflow erweitern'.",
+      "capabilities": ["swarm maintenance", "Swarm-Wartung", "agent prompt editing", "Agentenprompt-Bearbeitung", "tool routing", "Tool-Routing", "workspace configuration", "Workspace-Konfiguration", "repo self-improvement", "Repo-Selbstverbesserung", "scene creation", "Szenen-Erstellung", "job creation", "Job-Erstellung", "workflow catalog editing", "Workflow-Katalog-Bearbeitung"],
+      "tags": ["swarm", "maintenance", "wartung", "agents", "agenten", "tooling", "routing", "workspace", "workflow", "scene", "szene", "job", "create", "erstellen", "catalog", "katalog", "selfimprovement"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -766,9 +671,9 @@
       ]
     },
     "tool_developer": {
-      "description": "Tool development specialist for the StarlingAI self-improvement pipeline. Writes TypeScript tool implementations, runs sandboxed tests, and submits for approval once all tests pass.",
-      "capabilities": ["tool development", "tool testing", "self-improvement", "dynamic tool creation", "sandbox execution"],
-      "tags": ["selfimprovement", "tools", "development", "testing", "sandbox"],
+      "description": "Tool development specialist for the StarlingAI self-improvement pipeline. Writes TypeScript tool implementations, runs sandboxed tests, and submits for approval once all tests pass. Example queries: 'implement a new tool that fetches exchange rates', 'build a tool that converts markdown to PDF', 'neues Tool für Umsatzsteuer-Berechnung implementieren', 'TypeScript-Tool für JSON-Validierung schreiben', 'add a tool that calls the weather API', 'Werkzeug zur Zeitzonenkonvertierung entwickeln'.",
+      "capabilities": ["tool development", "Tool-Entwicklung", "tool testing", "Tool-Tests", "self-improvement", "Selbstverbesserung", "dynamic tool creation", "dynamische Tool-Erstellung", "sandbox execution", "Sandbox-Ausführung", "typescript tool authoring", "TypeScript-Tool-Erstellung"],
+      "tags": ["selfimprovement", "selbstverbesserung", "tools", "werkzeuge", "development", "entwicklung", "testing", "tests", "sandbox", "typescript"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -791,9 +696,9 @@
       ]
     },
     "agent_architect": {
-      "description": "Designs threshold-triggered ephemeral agents with the right prompt, tools, and model.",
-      "capabilities": ["agent design", "prompt writing", "model selection", "ephemeral agents"],
-      "tags": ["meta", "agents", "architecture"],
+      "description": "Designs threshold-triggered ephemeral agents with the right prompt, tools, and model. Produces valid JSON agent specifications for one-off specialized tasks. Example queries: 'design a narrow agent for parsing receipts', 'entwirf einen Agenten für Börsenkurse', 'create an ephemeral agent for meeting-note extraction', 'Ad-hoc-Agent für die Übersetzung medizinischer Texte entwerfen', 'spec a specialist agent for CVE triage'.",
+      "capabilities": ["agent design", "Agenten-Entwurf", "prompt writing", "Prompt-Erstellung", "model selection", "Modellauswahl", "ephemeral agents", "Ad-hoc-Agenten", "tool-set selection", "Toolset-Auswahl"],
+      "tags": ["meta", "agents", "agenten", "architecture", "architektur", "design", "entwurf", "ephemeral", "adhoc"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -810,10 +715,10 @@
       ]
     },
     "computer_use_agent": {
-      "description": "Desktop automation specialist. Connects to the user's local or remote PC (by IP address or hostname) via VNC/RDP and controls it with keyboard, mouse, and screen analysis. Can check running applications like LM Studio, VS Code, OBS, or any desktop software. Starts and manages computer sessions, lists open windows, takes screenshots, and interacts with any visible UI element.",
+      "description": "Desktop automation specialist. Connects to the user's local or remote PC (by IP address or hostname) via VNC/RDP and controls it with keyboard, mouse, and screen analysis. Can check running applications like LM Studio, VS Code, OBS, or any desktop software. Starts and manages computer sessions, lists open windows, takes screenshots, and interacts with any visible UI element. Example queries: 'check which model LM Studio has loaded on the remote PC', 'welches Modell läuft aktuell in LM Studio auf dem Server?', 'take a screenshot of VS Code on my laptop', 'öffne Copilot Chat und stelle eine Frage', 'list running applications on 192.168.1.10', 'Fenster und Anwendungen auf dem Remote-Desktop auflisten', 'click the OBS start streaming button', 'sende einen Text an das Chat-Fenster auf dem PC'.",
       "domain": "desktop",
-      "capabilities": ["desktop automation", "computer use", "window management", "keyboard typing", "mouse clicking", "screen capture", "remote PC access", "VNC connection", "RDP connection", "application inspection", "IP-based computer access"],
-      "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows"],
+      "capabilities": ["desktop automation", "Desktop-Automatisierung", "computer use", "Computersteuerung", "window management", "Fensterverwaltung", "keyboard typing", "Tastatureingabe", "mouse clicking", "Mausklick", "screen capture", "Bildschirmaufnahme", "remote PC access", "Fernzugriff", "VNC connection", "VNC-Verbindung", "RDP connection", "RDP-Verbindung", "application inspection", "Anwendungsinspektion", "IP-based computer access", "IP-basierter Zugriff"],
+      "tags": ["computer", "desktop", "vscode", "automation", "automatisierung", "remote", "fernzugriff", "vnc", "rdp", "ip-address", "ip-adresse", "lm-studio", "screen", "bildschirm", "windows", "fenster", "maus", "tastatur", "mouse", "keyboard"],
       "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
@@ -851,9 +756,9 @@
       ]
     },
     "agent_factory": {
-      "description": "Creates purpose-built ephemeral agents when the static catalog is not enough.",
-      "capabilities": ["meta orchestration", "ephemeral agents"],
-      "tags": ["meta", "agents"],
+      "description": "Creates purpose-built ephemeral agents at runtime when the static catalog is not enough for the current task. Prefers delegating to existing agents before minting new ones. Example queries: 'spin up an ephemeral agent for translating legal PDFs', 'kein Standardagent passt, erstelle einen Spezialisten für IoT-Logs', 'create a specialist agent for this unusual dataset', 'Ad-hoc-Agent bauen für Musiknoten-Analyse'.",
+      "capabilities": ["meta orchestration", "Meta-Orchestrierung", "ephemeral agents", "Ad-hoc-Agenten", "dynamic agent creation", "dynamische Agentenerstellung", "capability-gap resolution", "Lückenschließung bei Fähigkeiten"],
+      "tags": ["meta", "agents", "agenten", "factory", "werkstatt", "ephemeral", "adhoc", "dynamic", "dynamisch"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -871,9 +776,9 @@
       ]
     },
     "api_integrator": {
-      "description": "HTTP API specialist for testing endpoints, consuming REST/GraphQL APIs, and building integrations.",
-      "capabilities": ["API testing", "REST calls", "GraphQL queries", "webhook testing", "HTTP debugging", "response validation"],
-      "tags": ["api", "http", "rest", "graphql", "integration", "testing"],
+      "description": "HTTP API specialist for testing endpoints, consuming REST/GraphQL APIs, and building integrations. Covers auth, headers, status codes, response validation, webhook testing. Example queries: 'test the /users endpoint with bearer auth', 'call the GraphQL API and validate the response shape', 'REST-Endpunkt testen und JSON prüfen', 'Webhook auf Erreichbarkeit testen', 'GET http://host:1234/v1/models auf LM Studio prüfen', 'API-Antwort gegen Schema validieren', 'integrate with the payment provider API'.",
+      "capabilities": ["API testing", "API-Tests", "REST calls", "REST-Aufrufe", "GraphQL queries", "GraphQL-Abfragen", "webhook testing", "Webhook-Tests", "HTTP debugging", "HTTP-Debugging", "response validation", "Antwortvalidierung", "endpoint health checks", "Endpunkt-Healthchecks"],
+      "tags": ["api", "http", "rest", "graphql", "integration", "integrationen", "testing", "tests", "endpoint", "endpunkt", "webhook", "json"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -894,9 +799,9 @@
       ]
     },
     "git_developer": {
-      "description": "Version control specialist for repository operations, code reviews, branching, and commit management.",
-      "capabilities": ["git status", "git log", "git diff", "commit", "branching", "code review", "repository cloning"],
-      "tags": ["git", "vcs", "code", "version-control", "commits", "branches"],
+      "description": "Version control specialist for repository operations, code reviews, branching, and commit management. Reviews diffs, writes commit messages, switches branches, inspects history. Example queries: 'show me the last 10 commits', 'git commit the staged changes with a descriptive message', 'zeige den diff auf main', 'erstelle einen neuen Feature-Branch', 'review the changes in this PR', 'Commit-Historie durchsuchen nach tokenRevoke', 'clone this repo locally'.",
+      "capabilities": ["git status", "git-status", "git log", "git-log", "git diff", "git-diff", "commit", "Commit", "branching", "Branching", "code review", "Code-Review", "repository cloning", "Repository-Klonen", "merge conflict inspection", "Merge-Konflikte prüfen"],
+      "tags": ["git", "vcs", "code", "version-control", "versionskontrolle", "commits", "branches", "verzweigungen", "diff", "merge", "review", "repository"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -922,9 +827,9 @@
       ]
     },
     "translator": {
-      "description": "Multilingual translation specialist for documents, messages, and content localization.",
-      "capabilities": ["translation", "localization", "multilingual content", "language detection"],
-      "tags": ["translation", "language", "localization", "i18n", "multilingual"],
+      "description": "Multilingual translation specialist for documents, messages, and content localization. Preserves technical terms, code, and structure; adapts tone to context. Example queries: 'translate this German paragraph to English', 'übersetze das Dokument ins Englische', 'localize the UI strings to French', 'traduire ce message en allemand', 'translate this Markdown file to Spanish while keeping headings', 'Übersetzung des technischen Berichts ins Japanische'.",
+      "capabilities": ["translation", "Übersetzung", "localization", "Lokalisierung", "multilingual content", "mehrsprachige Inhalte", "language detection", "Spracherkennung", "technical term preservation", "Fachbegriffserhalt", "tone adaptation", "Tonanpassung"],
+      "tags": ["translation", "uebersetzung", "language", "sprache", "localization", "lokalisierung", "i18n", "l10n", "multilingual", "mehrsprachig", "english", "deutsch", "german", "french", "spanish", "japanese"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -944,9 +849,9 @@
       ]
     },
     "project_planner": {
-      "description": "Planning specialist for complex multi-step tasks: task breakdown, dependency mapping, roadmaps, and execution handoff to mission_coordinator.",
-      "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking", "dependency management"],
-      "tags": ["planning", "project", "tasks", "roadmap", "management", "dependencies"],
+      "description": "Planning specialist for complex multi-step tasks: task breakdown, dependency mapping, roadmaps, and execution handoff to mission_coordinator. Example queries: 'plan the Q2 product launch in phases', 'erstelle eine Roadmap für das Migrationsprojekt', 'break down the refactor into dependency-ordered tasks', 'Aufgabenliste mit Abhängigkeiten für das Redesign', 'draft a delivery timeline with acceptance criteria', 'Projektplan mit Meilensteinen und Lieferobjekten'.",
+      "capabilities": ["project planning", "Projektplanung", "task breakdown", "Aufgabenzerlegung", "roadmapping", "Roadmap-Erstellung", "timeline estimation", "Zeitplanung", "work tracking", "Arbeitsverfolgung", "deliverable tracking", "Lieferobjekt-Tracking", "dependency management", "Abhängigkeitsmanagement", "milestone definition", "Meilensteindefinition", "acceptance criteria", "Akzeptanzkriterien"],
+      "tags": ["planning", "planung", "project", "projekt", "tasks", "aufgaben", "roadmap", "fahrplan", "management", "dependencies", "abhaengigkeiten", "milestones", "meilensteine", "timeline", "zeitplan"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -969,9 +874,9 @@
       ]
     },
     "mission_coordinator": {
-      "description": "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate.",
-      "capabilities": ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating", "acceptance checking", "ephemeral agent generation", "memory persistence"],
-      "tags": ["coordination", "orchestration", "parallel", "workflow", "dependencies", "synthesis", "quality", "acceptance"],
+      "description": "Execution coordinator for complex missions that need partitioning, parallel specialists, dependency-aware sequencing, and a final quality gate. Example queries: 'coordinate a multi-agent research and drafting mission', 'orchestriere die parallele Quellenrecherche und Zusammenführung', 'execute the partitioned evidence gathering plan', 'führe den Ablauf mit Qualitätsprüfung aus', 'run the dependency graph for the security audit', 'koordiniere mehrere Spezialisten für die Migration', 'synthesize findings from parallel sub-agents'.",
+      "capabilities": ["multi-agent coordination", "Mehragenten-Koordination", "parallel task partitioning", "parallele Aufgabenverteilung", "dependency management", "Abhaengigkeitsmanagement", "result synthesis", "Ergebnissynthese", "quality gating", "Qualitaetspruefung", "acceptance checking", "Akzeptanzpruefung", "ephemeral agent generation", "temporaere Agentenerstellung", "memory persistence", "Speicherpersistenz", "workflow execution", "Workflow-Ausfuehrung", "task graph execution", "Aufgabengraph-Ausfuehrung"],
+      "tags": ["coordination", "koordination", "orchestration", "orchestrierung", "parallel", "workflow", "ablauf", "dependencies", "abhaengigkeiten", "synthesis", "synthese", "quality", "qualitaet", "acceptance", "akzeptanz", "mission", "execution", "ausfuehrung"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -1002,9 +907,9 @@
       ]
     },
     "quality_supervisor": {
-      "description": "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified.",
-      "capabilities": ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating"],
-      "tags": ["quality", "qa", "review", "acceptance", "verification", "gaps"],
+      "description": "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified. Example queries: 'review the drafted report against the original brief', 'prüfe ob der Entwurf die Anforderungen erfüllt', 'is this answer complete or should we rerun?', 'Abnahmeprüfung für das erstellte Dokument', 'identify any gaps before we ship', 'Qualitätsgate vor Auslieferung durchführen'.",
+      "capabilities": ["quality assurance", "Qualitaetssicherung", "acceptance criteria review", "Akzeptanzkriterienpruefung", "gap analysis", "Luckenanalyse", "verification", "Verifikation", "rerun gating", "Wiederholungsentscheidung", "completeness check", "Vollstaendigkeitspruefung", "grounding verification", "Begruendungspruefung"],
+      "tags": ["quality", "qualitaet", "qa", "review", "pruefung", "acceptance", "akzeptanz", "verification", "verifikation", "gaps", "luecken", "completeness", "vollstaendigkeit", "gate", "abnahme"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -1022,10 +927,10 @@
       ]
     },
     "notification_agent": {
-      "description": "Cross-channel notification specialist for sending messages via Telegram, Slack, Discord, and email.",
+      "description": "Cross-channel notification specialist for sending messages via Telegram, Slack, Discord, and email. Example queries: 'send the deployment status to the ops Slack channel', 'benachrichtige das Team per Telegram über das Ergebnis', 'post the release notes to Discord', 'sende eine Alarm-E-Mail an den Bereitschaftsdienst', 'notify the customer success channel about the incident', 'Nachricht an mehrere Kanäle mit angepasstem Format'.",
       "domain": "communication",
-      "capabilities": ["telegram messaging", "slack messaging", "discord messaging", "email sending", "multi-channel notifications", "alert routing"],
-      "tags": ["notifications", "messaging", "telegram", "slack", "discord", "email", "alerts"],
+      "capabilities": ["telegram messaging", "Telegram-Nachrichten", "slack messaging", "Slack-Nachrichten", "discord messaging", "Discord-Nachrichten", "email sending", "E-Mail-Versand", "multi-channel notifications", "Mehrkanal-Benachrichtigungen", "alert routing", "Alarmweiterleitung", "status broadcasts", "Status-Broadcasts", "platform formatting", "Plattform-Formatierung"],
+      "tags": ["notifications", "benachrichtigungen", "messaging", "nachrichten", "telegram", "slack", "discord", "email", "e-mail", "alerts", "alarme", "broadcast", "channels", "kanaele"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -1045,10 +950,10 @@
       ]
     },
     "productivity_agent": {
-      "description": "Personal productivity specialist for notes, reminders, timers, lightweight follow-up tracking, and memory maintenance.",
+      "description": "Personal productivity specialist for notes, reminders, timers, lightweight follow-up tracking, and memory maintenance. Example queries: 'remind me tomorrow at 9 to review the PR', 'setze einen Timer für 25 Minuten', 'note that the API key rotates monthly', 'merke dir dass der Kunde Linux bevorzugt', 'list my pending reminders', 'offene Erinnerungen anzeigen', 'clean up duplicate notes in workspace memory', 'Notiz zu den Onboarding-Schritten speichern'.",
       "domain": "productivity",
-      "capabilities": ["note taking", "workspace memory", "reminder scheduling", "timer management", "follow-up tracking", "memory promotion", "memory cleanup"],
-      "tags": ["productivity", "notes", "note", "reminder", "reminders", "timer", "timers", "alarm", "todo", "follow-up", "memory", "recall"],
+      "capabilities": ["note taking", "Notizen erfassen", "workspace memory", "Arbeitsbereichspeicher", "reminder scheduling", "Erinnerungsplanung", "timer management", "Timer-Verwaltung", "follow-up tracking", "Nachfassverfolgung", "memory promotion", "Speicherhochstufung", "memory cleanup", "Speicherbereinigung", "todo tracking", "Aufgabenverfolgung"],
+      "tags": ["productivity", "produktivitaet", "notes", "notizen", "note", "notiz", "reminder", "erinnerung", "reminders", "erinnerungen", "timer", "zeitmesser", "timers", "alarm", "wecker", "todo", "aufgabe", "follow-up", "nachfassen", "memory", "speicher", "recall", "merken"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -1073,19 +978,19 @@
       ]
     },
     "mail_agent": {
-      "description": "Mailbox triage and drafting specialist for multiple mail accounts with approval-gated sending.",
+      "description": "Mailbox triage, search, organization, drafting, and reply composition specialist for multiple mail accounts with approval-gated sending. Composes professional outbound mail, replies, and follow-up sequences; categorizes and files inbox messages; supports multi-account workflows. Example queries: 'summarize today's unread mail', 'draft a reply to the latest customer complaint', 'Entwurf für eine höfliche Absage an den Bewerber', 'verschiebe alle Newsletter in den Ordner Werbung', 'write a follow-up in 3 days', 'Antwortvorschlag für die Buchungsanfrage', 'list unread from info@ account', 'erstelle einen professionellen Angebotsentwurf', 'lösche die Spam-Nachrichten vom Montag'.",
       "domain": "communication",
-      "capabilities": ["mail triage", "mail search", "mail drafting", "reply drafting", "mail categorization", "multi-account mailbox operations"],
-      "tags": ["mail", "email", "emails", "inbox", "mailbox", "posteingang", "drafts", "triage", "communications"],
+      "capabilities": ["mail triage", "Posteingangstriage", "mail search", "Mail-Suche", "mail drafting", "Mail-Entwurf", "email drafting", "E-Mail-Entwurf", "reply composition", "Antwortverfassen", "follow-up sequences", "Follow-up-Sequenzen", "professional writing", "professionelles Schreiben", "tone adaptation", "Tonanpassung", "subject line generation", "Betreffzeilen-Erstellung", "mail categorization", "Mail-Kategorisierung", "multi-account mailbox operations", "Mehrkonto-Mailverwaltung", "folder management", "Ordnerverwaltung"],
+      "tags": ["mail", "email", "e-mail", "emails", "inbox", "mailbox", "posteingang", "postfach", "drafts", "entwurf", "triage", "reply", "antwort", "follow-up", "nachfassen", "communications", "kommunikation", "compose", "verfassen"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
-        "temperature": 0.1,
-        "maxTokens": 1536
+        "temperature": 0.15,
+        "maxTokens": 4096
       },
       "maxIterations": 10,
       "turnTimeoutMs": 120000,
-      "systemPrompt": "You manage email workflows across configured mail accounts. For inbox-reading tasks, call the relevant mail_* read tool before writing any explanation. If the account is unspecified, call mail_list_accounts first. Then prefer mail_list_unread or mail_search, and use mail_read only for the few messages you summarize. Ground every summary or reply in the actual message content returned by mail tools. Never claim that you cannot access the inbox, cannot read email, or lack mailbox permissions unless you attempted the relevant mail_* tool in this run and it failed. For simple inbox checks, stay in read-only mode and do not draft, update, send, categorize, or delegate. For organization tasks, use mail_categorize for labels and notes, mail_create_mailbox to create folders, mail_move to file messages into folders, mail_delete to move messages to Trash or permanently delete them, and mail_delete_mailbox only after the folder is empty. When drafting replies or outbound mail, produce clear professional content, then save it as a draft with mail_prepare_draft or mail_update_draft. Never send immediately after drafting unless the user clearly asked to send; even then, sending must go through mail_send_draft, which requires explicit user approval. If account choice is ambiguous, surface the ambiguity instead of guessing.",
+      "systemPrompt": "You manage email workflows across configured mail accounts, including triage, search, organization, and drafting/reply composition. For inbox-reading tasks, call the relevant mail_* read tool before writing any explanation. If the account is unspecified, call mail_list_accounts first. Then prefer mail_list_unread or mail_search, and use mail_read only for the few messages you summarize. Ground every summary or reply in the actual message content returned by mail tools. Never claim that you cannot access the inbox, cannot read email, or lack mailbox permissions unless you attempted the relevant mail_* tool in this run and it failed. For simple inbox checks, stay in read-only mode and do not draft, update, send, categorize, or delegate. For organization tasks, use mail_categorize for labels and notes, mail_create_mailbox to create folders, mail_move to file messages into folders, mail_delete to move messages to Trash or permanently delete them, and mail_delete_mailbox only after the folder is empty.\n\nDRAFTING & COMPOSITION — when the task is to draft an outbound mail, reply, or follow-up sequence: start by reading any shared facts, prior thread, or referenced documents. Produce a clear well-structured message with a direct subject line that reflects the purpose, an appropriate greeting, a concise body with no filler phrases, a concrete call-to-action or next step, and a professional closing. Adapt tone: formal for external or legal communications, direct and collegial for internal or technical audiences. When drafting a reply, quote only the specific portion of the original message you are responding to — do not forward the entire thread. For follow-up sequences, produce each message as a standalone draft with a note on recommended send delay. Save every draft via mail_prepare_draft or mail_update_draft — never send immediately. Sending must go through mail_send_draft, which requires explicit user approval. If account choice is ambiguous, surface the ambiguity instead of guessing.",
       "tools": [
         "mail_list_accounts",
         "mail_list_mailboxes",
@@ -1105,23 +1010,26 @@
         "share_finding"
       ]
     },
-    "db_analyst": {
-      "description": "Database query specialist for PostgreSQL and MySQL/MariaDB. Explores schemas, runs read queries, inspects live data, and exports results for downstream analysis or reporting.",
-      "capabilities": ["sql queries", "database inspection", "schema discovery", "data export", "postgres", "mysql"],
-      "tags": ["database", "sql", "postgres", "mysql", "data"],
+    "sql_specialist": {
+      "description": "SQL and database specialist for PostgreSQL and MySQL/MariaDB: live query execution, schema exploration, analytical query authoring, query optimization, index recommendations, schema migrations, EXPLAIN plan analysis, and data export. Example queries: 'show me the top 10 customers by revenue', 'optimize this slow query', 'schreibe eine Migration für eine neue Spalte email_verified', 'welche Indizes fehlen in der orders-Tabelle', 'count active users per region last month', 'Schema der users-Tabelle anzeigen', 'export query result to spreadsheet', 'EXPLAIN-Plan für diese SELECT analysieren', 'Foreign-Key-Beziehungen in der Bestelldatenbank prüfen'.",
+      "capabilities": ["sql queries", "SQL-Abfragen", "sql query writing", "SQL-Formulierung", "query optimization", "Abfrageoptimierung", "database inspection", "Datenbankinspektion", "schema discovery", "Schema-Erkennung", "schema design", "Schema-Entwurf", "index recommendation", "Index-Empfehlung", "migration scripts", "Migrationsskripte", "query performance analysis", "Abfrageperformance", "explain plan analysis", "EXPLAIN-Plan-Analyse", "data export", "Datenexport", "postgres", "mysql", "mariadb"],
+      "tags": ["database", "datenbank", "sql", "postgres", "mysql", "mariadb", "data", "daten", "query", "abfrage", "schema", "migration", "index", "performance", "optimization", "optimierung", "explain"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
-        "maxTokens": 6144
+        "maxTokens": 8192
       },
       "maxIterations": 8,
-      "systemPrompt": "You query live databases to retrieve, inspect, and summarize data for the user or downstream agents. Always retrieve credentials with get_site_credentials before calling sql_query. Use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) — never interpolate values directly into the SQL string. Prefer read-only queries (SELECT, SHOW, DESCRIBE, information_schema) unless the user explicitly requests modifications. Explore the schema first when the database structure is unknown: list tables from information_schema.tables, then DESCRIBE or SELECT column names before running analytical queries. Cap results using LIMIT or the max_rows parameter to avoid overwhelming context. If the query returns more rows than useful, aggregate with COUNT/GROUP BY/AVG/SUM and return the summary instead. Export useful results to a spreadsheet with spreadsheet_write or share as structured findings with share_finding for downstream agents. Never expose raw connection strings in output — mask the password portion in any log or summary.",
+      "systemPrompt": "You are the SQL and database specialist for PostgreSQL and MySQL/MariaDB. Handle live querying, analytical query authoring, schema exploration, optimization, and migration writing. Always retrieve credentials with get_site_credentials before calling sql_query. ALWAYS use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) — never interpolate user-supplied values into the SQL string. Prefer read-only queries (SELECT, SHOW, DESCRIBE, information_schema) unless the user explicitly requests modifications. When the schema is unknown, explore first: list tables from information_schema.tables, then DESCRIBE or SELECT column names from information_schema.columns before running analytical or migration queries. For analytical queries, prefer explicit JOIN types and add a short comment explaining what each CTE or subquery computes. Cap results with LIMIT or the max_rows parameter to avoid overwhelming context; if too many rows, aggregate with COUNT/GROUP BY/AVG/SUM and return the summary. For schema migrations, write idempotent scripts: IF NOT EXISTS on CREATE, IF EXISTS on DROP, wrap multiple changes in a transaction. For index recommendations, inspect existing indexes (pg_indexes or SHOW INDEX) first, then recommend only indexes that would materially help based on cardinality and filter selectivity. For performance analysis, use EXPLAIN ANALYZE (Postgres) or EXPLAIN FORMAT=JSON (MySQL) and interpret plan nodes rather than pasting raw output. Export useful results via spreadsheet_write or write_file. Never expose raw connection strings — mask the password portion in any log or summary. Publish completed queries, scripts, rationale, expected performance impact, and any destructive or lock-heavy operations via share_finding.",
       "tools": [
         "get_site_credentials",
         "sql_query",
         "spreadsheet_write",
+        "read_file",
         "write_file",
+        "list_files",
+        "workspace_search",
         "read_shared_facts",
         "share_finding",
         "metric_write",
@@ -1130,10 +1038,10 @@
       ]
     },
     "calendar_agent": {
-      "description": "Calendar and contacts specialist for CalDAV/CardDAV providers. Manages appointments, meetings, tasks, and address book contacts across Nextcloud, Fastmail, Radicale, Baikal, iCloud, and other CalDAV/CardDAV-compatible services.",
+      "description": "Calendar and contacts specialist for CalDAV/CardDAV providers. Manages appointments, meetings, tasks, and address book contacts across Nextcloud, Fastmail, Radicale, Baikal, iCloud, and other CalDAV/CardDAV-compatible services. Example queries: 'what meetings do I have next week?', 'welche Termine stehen diese Woche an?', 'schedule a 30-minute call with Anna on Thursday', 'lege einen Termin für Freitag 14 Uhr an', 'find contact details for Müller GmbH', 'Kontaktdaten im Adressbuch suchen', 'reschedule tomorrow's 10am to 2pm', 'Termin verschieben und alle Teilnehmer informieren'.",
       "domain": "communication",
-      "capabilities": ["calendar management", "event creation", "event scheduling", "meeting management", "contacts management", "address book", "CalDAV", "CardDAV"],
-      "tags": ["calendar", "contacts", "meetings", "appointments", "scheduling", "address book", "caldav", "carddav", "nextcloud", "fastmail", "icloud", "events"],
+      "capabilities": ["calendar management", "Kalenderverwaltung", "event creation", "Terminerstellung", "event scheduling", "Terminplanung", "meeting management", "Besprechungsverwaltung", "contacts management", "Kontaktverwaltung", "address book", "Adressbuch", "CalDAV", "CardDAV", "conflict detection", "Konflikterkennung", "recurring events", "Serientermine"],
+      "tags": ["calendar", "kalender", "contacts", "kontakte", "meetings", "besprechungen", "appointments", "termine", "scheduling", "terminplanung", "address book", "adressbuch", "caldav", "carddav", "nextcloud", "fastmail", "icloud", "events", "ereignisse", "invite", "einladung"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -1160,9 +1068,9 @@
       ]
     },
     "devops_coordinator": {
-      "description": "CI/CD and deployment coordinator for pipeline orchestration, container rollouts, rollback decisions, environment promotion, and deployment health verification.",
-      "capabilities": ["ci/cd orchestration", "deployment coordination", "rollback planning", "environment promotion", "pipeline diagnosis", "container lifecycle", "deployment health"],
-      "tags": ["devops", "cicd", "deployment", "pipeline", "rollback", "container", "release", "promote", "environment"],
+      "description": "CI/CD and deployment coordinator for pipeline orchestration, container rollouts, rollback decisions, environment promotion, and deployment health verification. Example queries: 'promote the v2.3 build from staging to production', 'rolle das Deployment auf die vorherige Version zurück', 'diagnose the failing deployment pipeline', 'warum schlägt der CI-Build fehl?', 'run a canary rollout with health checks', 'führe Container-Rollout mit Gesundheitsprüfung aus', 'coordinate the blue-green switchover', 'Umgebungspromotion mit Qualitätspruefung'.",
+      "capabilities": ["ci/cd orchestration", "CI/CD-Orchestrierung", "deployment coordination", "Deployment-Koordination", "rollback planning", "Rollback-Planung", "environment promotion", "Umgebungspromotion", "pipeline diagnosis", "Pipeline-Diagnose", "container lifecycle", "Container-Lebenszyklus", "deployment health", "Deployment-Gesundheit", "release management", "Release-Management", "canary deployment", "Canary-Deployment"],
+      "tags": ["devops", "cicd", "ci-cd", "deployment", "bereitstellung", "pipeline", "rollback", "zurückrollen", "container", "release", "freigabe", "promote", "befoerdern", "environment", "umgebung", "staging", "production", "produktion", "canary"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -1187,9 +1095,9 @@
       ]
     },
     "test_generator": {
-      "description": "Test suite generation specialist: creates unit tests, integration tests, and test stubs from code, user stories, or API specs. Supports TypeScript/JavaScript (Vitest, Jest), Python (pytest), and shell-based test scripts.",
-      "capabilities": ["unit test generation", "integration test generation", "test stub creation", "test coverage analysis", "vitest", "jest", "pytest", "test planning"],
-      "tags": ["tests", "testing", "unit-tests", "integration-tests", "vitest", "jest", "pytest", "coverage", "stubs", "tdd"],
+      "description": "Test suite generation specialist: creates unit tests, integration tests, and test stubs from code, user stories, or API specs. Supports TypeScript/JavaScript (Vitest, Jest), Python (pytest), and shell-based test scripts. Example queries: 'generate unit tests for the slugify function', 'schreibe Tests für die Rechnungs-Service-Klasse', 'add pytest coverage for the data pipeline module', 'Vitest-Tests für den API-Client generieren', 'create integration tests for the auth endpoints', 'Teststubs aus der OpenAPI-Spec erzeugen', 'cover edge cases in the date parser', 'Randfälle für die Preisberechnung abdecken'.",
+      "capabilities": ["unit test generation", "Unit-Test-Erstellung", "integration test generation", "Integrationstest-Erstellung", "test stub creation", "Teststub-Erstellung", "test coverage analysis", "Testabdeckungsanalyse", "vitest", "jest", "pytest", "test planning", "Testplanung", "edge case identification", "Randfall-Identifizierung", "mock generation", "Mock-Erstellung"],
+      "tags": ["tests", "tests", "testing", "testen", "unit-tests", "integration-tests", "vitest", "jest", "pytest", "coverage", "abdeckung", "stubs", "tdd", "test-suite", "randfaelle", "edge-cases"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -1209,9 +1117,9 @@
       ]
     },
     "log_analyst": {
-      "description": "Log parsing and anomaly detection specialist for structured JSON logs, journald output, nginx/web server access logs, application logs, and container logs. Extracts error patterns, rate spikes, latency outliers, and security signals.",
-      "capabilities": ["log parsing", "error pattern detection", "anomaly detection", "latency analysis", "access log analysis", "journald", "container logs", "security log analysis", "log summarization"],
-      "tags": ["logs", "log-analysis", "errors", "anomaly", "journald", "nginx", "container-logs", "latency", "monitoring", "audit-log"],
+      "description": "Log parsing and anomaly detection specialist for structured JSON logs, journald output, nginx/web server access logs, application logs, and container logs. Extracts error patterns, rate spikes, latency outliers, and security signals. Example queries: 'why did error rate spike yesterday at 14:00?', 'analysiere die nginx-Logs auf ungewöhnliche Zugriffe', 'find the root cause in these container logs', 'Fehlermuster in der Anwendungslogdatei erkennen', 'identify slow requests over the last hour', 'Auffälligkeiten in journald seit Dienstag', 'correlate error IDs across services'.",
+      "capabilities": ["log parsing", "Log-Parsing", "error pattern detection", "Fehlermustererkennung", "anomaly detection", "Anomalieerkennung", "latency analysis", "Latenzanalyse", "access log analysis", "Zugriffslog-Analyse", "journald", "container logs", "Container-Logs", "security log analysis", "Sicherheits-Log-Analyse", "log summarization", "Log-Zusammenfassung", "incident timeline reconstruction", "Vorfallszeitleiste", "correlation id tracing", "Korrelations-ID-Verfolgung"],
+      "tags": ["logs", "logdateien", "log-analysis", "log-analyse", "errors", "fehler", "anomaly", "anomalie", "journald", "nginx", "container-logs", "latency", "latenz", "monitoring", "ueberwachung", "audit-log", "vorfall", "incident"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -1220,7 +1128,7 @@
       },
       "maxIterations": 8,
       "container": { "disabled": true }, // read-only tools only — in-process is safe
-      "systemPrompt": "You analyse log files and streaming log output to surface actionable insights. Read log content via read_file for workspace files, or ssh_exec with journalctl/docker-logs commands for live system logs. For structured JSON logs, parse line by line and group by level, service, and error code. For access logs, extract: request rate per path, error rate (4xx/5xx), top slow requests, unusual user agents, and any burst patterns. For application logs, identify: exception traces, repeated failures, timeout chains, and correlation IDs that link events across services. For security logs, flag: authentication failures, unusual IP bursts, privilege escalation events, and unexpected service restarts. Work through the log in time order; identify the earliest error signal and trace forward to find what it triggered. Summarize findings as a structured incident timeline when an anomaly chain exists. Publish evidence with exact timestamps, line references, and severity classifications via share_finding so ops_triage and incident_responder can act without re-reading the raw log.",
+      "systemPrompt": "You analyse log files and streaming log output to surface actionable insights. Read log content via read_file for workspace files, or ssh_exec with journalctl/docker-logs commands for live system logs. For structured JSON logs, parse line by line and group by level, service, and error code. For access logs, extract: request rate per path, error rate (4xx/5xx), top slow requests, unusual user agents, and any burst patterns. For application logs, identify: exception traces, repeated failures, timeout chains, and correlation IDs that link events across services. For security logs, flag: authentication failures, unusual IP bursts, privilege escalation events, and unexpected service restarts. Work through the log in time order; identify the earliest error signal and trace forward to find what it triggered. Summarize findings as a structured incident timeline when an anomaly chain exists. Publish evidence with exact timestamps, line references, and severity classifications via share_finding so ops_triage can act without re-reading the raw log.",
       "tools": [
         "read_file",
         "list_files",
@@ -1234,55 +1142,10 @@
         "write_file"
       ]
     },
-    "sql_developer": {
-      "description": "SQL query authoring and optimization specialist for PostgreSQL and MySQL/MariaDB. Writes analytical queries, schema migrations, index recommendations, and query performance analysis.",
-      "capabilities": ["sql query writing", "query optimization", "schema design", "index recommendation", "postgres", "mysql", "migration scripts", "query performance analysis", "explain plan analysis"],
-      "tags": ["sql", "postgres", "mysql", "database", "query", "schema", "migration", "index", "performance", "optimization"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
-      },
-      "maxIterations": 8,
-      "systemPrompt": "You write, optimize, and review SQL for PostgreSQL and MySQL/MariaDB. Always use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) in any query that includes user-supplied values — never interpolate values directly into SQL strings. Before writing a query, inspect the schema with information_schema.tables and information_schema.columns to confirm table and column names. For analytical queries, prefer explicit JOIN types and include a comment explaining what each CTE or subquery computes. For schema migrations, write idempotent scripts: use IF NOT EXISTS for CREATE, IF EXISTS for DROP, and wrap multiple changes in a transaction. For index recommendations, inspect the existing indexes first with pg_indexes or SHOW INDEX, then recommend only indexes that would materially help the query plan based on cardinality and filter selectivity — not blanket indexing. For query performance analysis, use EXPLAIN ANALYZE (Postgres) or EXPLAIN FORMAT=JSON (MySQL) and interpret the plan nodes rather than just presenting the raw output. Publish completed queries, schema snippets, and migration scripts as artifacts via write_file, and summarize the rationale, expected performance impact, and any destructive operations via share_finding. Flag any query that requires elevated permissions or would lock tables under high traffic.",
-      "tools": [
-        "get_site_credentials",
-        "sql_query",
-        "read_file",
-        "write_file",
-        "list_files",
-        "workspace_search",
-        "read_shared_facts",
-        "share_finding"
-      ]
-    },
-    "email_composer": {
-      "description": "Professional email drafting specialist. Composes well-structured outbound emails, reply drafts, and follow-up sequences from a context brief — then hands off to mail_agent for approval-gated sending.",
-      "domain": "communication",
-      "capabilities": ["email drafting", "reply composition", "follow-up sequences", "professional writing", "tone adaptation", "subject line generation"],
-      "tags": ["email", "drafting", "compose", "reply", "follow-up", "professional-writing", "communication"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
-        "enableThinking": false,
-        "temperature": 0.2,
-        "maxTokens": 4096
-      },
-      "maxIterations": 5,
-      "container": { "disabled": true },
-      "systemPrompt": "You draft professional outbound emails and reply sequences. Start by reading any shared facts or context provided — prior conversation threads, relevant documents, or task context. Produce a clear, well-structured email with: a direct subject line that reflects the purpose, an appropriate greeting, a concise body with no filler phrases, a concrete call-to-action or next step, and a professional closing. Adapt tone based on the relationship and context: formal for external or legal communications, direct and collegial for internal or technical audiences. When drafting a reply, quote only the specific portion of the original message you are responding to — do not forward the entire thread. For follow-up sequences, produce each message as a standalone artifact with a clear subject and a note on the recommended send delay. When the draft is complete, save it via write_file so mail_agent can prepare it as a mail draft for approval. Never send directly — pass the draft path and recipient details to mail_agent and let the user approve sending through mail_agent's mail_send_draft flow. Publish the draft artifact path and a one-line intent summary via share_finding.",
-      "tools": [
-        "read_file",
-        "write_file",
-        "list_files",
-        "read_shared_facts",
-        "share_finding"
-      ]
-    },
     "finance_analyst": {
-      "description": "Financial analysis specialist for balance sheets, income statements, budgets, cash-flow forecasts, and financial metrics. Reads structured data, derives key ratios, and produces grounded financial summaries.",
-      "capabilities": ["financial statement analysis", "budget review", "cash flow analysis", "kpi calculation", "financial ratios", "p&l review", "spreadsheet analysis", "financial forecasting"],
-      "tags": ["finance", "financial", "budget", "cash-flow", "balance-sheet", "income-statement", "kpi", "ratios", "p&l", "forecast", "accounting"],
+      "description": "Financial analysis specialist for balance sheets, income statements, budgets, cash-flow forecasts, and financial metrics. Reads structured data, derives key ratios, and produces grounded financial summaries. Example queries: 'analyze Q1 revenue against budget', 'berechne die wichtigsten Kennzahlen aus der Bilanz', 'project cash runway from the burn spreadsheet', 'Abweichungsanalyse zwischen Ist und Plan', 'what is the gross margin trend over the last 4 quarters?', 'prüfe die Liquiditätssituation und Runway', 'summarize the P&L highlights', 'GuV-Analyse mit Auffälligkeiten'.",
+      "capabilities": ["financial statement analysis", "Jahresabschluss-Analyse", "budget review", "Budgetpruefung", "cash flow analysis", "Cashflow-Analyse", "kpi calculation", "KPI-Berechnung", "financial ratios", "Finanzkennzahlen", "p&l review", "GuV-Analyse", "spreadsheet analysis", "Tabellenanalyse", "financial forecasting", "Finanzprognose", "variance analysis", "Abweichungsanalyse", "runway estimation", "Runway-Schaetzung"],
+      "tags": ["finance", "finanzen", "financial", "finanziell", "budget", "cash-flow", "cashflow", "balance-sheet", "bilanz", "income-statement", "guv", "kpi", "kennzahlen", "ratios", "p&l", "forecast", "prognose", "accounting", "buchhaltung", "runway", "margin", "marge"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -1308,9 +1171,9 @@
       ]
     },
     "content_writer": {
-      "description": "Audience-ready content writing specialist for blog posts, product copy, newsletters, documentation, social media, and press releases. Writes from a brief or evidence base — not from speculation.",
-      "capabilities": ["blog post writing", "product copy", "newsletter writing", "documentation writing", "social media copy", "press release drafting", "brand tone adaptation", "seo-friendly writing"],
-      "tags": ["content", "writing", "blog", "copy", "newsletter", "documentation", "marketing", "seo", "press-release", "social-media"],
+      "description": "Audience-ready content writing specialist for blog posts, product copy, newsletters, documentation, social media, and press releases. Writes from a brief or evidence base — not from speculation. Example queries: 'write a blog post about our new feature launch', 'verfasse einen Blogartikel zur neuen Funktion', 'draft the monthly newsletter from these highlights', 'schreibe einen Produkt-Pitch für die Landingpage', 'create a LinkedIn post about the conference', 'Pressemitteilung für die Partnerschaft entwerfen', 'polish the onboarding docs for new customers', 'Newsletter-Text mit Call-to-Action formulieren'.",
+      "capabilities": ["blog post writing", "Blogartikel-Schreiben", "product copy", "Produkttexte", "newsletter writing", "Newsletter-Schreiben", "documentation writing", "Dokumentationsschreiben", "social media copy", "Social-Media-Texte", "press release drafting", "Pressemitteilungsentwurf", "brand tone adaptation", "Markenton-Anpassung", "seo-friendly writing", "SEO-optimiertes Schreiben", "headline writing", "Ueberschriften-Erstellung", "call-to-action drafting", "CTA-Formulierung"],
+      "tags": ["content", "inhalt", "writing", "schreiben", "blog", "copy", "text", "newsletter", "documentation", "dokumentation", "marketing", "seo", "press-release", "pressemitteilung", "social-media", "headline", "ueberschrift", "draft", "entwurf"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -1331,9 +1194,9 @@
       ]
     },
     "contract_analyst": {
-      "description": "Deep legal document analysis specialist. Extracts obligations, risks, non-standard clauses, and liability exposure from contracts, NDAs, service agreements, and similar legal documents. Routes output to contract_review scene for structured review reports.",
-      "capabilities": ["contract review", "legal document analysis", "clause extraction", "risk scoring", "nda review", "service-agreement analysis", "liability analysis", "ip clause analysis", "termination clause review", "compliance check"],
-      "tags": ["contract", "legal", "nda", "agreement", "risk", "compliance", "liability", "ip", "terms", "legal-analysis"],
+      "description": "Deep legal document analysis specialist. Extracts obligations, risks, non-standard clauses, and liability exposure from contracts, NDAs, service agreements, and similar legal documents. Routes output to contract_review scene for structured review reports. Example queries: 'review this NDA for non-standard clauses', 'prüfe den Dienstleistungsvertrag auf Risiken', 'extract all obligations and penalties from the agreement', 'Haftungsklauseln im Liefervertrag bewerten', 'identify termination rights and notice periods', 'welche Klauseln weichen vom Marktstandard ab?', 'assess IP ownership in this service contract', 'Kündigungsrechte und Fristen im Vertrag analysieren'.",
+      "capabilities": ["contract review", "Vertragsprüfung", "legal document analysis", "juristische Dokumentenanalyse", "clause extraction", "Klauselextraktion", "risk scoring", "Risikobewertung", "nda review", "NDA-Prüfung", "service-agreement analysis", "Dienstleistungsvertrag-Analyse", "liability analysis", "Haftungsanalyse", "ip clause analysis", "IP-Klausel-Analyse", "termination clause review", "Kündigungsklausel-Prüfung", "compliance check", "Compliance-Prüfung", "obligation extraction", "Pflichtenextraktion"],
+      "tags": ["contract", "vertrag", "legal", "juristisch", "nda", "agreement", "vereinbarung", "risk", "risiko", "compliance", "liability", "haftung", "ip", "terms", "bedingungen", "legal-analysis", "rechtsanalyse", "clauses", "klauseln", "termination", "kuendigung"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,

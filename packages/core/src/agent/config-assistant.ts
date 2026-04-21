@@ -154,7 +154,7 @@ function parseDraftResponse(raw: string, targetAgent?: string): ConfigAssistantD
 function selectAssistantAgent(mode: "setup" | "enhancement" | "prompt", targetAgent?: string): string {
   const config = getConfig();
   if ((mode === "prompt" || targetAgent) && config.subAgents?.["prompt_optimizer"]) return "prompt_optimizer";
-  if (config.subAgents?.["incident_responder"]) return "incident_responder";
+  if (config.subAgents?.["ops_triage"]) return "ops_triage";
   return "main_assistant";
 }
 

@@ -156,7 +156,7 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | `software_bug_fix` | Diagnose → minimal fix → test cycle → change summary | Max 2 fix-test cycles |
 | `incident_response` | Triage → root-cause → remediate → post-incident brief | Human-in-loop on infra apply |
 | `accessibility_audit` | WCAG 2.2 browser-driven audit → structured issue report | |
-| `data_pipeline_review` | Schema quality, null rates, anomaly detection → data quality report | Uses `db_analyst` + `sql_developer` |
+| `data_pipeline_review` | Schema quality, null rates, anomaly detection → data quality report | Uses `sql_specialist` + `data_analyst` |
 | `competitive_analysis` | Multi-competitor parallel research → comparison table + visual brief | |
 | `release_notes_draft` | Git log + diff analysis → Keep-a-Changelog notes + optional broadcast | |
 | `translation_task` | Document/message translation with optional QA spot-check | |
@@ -191,8 +191,7 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | `devops_coordinator` | CI/CD orchestration, rollout coordination, rollback decisions | `shell_exec`, `ssh_exec`, `service_check`, delegation tools |
 | `test_generator` | Unit/integration test generation from code or specs (Vitest, Jest, pytest) | `workspace_search`, `read_file`, `write_file`, `shell_exec` |
 | `log_analyst` | Structured log parsing, anomaly detection, incident timeline extraction | `read_file`, `ssh_exec`, `shell_exec`, `metric_write` |
-| `sql_developer` | SQL query authoring, optimization, schema migrations, index recommendations | `sql_query`, `get_site_credentials`, `write_file` |
-| `email_composer` | Professional email drafting with approval-gated send-handoff to `mail_agent` | `read_file`, `write_file`, `share_finding` |
+| `sql_specialist` | SQL querying, authoring, optimization, schema migrations, index recommendations, data export | `sql_query`, `get_site_credentials`, `spreadsheet_write`, `write_file` |
 | `finance_analyst` | Balance sheet, budget, cash-flow, and KPI analysis from spreadsheet or file data | `spreadsheet_read`, `extract_file_content`, `generate_chart_html` |
 | `content_writer` | Blog posts, product copy, newsletters, documentation, and press releases from a brief | `read_file`, `write_file`, `generate_document` |
 

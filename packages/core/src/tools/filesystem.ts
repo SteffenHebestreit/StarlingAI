@@ -50,6 +50,9 @@ function guardPath(path: string, workspacePath: string): { safe: boolean; resolv
 registerTool({
   name: "read_file",
   description: "Read the contents of a file within the workspace directory.",
+  embeddingDescription: "Open, view, inspect, or load a file. Read source code, markdown, JSON, YAML, CSV, text. Datei lesen, öffnen, einsehen, anzeigen, laden. Inhalt einer Datei abrufen.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
@@ -98,6 +101,9 @@ registerTool({
 registerTool({
   name: "list_files",
   description: "List files and directories within a path in the workspace.",
+  embeddingDescription: "List, browse, enumerate, or show files and folders in a directory. Dateien und Ordner auflisten, durchsuchen, anzeigen. Verzeichnisinhalt anzeigen. Directory listing.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
@@ -199,6 +205,9 @@ registerTool({
 registerTool({
   name: "write_file",
   description: "Write content to a file within the workspace. Creates file and parent directories if needed.",
+  embeddingDescription: "Write, save, create, or persist a file with given content. Datei schreiben, speichern, erstellen, sichern. Write code, documents, reports, generated output. Neue Datei anlegen.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
@@ -243,6 +252,9 @@ registerTool({
 registerTool({
   name: "edit_file",
   description: "Apply an exact string replacement to a file within the workspace. Fails if old_string is not found.",
+  embeddingDescription: "Edit, modify, update, patch, or change a specific section of a file. Datei bearbeiten, anpassen, ändern, patchen. Surgical string replacement for targeted edits.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
@@ -294,6 +306,9 @@ registerTool({
 registerTool({
   name: "create_dir",
   description: "Create a directory (and any missing parent directories) within the workspace.",
+  embeddingDescription: "Create, make, or add a folder or directory. Ordner anlegen, Verzeichnis erstellen, neues Verzeichnis. mkdir, new folder.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
@@ -325,6 +340,9 @@ registerTool({
 registerTool({
   name: "delete_file",
   description: "Delete a file within the workspace. Requires per-call approval (Tier 1 — destructive).",
+  embeddingDescription: "Delete, remove, or destroy a file permanently. Datei löschen, entfernen, vernichten. Remove file from workspace. Destructive operation with approval.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {

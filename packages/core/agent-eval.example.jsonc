@@ -22,7 +22,7 @@
     },
     {
       "name": "retrieval-workspace",
-      "agentName": "retrieval_analyst",
+      "agentName": "code_analyst",
       "task": "Search the workspace for any files that mention 'parallel_delegate' and return the file paths and a one-line summary of each match.",
       "expectIncludes": ["parallel_delegate"],
       "expectExcludes": ["Sub-agent error:"],

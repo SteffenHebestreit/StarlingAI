@@ -20,6 +20,7 @@ registerTool({
     "Use this for REST API calls, webhook triggers, GraphQL queries, or any HTTP interaction. " +
     "The response body is returned (truncated at 64 KB). " +
     "Requires per-call approval because it communicates with external services.",
+  embeddingDescription: "Make HTTP request, call REST API, trigger webhook, send GraphQL query, curl equivalent. HTTP-Anfrage senden, API aufrufen, Webhook auslösen, REST-Endpoint abfragen.",
   parameters: {
     type: "object",
     properties: {

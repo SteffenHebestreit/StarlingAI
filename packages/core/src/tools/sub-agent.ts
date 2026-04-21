@@ -23,7 +23,7 @@ import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
 
-const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "incident_responder", "infrastructure_agent"]);
+const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
