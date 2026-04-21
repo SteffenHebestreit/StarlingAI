@@ -2268,6 +2268,22 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const isApology = finalResponse.toLowerCase().startsWith("i apologize");
       if (finalResponse.length > 50 && !isApology) {
         graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
+        // G33 follow-up: positive signal — the injected cached trajectory
+        // contributed to a successful answer. Pairs with `trajectory_cache_hit`
+        // and `trajectory_cache_invalidated` so operators can compute the
+        // hit-and-helpful rate from the audit log without further plumbing.
+        if (injectedTrajectoryIdentity) {
+          logAudit(
+            "trajectory_cache_used",
+            {
+              normalizedQuery: injectedTrajectoryIdentity.normalizedQuery.slice(0, 200),
+              finishedAt: injectedTrajectoryIdentity.finishedAt,
+              finalAnswerChars: finalResponse.length,
+              toolIterations: iterationCount,
+            },
+            { sessionId: session.id, channel: session.channel },
+          );
+        }
       } else if (finalResponse.length <= 50 || isApology) {
         graphMarkSessionRetrievalsUnhelpful(session.id, { penalty: 0.02 }).catch(() => {});
         // G33 follow-up: if a cached trajectory was injected and the turn
