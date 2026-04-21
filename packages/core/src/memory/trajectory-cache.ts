@@ -11,14 +11,16 @@
  * - TTL enforced on read: stale entries are never returned.
  */
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { appendJsonLine, readLastRecords } from "./bounded-ndjson-store.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const CACHE_FILE = ".starlingai/trajectory_cache.ndjson";
+const INVALIDATION_FILE = ".starlingai/trajectory_cache_invalidations.json";
+const INVALIDATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_CACHE_LINES = 5_000;
 const SIMILARITY_THRESHOLD = 0.86;
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;          // 24 h
@@ -86,17 +88,61 @@ export async function writeTrajectory(
 }
 
 // ── Invalidation ───────────────────────────────────────────────────────────
-// In-memory blocklist of trajectory entries that produced a bad turn outcome
-// (apology, blocked, or empty answer) when injected. Keyed by a stable
-// identity built from `${normalizedQuery}::${finishedAt}` so the same entry
-// is skipped on subsequent lookups in the current process. Bounded to keep
-// memory predictable; the file itself is the source of truth across restarts.
+// Workspace-scoped blocklist of trajectory entries that produced a bad turn
+// outcome (apology, blocked, or empty answer) when injected. Keyed by a
+// stable identity `${normalizedQuery}::${finishedAt}`. Persisted per workspace
+// to `.starlingai/trajectory_cache_invalidations.json` so the learning
+// survives gateway restarts; older runs would otherwise re-expose the same
+// bad entries.
+//
+// In-memory cache holds a Map<workspacePath, Map<identity, expiresAt>> with
+// lazy load on first lookup. Bounded per workspace to keep memory and disk
+// footprints predictable; entries past `INVALIDATION_TTL_MS` are evicted on
+// load.
 
 const INVALIDATION_MAX_ENTRIES = 256;
-const _invalidatedKeys = new Map<string, number>(); // key -> insertion order
+const _invalidationsByWorkspace = new Map<string, Map<string, number>>();
+const _loadedWorkspaces = new Set<string>();
 
 function trajectoryIdentity(entry: Pick<TrajectoryEntry, "normalizedQuery" | "finishedAt">): string {
   return `${entry.normalizedQuery}::${entry.finishedAt}`;
+}
+
+function getInvalidationMap(workspacePath: string): Map<string, number> {
+  let map = _invalidationsByWorkspace.get(workspacePath);
+  if (!map) {
+    map = new Map<string, number>();
+    _invalidationsByWorkspace.set(workspacePath, map);
+  }
+  if (_loadedWorkspaces.has(workspacePath)) return map;
+  _loadedWorkspaces.add(workspacePath);
+  const file = resolve(workspacePath, INVALIDATION_FILE);
+  if (!existsSync(file)) return map;
+  try {
+    const raw = readFileSync(file, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    const now = Date.now();
+    for (const [key, expiresAt] of Object.entries(parsed)) {
+      if (typeof expiresAt === "number" && expiresAt > now) {
+        map.set(key, expiresAt);
+      }
+    }
+  } catch {
+    // Corrupt invalidation file is non-fatal — start fresh.
+  }
+  return map;
+}
+
+function persistInvalidations(workspacePath: string, map: Map<string, number>): void {
+  try {
+    const file = resolve(workspacePath, INVALIDATION_FILE);
+    mkdirSync(dirname(file), { recursive: true });
+    const obj: Record<string, number> = {};
+    for (const [key, expiresAt] of map) obj[key] = expiresAt;
+    writeFileSync(file, JSON.stringify(obj), "utf-8");
+  } catch {
+    // Best-effort — never block the turn on persistence failure.
+  }
 }
 
 /**
@@ -104,21 +150,29 @@ function trajectoryIdentity(entry: Pick<TrajectoryEntry, "normalizedQuery" | "fi
  * it. Wired from `runtime.ts` when a turn that received an injected cache
  * ends in apology/empty-answer/blocked — the entry is then almost certainly
  * stale or wrong, and reusing it would propagate the same bad outcome.
+ *
+ * Invalidations are persisted per workspace and survive process restarts
+ * (TTL: 7 days, capped at INVALIDATION_MAX_ENTRIES per workspace).
  */
 export function invalidateTrajectory(
+  workspacePath: string,
   entry: Pick<TrajectoryEntry, "normalizedQuery" | "finishedAt">,
 ): void {
   const key = trajectoryIdentity(entry);
-  if (_invalidatedKeys.has(key)) return;
-  _invalidatedKeys.set(key, Date.now());
-  if (_invalidatedKeys.size > INVALIDATION_MAX_ENTRIES) {
-    const oldestKey = _invalidatedKeys.keys().next().value;
-    if (oldestKey) _invalidatedKeys.delete(oldestKey);
+  const map = getInvalidationMap(workspacePath);
+  if (map.has(key)) return;
+  map.set(key, Date.now() + INVALIDATION_TTL_MS);
+  while (map.size > INVALIDATION_MAX_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (!oldestKey) break;
+    map.delete(oldestKey);
   }
+  persistInvalidations(workspacePath, map);
 }
 
 export function _resetTrajectoryInvalidationForTests(): void {
-  _invalidatedKeys.clear();
+  _invalidationsByWorkspace.clear();
+  _loadedWorkspaces.clear();
 }
 
 // ── Read ───────────────────────────────────────────────────────────────────
@@ -164,6 +218,7 @@ export async function lookupTrajectory(
   if (!queryEmbedding) return null;
 
   const now = Date.now();
+  const invalidationMap = getInvalidationMap(workspacePath);
 
   let bestEntry: TrajectoryEntry | null = null;
   let bestSim = 0;
@@ -176,8 +231,9 @@ export async function lookupTrajectory(
     // TTL check
     const finishedMs = new Date(entry.finishedAt).getTime();
     if (Number.isNaN(finishedMs) || (now - finishedMs) > entry.ttlSeconds * 1000) continue;
-    // Skip entries marked bad earlier in this process
-    if (_invalidatedKeys.has(trajectoryIdentity(entry))) continue;
+    // Skip entries marked bad in this or a prior process for this workspace
+    const invalidationExpiresAt = invalidationMap.get(trajectoryIdentity(entry));
+    if (invalidationExpiresAt !== undefined && invalidationExpiresAt > now) continue;
     // Security: skip credential-shaped entries (defence in depth — should not exist)
     const serialized = JSON.stringify(entry);
     if (CREDENTIAL_RE.test(serialized)) continue;

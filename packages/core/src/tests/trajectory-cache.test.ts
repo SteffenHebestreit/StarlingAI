@@ -97,10 +97,36 @@ describe("G33: trajectory cache", () => {
     const first = await lookupTrajectory("show me the headlines news", ws, false);
     expect(first).not.toBeNull();
 
-    invalidateTrajectory({
+    invalidateTrajectory(ws, {
       normalizedQuery: first!.entry.normalizedQuery,
       finishedAt: first!.entry.finishedAt,
     });
+
+    const second = await lookupTrajectory("show me the headlines news", ws, false);
+    expect(second).toBeNull();
+  });
+
+  it("persists invalidations across process restarts (re-imported module)", async () => {
+    const ws = makeWorkspace();
+    await writeTrajectory({
+      channel: "test",
+      normalizedQuery: "what are the headlines today",
+      sharedFindings: ["news A"],
+      finalAnswer: "Headlines: A",
+    }, ws, false);
+
+    const first = await lookupTrajectory("show me the headlines news", ws, false);
+    expect(first).not.toBeNull();
+
+    invalidateTrajectory(ws, {
+      normalizedQuery: first!.entry.normalizedQuery,
+      finishedAt: first!.entry.finishedAt,
+    });
+
+    // Drop the in-memory invalidation map (simulating a process restart) but
+    // leave the persisted .starlingai/trajectory_cache_invalidations.json on
+    // disk. The next lookup must re-load and still skip the entry.
+    _resetTrajectoryInvalidationForTests();
 
     const second = await lookupTrajectory("show me the headlines news", ws, false);
     expect(second).toBeNull();
