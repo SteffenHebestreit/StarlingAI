@@ -95,6 +95,7 @@ export type AuditEventType =
   | "sub_agent_synthesis_forced"
   | "hallucinated_truncation_bypass"
   | "trajectory_cache_hit"
+  | "trajectory_cache_used"
   | "trajectory_cache_invalidated";
 
 export interface AuditEvent {
