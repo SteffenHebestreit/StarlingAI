@@ -20,7 +20,7 @@ import { registerSessionAbortController, deregisterSessionAbortController } from
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
-import { lookupTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
+import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
@@ -1695,18 +1695,34 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // semantically similar recent query.  If yes, inject it as extra system context
   // so the model can decide whether to reuse or re-research the evidence.
   let trajectoryInjectionContext = "";
+  let injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null = null;
   try {
-    const cachedTrajectory = await lookupTrajectory(
+    const cachedHit = await lookupTrajectory(
       userMessage,
       session.getWorkspacePath(),
       initialDynamicGuidance?.freshnessSensitive ?? false,
     );
+    const cachedTrajectory = cachedHit?.entry ?? null;
     if (cachedTrajectory && cachedTrajectory.finalAnswer.length > 50) {
       const evidence = cachedTrajectory.sharedFindings.length > 0
         ? `\n\nEvidence gathered:\n${cachedTrajectory.sharedFindings.slice(0, 5).map(f => `• ${f.slice(0, 300)}`).join("\n")}`
         : "";
       trajectoryInjectionContext =
         `[CACHED RECENT EVIDENCE — verify before reuse, cached at ${cachedTrajectory.finishedAt}]\n${cachedTrajectory.finalAnswer.slice(0, 1500)}${evidence}`;
+      injectedTrajectoryIdentity = {
+        normalizedQuery: cachedTrajectory.normalizedQuery,
+        finishedAt: cachedTrajectory.finishedAt,
+      };
+      logAudit(
+        "trajectory_cache_hit",
+        {
+          similarity: Number(cachedHit!.similarity.toFixed(3)),
+          ageMs: Date.now() - new Date(cachedTrajectory.finishedAt).getTime(),
+          findingsCount: cachedTrajectory.sharedFindings.length,
+          finalAnswerChars: cachedTrajectory.finalAnswer.length,
+        },
+        { sessionId: session.id, channel: session.channel },
+      );
     }
   } catch { /* best-effort — never block the turn */ }
 
@@ -2254,6 +2270,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
       } else if (finalResponse.length <= 50 || isApology) {
         graphMarkSessionRetrievalsUnhelpful(session.id, { penalty: 0.02 }).catch(() => {});
+        // G33 follow-up: if a cached trajectory was injected and the turn
+        // still ended in apology / stub, the cached evidence is almost
+        // certainly stale or wrong. Invalidate it so future similar
+        // queries don't keep inheriting the same bad outcome.
+        if (injectedTrajectoryIdentity) {
+          invalidateTrajectory(injectedTrajectoryIdentity);
+          logAudit(
+            "trajectory_cache_invalidated",
+            {
+              normalizedQuery: injectedTrajectoryIdentity.normalizedQuery.slice(0, 200),
+              finishedAt: injectedTrajectoryIdentity.finishedAt,
+              reason: isApology ? "apology" : "stub_response",
+              finalAnswerChars: finalResponse.length,
+            },
+            { sessionId: session.id, channel: session.channel, severity: "warn" },
+          );
+        }
       }
 
       return {
