@@ -29,6 +29,7 @@ registerTool({
     "When saved loginUrl or named URLs are present, use those saved URLs before guessing a path or opening the homepage.",
     "The hostname is matched against configured sites (e.g. 'github.com', 'jira.company.com').",
   ].join(" "),
+  embeddingDescription: "Look up, retrieve stored site credentials, login URL, saved bookmarks for a website. Zugangsdaten suchen, gespeicherte Logins prüfen, hinterlegte URLs abrufen.",
   parameters: {
     type: "object",
     properties: {

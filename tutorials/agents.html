@@ -135,11 +135,6 @@
                 <td>SearXNG-first with Playwright and DuckDuckGo fallback; publishes reusable findings</td>
               </tr>
               <tr>
-                <td><span class="agent-name">security_researcher</span></td>
-                <td>CVE lookup, advisories, exploit status, threat intelligence</td>
-                <td>Specialized for NVD, MITRE, vendor bulletins, and patch status research</td>
-              </tr>
-              <tr>
                 <td><span class="agent-name">shell_agent</span></td>
                 <td>Targeted shell commands, build checks, remote SSH inspection</td>
                 <td>Handles straightforward CLI and server inspection tasks; grounded in exact stdout/stderr</td>
@@ -225,7 +220,7 @@
             <code>browser_agent</code> uses <code>get_site_credentials</code> for metadata and
             <code>site_fill_credentials</code> for secure browser logins, while
             <code>computer_use_agent</code> can use <code>computer_type_credential</code> for desktop login forms.
-            Headless server work should route to <code>shell_agent</code>, <code>ops_triage</code>, or <code>incident_responder</code> with <code>ssh_exec</code> instead of desktop automation.
+            Headless server work should route to <code>shell_agent</code> or <code>ops_triage</code> with <code>ssh_exec</code> instead of desktop automation.
           </div>
         </div>
       </div>

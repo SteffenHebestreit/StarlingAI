@@ -18,6 +18,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024; // 64KB
 registerTool({
   name: "shell_exec",
   description: "Execute a shell command in an isolated Docker sandbox container. The sandbox has no network access and limited filesystem. Use for running scripts, installing tools, compiling code.",
+  embeddingDescription: "Run, execute, invoke a shell command, bash script, or CLI tool in a sandbox. Shell-Befehl ausführen, Kommando starten, Skript laufen lassen. Command line execution, terminal, bash, sh.",
   parameters: {
     type: "object",
     properties: {
@@ -139,6 +140,7 @@ registerTool({
   description:
     "Execute a script file from the workspace in the Docker sandbox. " +
     "Supports .sh, .py, .js, and .ts files. The script must already exist in the workspace.",
+  embeddingDescription: "Run, execute a script file (bash, python, javascript, typescript) from the workspace. Skript ausführen, Python-Datei starten, Node-Script laufen lassen.",
   parameters: {
     type: "object",
     properties: {

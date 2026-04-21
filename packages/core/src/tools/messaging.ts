@@ -21,6 +21,7 @@ registerTool({
     "Send a text message to a Slack channel or DM. " +
     "Requires the Slack channel to be enabled with a valid bot token. " +
     "The channelId can be a channel ID (C...), user ID (U...), or channel name.",
+  embeddingDescription: "Send message, post, notify via Slack channel or direct message. Slack-Nachricht senden, in Slack posten, Team benachrichtigen. Broadcast to team chat.",
   parameters: {
     type: "object",
     properties: {
@@ -60,6 +61,7 @@ registerTool({
     "Send a text message to a Discord channel. " +
     "Requires the Discord channel to be enabled with a valid bot token. " +
     "Messages over 2000 characters are automatically chunked.",
+  embeddingDescription: "Send message, post to Discord channel or server. Discord-Nachricht senden, in Discord posten, Community benachrichtigen. Broadcast to Discord community.",
   parameters: {
     type: "object",
     properties: {
@@ -100,6 +102,7 @@ registerTool({
     "Send an email via the configured SMTP transporter. " +
     "Requires the email channel to be enabled and running. " +
     "The sender address is the configured smtpFrom address.",
+  embeddingDescription: "Send an email via SMTP, dispatch mail message, notify by e-mail. E-Mail versenden per SMTP, Mail schicken, Benachrichtigung per Mail. Non-approval notification channel.",
   parameters: {
     type: "object",
     properties: {

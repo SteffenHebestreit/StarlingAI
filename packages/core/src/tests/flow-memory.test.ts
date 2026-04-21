@@ -39,7 +39,7 @@ describe("flow memory", () => {
       scope: "enhancement",
       request: "Make browser agent more persistent",
       summary: "Blindly retrying clicks on a stable page caused loops",
-      assistantAgent: "incident_responder",
+      assistantAgent: "ops_triage",
       targetAgent: "browser_agent",
       actions: ["avoid repetitive click loops"],
       outcome: "failure",

@@ -328,26 +328,6 @@
         "write_file"
       ]
     },
-    "file_analyst": {
-      "description": "Attachment and document analysis specialist for PDFs, images, and mixed file payloads.",
-      "capabilities": ["document extraction", "attachment analysis", "exact text extraction"],
-      "tags": ["files", "documents", "analysis"],
-      "model": {
-        "primary": "lmstudio/qwen3.5-4b",
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 5,
-      "systemPrompt": "You analyze files and attachments. Prefer extract_file_content for PDFs, office files, audio, and video before falling back to raw file reads. Capture exact text, dates, table values, and metadata. Publish reusable evidence with share_finding so sibling agents can cite the extracted content without rereading the file.",
-      "tools": [
-        "extract_file_content",
-        "read_file",
-        "list_files",
-        "read_shared_facts",
-        "share_finding",
-        "write_file"
-      ]
-    },
     "document_intake": {
       "description": "Document intake specialist for classifying, extracting, and normalizing long reports, PDFs, DOCX files, and mixed attachments into reusable facts.",
       "capabilities": ["document intake", "attachment classification", "content normalization", "metadata extraction", "handoff preparation"],
@@ -486,7 +466,7 @@
         "maxTokens": 4096
       },
       "maxIterations": 6,
-      "systemPrompt": "You triage operational failures before remediation starts. Begin with the cheapest evidence: service_check for availability, relevant config or log files, and narrow shell commands that confirm process, container, network, or startup state. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Hand provider, model, or gateway config faults to incident_responder when the problem is primarily runtime configuration, and hand infrastructure changes to infrastructure_agent when the diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and next corrective action via share_finding.",
+      "systemPrompt": "You triage operational failures before remediation starts. Begin with the cheapest evidence: service_check for availability, relevant config or log files, and narrow shell commands that confirm process, container, network, or startup state. Separate observed symptoms from inferred root cause, and avoid proposing broad fixes until you have at least one concrete failure signal. Distinguish clearly between provider issues, invalid model identifiers, gateway faults, stale runtime configuration, container/deployment problems, and network issues. Hand infrastructure changes to infrastructure_agent when the diagnosis is complete and remediation needs provisioning or deployment work. Publish the most likely root cause, impacted component, and next corrective action via share_finding.",
       "tools": [
         "service_check",
         "shell_exec",
@@ -537,27 +517,6 @@
         "workspace_search",
         "generate_document",
         "generate_pdf",
-        "share_finding",
-        "write_file"
-      ]
-    },
-    "incident_responder": {
-      "description": "Runtime incident triage specialist for provider, gateway, and configuration failures.",
-      "capabilities": ["incident triage", "provider troubleshooting", "gateway diagnosis", "config drift detection"],
-      "tags": ["ops", "incident", "reliability", "providers", "debugging"],
-      "model": {
-        "primary": "lmstudio/zai-org/glm-4.7-flash",
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 6,
-      "systemPrompt": "You diagnose runtime incidents. Prefer quick configuration checks, health checks, and targeted shell commands before proposing fixes. Distinguish clearly between provider issues, invalid model identifiers, network problems, and stale runtime configuration. Publish the root cause and the minimum corrective action via share_finding.",
-      "tools": [
-        "shell_exec",
-        "read_file",
-        "list_files",
-        "web_fetch",
-        "read_shared_facts",
         "share_finding",
         "write_file"
       ]

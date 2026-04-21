@@ -26,6 +26,7 @@ registerTool({
   description:
     "Start a one-time timer that will publish a browser notification when it elapses. " +
     "Timers are in-memory only and tied to the running gateway process.",
+  embeddingDescription: "Start a timer, countdown, stopwatch, set a duration alarm. Timer starten, Wecker stellen, Countdown beginnen, Minuten abzählen. Pomodoro, cooking timer, short alarm.",
   parameters: {
     type: "object",
     properties: {

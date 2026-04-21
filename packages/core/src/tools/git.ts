@@ -66,6 +66,7 @@ async function runGitInSandbox(
 registerTool({
   name: "git_status",
   description: "Show the working tree status of a git repository in the workspace. Returns modified, staged, and untracked files.",
+  embeddingDescription: "Check, show git status, working tree changes, modified files, staged files. Git-Status prüfen, Änderungen anzeigen, was hat sich geändert.",
   parameters: {
     type: "object",
     properties: {
@@ -88,6 +89,7 @@ registerTool({
 registerTool({
   name: "git_log",
   description: "Show commit history. Returns recent commits with hash, author, date, and message.",
+  embeddingDescription: "Show, view git commit history, log, recent commits. Git-Historie anzeigen, Commit-Verlauf, letzte Commits auflisten.",
   parameters: {
     type: "object",
     properties: {
@@ -130,6 +132,7 @@ registerTool({
 registerTool({
   name: "git_diff",
   description: "Show file differences. Without arguments shows unstaged changes. Use 'staged: true' for staged changes, or provide two refs to compare.",
+  embeddingDescription: "Show, view git diff, file differences, changes between commits or branches. Git-Diff anzeigen, Dateiänderungen, Unterschiede zwischen Commits.",
   parameters: {
     type: "object",
     properties: {

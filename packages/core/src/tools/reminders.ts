@@ -32,6 +32,7 @@ registerTool({
   description:
     "Create a one-time reminder that will publish a browser notification when it becomes due. " +
     "Reminders are in-memory only and currently tied to the running gateway process.",
+  embeddingDescription: "Create a reminder, schedule a follow-up, remind me at a specific time. Erinnerung erstellen, erinnere mich, Wiedervorlage, Notification für später planen. Schedule alert.",
   parameters: {
     type: "object",
     properties: {

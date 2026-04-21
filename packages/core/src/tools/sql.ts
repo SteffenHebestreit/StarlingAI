@@ -209,6 +209,7 @@ registerTool({
     "All parameters must be passed separately via the params array to prevent SQL injection. " +
     "Results are capped at 500 rows. " +
     "Requires per-call approval because it executes statements against live databases.",
+  embeddingDescription: "Run, execute a SQL query against a PostgreSQL or MySQL database. SQL-Abfrage ausführen, Datenbankabfrage, SELECT, INSERT, UPDATE, DELETE. Query database, Datenbank abfragen, Daten aus DB holen.",
   parameters: {
     type: "object",
     properties: {

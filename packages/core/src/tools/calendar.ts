@@ -6,6 +6,7 @@ import { callMailService, formatMailServiceError, ok, fail } from "./mail-servic
 registerTool({
   name: "calendar_list_calendars",
   description: "List all CalDAV calendars for a configured mail account. Returns calendar URLs, names, and descriptions.",
+  embeddingDescription: "List available calendars, show configured calendars. Verfügbare Kalender anzeigen, Kalenderliste abrufen, Kalender auflisten.",
   parameters: {
     type: "object",
     properties: {
@@ -37,6 +38,7 @@ registerTool({
 registerTool({
   name: "calendar_list_events",
   description: "List calendar events within a date range. Returns event details including UID, URL, etag, title, start/end times, attendees, and recurrence rules.",
+  embeddingDescription: "List, show, view upcoming meetings, appointments, events, schedule. Termine anzeigen, Besprechungen auflisten, Kalendereinträge abrufen, Zeitplan ansehen. What's on my calendar.",
   parameters: {
     type: "object",
     properties: {
@@ -90,6 +92,7 @@ registerTool({
 registerTool({
   name: "calendar_create_event",
   description: "Create a new event in a CalDAV calendar. Returns the new event UID.",
+  embeddingDescription: "Create, schedule, add a meeting, appointment, event. Termin anlegen, Besprechung planen, neuen Kalendereintrag erstellen, Ereignis eintragen.",
   parameters: {
     type: "object",
     properties: {

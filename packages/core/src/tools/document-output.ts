@@ -35,6 +35,7 @@ registerTool({
   description:
     "Generate and save a workspace document as Markdown, text, HTML, or JSON. " +
     "Use this for reports, handoff notes, briefs, and exportable artifacts.",
+  embeddingDescription: "Generate, create, produce a document, report, brief, artifact. Dokument erstellen, Bericht generieren, Markdown speichern, Artefakt produzieren. Final deliverable, downloadable report.",
   parameters: {
     type: "object",
     properties: {
@@ -298,6 +299,7 @@ registerTool({
   description:
     "Generate and save an HTML chart report in the workspace. " +
     "Use this for dashboards, KPI snapshots, and visual summaries that can be previewed in chat.",
+  embeddingDescription: "Generate, create a chart, graph, bar chart, line chart, pie chart, visual data report. Diagramm erstellen, Chart generieren, Datenvisualisierung, Balken-, Linien-, Tortendiagramm.",
   parameters: {
     type: "object",
     properties: {

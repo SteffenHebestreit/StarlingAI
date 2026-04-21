@@ -50,6 +50,7 @@ registerTool({
     "its contents as structured JSON. Each sheet is returned as an array of row objects. " +
     "Use this to inspect data before analysis, transformation, or reporting. " +
     "Results are capped at 2,000 rows per sheet.",
+  embeddingDescription: "Read, parse, load a spreadsheet, Excel file, CSV, XLSX, ODS. Tabelle lesen, Excel-Datei öffnen, CSV parsen, Tabellenkalkulation auswerten. Import tabular data.",
   parameters: {
     type: "object",
     properties: {
@@ -174,6 +175,7 @@ registerTool({
     "Write structured JSON data to a new or existing spreadsheet file (.xlsx or .csv) in the workspace. " +
     "Each entry in 'sheets' becomes a separate worksheet. For .csv output, only the first sheet is written. " +
     "Existing files are overwritten by default.",
+  embeddingDescription: "Write, export, save data to Excel, XLSX, or CSV spreadsheet. Tabelle erstellen, Excel-Datei schreiben, CSV exportieren, Daten in Tabelle speichern. Export tabular results.",
   parameters: {
     type: "object",
     properties: {

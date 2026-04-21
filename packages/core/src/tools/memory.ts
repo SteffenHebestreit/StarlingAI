@@ -364,6 +364,7 @@ registerTool({
     "Use a descriptive, stable key (e.g. 'project_goals', 'client_preferences'). " +
     "Overwrites any previous entry with the same key. " +
     "Use scope='workspace' for repo-local memory and scope='user' for durable cross-workspace preferences or habits.",
+  embeddingDescription: "Save, remember, persist, note, record information for later. Merken, speichern, notieren, festhalten, Notiz machen, sich erinnern. Long-term memory, durable notes, save fact.",
   parameters: {
     type: "object",
     properties: {
@@ -435,6 +436,7 @@ registerTool({
     "Search memory across user-global, workspace, session-shared facts, and agent lessons/flow memory. " +
     "Matches against subject, content, tags, and memory kind. " +
     "Returns up to `limit` results (default 10).",
+  embeddingDescription: "Search, recall, look up saved notes, remembered facts, past lessons. Erinnerungen suchen, Notizen finden, was wurde gespeichert, Gedächtnis abfragen. Retrieve long-term memory.",
   parameters: {
     type: "object",
     properties: {

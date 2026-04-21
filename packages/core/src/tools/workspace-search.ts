@@ -64,6 +64,9 @@ registerTool({
     "Full-text keyword search across all text files in the workspace. " +
     "Returns matching file paths with surrounding context snippets. " +
     "Use for retrieval, code lookup, or finding mentions of a concept across the project.",
+  embeddingDescription: "Search, find, locate, grep, or look up text, code, symbols, mentions across the workspace. Dateien durchsuchen, Code finden, Begriff suchen, Vorkommen lokalisieren. Full-text search in the project. Retrieval.",
+  costHint: "low",
+  latencyHint: "low",
   parameters: {
     type: "object",
     properties: {

@@ -55,7 +55,7 @@ The collective memory layer (`swarm/memory.ts`) gives agents a shared knowledge 
 
 ### 3. Robustheit durch Redundanz (Robustness Through Redundancy)
 
-If a sub-agent times out or errors, the orchestrator retries with the next-best candidate from the routing result list. No single agent failure terminates the session. The `incident_responder` agent monitors provider and channel health and can trigger corrective actions without human intervention.
+If a sub-agent times out or errors, the orchestrator retries with the next-best candidate from the routing result list. No single agent failure terminates the session. The `ops_triage` agent monitors provider, gateway, and channel health and can trigger corrective actions without human intervention.
 
 At the infrastructure level:
 - Docker Compose restarts failed service containers automatically.

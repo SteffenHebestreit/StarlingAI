@@ -22,6 +22,7 @@ registerTool({
     "Best for single sentences, UI labels, short paragraphs, and inline snippets (up to ~4 000 characters). " +
     "For multi-page documents or when a QA review pass is required, use the `translator` sub-agent instead. " +
     "This tool is read-only and does not require per-call approval.",
+  embeddingDescription: "Translate, convert text from one language to another. Text übersetzen, in eine andere Sprache umwandeln, Sprachübersetzung. Quick inline translation.",
   parameters: {
     type: "object",
     properties: {

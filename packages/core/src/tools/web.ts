@@ -69,6 +69,7 @@ interface ResolvedSearchBackendConfig {
 registerTool({
   name: "web_search",
   description: "Search the web using the configured search backend. Prefers SearXNG when configured and can fall back to DuckDuckGo.",
+  embeddingDescription: "Search, google, query the internet or web for information, topics, news, articles. Websuche, Internet durchsuchen, googeln, nachschlagen, Suchmaschine abfragen. Find online content.",
   parameters: {
     type: "object",
     properties: {
@@ -224,6 +225,7 @@ registerTool({
 registerTool({
   name: "web_fetch",
   description: "Fetch and read content from a public URL. Uses Playwright for HTML pages (renders JavaScript) and native fetch for JSON APIs. Returns text content.",
+  embeddingDescription: "Fetch, download, retrieve, load content from a URL or webpage. Webseite abrufen, URL aufrufen, Seiteninhalt laden, HTML holen. Read online page contents.",
   parameters: {
     type: "object",
     properties: {
