@@ -93,7 +93,9 @@ export type AuditEventType =
   | "turn_scorecard"
   | "coverage_shortfall_resynthesis"
   | "sub_agent_synthesis_forced"
-  | "hallucinated_truncation_bypass";
+  | "hallucinated_truncation_bypass"
+  | "trajectory_cache_hit"
+  | "trajectory_cache_invalidated";
 
 export interface AuditEvent {
   id: string;

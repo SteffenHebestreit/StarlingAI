@@ -85,7 +85,53 @@ export async function writeTrajectory(
   }
 }
 
+// ── Invalidation ───────────────────────────────────────────────────────────
+// In-memory blocklist of trajectory entries that produced a bad turn outcome
+// (apology, blocked, or empty answer) when injected. Keyed by a stable
+// identity built from `${normalizedQuery}::${finishedAt}` so the same entry
+// is skipped on subsequent lookups in the current process. Bounded to keep
+// memory predictable; the file itself is the source of truth across restarts.
+
+const INVALIDATION_MAX_ENTRIES = 256;
+const _invalidatedKeys = new Map<string, number>(); // key -> insertion order
+
+function trajectoryIdentity(entry: Pick<TrajectoryEntry, "normalizedQuery" | "finishedAt">): string {
+  return `${entry.normalizedQuery}::${entry.finishedAt}`;
+}
+
+/**
+ * Mark a previously-returned trajectory entry as bad so future lookups skip
+ * it. Wired from `runtime.ts` when a turn that received an injected cache
+ * ends in apology/empty-answer/blocked — the entry is then almost certainly
+ * stale or wrong, and reusing it would propagate the same bad outcome.
+ */
+export function invalidateTrajectory(
+  entry: Pick<TrajectoryEntry, "normalizedQuery" | "finishedAt">,
+): void {
+  const key = trajectoryIdentity(entry);
+  if (_invalidatedKeys.has(key)) return;
+  _invalidatedKeys.set(key, Date.now());
+  if (_invalidatedKeys.size > INVALIDATION_MAX_ENTRIES) {
+    const oldestKey = _invalidatedKeys.keys().next().value;
+    if (oldestKey) _invalidatedKeys.delete(oldestKey);
+  }
+}
+
+export function _resetTrajectoryInvalidationForTests(): void {
+  _invalidatedKeys.clear();
+}
+
 // ── Read ───────────────────────────────────────────────────────────────────
+
+/**
+ * Result of a trajectory cache lookup. The similarity score and identity are
+ * exposed so callers can decide whether to invalidate the entry on a bad turn
+ * outcome.
+ */
+export interface TrajectoryLookupResult {
+  entry: TrajectoryEntry;
+  similarity: number;
+}
 
 /**
  * Look up a cached trajectory for a semantically similar query.
@@ -94,6 +140,7 @@ export async function writeTrajectory(
  *   - Cosine similarity ≥ SIMILARITY_THRESHOLD
  *   - Entry is not expired (within TTL)
  *   - Entry is not credential-shaped
+ *   - Entry has not been invalidated this process
  *
  * Returns `null` if embeddings are unavailable or no match found.
  */
@@ -101,7 +148,7 @@ export async function lookupTrajectory(
   query: string,
   workspacePath: string,
   freshnessSensitive = false,
-): Promise<TrajectoryEntry | null> {
+): Promise<TrajectoryLookupResult | null> {
   if (!isEmbeddingAvailable()) return null;
   if (freshnessSensitive) return null; // Never use cached data for fresh-sensitive queries
 
@@ -129,6 +176,8 @@ export async function lookupTrajectory(
     // TTL check
     const finishedMs = new Date(entry.finishedAt).getTime();
     if (Number.isNaN(finishedMs) || (now - finishedMs) > entry.ttlSeconds * 1000) continue;
+    // Skip entries marked bad earlier in this process
+    if (_invalidatedKeys.has(trajectoryIdentity(entry))) continue;
     // Security: skip credential-shaped entries (defence in depth — should not exist)
     const serialized = JSON.stringify(entry);
     if (CREDENTIAL_RE.test(serialized)) continue;
@@ -142,5 +191,5 @@ export async function lookupTrajectory(
     }
   }
 
-  return bestEntry;
+  return bestEntry ? { entry: bestEntry, similarity: bestSim } : null;
 }
