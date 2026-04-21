@@ -1,0 +1,709 @@
+openapi: 3.1.0
+info:
+  title: StarlingAI Gateway API
+  version: 0.7.0
+  summary: HTTP + WebSocket surface for the StarlingAI agent-swarm gateway.
+  description: |
+    REST API for the `@starlingai/core` gateway. Companion WebSocket RPC is at
+    `ws://${host}:${port}/ws?token=<jwt>` and follows JSON-RPC 2.0 (see
+    `docs/api.md` for the RPC method catalog).
+
+    Authentication: all `/api/*` paths require a bearer JWT unless noted.
+    Scene-trigger endpoints (`POST /api/scenes/:name/run`, `POST /api/jobs/:name/run`)
+    also accept a scene/job webhook key via `?key=` or `X-Scene-Key`.
+
+    Schemas below are intentionally loose — the runtime validates with Zod
+    schemas in `packages/core/src/config/` and `packages/core/src/gateway/`.
+    Refer to those schemas for exhaustive field definitions.
+  license:
+    name: CC BY-NC 4.0
+    url: https://creativecommons.org/licenses/by-nc/4.0/
+servers:
+  - url: http://localhost:8765
+    description: Local default (gateway.port)
+  - url: https://{host}
+    description: Reverse-proxied deployment
+    variables:
+      host:
+        default: ai.internal.example
+
+tags:
+  - name: Health
+  - name: Runtime
+  - name: Providers
+  - name: Multimodal
+  - name: Workspace
+  - name: Sessions
+  - name: Sites
+  - name: Guardrails
+  - name: Agents
+  - name: Memory
+  - name: ConfigAssistant
+  - name: Personality
+  - name: Scenes
+  - name: Jobs
+  - name: Approval
+  - name: Channels
+  - name: Swarm
+  - name: DynamicTools
+  - name: Checkpoints
+  - name: ComputerSessions
+  - name: Chat
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    sceneKey:
+      type: apiKey
+      in: header
+      name: X-Scene-Key
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+      required: [error]
+    HealthStatus:
+      type: object
+      properties:
+        status: { type: string, enum: [ok] }
+      required: [status]
+    ReadyStatus:
+      type: object
+      properties:
+        status: { type: string }
+        activeSessions: { type: integer }
+    RuntimeSnapshot:
+      type: object
+      description: Component health map; exact fields depend on registered components.
+      additionalProperties: true
+    ModelEndpointConfig:
+      type: object
+      additionalProperties: true
+    MultimodalConfig:
+      type: object
+      additionalProperties: true
+    GuardrailsConfig:
+      type: object
+      additionalProperties: true
+    PersonalityConfig:
+      type: object
+      properties:
+        systemPrompt: { type: string }
+        source: { type: string, enum: [config, runtime] }
+    AgentSummary:
+      type: object
+      properties:
+        name: { type: string }
+        label: { type: string }
+        cost: { type: string, enum: [cheap, standard, premium] }
+        tools: { type: array, items: { type: string } }
+        tier: { type: integer }
+    AgentOutcome:
+      type: object
+      properties:
+        agent: { type: string }
+        successRate: { type: number }
+        samples: { type: integer }
+    Scene:
+      type: object
+      additionalProperties: true
+    Job:
+      type: object
+      additionalProperties: true
+    JobRun:
+      type: object
+      properties:
+        jobId: { type: string }
+        status: { type: string, enum: [pending, running, completed, failed, cancelled] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        result: { type: object, additionalProperties: true }
+        error: { type: string }
+    ApprovalRecord:
+      type: object
+      properties:
+        approvalId: { type: string }
+        status: { type: string, enum: [pending, approved, rejected, expired] }
+        summary: { type: string }
+        requestedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+    ApprovalDecision:
+      type: object
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        comment: { type: string }
+      required: [decision]
+    ChannelConfig:
+      type: object
+      additionalProperties: true
+    SwarmStatus:
+      type: object
+      additionalProperties: true
+    DynamicTool:
+      type: object
+      additionalProperties: true
+    CapabilityGap:
+      type: object
+      properties:
+        capability: { type: string }
+        sampleQuery: { type: string }
+        occurrences: { type: integer }
+        firstSeen: { type: string, format: date-time }
+    Checkpoint:
+      type: object
+      additionalProperties: true
+    ComputerSession:
+      type: object
+      additionalProperties: true
+    ChatRequest:
+      type: object
+      properties:
+        message: { type: string }
+        sessionId: { type: string }
+        agentName: { type: string }
+        attachments:
+          type: array
+          items: { type: object, additionalProperties: true }
+      required: [message]
+    ChatResponse:
+      type: object
+      properties:
+        sessionId: { type: string }
+        text: { type: string }
+        trace: { type: array, items: { type: object, additionalProperties: true } }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      security: []
+      summary: Liveness probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+  /readyz:
+    get:
+      tags: [Health]
+      security: []
+      summary: Readiness probe with session count
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadyStatus' }
+
+  /api/status:
+    get:
+      tags: [Runtime]
+      summary: Uptime summary and active-session counters
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+
+  /api/runtime/status:
+    get:
+      tags: [Runtime]
+      summary: Component-by-component runtime health
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeSnapshot' } } }
+
+  /api/model-endpoints/status:
+    get:
+      tags: [Providers]
+      summary: Reachability of each configured model endpoint
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } } }
+
+  /api/providers/status:
+    get:
+      tags: [Providers]
+      summary: Provider roster and availability
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } } }
+
+  /api/model-endpoints/config:
+    get:
+      tags: [Providers]
+      summary: Read current model-endpoint routing config
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ModelEndpointConfig' } } } } }
+    put:
+      tags: [Providers]
+      summary: Replace model-endpoint routing config
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ModelEndpointConfig' } }
+      responses:
+        '200': { description: Updated }
+        '400': { description: Invalid config, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /api/multimodal/status:
+    get: { tags: [Multimodal], summary: Multimodal subsystem reachability, responses: { '200': { description: OK } } }
+  /api/multimodal/config:
+    get: { tags: [Multimodal], summary: Read multimodal config, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MultimodalConfig' } } } } } }
+    put:
+      tags: [Multimodal]
+      summary: Replace multimodal config
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MultimodalConfig' } } } }
+      responses: { '200': { description: Updated } }
+  /api/multimodal/file-to-markdown:
+    post:
+      tags: [Multimodal]
+      summary: Convert an uploaded document to Markdown
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+              required: [file]
+      responses:
+        '200': { description: Markdown result, content: { application/json: { schema: { type: object, properties: { markdown: { type: string } } } } } }
+  /api/multimodal/transcribe:
+    post:
+      tags: [Multimodal]
+      summary: Speech-to-text on an uploaded audio file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                audio: { type: string, format: binary }
+                language: { type: string }
+              required: [audio]
+      responses:
+        '200': { description: Transcription, content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } } }
+  /api/multimodal/voices:
+    get: { tags: [Multimodal], summary: Available TTS voices, responses: { '200': { description: OK } } }
+  /api/multimodal/voices/save:
+    post:
+      tags: [Multimodal]
+      summary: Upsert a TTS voice preset
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Saved } }
+  /api/multimodal/voices/{id}:
+    delete:
+      tags: [Multimodal]
+      summary: Delete a TTS voice preset
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+  /api/multimodal/tts:
+    post:
+      tags: [Multimodal]
+      summary: Render text as speech (returns audio/wav)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: string }
+                voiceId: { type: string }
+              required: [text]
+      responses:
+        '200':
+          description: WAV audio
+          content: { 'audio/wav': { schema: { type: string, format: binary } } }
+  /api/multimodal/summarize-for-speech:
+    post:
+      tags: [Multimodal]
+      summary: Produce a shorter pre-TTS summary
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { text: { type: string } }, required: [text] } } } }
+      responses: { '200': { description: Summary, content: { application/json: { schema: { type: object, properties: { summary: { type: string } } } } } } }
+  /api/multimodal/analyze-image:
+    post:
+      tags: [Multimodal]
+      summary: Vision analysis on an uploaded image
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image: { type: string, format: binary }
+                prompt: { type: string }
+              required: [image]
+      responses: { '200': { description: Analysis result } }
+  /api/multimodal/generate-image:
+    post:
+      tags: [Multimodal]
+      summary: Generate an image from a prompt via the configured external backend
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { prompt: { type: string } }, required: [prompt] } } } }
+      responses: { '200': { description: Generated image metadata } }
+
+  /api/workspace/upload:
+    post:
+      tags: [Workspace]
+      summary: Upload a file into the agent-visible workspace
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                path: { type: string }
+              required: [file]
+      responses: { '200': { description: Upload accepted } }
+  /api/workspace/file:
+    get:
+      tags: [Workspace]
+      summary: Retrieve a file from the workspace
+      parameters: [ { name: path, in: query, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: File content }
+        '404': { description: Not found }
+  /api/workspace/archive:
+    get:
+      tags: [Workspace]
+      summary: Download the workspace as a ZIP archive
+      responses:
+        '200':
+          description: ZIP
+          content: { 'application/zip': { schema: { type: string, format: binary } } }
+
+  /api/sessions/{sessionId}/debug-markdown:
+    get:
+      tags: [Sessions]
+      summary: Full session transcript + raw history + audit evidence as Markdown
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Markdown export, content: { 'text/markdown': { schema: { type: string } } } } }
+  /api/sessions/{sessionId}/audit-markdown:
+    get:
+      tags: [Sessions]
+      summary: Audit-only Markdown export for a session
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Markdown export, content: { 'text/markdown': { schema: { type: string } } } } }
+
+  /api/sites:
+    get:
+      tags: [Sites]
+      summary: List stored site login metadata (never the secrets themselves)
+      responses: { '200': { description: OK } }
+  /api/sites/{hostname}:
+    post:
+      tags: [Sites]
+      summary: Upsert login metadata for a hostname
+      parameters: [ { name: hostname, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Saved } }
+    delete:
+      tags: [Sites]
+      summary: Remove stored login metadata for a hostname
+      parameters: [ { name: hostname, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+
+  /api/guardrails:
+    get: { tags: [Guardrails], summary: Read current guardrail config, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GuardrailsConfig' } } } } } }
+    put:
+      tags: [Guardrails]
+      summary: Update rate limits, tool-tier rules, and approval rules
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GuardrailsConfig' } } } }
+      responses: { '200': { description: Updated }, '400': { description: Invalid config } }
+  /api/guardrails/reset:
+    post: { tags: [Guardrails], summary: Revert guardrails to the compiled config default, responses: { '200': { description: Reset } } }
+
+  /api/agents:
+    get:
+      tags: [Agents]
+      summary: List all sub-agents
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AgentSummary' } } } } } }
+  /api/agents/resolve:
+    get:
+      tags: [Agents]
+      summary: Resolve a query to the best-matched agent(s)
+      parameters: [ { name: q, in: query, required: true, schema: { type: string } } ]
+      responses: { '200': { description: OK } }
+  /api/agents/{name}/model:
+    patch:
+      tags: [Agents]
+      summary: Hot-patch an agent's model config
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Patched }, '404': { description: Unknown agent } }
+  /api/agents/outcomes:
+    get:
+      tags: [Agents]
+      summary: Per-agent success rate and sample counts
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AgentOutcome' } } } } } }
+
+  /api/flow-memory:
+    get: { tags: [Memory], summary: Read persistent swarm flow memory, responses: { '200': { description: OK } } }
+    post:
+      tags: [Memory]
+      summary: Append to flow memory
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Appended } }
+
+  /api/config-assistant/proposals:
+    get: { tags: [ConfigAssistant], summary: List pending config-assistant proposals, responses: { '200': { description: OK } } }
+    post:
+      tags: [ConfigAssistant]
+      summary: Create a config-assistant proposal
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+  /api/config-assistant/proposals/{id}/apply:
+    post:
+      tags: [ConfigAssistant]
+      summary: Approve and apply a proposal
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Applied }, '404': { description: Unknown proposal } }
+  /api/config-assistant/proposals/{id}/feedback:
+    post:
+      tags: [ConfigAssistant]
+      summary: Attach operator feedback to a proposal (approve/reject with notes)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Recorded } }
+
+  /api/personality:
+    get: { tags: [Personality], summary: Read the main assistant system prompt, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PersonalityConfig' } } } } } }
+    put:
+      tags: [Personality]
+      summary: Replace the main assistant system prompt
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { systemPrompt: { type: string } }, required: [systemPrompt] } } } }
+      responses: { '200': { description: Updated } }
+  /api/personality/reset:
+    post: { tags: [Personality], summary: Revert personality to the compiled config default, responses: { '200': { description: Reset } } }
+
+  /api/scenes:
+    get: { tags: [Scenes], summary: List scenes, responses: { '200': { description: OK } } }
+  /api/scenes/{name}:
+    post:
+      tags: [Scenes]
+      summary: Create or update a scene
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Scene' } } } }
+      responses: { '200': { description: Saved } }
+    delete:
+      tags: [Scenes]
+      summary: Delete a scene
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+  /api/scenes/{name}/run:
+    post:
+      tags: [Scenes]
+      summary: Trigger a scene (async; returns jobId)
+      security:
+        - bearerAuth: []
+        - sceneKey: []
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: key, in: query, required: false, schema: { type: string }, description: Scene webhook key (alternative to bearer auth) }
+      requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses:
+        '202':
+          description: Scene job enqueued
+          content: { application/json: { schema: { type: object, properties: { jobId: { type: string } } } } }
+
+  /api/jobs:
+    get: { tags: [Jobs], summary: List job definitions, responses: { '200': { description: OK } } }
+  /api/jobs/{name}:
+    post:
+      tags: [Jobs]
+      summary: Create or update a job
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+      responses: { '200': { description: Saved } }
+    delete:
+      tags: [Jobs]
+      summary: Delete a job
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+  /api/jobs/{name}/run:
+    post:
+      tags: [Jobs]
+      summary: Trigger a job (async; returns jobId)
+      security:
+        - bearerAuth: []
+        - sceneKey: []
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses:
+        '202': { description: Job enqueued, content: { application/json: { schema: { type: object, properties: { jobId: { type: string } } } } } }
+
+  /api/scenes/jobs:
+    get: { tags: [Jobs], summary: List scene-job runs, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/JobRun' } } } } } } }
+  /api/scenes/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      summary: Poll a scene-job run
+      parameters: [ { name: jobId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/JobRun' } } } }, '404': { description: Unknown job } }
+  /api/scenes/jobs/{jobId}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cancel an in-flight scene-job run
+      parameters: [ { name: jobId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Cancelled } }
+
+  /api/approval/{approvalId}:
+    get:
+      tags: [Approval]
+      summary: Read an approval record
+      parameters: [ { name: approvalId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ApprovalRecord' } } } } }
+    post:
+      tags: [Approval]
+      summary: Submit an approval decision (one-click callback)
+      parameters: [ { name: approvalId, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ApprovalDecision' } } } }
+      responses: { '200': { description: Recorded } }
+
+  /channels/slack/events:
+    post:
+      tags: [Channels]
+      security: []
+      summary: Slack Events API webhook
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Challenge echoed or event acknowledged } }
+  /channels/whatsapp/webhook:
+    get:
+      tags: [Channels]
+      security: []
+      summary: WhatsApp verification handshake
+      parameters:
+        - { name: 'hub.mode', in: query, required: true, schema: { type: string } }
+        - { name: 'hub.verify_token', in: query, required: true, schema: { type: string } }
+        - { name: 'hub.challenge', in: query, required: true, schema: { type: string } }
+      responses: { '200': { description: Challenge echoed } }
+    post:
+      tags: [Channels]
+      security: []
+      summary: WhatsApp inbound message
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: Accepted } }
+
+  /api/channels:
+    get: { tags: [Channels], summary: List configured channels and runtime status, responses: { '200': { description: OK } } }
+  /api/channels/{type}:
+    get:
+      tags: [Channels]
+      summary: Read a channel's runtime state + config
+      parameters: [ { name: type, in: path, required: true, schema: { type: string, enum: [slack, telegram, discord, whatsapp, email, webchat] } } ]
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ChannelConfig' } } } } }
+    put:
+      tags: [Channels]
+      summary: Upsert a channel config
+      parameters: [ { name: type, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChannelConfig' } } } }
+      responses: { '200': { description: Saved } }
+    delete:
+      tags: [Channels]
+      summary: Disable a channel
+      parameters: [ { name: type, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+  /api/channels/dead-letters:
+    get: { tags: [Channels], summary: Inspect the channel dead-letter queue, responses: { '200': { description: OK } } }
+
+  /api/swarm/status:
+    get: { tags: [Swarm], summary: Bidding, task queue, and concurrency snapshot, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SwarmStatus' } } } } } }
+  /api/swarm/health:
+    get: { tags: [Swarm], summary: Swarm bus liveness, worker status, and warden alerts, responses: { '200': { description: OK } } }
+
+  /api/tools/dynamic:
+    get: { tags: [DynamicTools], summary: List loaded self-developed tools, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DynamicTool' } } } } } } }
+  /api/tools/dynamic/promotion:
+    get: { tags: [DynamicTools], summary: List tools pending promotion, responses: { '200': { description: OK } } }
+  /api/tools/dynamic/{name}/promote:
+    post:
+      tags: [DynamicTools]
+      summary: Approve promotion of a `selfdev__` tool into the catalog
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Promoted } }
+  /api/tools/dynamic/{name}/reject-promotion:
+    post:
+      tags: [DynamicTools]
+      summary: Reject a promotion candidate
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { reason: { type: string } } } } } }
+      responses: { '200': { description: Rejected } }
+
+  /api/capability-gaps:
+    get: { tags: [Swarm], summary: List detected capability gaps (zero-result or low-confidence routings), responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/CapabilityGap' } } } } } } }
+
+  /api/checkpoints:
+    get: { tags: [Checkpoints], summary: List long-running-task checkpoints, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Checkpoint' } } } } } } }
+  /api/checkpoints/{taskId}/resume:
+    post:
+      tags: [Checkpoints]
+      summary: Resume a paused task
+      parameters: [ { name: taskId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Resumed } }
+  /api/checkpoints/{taskId}/complete:
+    post:
+      tags: [Checkpoints]
+      summary: Mark a paused task as complete
+      parameters: [ { name: taskId, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Completed } }
+
+  /api/computer-sessions:
+    get: { tags: [ComputerSessions], summary: List computer-use sessions, responses: { '200': { description: OK } } }
+  /api/computer-sessions/active:
+    get: { tags: [ComputerSessions], summary: List currently-active computer-use sessions, responses: { '200': { description: OK } } }
+  /api/computer-sessions/config:
+    get: { tags: [ComputerSessions], summary: VNC/RDP/SSH adapter config, responses: { '200': { description: OK } } }
+  /api/computer-sessions/{id}:
+    get:
+      tags: [ComputerSessions]
+      summary: Inspect a single session
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ComputerSession' } } } } }
+  /api/computer-sessions/{id}/emergency-stop:
+    post:
+      tags: [ComputerSessions]
+      summary: Hard-stop a computer-use session
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Stopped } }
+  /api/computer-sessions/{id}/heartbeat:
+    post:
+      tags: [ComputerSessions]
+      summary: Keepalive ping for a computer-use session
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: OK } }
+
+  /api/chat:
+    post:
+      tags: [Chat]
+      summary: Synchronous chat turn
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatRequest' } } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ChatResponse' } } }
+  /api/chat/stream:
+    post:
+      tags: [Chat]
+      summary: Streaming chat turn (AG-UI Server-Sent Events)
+      description: |
+        Streams `RUN_STARTED`, `TOOL_CALL_STARTED`, `TOOL_CALL_ENDED`, `RUN_FINISHED`,
+        and `RUN_ERROR` events as SSE frames. The final event carries the full
+        assistant message. Clients should send `Accept: text/event-stream`.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatRequest' } } } }
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { type: string }

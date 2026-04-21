@@ -90,6 +90,17 @@ import { stopAllTimers } from "./runtime/timers.js";
 
 const log = childLogger("main");
 
+/**
+ * Boot the gateway process: loads config, starts the Postgres audit sink,
+ * MemGraph schema bootstrap, scene-job store, Redis session cache, LLM
+ * provider health checks, webhook sync, retrieval/runtime daemons, the
+ * embedded scene worker (unless `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1`), and
+ * finally the HTTP + WebSocket listeners on `config.gateway.port`.
+ *
+ * Called from the package entrypoint; not expected to return before the
+ * process exits. Side effects include binding sockets, writing to the
+ * filesystem, and connecting to every configured backing service.
+ */
 export async function main() {
   log.info("StarlingAI starting...");
   const embeddedSceneWorkerEnabled = process.env["SAI_DISABLE_EMBEDDED_SCENE_WORKER"] !== "1";

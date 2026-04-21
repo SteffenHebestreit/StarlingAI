@@ -103,6 +103,17 @@ function getAccount(accounts: MailAccountConfig[], accountId: string): MailAccou
   return account;
 }
 
+/**
+ * Build the mail-service Hono app.
+ *
+ * Mounts every `/api/*` route (accounts, mailboxes, messages, drafts,
+ * calendar, contacts) plus `/health`. When `authToken` is provided, every
+ * non-health request must carry `Authorization: Bearer <token>`; otherwise
+ * the service runs open and should only be reachable on a private network.
+ *
+ * `store` owns the on-disk draft and category persistence at
+ * `MailServiceRuntimeConfig.dataPath`.
+ */
 export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftStore; authToken?: string }) {
   const app = new Hono();
 
