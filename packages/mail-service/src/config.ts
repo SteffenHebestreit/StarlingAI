@@ -87,6 +87,17 @@ function resolveAccount(account: z.infer<typeof MailAccountSchema>): MailAccount
   };
 }
 
+/**
+ * Load and validate the mail service runtime config.
+ *
+ * Accounts are parsed from a JSON/JSON5 file at
+ * `SAI_MAIL_SERVICE_CONFIG_PATH` (default `/config/mail/accounts.json`).
+ * Any string value starting with `$` is treated as an env-var reference and
+ * resolved against `process.env` — a missing or empty variable throws.
+ *
+ * Runtime settings come from the process environment: `HOST`, `PORT`,
+ * `SAI_MAIL_SERVICE_DATA_PATH`, and `SAI_MAIL_SERVICE_TOKEN`.
+ */
 export async function loadMailServiceConfig(): Promise<MailServiceRuntimeConfig> {
   const configPath = process.env["SAI_MAIL_SERVICE_CONFIG_PATH"] ?? "/config/mail/accounts.json";
   const raw = await readFile(configPath, "utf8");
