@@ -6,7 +6,7 @@
  * or when human QA spot-checks are required.
  */
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { getChatProviderWithOverride } from "../providers/index.js";
+import { getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import { childLogger } from "../logger.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
 
@@ -95,10 +95,17 @@ registerTool({
     );
 
     try {
-      const provider = getChatProviderWithOverride({
+      // E25: prefer the routing-tier model for lightweight translation work
+      // when configured — smaller instruction-tuned models produce tighter
+      // single-sentence translations at lower cost/latency. Fall back to the
+      // default provider when no tier model is configured.
+      const override = {
         temperature: 0.1,
         maxTokens: Math.max(512, text.length * 3),
-      });
+      };
+      const provider =
+        getChatProviderForTier("routing", override)
+          ?? getChatProviderWithOverride(override);
       const response = await provider.complete(messages, [], ctx.signal);
       const translated = (response.content ?? "").trim();
 

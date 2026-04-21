@@ -21,7 +21,7 @@ import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { lookupTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
-import { graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
+import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -2244,8 +2244,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // A non-blocked turn that produced a substantive answer is treated as a
       // successful outcome — memories retrieved during the turn get credited
       // (wasUseful=true + importance boost). Same signal the sub-agent uses.
-      if (finalResponse.length > 50 && !finalResponse.toLowerCase().startsWith("i apologize")) {
+      // An apology or stub answer is treated as an unhelpful outcome: the
+      // memories were retrieved and still didn't help, so mark them
+      // wasUseful=false and apply a modest importance penalty. This is the
+      // negative-signal counterpart that closes the E26 loop in both
+      // directions rather than relying solely on slow decay.
+      const isApology = finalResponse.toLowerCase().startsWith("i apologize");
+      if (finalResponse.length > 50 && !isApology) {
         graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
+      } else if (finalResponse.length <= 50 || isApology) {
+        graphMarkSessionRetrievalsUnhelpful(session.id, { penalty: 0.02 }).catch(() => {});
       }
 
       return {

@@ -209,6 +209,46 @@ export function isAgentMessagingSuppressed(sessionId: string, agentName: string)
   return true;
 }
 
+// ── Graceful degradation registry ────────────────────────────────────────────
+// Imminent-storm alerts don't abort the session (too aggressive) but they
+// should cause the next sub-agent iteration to tighten its tool budget and
+// receive a "slow down" nudge. The registry tracks sessions that have entered
+// degraded mode and when the soft-suppression expires.
+
+const DEGRADE_TTL_MS = 90_000;
+const _degradedSessions = new Map<string, number>();
+
+function pruneDegradedSessions(): void {
+  const now = Date.now();
+  for (const [id, expiry] of _degradedSessions) {
+    if (expiry <= now) _degradedSessions.delete(id);
+  }
+}
+
+export function markSessionDegraded(sessionId: string, ttlMs: number = DEGRADE_TTL_MS): void {
+  if (!sessionId) return;
+  _degradedSessions.set(sessionId, Date.now() + Math.max(1000, ttlMs));
+}
+
+export function isSessionDegraded(sessionId: string): boolean {
+  if (!sessionId) return false;
+  const expiry = _degradedSessions.get(sessionId);
+  if (!expiry) return false;
+  if (expiry <= Date.now()) {
+    _degradedSessions.delete(sessionId);
+    return false;
+  }
+  return true;
+}
+
+export function clearSessionDegraded(sessionId: string): void {
+  _degradedSessions.delete(sessionId);
+}
+
+export function _resetDegradedSessionsForTests(): void {
+  _degradedSessions.clear();
+}
+
 export function startWarden(): void {
   if (_wardenInterval) return;
 
@@ -417,7 +457,10 @@ export function startWarden(): void {
     }
   });
 
-  _wardenInterval = setInterval(sweepAnomalies, 30_000);
+  _wardenInterval = setInterval(() => {
+    sweepAnomalies();
+    pruneDegradedSessions();
+  }, 30_000);
   _wardenInterval.unref();
 
   // Start the specialized tool-development session warden
@@ -462,6 +505,7 @@ export function resetWardenForTests(): void {
   _toolStormImminentCooldown.clear();
   _agentMessageImminentCooldown.clear();
   _sessionAbortControllers.clear();
+  _degradedSessions.clear();
   _alertRing.length = 0;
   _alertsEmitted = 0;
 }
@@ -890,6 +934,15 @@ function emitAlert(alert: WardenAlert): void {
     { severity: alert.severity, channel: "warden" },
   );
   log[alert.severity]({ alertType: alert.type, subject: alert.subject }, `Warden: ${alert.detail}`);
+
+  // E19 graceful-degradation ladder: imminent alerts are too soft to justify
+  // an abort but should cause the next iteration to tighten its tool budget
+  // and receive a "slow down" nudge. Flag the session so sub-agent.ts can
+  // react on the next loop pass.
+  if (alert.type === "tool_storm_imminent" || alert.type === "agent_message_flood_imminent") {
+    const sessionId = extractSessionIdFromSubject(alert.subject);
+    if (sessionId) markSessionDegraded(sessionId);
+  }
 
   // Abort the active session turn if the alert is severe enough
   maybeAbortSession(alert);
