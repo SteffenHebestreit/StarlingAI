@@ -7,6 +7,9 @@ dist/
 coverage/
 .turbo/
 
+# Claude Code local settings (per-user permission allowlist, etc.)
+.claude/
+
 # Runtime secrets and credentials
 .guardedswarm/
 guardedswarm.json
