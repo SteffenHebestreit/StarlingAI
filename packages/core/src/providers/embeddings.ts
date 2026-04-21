@@ -868,6 +868,13 @@ let _index: EmbeddingEntry[] = [];
 let _available = false;
 let _embeddingModel = "";
 let _queryCache = new Map<string, CachedEmbeddingQuery>();
+// Raw query-vector cache (distinct from `_queryCache`, which holds post-search
+// `EmbeddingSearchResult[]`). Keyed by `${embeddingModel}::${normalized query}`.
+// Hit by tool rerank, trajectory cache, and memory service — all of which
+// previously fired an HTTP embedding call per invocation.
+type CachedQueryVector = { storedAt: number; vector: Float32Array };
+let _queryVectorCache = new Map<string, CachedQueryVector>();
+let _queryVectorInflight = new Map<string, Promise<Float32Array | null>>();
 let _lastProvider: LMStudioProvider | null = null;
 let _lastSubAgents: Record<string, SubAgentConfig> = {};
 let _retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -875,6 +882,8 @@ let _retryDelayMs = 0;
 
 const QUERY_CACHE_TTL_MS = 5 * 60_000;
 const QUERY_CACHE_MAX_ENTRIES = 64;
+const QUERY_VECTOR_CACHE_TTL_MS = 5 * 60_000;
+const QUERY_VECTOR_CACHE_MAX_ENTRIES = 256;
 const EMBEDDING_RETRY_INITIAL_DELAY_MS = 15_000;
 const EMBEDDING_RETRY_MAX_DELAY_MS = 120_000;
 const SEARCH_STOP_WORDS = new Set<string>([
@@ -1125,12 +1134,44 @@ export function isEmbeddingAvailable(): boolean {
  */
 export async function computeQueryEmbedding(text: string): Promise<Float32Array | null> {
   if (!_available || !_lastProvider || !_embeddingModel) return null;
-  try {
-    const [vec] = await _lastProvider.embed([text], _embeddingModel);
-    return vec ?? null;
-  } catch {
-    return null;
+  const normalized = normalizeSearchText(text);
+  if (!normalized) {
+    try {
+      const [vec] = await _lastProvider.embed([text], _embeddingModel);
+      return vec ?? null;
+    } catch {
+      return null;
+    }
   }
+  const cacheKey = `${_embeddingModel}::${normalized}`;
+  const cached = _queryVectorCache.get(cacheKey);
+  if (cached && Date.now() - cached.storedAt <= QUERY_VECTOR_CACHE_TTL_MS) {
+    return cached.vector;
+  }
+  if (cached) _queryVectorCache.delete(cacheKey);
+  const inflight = _queryVectorInflight.get(cacheKey);
+  if (inflight) return inflight;
+  const provider = _lastProvider;
+  const model = _embeddingModel;
+  const promise = (async () => {
+    try {
+      const [vec] = await provider.embed([text], model);
+      if (vec) {
+        _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec });
+        if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
+          const oldestKey = _queryVectorCache.keys().next().value;
+          if (oldestKey) _queryVectorCache.delete(oldestKey);
+        }
+      }
+      return vec ?? null;
+    } catch {
+      return null;
+    } finally {
+      _queryVectorInflight.delete(cacheKey);
+    }
+  })();
+  _queryVectorInflight.set(cacheKey, promise);
+  return promise;
 }
 
 export function resetEmbeddingSearchStateForTests(): void {
@@ -1195,4 +1236,6 @@ function storeCachedEmbeddingQuery(cacheKey: string, results: EmbeddingSearchRes
 
 function clearEmbeddingQueryCache(): void {
   _queryCache.clear();
+  _queryVectorCache.clear();
+  _queryVectorInflight.clear();
 }
