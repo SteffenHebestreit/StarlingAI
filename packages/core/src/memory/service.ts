@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
+import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 
 const log = childLogger("memory:service");
 
@@ -14,41 +15,19 @@ const MEMORY_SUBDIR = ".starlingai/memory";
 const CONTENT_MERGE_MAX_CHARS = 560;
 
 const TOKEN_STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "but",
-  "by",
-  "for",
-  "from",
-  "had",
-  "has",
-  "have",
-  "in",
-  "into",
-  "is",
-  "it",
-  "its",
-  "of",
-  "on",
-  "or",
-  "that",
-  "the",
-  "their",
-  "them",
-  "then",
-  "there",
-  "these",
-  "this",
-  "those",
-  "to",
-  "was",
-  "were",
-  "with",
+  // English
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "had", "has", "have", "in", "into", "is", "it", "its", "of", "on", "or",
+  "that", "the", "their", "them", "then", "there", "these", "this", "those",
+  "to", "was", "were", "with",
+  // German — the agent frequently writes and searches in German; these were
+  // previously scored as content words, diluting relevance.
+  "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem",
+  "eines", "und", "oder", "aber", "denn", "weil", "dass", "wenn", "als",
+  "von", "vom", "zum", "zur", "auf", "mit", "nach", "vor", "über", "unter",
+  "für", "bei", "ist", "sind", "war", "waren", "habe", "hat", "haben",
+  "ich", "du", "er", "sie", "es", "wir", "ihr", "mein", "dein", "sein",
+  "nicht", "auch", "noch", "schon", "bitte", "diese", "dieser", "dieses",
 ]);
 
 export type MemoryScope = "workspace" | "user" | "session" | "agent";
@@ -117,7 +96,43 @@ interface StoredWorkspaceMemoryRecord {
   storedAt?: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Optional pre-computed embedding for semantic search (number[] for JSON). */
+  embedding?: number[];
 }
+
+// ── LRU cache for durable memory reads ────────────────────────────────────
+// Keyed on `${scope}:${dir}` — invalidated whenever the dir mtime changes
+// (file add/remove) or when `storeDurableMemoryRecord` explicitly bumps the
+// version (covers in-place overwrites where dir mtime may not move).
+
+interface DurableCacheEntry {
+  mtimeMs: number;
+  version: number;
+  records: MemoryRecord[];
+  embeddings: Map<string, Float32Array>;
+}
+
+const _durableCache = new Map<string, DurableCacheEntry>();
+const _durableVersionBump = new Map<string, number>();
+
+function _cacheKey(scope: DurableMemoryScope, dir: string): string {
+  return `${scope}:${dir}`;
+}
+
+function _bumpCacheVersion(key: string): void {
+  _durableVersionBump.set(key, (_durableVersionBump.get(key) ?? 0) + 1);
+  _durableCache.delete(key);
+}
+
+// ── Auto-compaction tracking ──────────────────────────────────────────────
+// Avoid O(n) compact-on-every-write by counting writes per (scope, workspace)
+// and only compacting every `COMPACT_CHECK_INTERVAL` writes when the store
+// has grown past `COMPACT_MIN_RECORDS`.
+
+const COMPACT_CHECK_INTERVAL = 50;
+const COMPACT_MIN_RECORDS = 500;
+const _writeCounters = new Map<string, number>();
+const _compactingScopes = new Set<string>();
 
 export function storeWorkspaceMemoryRecord(workspacePath: string, input: StoreWorkspaceMemoryInput): MemoryRecord {
   return storeDurableMemoryRecord("workspace", workspacePath, input);
@@ -138,12 +153,20 @@ export async function searchMemoryRecords(
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
   const records: MemoryRecord[] = [];
 
+  // Collect durable embeddings alongside records so we can run a single-pass
+  // cosine blend instead of embedding every record at search time.
+  const embeddings = new Map<string, Float32Array>();
+
   if (scopes.has("workspace")) {
-    records.push(...readWorkspaceMemoryRecords(workspacePath));
+    const cached = _readDurableCached("workspace", workspacePath);
+    records.push(...cached.records);
+    for (const [id, vec] of cached.embeddings) embeddings.set(id, vec);
   }
 
   if (scopes.has("user")) {
-    records.push(...readUserMemoryRecords(workspacePath));
+    const cached = _readDurableCached("user", workspacePath);
+    records.push(...cached.records);
+    for (const [id, vec] of cached.embeddings) embeddings.set(id, vec);
   }
 
   if (scopes.has("session") && opts.sessionId) {
@@ -160,23 +183,42 @@ export async function searchMemoryRecords(
     return scoreRecord(record, normalizedQuery, tokens) > 0;
   });
 
-  // Pre-score all candidates
+  // Pre-score all candidates (token overlap + recency + decay)
   const textScored = filtered.map((record) => ({
     ...record,
     score: scoreRecord(record, normalizedQuery, tokens),
   }));
 
+  // Embedding blend: when the embedding provider is available, compute the
+  // query embedding once and apply a cosine-similarity adjustment to scored
+  // records that have a stored vector.  Cheap — no per-record model calls.
+  let queryVec: Float32Array | null = null;
+  if (normalizedQuery && isEmbeddingAvailable()) {
+    try { queryVec = await computeQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
+  }
+  const embeddingScored = queryVec
+    ? textScored.map((record) => {
+        const vec = embeddings.get(record.id);
+        if (!vec || vec.length !== queryVec!.length) return record;
+        const sim = cosineSimilarity(queryVec!, vec);
+        // Blend: 70% lexical/recency, 30% semantic.  Only adds — never
+        // penalises a lexically relevant record that happens to have a low
+        // cosine score against a paraphrased query.
+        return { ...record, score: (record.score ?? 0) + Math.max(0, sim) * 0.3 };
+      })
+    : textScored;
+
   // Graph reranking: blend text score (55%) with graph score (45%)
   // Falls back to text-only if MemGraph is unavailable or the query is empty
   const limit = Math.max(1, Math.min(50, Math.trunc(opts.limit ?? 10)));
-  const graphScores = await graphRerank(textScored.map(r => r.id));
+  const graphScores = await graphRerank(embeddingScored.map(r => r.id));
 
   const finalScored = graphScores.size > 0
-    ? textScored.map(record => ({
+    ? embeddingScored.map(record => ({
         ...record,
         score: (record.score ?? 0) * 0.55 + (graphScores.get(record.id) ?? 0.5) * 0.45,
       }))
-    : textScored;
+    : embeddingScored;
 
   const sorted = finalScored
     .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || right.updatedAt.localeCompare(left.updatedAt))
@@ -346,24 +388,54 @@ function readUserMemoryRecords(workspacePath: string): MemoryRecord[] {
 }
 
 function readDurableMemoryRecords(scope: DurableMemoryScope, workspacePath: string): MemoryRecord[] {
-  const dir = memoryDirForScope(scope, workspacePath);
-  if (!existsSync(dir)) return [];
+  return _readDurableCached(scope, workspacePath).records;
+}
 
-  return readdirSync(dir)
-    .filter((file) => file.endsWith(".json"))
-    .map((file) => {
-      try {
-        return parseStoredWorkspaceMemory(readFileSync(resolve(dir, file), "utf-8"));
-      } catch {
-        return null;
+function _readDurableCached(scope: DurableMemoryScope, workspacePath: string): DurableCacheEntry {
+  const dir = memoryDirForScope(scope, workspacePath);
+  if (!existsSync(dir)) {
+    return { mtimeMs: 0, version: 0, records: [], embeddings: new Map() };
+  }
+
+  const key = _cacheKey(scope, dir);
+  const expectedVersion = _durableVersionBump.get(key) ?? 0;
+  let mtimeMs = 0;
+  try { mtimeMs = statSync(dir).mtimeMs; } catch { /* ignore */ }
+
+  const cached = _durableCache.get(key);
+  if (cached && cached.mtimeMs === mtimeMs && cached.version === expectedVersion) {
+    return cached;
+  }
+
+  const records: MemoryRecord[] = [];
+  const embeddings = new Map<string, Float32Array>();
+  for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+    try {
+      const stored = parseStoredWorkspaceMemory(readFileSync(resolve(dir, file), "utf-8"));
+      if (!stored) continue;
+      const record = workspaceStoredToRecord(stored);
+      records.push(record);
+      if (Array.isArray(stored.embedding) && stored.embedding.length > 0) {
+        embeddings.set(record.id, new Float32Array(stored.embedding));
       }
-    })
-    .filter((entry): entry is StoredWorkspaceMemoryRecord => entry !== null)
-    .map(workspaceStoredToRecord);
+    } catch { /* skip malformed */ }
+  }
+
+  const entry: DurableCacheEntry = { mtimeMs, version: expectedVersion, records, embeddings };
+  _durableCache.set(key, entry);
+  return entry;
+}
+
+/** Internal — exposed for tests. Clears all in-process caches. */
+export function _clearDurableMemoryCaches(): void {
+  _durableCache.clear();
+  _durableVersionBump.clear();
+  _writeCounters.clear();
 }
 
 function storeDurableMemoryRecord(scope: DurableMemoryScope, workspacePath: string, input: StoreWorkspaceMemoryInput): MemoryRecord {
   const dir = ensureDirForScope(scope, workspacePath);
+  const cacheKey = _cacheKey(scope, dir);
   const key = safeKey(input.key);
   const filePath = join(dir, `${key}.json`);
   const existing = existsSync(filePath)
@@ -371,29 +443,91 @@ function storeDurableMemoryRecord(scope: DurableMemoryScope, workspacePath: stri
     : null;
   const now = new Date().toISOString();
 
+  const subject = (input.subject ?? key).trim() || key;
+  const content = input.content.trim();
+
+  // Reuse existing embedding when the indexable text hasn't changed —
+  // otherwise clear so the async refresh below can replace it.
+  const prevIndex = existing ? `${existing.subject ?? ""}\n${existing.content}` : "";
+  const nextIndex = `${subject}\n${content}`;
+  const embedding = prevIndex === nextIndex ? existing?.embedding : undefined;
+
   const stored: StoredWorkspaceMemoryRecord = {
     id: existing?.id ?? randomUUID(),
     scope,
     kind: normalizeKind(input.kind) ?? existing?.kind ?? "note",
     ownerType: scope === "user" ? "user" : "workspace",
     ownerId: scope === "user" ? "user" : "workspace",
-    subject: (input.subject ?? key).trim() || key,
+    subject,
     source: "memory_store",
     key,
-    content: input.content.trim(),
+    content,
     tags: normalizeTags(input.tags),
     storedAt: existing?.createdAt ?? now,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    ...(embedding ? { embedding } : {}),
   };
 
   writeFileSync(filePath, JSON.stringify(stored, null, 2), "utf-8");
+  _bumpCacheVersion(cacheKey);
   const result = workspaceStoredToRecord(stored);
+
+  // Fire-and-forget embedding refresh when the indexable text changed and
+  // embeddings are configured.  Writes back to the same file so future reads
+  // pick it up.
+  if (!embedding && isEmbeddingAvailable()) {
+    void _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
+  }
 
   // Fire-and-forget graph write-through — MemGraph enhances search but is not critical path
   upsertMemoryToGraph(result).catch(err => log.debug({ err }, "Graph write-through failed"));
 
+  // Best-effort auto-compaction: every COMPACT_CHECK_INTERVAL writes, compact
+  // if the store has grown past COMPACT_MIN_RECORDS.
+  _maybeAutoCompact(scope, workspacePath, cacheKey);
+
   return result;
+}
+
+async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text: string): Promise<void> {
+  try {
+    const vec = await computeQueryEmbedding(text);
+    if (!vec) return;
+    if (!existsSync(filePath)) return;
+    const parsed = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"));
+    if (!parsed) return;
+    // Only write back if the indexable text still matches what we embedded.
+    const currentIndex = `${parsed.subject ?? ""}\n${parsed.content}`;
+    if (currentIndex !== text) return;
+    const updated: StoredWorkspaceMemoryRecord = { ...parsed, embedding: Array.from(vec) };
+    writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
+    _bumpCacheVersion(cacheKey);
+  } catch (err) {
+    log.debug({ err }, "Embedding refresh failed — non-critical");
+  }
+}
+
+function _maybeAutoCompact(scope: DurableMemoryScope, workspacePath: string, cacheKey: string): void {
+  // Re-entry guard: compact itself calls storeDurableMemoryRecord, which
+  // re-enters this function.  The counter guard alone is insufficient.
+  if (_compactingScopes.has(cacheKey)) return;
+  const count = (_writeCounters.get(cacheKey) ?? 0) + 1;
+  _writeCounters.set(cacheKey, count);
+  if (count % COMPACT_CHECK_INTERVAL !== 0) return;
+  try {
+    const records = readDurableMemoryRecords(scope, workspacePath);
+    if (records.length < COMPACT_MIN_RECORDS) return;
+    _compactingScopes.add(cacheKey);
+    try {
+      compactDurableMemoryRecords(scope, workspacePath);
+    } finally {
+      _compactingScopes.delete(cacheKey);
+    }
+  } catch (err) {
+    _compactingScopes.delete(cacheKey);
+    log.debug({ err }, "Auto-compaction skipped — non-critical");
+  }
 }
 
 async function readSessionMemoryRecords(sessionId: string): Promise<MemoryRecord[]> {
@@ -487,7 +621,8 @@ function parseStoredWorkspaceMemory(raw: string): StoredWorkspaceMemoryRecord | 
 }
 
 function scoreRecord(record: MemoryRecord, normalizedQuery: string, tokens: string[]): number {
-  if (!normalizedQuery) return scopeWeight(record.scope) + recencyBoost(record.updatedAt);
+  const decay = decayFactorForKind(record.kind, record.updatedAt);
+  if (!normalizedQuery) return (scopeWeight(record.scope) + recencyBoost(record.updatedAt)) * decay;
 
   const subject = record.subject.toLowerCase();
   const content = record.content.toLowerCase();
@@ -505,7 +640,26 @@ function scoreRecord(record: MemoryRecord, normalizedQuery: string, tokens: stri
     else if (content.includes(token)) score += 0.14;
   }
 
-  return score;
+  // Kind-based decay: volatile kinds (fact/note) lose half their weight
+  // in two weeks; durable kinds (decision/preference) in six months.
+  return score * decay;
+}
+
+const KIND_HALF_LIFE_DAYS: Record<MemoryKind, number> = {
+  decision: 180,
+  preference: 180,
+  summary: 45,
+  lesson: 90,
+  fact: 14,
+  note: 14,
+};
+
+function decayFactorForKind(kind: MemoryKind, updatedAt: string): number {
+  const parsed = Date.parse(updatedAt);
+  if (!Number.isFinite(parsed)) return 1.0;
+  const ageDays = Math.max(0, (Date.now() - parsed) / 86_400_000);
+  const halfLife = KIND_HALF_LIFE_DAYS[kind] ?? 14;
+  return Math.pow(0.5, ageDays / halfLife);
 }
 
 function scopeWeight(scope: MemoryScope): number {

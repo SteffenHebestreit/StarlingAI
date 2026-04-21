@@ -81,6 +81,28 @@ describe("Warden — tool storm detection", () => {
     const alerts2 = sweepAnomaliesNow();
     expect(alerts2.filter(a => a.type === "tool_storm")).toHaveLength(0);
   });
+
+  it("E19: fires tool_storm_imminent when short-window velocity is elevated", () => {
+    // 8 calls in <60s — below hard threshold (15/5min) but meets predict bar.
+    for (let i = 0; i < 8; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-imm", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some(a => a.type === "tool_storm_imminent" && a.subject === "sess-imm")).toBe(true);
+    expect(alerts.some(a => a.type === "tool_storm")).toBe(false);
+  });
+
+  it("E19: imminent alert does not re-fire during cooldown", () => {
+    for (let i = 0; i < 8; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-cool", data: {} });
+    }
+    sweepAnomaliesNow();
+    vi.mocked(logAudit).mockClear();
+    // Add one more call and sweep again — should NOT re-fire imminent.
+    fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-cool", data: {} });
+    const alerts2 = sweepAnomaliesNow();
+    expect(alerts2.filter(a => a.type === "tool_storm_imminent")).toHaveLength(0);
+  });
 });
 
 describe("Warden — repeated failures detection", () => {

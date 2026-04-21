@@ -13,7 +13,7 @@
 
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
+import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
@@ -25,6 +25,7 @@ import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurre
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
 import { consumeAgentMessages } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult } from "../tools/result-shaping.js";
@@ -1062,8 +1063,18 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
       : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
-    // Get available tools for this agent
+    // Get available tools for this agent. E20: rerank by semantic
+    // relevance to the current task so the model sees the most relevant
+    // tools first — useful when the tool list is large and the model's
+    // attention budget is finite.
     let tools = getToolsAsLLMDefs(effectiveToolNames);
+    if (tools.length > 6) {
+      try {
+        tools = await rerankToolsForTask(tools, sanitizedTask);
+      } catch (err) {
+        log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
+      }
+    }
 
     const toolContext: ToolContext = {
       sessionId: subSessionId,
@@ -1165,7 +1176,10 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
-    /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount. */
+    /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
+     *  Also closes the graph-memory retrieval feedback loop on success/partial
+     *  outcomes so retrieved memories that led to a real deliverable get
+     *  credited (wasUseful=true + importance boost). */
     const recordOutcome = (
       fields: Parameters<typeof appendOutcome>[1],
     ): void => {
@@ -1174,6 +1188,12 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,
       });
+      if (fields.outcome === "success" || fields.outcome === "partial") {
+        // Partial outcomes credit less than full success — still positive,
+        // because some of the retrieved memories *did* contribute.
+        const boost = fields.outcome === "success" ? 0.05 : 0.02;
+        graphMarkSessionRetrievalsUseful(subSessionId, { boost }).catch(() => {});
+      }
     };
 
     const buildStats = (

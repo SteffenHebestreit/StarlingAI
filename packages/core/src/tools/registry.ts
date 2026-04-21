@@ -1,5 +1,6 @@
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
+import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 
 export interface ToolHandler {
   name: string;
@@ -8,6 +9,18 @@ export interface ToolHandler {
   /** Optional per-tool timeout in ms. When set, tool execution is aborted after this duration. */
   timeoutMs?: number;
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
+  /**
+   * E20: Free-form description used only for embedding-based rerank.
+   * When unset the reranker falls back to `description`.  Use this to add
+   * paraphrases, synonyms, and example tasks that help route
+   * semantically-close queries to the right tool even when the user's
+   * wording doesn't match the canonical description.
+   */
+  embeddingDescription?: string;
+  /** E20: Qualitative cost hint. "low" tools are preferred when semantic scores tie. */
+  costHint?: "low" | "medium" | "high";
+  /** E20: Qualitative latency hint. Same tie-break semantics as costHint. */
+  latencyHint?: "low" | "medium" | "high";
 }
 
 export interface SwarmTaskAttempt {
@@ -176,6 +189,89 @@ export function getToolsAsLLMDefs(allowedTools?: string[]): LLMToolDef[] {
     description: t.description,
     parameters: t.parameters,
   }));
+}
+
+// ── E20: Task-aware tool rerank ──────────────────────────────────────────
+// Embedding cache keyed on `name::description::embeddingDescription` so
+// dev-time edits to a tool's wording invalidate the cache automatically.
+
+const _toolEmbeddingCache = new Map<string, Float32Array>();
+const _toolEmbeddingInflight = new Map<string, Promise<Float32Array | null>>();
+const HINT_WEIGHT: Record<"low" | "medium" | "high", number> = {
+  low: 0.02,
+  medium: 0,
+  high: -0.015,
+};
+
+function _toolEmbeddingKey(h: ToolHandler): string {
+  return `${h.name}::${h.description}::${h.embeddingDescription ?? ""}`;
+}
+
+function _toolEmbeddingText(h: ToolHandler): string {
+  const paraphrase = h.embeddingDescription ?? "";
+  return paraphrase
+    ? `Tool: ${h.name}\nDescription: ${h.description}\nAlso: ${paraphrase}`
+    : `Tool: ${h.name}\nDescription: ${h.description}`;
+}
+
+async function _getToolEmbedding(h: ToolHandler): Promise<Float32Array | null> {
+  const key = _toolEmbeddingKey(h);
+  const cached = _toolEmbeddingCache.get(key);
+  if (cached) return cached;
+  const inflight = _toolEmbeddingInflight.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    const vec = await computeQueryEmbedding(_toolEmbeddingText(h));
+    if (vec) _toolEmbeddingCache.set(key, vec);
+    return vec;
+  })();
+  _toolEmbeddingInflight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    _toolEmbeddingInflight.delete(key);
+  }
+}
+
+/**
+ * E20: Reorder the given tool definitions by semantic relevance to `task`.
+ *
+ * Non-destructive — tools with unavailable embeddings retain their input
+ * order at the tail. Tie-breaks prefer lower `costHint` / `latencyHint`.
+ * When embeddings are unavailable the input list is returned unchanged.
+ */
+export async function rerankToolsForTask(
+  defs: LLMToolDef[],
+  task: string,
+): Promise<LLMToolDef[]> {
+  if (!task || defs.length <= 1 || !isEmbeddingAvailable()) return defs;
+
+  const queryVec = await computeQueryEmbedding(task);
+  if (!queryVec) return defs;
+
+  const scored = await Promise.all(
+    defs.map(async (def, idx) => {
+      const handler = _registry.get(def.name);
+      if (!handler) return { def, score: -Infinity, idx };
+      const vec = await _getToolEmbedding(handler);
+      if (!vec) return { def, score: -Infinity, idx };
+      const sim = cosineSimilarity(queryVec, vec);
+      const costAdj = HINT_WEIGHT[handler.costHint ?? "medium"];
+      const latAdj = HINT_WEIGHT[handler.latencyHint ?? "medium"];
+      return { def, score: sim + costAdj + latAdj, idx };
+    }),
+  );
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.idx - b.idx;
+  });
+  return scored.map(s => s.def);
+}
+
+export function _clearToolEmbeddingCacheForTests(): void {
+  _toolEmbeddingCache.clear();
+  _toolEmbeddingInflight.clear();
 }
 
 /**

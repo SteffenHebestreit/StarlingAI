@@ -183,6 +183,26 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
   return createChatProvider(modelConfig, resolveProviderEndpoint(modelConfig, config));
 }
 
+/**
+ * E25 — Model tier ladder.
+ *
+ * Returns a ChatProvider configured with the tier-specific model (inheriting
+ * sampling/context settings from the default ModelConfig). Returns `null`
+ * when no tier model is configured so callers can fall back to the default
+ * provider without building a second one.
+ *
+ * Current wiring:
+ *   - "routing"   → reserved; no runtime consumer yet
+ *   - "synthesis" → consumed by runtime.forceSynthesis to run the final
+ *                   user-facing rewrite on a lighter / faster model
+ */
+export function getChatProviderForTier(tier: "routing" | "synthesis"): ChatProvider | null {
+  const config = getConfig();
+  const tierModel = config.agents.defaults.model.tiers?.[tier];
+  if (!tierModel) return null;
+  return getChatProviderWithOverride({ primary: tierModel });
+}
+
 export function getEmbeddingProvider(): LMStudioProvider {
   const config = getConfig();
   const modelConfig = config.agents.defaults.model;

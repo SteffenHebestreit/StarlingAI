@@ -65,6 +65,22 @@ export const ModelConfigSchema = z.object({
    *  Qwen keeps its special sampling auto-tuning unless explicitly overridden;
    *  other models retain their configured sampling values. */
   enableThinking: z.boolean().optional(),
+  /** Optional model-tier ladder. When set, the orchestrator swaps in the
+   *  tier-specific model for certain paths instead of `primary`:
+   *   - `routing`   : lightweight classifier/picker calls (reserved — wired as
+   *                   adopted, currently unused by the runtime)
+   *   - `synthesis` : final user-facing rewrite + delegate-coverage resynthesis
+   *                   (see runtime.forceSynthesis). Use a smaller, more
+   *                   instruction-following model to reduce tail latency on
+   *                   synthesis turns while keeping `primary` for reasoning.
+   *  Each value is a provider-prefixed model name, same format as `primary`
+   *  (e.g. "lmstudio/qwen3-7b-instruct"). Other ModelConfig fields
+   *  (temperature, context window, sampling) are inherited from the base
+   *  ModelConfig — only the model name is overridden. */
+  tiers: z.object({
+    routing: z.string().max(200).optional(),
+    synthesis: z.string().max(200).optional(),
+  }).optional(),
 });
 
 export const RateLimitSchema = z.object({

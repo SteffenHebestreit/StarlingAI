@@ -8,9 +8,10 @@
  * The orchestrator reads recent failures at session start so it can
  * route smarter without repeating known-broken paths.
  */
-import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
+import { appendJsonLine, readLastRecords } from "../memory/bounded-ndjson-store.js";
 
 const log = childLogger("agent:outcomes");
 
@@ -36,52 +37,21 @@ export interface OutcomeEntry {
 }
 
 const OUTCOMES_FILE = ".starlingai/agent_outcomes.ndjson";
+const MAX_OUTCOMES_LINES = 50_000;
 
 export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void {
   try {
-    const dir = resolve(workspacePath, ".starlingai");
-    mkdirSync(dir, { recursive: true });
     const filePath = resolve(workspacePath, OUTCOMES_FILE);
-    appendFileSync(filePath, JSON.stringify(entry) + "\n", "utf-8");
-    // Rolling-window trim: keep only the last MAX_OUTCOMES_LINES lines so very
-    // long-lived workspaces do not pay O(n) read cost on every routing call.
-    _trimOutcomesIfNeeded(filePath);
+    appendJsonLine(filePath, entry, { maxLines: MAX_OUTCOMES_LINES });
   } catch (err) {
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");
   }
 }
 
-const MAX_OUTCOMES_LINES = 50_000;
-const TRIM_CHECK_INTERVAL = 200; // only count lines every N writes
-let _outcomesWriteCount = 0;
-
-function _trimOutcomesIfNeeded(filePath: string): void {
-  _outcomesWriteCount++;
-  if (_outcomesWriteCount % TRIM_CHECK_INTERVAL !== 0) return;
-  try {
-    const raw = readFileSync(filePath, "utf-8").trim();
-    const lines = raw.split("\n").filter(Boolean);
-    if (lines.length > MAX_OUTCOMES_LINES) {
-      const kept = lines.slice(lines.length - MAX_OUTCOMES_LINES);
-      writeFileSync(filePath, kept.join("\n") + "\n", "utf-8");
-    }
-  } catch { /* best-effort */ }
-}
-
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
   const file = resolve(workspacePath, OUTCOMES_FILE);
   if (!existsSync(file)) return [];
-  try {
-    return readFileSync(file, "utf-8")
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(line => { try { return JSON.parse(line) as OutcomeEntry; } catch { return null; } })
-      .filter((e): e is OutcomeEntry => e !== null)
-      .slice(-limit);
-  } catch {
-    return [];
-  }
+  return readLastRecords<OutcomeEntry>(file, limit);
 }
 
 export interface AgentCostProfile {

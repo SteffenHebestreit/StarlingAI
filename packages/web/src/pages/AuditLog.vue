@@ -11,6 +11,7 @@
           <option value="tool_call_failed">Tool Failures</option>
           <option value="sub_agent_tool_call">Sub-Agent Tools</option>
           <option value="turn_performance">Turn Performance</option>
+          <option value="turn_scorecard">Turn Scorecard</option>
           <option value="scene_job_completed">Scene Jobs</option>
           <option value="scene_job_failed">Scene Failures</option>
           <option value="parallel_delegate_started">Swarm Runs</option>
@@ -72,6 +73,84 @@
         <div class="mt-1 text-xl font-semibold text-white">{{ formatCompactNumber(performanceSummary.avgPromptChars) }}</div>
         <div class="text-xs text-gray-400">Tools/turn {{ performanceSummary.avgToolCalls.toFixed(1) }}</div>
         <div class="mt-2 text-xs text-gray-300">High prompt {{ performanceSummary.promptHeavyTurns }} · Tool-heavy {{ performanceSummary.toolHeavyTurns }}</div>
+      </div>
+    </div>
+
+    <div v-if="scorecardSummary" class="mb-4 grid gap-3 md:grid-cols-4">
+      <div class="rounded-xl px-4 py-3 border border-indigo-900/40 bg-indigo-950/20">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-indigo-300">Delegations / turn</div>
+          <span v-if="scorecardSummary.delegations" :class="['text-[10px]', sparklineTrendClass(scorecardSummary.delegations.trend)]">
+            {{ sparklineTrendGlyph(scorecardSummary.delegations.trend) }} peak {{ scorecardSummary.delegations.peak }}
+          </span>
+        </div>
+        <div class="mt-1 text-xl font-semibold text-white">{{ scorecardSummary.avgDelegations.toFixed(1) }}</div>
+        <svg
+          v-if="scorecardSummary.delegations"
+          :viewBox="`0 0 ${scorecardSummary.delegations.width} ${scorecardSummary.delegations.height}`"
+          class="mt-1 w-full h-7"
+          preserveAspectRatio="none"
+        >
+          <path :d="scorecardSummary.delegations.path" fill="none" stroke="currentColor" class="text-indigo-400" stroke-width="1.5" />
+        </svg>
+        <div class="text-xs text-gray-400">Last {{ scorecardSummary.sampleSize }} scorecards</div>
+      </div>
+
+      <div class="rounded-xl px-4 py-3 border border-sky-900/40 bg-sky-950/20">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-sky-300">Tool iterations</div>
+          <span v-if="scorecardSummary.iterations" :class="['text-[10px]', sparklineTrendClass(scorecardSummary.iterations.trend)]">
+            {{ sparklineTrendGlyph(scorecardSummary.iterations.trend) }} peak {{ scorecardSummary.iterations.peak }}
+          </span>
+        </div>
+        <div class="mt-1 text-xl font-semibold text-white">{{ scorecardSummary.avgIterations.toFixed(1) }}</div>
+        <svg
+          v-if="scorecardSummary.iterations"
+          :viewBox="`0 0 ${scorecardSummary.iterations.width} ${scorecardSummary.iterations.height}`"
+          class="mt-1 w-full h-7"
+          preserveAspectRatio="none"
+        >
+          <path :d="scorecardSummary.iterations.path" fill="none" stroke="currentColor" class="text-sky-400" stroke-width="1.5" />
+        </svg>
+        <div class="text-xs text-gray-400">Avg per turn</div>
+      </div>
+
+      <div class="rounded-xl px-4 py-3 border border-emerald-900/40 bg-emerald-950/20">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-emerald-300">Answer length</div>
+          <span v-if="scorecardSummary.answerLengths" :class="['text-[10px]', sparklineTrendClass(scorecardSummary.answerLengths.trend)]">
+            {{ sparklineTrendGlyph(scorecardSummary.answerLengths.trend) }} peak {{ formatCompactNumber(scorecardSummary.answerLengths.peak) }}
+          </span>
+        </div>
+        <div class="mt-1 text-xl font-semibold text-white">{{ formatCompactNumber(scorecardSummary.avgAnswerLength) }}</div>
+        <svg
+          v-if="scorecardSummary.answerLengths"
+          :viewBox="`0 0 ${scorecardSummary.answerLengths.width} ${scorecardSummary.answerLengths.height}`"
+          class="mt-1 w-full h-7"
+          preserveAspectRatio="none"
+        >
+          <path :d="scorecardSummary.answerLengths.path" fill="none" stroke="currentColor" class="text-emerald-400" stroke-width="1.5" />
+        </svg>
+        <div class="text-xs text-gray-400">Chars, avg</div>
+      </div>
+
+      <div class="rounded-xl px-4 py-3 border border-amber-900/40 bg-amber-950/20">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] uppercase tracking-wide text-amber-300">Friction signals</div>
+          <span v-if="scorecardSummary.wardenFailures" :class="['text-[10px]', sparklineTrendClass(scorecardSummary.wardenFailures.trend)]">
+            {{ sparklineTrendGlyph(scorecardSummary.wardenFailures.trend) }} peak {{ scorecardSummary.wardenFailures.peak }}
+          </span>
+        </div>
+        <div class="mt-1 text-xl font-semibold text-white">{{ scorecardSummary.forcedSynthTotal }}</div>
+        <svg
+          v-if="scorecardSummary.wardenFailures"
+          :viewBox="`0 0 ${scorecardSummary.wardenFailures.width} ${scorecardSummary.wardenFailures.height}`"
+          class="mt-1 w-full h-7"
+          preserveAspectRatio="none"
+        >
+          <path :d="scorecardSummary.wardenFailures.path" fill="none" stroke="currentColor" class="text-amber-400" stroke-width="1.5" />
+        </svg>
+        <div class="text-xs text-gray-400">Forced synth fires · warden line = delegation failures</div>
       </div>
     </div>
 
@@ -242,6 +321,85 @@ const auditExporting = ref(false);
 const recentPerformanceEvents = computed(() => audit.events
   .filter((event) => event.type === "turn_performance")
   .slice(0, 25));
+
+const recentScorecardEvents = computed(() => audit.events
+  .filter((event) => event.type === "turn_scorecard")
+  .slice(0, 25));
+
+const SPARKLINE_WIDTH = 120;
+const SPARKLINE_HEIGHT = 28;
+
+function buildSparkline(values: number[]): {
+  path: string;
+  latest: number;
+  peak: number;
+  trend: "up" | "down" | "flat";
+  width: number;
+  height: number;
+} | null {
+  if (values.length === 0) return null;
+  const peak = Math.max(...values, 1);
+  const latest = values[values.length - 1] ?? 0;
+  const first = values[0] ?? 0;
+  const trend: "up" | "down" | "flat" = latest > first * 1.1 ? "up" : latest < first * 0.9 ? "down" : "flat";
+  if (values.length === 1) {
+    const y = SPARKLINE_HEIGHT - (latest / peak) * (SPARKLINE_HEIGHT - 4) - 2;
+    return { path: `M 0 ${y.toFixed(1)} L ${SPARKLINE_WIDTH} ${y.toFixed(1)}`, latest, peak, trend, width: SPARKLINE_WIDTH, height: SPARKLINE_HEIGHT };
+  }
+  const step = SPARKLINE_WIDTH / (values.length - 1);
+  const points = values.map((v, i) => {
+    const x = i * step;
+    const y = SPARKLINE_HEIGHT - (v / peak) * (SPARKLINE_HEIGHT - 4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return {
+    path: `M ${points.join(" L ")}`,
+    latest,
+    peak,
+    trend,
+    width: SPARKLINE_WIDTH,
+    height: SPARKLINE_HEIGHT,
+  };
+}
+
+const scorecardSummary = computed(() => {
+  const events = recentScorecardEvents.value;
+  if (events.length === 0) return null;
+  // Events are newest-first — reverse so sparklines read oldest→newest.
+  const ordered = [...events].reverse();
+  const pick = (key: string) => ordered.map((ev) => {
+    const n = Number(ev.data[key] ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  });
+  const delegations = pick("delegationCount");
+  const iterations = pick("toolIterations");
+  const answerLengths = pick("finalAnswerLength");
+  const wardenFailures = pick("wardenFailureCount");
+  const forcedSynthTotal = ordered.filter((ev) => Boolean(ev.data.forcedSynthesisFired)).length;
+  return {
+    sampleSize: ordered.length,
+    delegations: buildSparkline(delegations),
+    iterations: buildSparkline(iterations),
+    answerLengths: buildSparkline(answerLengths),
+    wardenFailures: buildSparkline(wardenFailures),
+    forcedSynthTotal,
+    avgDelegations: delegations.reduce((s, v) => s + v, 0) / delegations.length,
+    avgIterations: iterations.reduce((s, v) => s + v, 0) / iterations.length,
+    avgAnswerLength: answerLengths.reduce((s, v) => s + v, 0) / answerLengths.length,
+  };
+});
+
+function sparklineTrendClass(trend: "up" | "down" | "flat"): string {
+  if (trend === "up") return "text-emerald-400";
+  if (trend === "down") return "text-rose-400";
+  return "text-gray-400";
+}
+
+function sparklineTrendGlyph(trend: "up" | "down" | "flat"): string {
+  if (trend === "up") return "▲";
+  if (trend === "down") return "▼";
+  return "◆";
+}
 
 const performanceSummary = computed(() => {
   if (recentPerformanceEvents.value.length === 0) return null;
