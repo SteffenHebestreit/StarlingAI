@@ -24,6 +24,7 @@ vi.mock("../providers/index.js", () => {
   return {
     getChatProvider: () => provider,
     getChatProviderWithOverride: () => provider,
+    getChatProviderForTier: () => null,
   };
 });
 

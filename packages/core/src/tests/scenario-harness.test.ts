@@ -278,9 +278,7 @@ describe("G35: scenario harness", () => {
       task: "do a thing",
       workspacePath: "/tmp/test",
       parentSessionId: "test-session",
-      config: {} as never,
-      systemPrompt: "",
-      model: "mock",
+      inlineConfig: {} as never,
     });
 
     expect(result.output).toBe("mocked-response-42");

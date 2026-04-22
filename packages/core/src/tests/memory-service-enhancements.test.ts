@@ -22,9 +22,9 @@ function fakeEmbed(text: string): Float32Array {
   v[1] = (t.match(/security|auth|credential/g)?.length ?? 0);
   v[2] = (t.match(/headline|news|nachrichten/g)?.length ?? 0);
   v[3] = (t.match(/email|mail|message/g)?.length ?? 0);
-  for (let i = 0; i < 4; i++) v[i] += 0.01;
+  for (let i = 0; i < 4; i++) v[i] = (v[i] ?? 0) + 0.01;
   const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
-  for (let i = 0; i < 4; i++) v[i] = v[i] / norm;
+  for (let i = 0; i < 4; i++) v[i] = (v[i] ?? 0) / norm;
   return v;
 }
 
