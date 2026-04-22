@@ -51,14 +51,10 @@
       }
     },
     "n8n_project_list": {
-      "description": "Authenticated access to internal web applications: log in to a target URL (supports internal HTTP domains like n8n.k2o), fill credentials, and navigate to a protected page such as the n8n project list (Projektliste, Einträge prüfen, neue Workflows). Includes enhanced timeout handling and error recovery for internal networks.",
-      "task": "Use web_task_coordinator to orchestrate the multi-step browser workflow. First, detect if targetUrl is an internal HTTP domain (e.g., http://n8n.k2o) and configure browser settings accordingly. Set explicit timeout of 120 seconds for all navigation and interaction steps. Use browser_agent to navigate to the target URL with HTTP protocol enforcement and enhanced error handling for internal networks. Trigger site_fill_credentials human-in-loop step for secure credential entry. Use browser_agent to fill username and password fields with retry logic, submit the login form, and wait for successful authentication with extended timeout. After login, navigate to the protected Project List page. Use evidence_analyst or vision_browser_analyst to verify login success (e.g., check for user dashboard elements). Implement error recovery: if navigation fails due to internal network issues, retry with adjusted settings. Finally, use summarizer to produce a concise report with: navigation steps completed, login status, current page state, timeout configurations used, and any blockers encountered.",
+      "description": "Open the n8n login page, fill the stored site credentials, navigate to the project-list URL from the site's named URLs, and read the visible table or Projektliste to check for new entries. Stop after listing the workflows and ask whether one of the found workflows should be run.",
+      "task": "Use browser_agent to execute this exact browser flow and nothing broader. Do NOT use web_search. Call get_site_credentials for the hostname from {{targetUrl}} to read the loginUrl, named URLs, selectors, and notes. Open the loginUrl from the site credentials when present; otherwise open {{targetUrl}}. Take a browser_snapshot to identify the login form fields, then call site_fill_credentials to fill and submit the stored credentials securely. Do NOT wait for generic dashboard text such as Projects, Home, Dashboard, or other landing-page labels before proceeding. Do NOT wait for or re-check login-form text such as Sign in, Email, or Password, and do NOT click the submit button again. If the post-login state is ambiguous, use a short fixed delay and then continue to the named URL. Immediately inspect the named URLs from get_site_credentials and pick the entry whose label best matches {{projectListUrlHint}}. If no matching named URL exists, stop and report that the site credentials entry is missing the project-list URL instead of guessing a path. Navigate directly to that named URL after the secure credential submit, even if the post-login landing page has not visibly changed yet. Stay on the same n8n.k2o host from the stored credentials and do not guess localhost, app.n8n.io, n8n.io, or other alternate hosts. Wait up to {{navigationTimeout}} seconds for the final project-list page to load, take a browser_snapshot, and read the visible table rows directly. Prefer browser_snapshot over browser_screenshot for table extraction, and answer immediately once the visible rows are readable. Return {{outputFormat}} with the final URL, the visible table contents, whether any clearly new entries are visible, and any blocker encountered. IMPORTANT: Do not start or click any n8n workflow from this scene. This scene ends at the project list only. If exactly one workflow clearly stands out as the new or relevant entry, end with a direct question asking whether that workflow should be run and include a final line `RUN_CANDIDATE: <workflow name>`. If multiple plausible workflows are visible, ask which listed workflow should be run next and do not emit a RUN_CANDIDATE line. If no workflow should be run, say so clearly. Do not delegate to web_task_coordinator, vision_browser_analyst, evidence_analyst, or summarizer for this workflow.",
       "allowedAgents": [
-        "web_task_coordinator",
-        "browser_agent",
-        "vision_browser_analyst",
-        "evidence_analyst",
-        "summarizer"
+        "browser_agent"
       ],
       "humanInLoopSteps": [
         "site_fill_credentials",
@@ -70,37 +66,51 @@
           "description": "Initial URL to open (supports internal HTTP domains like http://n8n.k2o)",
           "default": "http://n8n.k2o"
         },
-        "protectedPageUrl": {
-          "description": "URL of the protected page to navigate after login (e.g., Project List page)",
-          "default": "http://n8n.k2o/projects"
-        },
-        "credentialStoreName": {
-          "description": "Name of the credential store to use for login credentials",
-          "default": "n8n_credentials"
-        },
-        "verificationSelectors": {
-          "description": "CSS selectors to verify successful login (e.g., user menu, dashboard elements)",
-          "default": ".user-menu, .dashboard, .project-list"
+        "projectListUrlHint": {
+          "description": "Preferred named URL labels in site credentials for the project-list destination",
+          "default": "project-list, project-list-url, projects, projektliste"
         },
         "outputFormat": {
-          "description": "Report format: markdown, json, or brief",
-          "default": "markdown with step-by-step log and verification status"
+          "description": "Report format for the table readout",
+          "default": "a concise markdown report"
         },
         "navigationTimeout": {
-          "description": "Navigation timeout in seconds (minimum 120 for internal domains)",
+          "description": "Navigation timeout in seconds for page loads and the final table read",
           "default": "120"
+        }
+      }
+    },
+    "n8n_run_workflow": {
+      "description": "After the user confirms a listed n8n workflow, open n8n, log in with stored credentials, find the named workflow in the project list, and start that one workflow.",
+      "task": "Use browser_agent to execute this exact browser flow and nothing broader. Do NOT use web_search. Call get_site_credentials for the hostname from {{targetUrl}} to read the loginUrl, named URLs, selectors, and notes. Open the loginUrl from the site credentials when present; otherwise open {{targetUrl}}. Take a browser_snapshot to identify the login form fields, then call site_fill_credentials to fill and submit the stored credentials securely. Do NOT wait for generic dashboard text such as Projects, Home, Dashboard, or other landing-page labels before proceeding. Do NOT wait for or re-check login-form text such as Sign in, Email, or Password, and do NOT click the submit button again. If the post-login state is ambiguous, use a short fixed delay and then continue to the named URL. Inspect the named URLs from get_site_credentials and pick the entry whose label best matches {{projectListUrlHint}}. If no matching named URL exists, stop and report that the site credentials entry is missing the project-list URL instead of guessing a path. Navigate directly to that named URL after the secure credential submit, even if the post-login landing page has not visibly changed yet. Stay on the same n8n.k2o host from the stored credentials and do not guess localhost, app.n8n.io, n8n.io, or other alternate hosts. Wait up to {{navigationTimeout}} seconds for the table to load. Take a browser_snapshot and locate the row whose visible workflow name best matches {{workflowName}}. Prefer browser_snapshot over browser_screenshot, and if no exact or unambiguous match is visible, stop and report the visible candidate workflow names instead of guessing. Open only that workflow entry, take another browser_snapshot, identify the primary run or execute control, click it once, and wait for a visible confirmation that execution has started. Return {{outputFormat}} with the matched workflow name, the final URL, the visible execution status, and any blocker encountered. Do not start any additional workflows.",
+      "allowedAgents": [
+        "browser_agent"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials",
+        "mcp__playwright__browser_navigate"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "targetUrl": {
+          "description": "Initial URL to open (supports internal HTTP domains like http://n8n.k2o)",
+          "default": "http://n8n.k2o"
         },
-        "retryCount": {
-          "description": "Number of retry attempts for failed navigation steps",
-          "default": "3"
+        "projectListUrlHint": {
+          "description": "Preferred named URL labels in site credentials for the project-list destination",
+          "default": "project-list, project-list-url, projects, projektliste"
         },
-        "useHttpExplicitly": {
-          "description": "Force HTTP protocol instead of HTTPS (required for internal domains)",
-          "default": "true"
+        "workflowName": {
+          "description": "Exact or near-exact workflow name that the user confirmed should be started",
+          "default": "the workflow the user just confirmed"
         },
-        "internalDomainHandling": {
-          "description": "Strategy for handling internal network domains",
-          "default": "enhanced_timeout_with_retry_and_error_recovery"
+        "outputFormat": {
+          "description": "Report format for the workflow start result",
+          "default": "a concise markdown report"
+        },
+        "navigationTimeout": {
+          "description": "Navigation timeout in seconds for page loads and workflow start confirmation",
+          "default": "120"
         }
       }
     },
