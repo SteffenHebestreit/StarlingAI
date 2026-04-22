@@ -255,6 +255,222 @@
           "default": "informational"
         }
       }
+    },
+    "security_audit": {
+      "description": "Research CVEs and security advisories for a specified stack or codebase, run static code analysis on high-risk paths, apply a compliance check, and produce a prioritised risk report. Example triggers: 'run a security audit on our Node.js dependencies', 'Sicherheits-Audit für das Docker-Deployment durchführen', 'check the code for security issues and CVE exposure', 'Sicherheitsüberprüfung mit CVE-Recherche und Compliance-Check', 'audit this repo for vulnerabilities', 'erstelle einen Sicherheitsbericht mit Risikotabelle'.",
+      "task": "Use researcher to gather current CVE data, vendor advisories, and upstream security announcements for {{target}} at or above {{severityThreshold}}. Use code_analyst for static review of authentication, input handling, crypto, serialisation, and dependency-exposed code paths when the audit scope includes the source tree. Use policy_compliance_reviewer to map findings against the configured compliance requirements. Use evidence_analyst to reconcile CVE data with the code analysis into a single evidence ledger keyed by CVE id and affected file or dependency. Use summarizer to produce the final {{outputFormat}} with an ordered risk table (severity, CVE/finding, affected component, remediation, owner). Run one quality_supervisor pass before finalising. Do not attempt to patch vulnerabilities from this scene — the deliverable is the report; remediation is a separate task.",
+      "allowedAgents": [
+        "researcher",
+        "research_librarian",
+        "code_analyst",
+        "policy_compliance_reviewer",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard",
+        "quality_supervisor"
+      ],
+      "params": {
+        "target": {
+          "description": "Software stack, repository path, service, or dependency set to audit",
+          "default": "configured stack and npm dependencies"
+        },
+        "auditScope": {
+          "description": "What to cover: dependencies, code, infrastructure, all",
+          "default": "dependencies"
+        },
+        "severityThreshold": {
+          "description": "Minimum CVSS severity to include (low, medium, high, critical)",
+          "default": "medium"
+        },
+        "outputFormat": {
+          "description": "Final report format",
+          "default": "markdown with risk table and remediation plan"
+        }
+      }
+    },
+    "release_notes_draft": {
+      "description": "Generate release notes from git history and diff analysis for a given ref range, formatted per Keep-a-Changelog conventions and tailored to the stated audience. Example triggers: 'draft release notes for v2.3', 'Release Notes für den letzten Sprint erstellen', 'summarise the commits between HEAD~20 and HEAD', 'Versionshinweise aus Git-Log generieren', 'produce changelog entries for the upcoming release', 'technische Release-Notizen mit Breaking Changes'.",
+      "task": "Use git_developer to collect commits and diffs in {{targetRef}} and classify them into Added / Changed / Fixed / Removed / Security / Deprecated buckets (Keep-a-Changelog). Use code_analyst to flag breaking changes, migration-relevant diffs, and high-impact behaviour changes that the commit message alone may understate. Use paper_author to draft the notes for {{audience}} as grouped bullets with short, outcome-oriented phrasing — no commit hashes or author names unless the audience is `technical`. Use qa_guard to verify that no listed item contradicts the actual diff. Use summarizer to produce the final Keep-a-Changelog section headed by `## [{{version}}] — <ISO date>`. Do not invent changes not visible in the diff.",
+      "allowedAgents": [
+        "git_developer",
+        "code_analyst",
+        "paper_author",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "version": {
+          "description": "Release version label (e.g. v2.3, 0.7.0-rc1)",
+          "default": "next"
+        },
+        "targetRef": {
+          "description": "Git ref range to generate notes from",
+          "default": "HEAD~20..HEAD"
+        },
+        "audience": {
+          "description": "Intended audience: internal, public, technical",
+          "default": "internal team"
+        },
+        "broadcast": {
+          "description": "Whether to hand the notes to a broadcast step afterwards (yes/no)",
+          "default": "no"
+        }
+      }
+    },
+    "incident_response": {
+      "description": "Triage a live or recent production incident, gather diagnostic evidence from logs and services, identify root cause, guide or apply remediation, and capture findings for a postmortem. Example triggers: 'triage the database outage at 14:00', 'Vorfallsreaktion für den 500er Fehlerausbruch', 'investigate why payments are failing right now', 'Ausfall untersuchen und Ursache finden', 'run incident response on the gateway timeout', 'Incident-Response mit Ursachenanalyse und Behebung'.",
+      "task": "Use ops_triage to direct the investigation. Run one or two targeted remote checks with shell_agent (ssh_exec, service_check) to confirm which of {{affectedService}} is failing and how. Use log_analyst to parse relevant logs around the incident window and build a concrete timeline with real timestamps, error codes, and affected requests. Use infrastructure_agent only when a clear, low-risk remediation is identified; for anything beyond service restart or cache flush, surface the proposed action and stop. Use evidence_analyst to consolidate the findings into a structured ledger: what failed, when, why (with quoted log lines), remediation taken (if any), and follow-up actions. Use summarizer to produce a concise status-update suitable for broadcast. Do not replace concrete stderr or log evidence with speculation — if the evidence is only an error phrase, return that exact phrase. Severity hint: {{severity}}.",
+      "allowedAgents": [
+        "ops_triage",
+        "shell_agent",
+        "log_analyst",
+        "infrastructure_agent",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "incident": {
+          "description": "Description of the failure, alert, or symptom",
+          "default": "the reported incident"
+        },
+        "severity": {
+          "description": "Incident severity: low, medium, high, critical",
+          "default": "high"
+        },
+        "affectedService": {
+          "description": "Service, container, or host showing the failure",
+          "default": "discover from logs"
+        }
+      }
+    },
+    "competitive_analysis": {
+      "description": "Research multiple competitors or comparable products in parallel, reconcile the findings along common dimensions, and produce a competitive intelligence brief with a comparison table and visual summary. Example triggers: 'compare ProductA, ProductB, ProductC on pricing and features', 'Wettbewerbsanalyse für drei SaaS-Produkte', 'run competitive research across these three vendors', 'Vergleichsanalyse mit Tabelle und Differenzierungsmerkmalen', 'competitive snapshot for the payments space', 'Wettbewerbsübersicht mit Visual Brief'.",
+      "task": "Use mission_coordinator to partition {{competitors}} into per-competitor research tasks and fan them out in parallel. For each competitor, use researcher to collect public evidence (pricing pages, product docs, case studies, press coverage) and research_librarian to persist notes keyed by competitor. Use evidence_analyst to normalise the findings across {{dimensions}} so every competitor is scored on the same axes. Use data_analyst when any dimension is numeric. Use chart_designer to produce a comparison table (and a differentiator-highlight chart when the numeric evidence is strong enough). Use paper_author or summarizer to write the final {{deliverable}} for {{audience}}, leading with a one-paragraph verdict and the comparison table. Run exactly one quality_supervisor pass before finalising. Do not invent pricing or features that are not backed by a cited source.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "research_librarian",
+        "evidence_analyst",
+        "data_analyst",
+        "chart_designer",
+        "paper_author",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "competitors": {
+          "description": "Comma-separated competitor names or products",
+          "default": "the competitors named in the user request"
+        },
+        "dimensions": {
+          "description": "Comparison dimensions (e.g. pricing, features, market-position)",
+          "default": "pricing, features, market-position"
+        },
+        "deliverable": {
+          "description": "Preferred final deliverable",
+          "default": "competitive intelligence brief with comparison table and key differentiators"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "product and strategy stakeholders"
+        }
+      }
+    },
+    "data_pipeline_review": {
+      "description": "Inspect a data source — database, file, or pipeline — for schema quality, null rates, anomalies, and referential integrity; produce a structured data quality report. Example triggers: 'run a data quality check on the orders table', 'Schema-Prüfung für die Kundendatei', 'check null rates and duplicates in the CSV export', 'Datenqualitätsanalyse mit Anomalieerkennung', 'review the pipeline output for integrity issues', 'Datenqualitätsbericht mit Issue-Tabelle'.",
+      "task": "Use document_intake when the data source is a file attachment and needs to be read in. Use sql_specialist when the source is a database or table — start by inspecting the schema (columns, types, nullability, keys, indexes) with read-only queries, then run the checks listed in {{validationRules}}: null/empty rates per column, type consistency (bad casts, mixed types), referential integrity (orphaned foreign keys), row-count drift versus prior snapshot if available, duplicate keys, and value distributions (outliers, unexpected enums). Use data_analyst to compute distribution summaries and flag anomalies. Use evidence_analyst to reconcile findings into a single issue ledger: severity, column, rule, sample offending rows (redact PII), recommended action. Use chart_designer when a distribution or trend chart materially helps. Use summarizer to produce the final {{outputFormat}} led by a one-paragraph verdict and an issue table. qa_guard verifies that every issue in the report is traceable to a real query result. Do not perform data mutations from this scene — reporting only.",
+      "allowedAgents": [
+        "sql_specialist",
+        "data_analyst",
+        "document_intake",
+        "evidence_analyst",
+        "chart_designer",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "dataSource": {
+          "description": "File path, database name, table, or description of the data source",
+          "default": "attached files or configured database"
+        },
+        "validationRules": {
+          "description": "Comma-separated validation rules to enforce",
+          "default": "null rates, type consistency, referential integrity, row-count drift, value distributions, duplicate keys"
+        },
+        "outputFormat": {
+          "description": "Final report format",
+          "default": "markdown data quality report with issue table"
+        }
+      }
+    },
+    "content_creation": {
+      "description": "Research a topic (when needed), produce audience-ready written content in a specified format and tone, and hand off a finished draft ready for review or publication. Example triggers: 'write a blog post about our new feature', 'Blog-Artikel zum neuen Release verfassen', 'draft a product newsletter for this month', 'Content-Entwurf für die Landingpage', 'produce documentation for the new endpoint', 'Fachartikel mit Recherche und Korrekturlesen'.",
+      "task": "When {{requiresResearch}} indicates research is needed, use researcher to gather supporting evidence first and research_librarian to persist notes keyed to the topic; use evidence_analyst to reconcile claims before drafting. Use content_writer to produce the {{contentType}} for {{audience}} in a {{tone}} voice — lead with the hook, no marketing filler. Use qa_guard to verify claims against the evidence ledger and flag unsourced statements. Run one quality_supervisor pass for structure, voice, and audience-fit before finalising. Use summarizer only when a short summary or social-post variant of the main piece is requested. Do not publish or broadcast from this scene — the deliverable is the draft itself.",
+      "allowedAgents": [
+        "content_writer",
+        "researcher",
+        "research_librarian",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard",
+        "quality_supervisor"
+      ],
+      "params": {
+        "contentType": {
+          "description": "blog-post, newsletter, product-copy, documentation, press-release",
+          "default": "blog-post"
+        },
+        "topic": {
+          "description": "Topic, angle, or key message for the content",
+          "default": "the requested topic"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "general technical audience"
+        },
+        "tone": {
+          "description": "Voice and tone (professional, friendly, technical, playful, urgent)",
+          "default": "professional and engaging"
+        },
+        "requiresResearch": {
+          "description": "Whether a research pass is required before drafting (yes/no)",
+          "default": "yes"
+        }
+      }
+    },
+    "onboarding_packet": {
+      "description": "Build a structured onboarding packet for a new team member, role, or project — gathering the relevant resources, translating to the target language when needed, and producing a ready-to-share document with a quick-reference table. Example triggers: 'create an onboarding packet for a new backend engineer', 'Einarbeitungsunterlagen für neuen Projektmanager', 'assemble an onboarding document for the StarlingAI platform', 'Onboarding-Paket mit Quick-Reference erstellen', 'put together an intro guide for the new PM', 'Willkommensdokument mit Ressourcenübersicht'.",
+      "task": "Use document_intake when existing onboarding material or attachments are provided. Use researcher to fill identifiable gaps (links to docs, tools, access request processes, team rituals, glossary entries) for {{topic}} — do not invent processes that are not actually documented. Use content_writer to assemble the packet for {{audience}}, structured as: Welcome + role context → First-week priorities → Access and accounts checklist → Key contacts → Architecture or product overview → Glossary → Quick-reference table (tool / purpose / link / owner). Use translator to render the final packet in {{outputLanguage}} when it is not English. Use meeting_briefing_agent when the audience expects a first-meeting handoff section with agenda points. Use qa_guard to verify every referenced link and contact against the gathered evidence — do not ship broken references. Produce {{outputFormat}}.",
+      "allowedAgents": [
+        "document_intake",
+        "researcher",
+        "research_librarian",
+        "content_writer",
+        "translator",
+        "meeting_briefing_agent",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "topic": {
+          "description": "What the person is being onboarded to (platform, project, role)",
+          "default": "the requested onboarding topic"
+        },
+        "audience": {
+          "description": "Who is being onboarded and their background",
+          "default": "new team member with intermediate technical background"
+        },
+        "outputLanguage": {
+          "description": "Language for the final packet",
+          "default": "English"
+        },
+        "outputFormat": {
+          "description": "Packet format",
+          "default": "structured Markdown with sections and a quick-reference table"
+        }
+      }
     }
   }
 }
