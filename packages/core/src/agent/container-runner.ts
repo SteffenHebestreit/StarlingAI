@@ -72,8 +72,20 @@ export type ContainerDiagnosticEvent =
   | { type: "heartbeat" }
   | { type: "ready"; bootstrapMs?: number };
 
-// Tools that need internet access — these agents run with --network=bridge
-const NEEDS_INTERNET = new Set(["researcher", "source_verifier", "browser_agent"]);
+// Tools that need internet access — these agents run with --network=bridge.
+// Anything that calls http_request, web_search, web_fetch, or external HTTP
+// endpoints (LM Studio probes, REST integrations, webhook tests) must be here
+// or it will get --network=none and silently fail to reach any host.
+const NEEDS_INTERNET = new Set([
+  "researcher",
+  "source_verifier",
+  "browser_agent",
+  "api_integrator",
+  "citation_researcher",
+  "vision_browser_analyst",
+  "accessibility_tester",
+  "web_task_coordinator",
+]);
 
 /**
  * Patterns the Docker CLI emits when it cannot reach the daemon. Used to

@@ -504,6 +504,13 @@ function isWorkflowCatalogToolName(toolName: string): boolean {
 function normalizeWorkflowDiscoveryText(value: string): string {
   return value
     .toLowerCase()
+    // Fold common diacritics (German umlauts, sharp s, accented vowels) BEFORE
+    // stripping non-ASCII so e.g. "über" → "ueber" (filtered as a stop word)
+    // instead of "ber" (a 3-char nonsense token that pollutes catalog scoring).
+    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+    .replace(/[àáâã]/g, "a").replace(/[èéêë]/g, "e")
+    .replace(/[ìíîï]/g, "i").replace(/[òóôõ]/g, "o")
+    .replace(/[ùúû]/g, "u").replace(/[ýÿ]/g, "y").replace(/ñ/g, "n").replace(/ç/g, "c")
     .replace(/[_:/.-]+/g, " ")
     .replace(/[^a-z0-9\s]+/g, " ")
     .replace(/\s+/g, " ")
@@ -512,6 +519,10 @@ function normalizeWorkflowDiscoveryText(value: string): string {
 
 function isMeaningfulWorkflowDiscoveryToken(token: string): boolean {
   if (!token || WORKFLOW_DISCOVERY_STOP_WORDS.has(token)) return false;
+  // Reject pure-digit tokens (IP octets, port numbers, version fragments) — they
+  // carry no topical signal and would otherwise inflate matchedTerms against
+  // workflows that happen to have numbers in their searchable text.
+  if (/^\d+$/.test(token)) return false;
   return token.length >= 3 || /\d/.test(token);
 }
 
