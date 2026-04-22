@@ -155,6 +155,23 @@ export const WORKFLOW_DISCOVERY_STOP_WORDS = new Set<string>([
   "show", "that", "the", "these", "this", "to", "use", "using", "with", "write", "you",
   "bitte", "das", "der", "die", "dir", "du", "ein", "eine", "für", "fuer", "hier", "im", "in", "ist", "jetzt", "kann", "kannst", "mir", "mit",
   "oder", "schreib", "schreibe", "thema", "und", "von", "wie", "zu", "zum", "zur",
+  // Generic infra/config noise tokens — these appear in any pasted shell
+  // session, iptables rule, WireGuard config, or pfsense/router UI dump and
+  // would otherwise dominate workflow-catalog scoring without carrying intent.
+  "cat", "conf", "config", "configs", "cfg", "ini", "yaml", "yml", "json",
+  "nat", "snat", "dnat", "src", "dst", "lan", "wan", "dmz", "vlan", "opt",
+  "com", "org", "net", "io", "de", "local",
+  "description", "beschreibung", "label", "name", "value",
+  "peer", "peers", "interface", "interfaces", "address", "addresses",
+  "port", "ports", "key", "keys", "privatekey", "publickey", "presharedkey",
+  "endpoint", "endpoints", "listenport", "allowedips", "persistentkeepalive",
+  "protocol", "proto", "tcp", "udp", "icmp", "ipv4", "ipv6", "mtu",
+  "http", "https", "url", "uri", "path",
+  "true", "false", "null", "none", "default", "defaults", "enabled", "disabled",
+  // Common shell/admin command words that get harvested when prompts/commands
+  // leak through stripping (e.g. inside prose).
+  "sudo", "root", "home", "usr", "etc", "var", "opt", "tmp", "bin", "lib",
+  "iptables", "systemctl", "docker", "compose", "kubectl", "helm",
 ]);
 
 export const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
