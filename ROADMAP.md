@@ -150,27 +150,31 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ### 10.1 — Scenes
 
-| Scene | Purpose | Notes |
-|-------|---------|-------|
-| `security_audit` | CVE research + static code analysis + compliance check → risk report | |
-| `software_bug_fix` | Diagnose → minimal fix → test cycle → change summary | Max 2 fix-test cycles |
-| `incident_response` | Triage → root-cause → remediate → post-incident brief | Human-in-loop on infra apply |
-| `accessibility_audit` | WCAG 2.2 browser-driven audit → structured issue report | |
-| `data_pipeline_review` | Schema quality, null rates, anomaly detection → data quality report | Uses `sql_specialist` + `data_analyst` |
-| `competitive_analysis` | Multi-competitor parallel research → comparison table + visual brief | |
-| `release_notes_draft` | Git log + diff analysis → Keep-a-Changelog notes + optional broadcast | |
-| `translation_task` | Document/message translation with optional QA spot-check | |
-| `infrastructure_change` | Plan → compliance review → human-approved apply → verify | Human-in-loop: `terraform_apply`, `ansible_apply` |
-| `calendar_scheduling` | Check availability → book event → channel confirmation | |
-| `onboarding_packet` | Gather resources → translate → structured onboarding Markdown doc | |
-| `code_refactor` | Diagnose → minimal targeted refactor → test verification → clean commit | Max 2 refactor-test cycles |
-| `content_creation` | Research → draft → quality-check audience-ready content | Uses `content_writer` |
-| `database_migration` | Inspect schema → write idempotent migration → compliance gate → apply → verify | Human-in-loop on `sql_query` write |
-| `contract_review` | Intake → clause inventory → risk table → negotiation points | Legal analysis only — requires human review |
+**Status:** ✅ All 15 scenes shipped (workspace/scenes/10-scenes.jsonc, 2026-04-22) — every scene resolves against the agent catalog and parses cleanly under `SceneConfigSchema`.
 
-**Human-in-loop gates added:** `infrastructure_apply`, `terraform_apply`, `ansible_apply`, `db_query_write`, `sql_query` (write path) — all require explicit operator approval before execution.
+| Scene | Purpose | Status | Notes |
+|-------|---------|--------|-------|
+| `security_audit` | CVE research + static code analysis + compliance check → risk report | ✅ | |
+| `software_bug_fix` | Diagnose → minimal fix → test cycle → change summary | ✅ | Max 2 fix-test cycles |
+| `incident_response` | Triage → root-cause → remediate → post-incident brief | ✅ | Human-in-loop on infra apply |
+| `accessibility_audit` | WCAG 2.2 browser-driven audit → structured issue report | ✅ | |
+| `data_pipeline_review` | Schema quality, null rates, anomaly detection → data quality report | ✅ | Uses `sql_specialist` + `data_analyst` |
+| `competitive_analysis` | Multi-competitor parallel research → comparison table + visual brief | ✅ | |
+| `release_notes_draft` | Git log + diff analysis → Keep-a-Changelog notes + optional broadcast | ✅ | |
+| `translation_task` | Document/message translation with optional QA spot-check | ✅ | |
+| `infrastructure_change` | Plan → compliance review → human-approved apply → verify | ✅ | HITL: `terraform_apply`, `ansible_apply`, `infrastructure_apply`, `ssh_exec` |
+| `calendar_scheduling` | Check availability → book event → channel confirmation | ✅ | |
+| `onboarding_packet` | Gather resources → translate → structured onboarding Markdown doc | ✅ | |
+| `code_refactor` | Diagnose → minimal targeted refactor → test verification → clean commit | ✅ | Max 2 refactor-test cycles |
+| `content_creation` | Research → draft → quality-check audience-ready content | ✅ | Uses `content_writer` |
+| `database_migration` | Inspect schema → write idempotent migration → compliance gate → apply → verify | ✅ | HITL: `sql_query`, `db_query_write`, `database_apply` |
+| `contract_review` | Intake → clause inventory → risk table → negotiation points | ✅ | Legal analysis only — requires human review |
+
+**Human-in-loop gates added:** `infrastructure_apply`, `terraform_apply`, `ansible_apply`, `db_query_write`, `sql_query` (write path), `monitoring_apply`, `prometheus_apply`, `grafana_apply`, `plan_finalize`, `project_planner_handoff` — all require explicit operator approval before execution.
 
 ### 10.2 — Jobs (Multi-Step Workflows)
+
+**Status:** ✅ All 9 jobs shipped and now resolve against Stage 10.1 scenes (2026-04-22). 5 additional jobs are live in `workspace/jobs/10-jobs.jsonc` beyond the initial roster: `daily_ops_brief`, `deep_research_packet`, `database_analysis`, `research_visual_digest`, `source_grounded_paper_packet`.
 
 | Job | Steps | Trigger |
 |-----|-------|---------|
@@ -185,6 +189,9 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | `content_pipeline` | `content_creation` → `multi_channel_broadcast` | API + `/content` slash |
 
 ### 10.3 — Agents
+
+**Status:** ✅ All 6 agents present in `workspace/agents/*.jsonc`.
+
 
 | Agent | Role | Key Tools |
 |-------|------|-----------|
@@ -206,8 +213,8 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 | `translate_text` tool | Tool | ✅ v0.5.1 | Tier-0 inline LLM translation; max 4 000 chars; auto-detects source language; no agent spawn required |
 | `ask_user` tool | Tool | ✅ v0.5.1 | HITL pause-and-ask; supports multiple-choice and free-text input; routed via WebSocket `agent.input_needed` event |
 | `contract_analyst` agent | Agent | ✅ v0.5.1 | Deep legal document analysis with risk scoring, clause inventory, and jurisdiction comparison; routes to `contract_review` scene |
-| `monitoring_setup` scene | Scene | ✅ v0.5.1 | Define alert rules, thresholds, and dashboards; human-in-loop approval before applying alert config |
-| `feature_planning` scene | Scene | ✅ v0.5.1 | Product feature → acceptance criteria → task graph → `project_planner` handoff; human approval gates |
+| `monitoring_setup` scene | Scene | ✅ 2026-04-22 | Define alert rules, thresholds, and dashboards; human-in-loop approval before applying alert config. Previously listed as v0.5.1; scene definition actually landed 2026-04-22 alongside the Stage 10.1 completion wave. HITL: `monitoring_apply`, `prometheus_apply`, `grafana_apply`, `infrastructure_apply` |
+| `feature_planning` scene | Scene | ✅ 2026-04-22 | Product feature → acceptance criteria → task graph → `project_planner` handoff; human approval gates. Previously listed as v0.5.1; scene definition actually landed 2026-04-22. HITL: `plan_finalize`, `project_planner_handoff` |
 | `database_analysis` job | Job | ✅ v0.5.1 | Scheduled schema + data quality check via `data_pipeline_review` scene; broadcasts weekly digest to configured channels |
 
 ---
