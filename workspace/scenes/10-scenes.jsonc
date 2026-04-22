@@ -471,6 +471,246 @@
           "default": "structured Markdown with sections and a quick-reference table"
         }
       }
+    },
+    "software_bug_fix": {
+      "description": "Diagnose a reported bug against the current source tree, apply the smallest viable fix, verify with tests, and hand back a clean change summary. Example triggers: 'fix the null-pointer crash in the order service', 'behebe den Fehler im Login-Flow', 'diagnose and patch the rendering bug on the dashboard', 'Bug im Zahlungs-Handler reparieren', 'apply a minimal fix for the flaky queue consumer', 'Softwarefehler untersuchen und beheben'.",
+      "task": "Use git_developer to capture the current branch state and any recent commits that touched the suspected area. Use code_analyst to diagnose the bug described by {{bugReport}} — start from the exact error or symptom, read only the code paths involved, and identify the single smallest change that fixes the root cause. Use coder to apply that minimal fix; do not refactor surrounding code. Use test_generator to add a regression test covering the bug (or amend the existing one) and to run the relevant test subset. If tests fail, perform at most one more fix-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify the fix actually addresses the reported symptom, and summarizer to produce the final change summary: what was broken, why, the exact diff (file + function), the new test, and any remaining risk. Do not rename, extract helpers, or stylistic clean-ups unless required by the fix.",
+      "allowedAgents": [
+        "git_developer",
+        "code_analyst",
+        "coder",
+        "test_generator",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "bugReport": {
+          "description": "Description of the bug, failing behaviour, error message, or repro steps",
+          "default": "the reported bug"
+        },
+        "targetRef": {
+          "description": "Git ref or branch to apply the fix on",
+          "default": "current branch"
+        },
+        "maxCycles": {
+          "description": "Maximum fix-test iterations (hard ceiling)",
+          "default": "2"
+        }
+      }
+    },
+    "accessibility_audit": {
+      "description": "Run a WCAG 2.2 accessibility audit against a live web page or component, capture browser evidence, and produce a structured issue report with severity, guideline reference, and remediation. Example triggers: 'run an accessibility audit on the landing page', 'WCAG-Prüfung für die Login-Seite durchführen', 'check the checkout flow for a11y issues', 'Barrierefreiheit der Anwendung prüfen', 'audit the dashboard against WCAG 2.2', 'Accessibility-Report für das Webportal erstellen'.",
+      "task": "Use web_auditor_agent or accessibility_tester to drive the audit. For dynamic pages, use browser_agent to open {{targetUrl}}, wait for the relevant state, and capture browser_snapshot evidence plus computed-style/DOM info needed for the checks. Run the WCAG {{wcagLevel}} checks covering: text alternatives, contrast, keyboard operability, focus management, semantic structure/headings, form labelling, ARIA correctness, time-based media alternatives, and motion/animation safety. Use vision_browser_analyst when a screenshot-based check is needed (e.g. contrast, layout). Use evidence_analyst to reconcile findings into one issue ledger keyed by WCAG success criterion — severity (critical/serious/moderate/minor), guideline reference (e.g. 1.4.3), element selector, failing evidence (quoted DOM or computed style), and a specific remediation. Use qa_guard to verify every listed issue is backed by real captured evidence (no speculative claims). Use summarizer to produce the final {{outputFormat}} led by a one-paragraph verdict and the issue table grouped by severity.",
+      "allowedAgents": [
+        "web_auditor_agent",
+        "accessibility_tester",
+        "browser_agent",
+        "vision_browser_analyst",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials"
+      ],
+      "params": {
+        "targetUrl": {
+          "description": "Page or component URL to audit",
+          "default": ""
+        },
+        "wcagLevel": {
+          "description": "WCAG conformance level to test against (A, AA, AAA)",
+          "default": "AA"
+        },
+        "outputFormat": {
+          "description": "Final report format",
+          "default": "markdown report with severity-grouped issue table and remediation column"
+        }
+      }
+    },
+    "translation_task": {
+      "description": "Translate a document, message, or attached text between languages, preserving meaning, tone, and formatting, with an optional QA spot-check for critical content. Example triggers: 'translate this announcement to German', 'übersetze das Dokument ins Englische', 'localise these UI strings to French', 'Fachtext ins Deutsche übersetzen', 'translate the attached contract to Spanish', 'Übersetzung mit Qualitätsprüfung anfertigen'.",
+      "task": "Use document_intake when the source is an attached file and needs to be read first. Use translator to render the source into {{targetLanguage}} from {{sourceLanguage}} (auto-detect when unspecified), preserving formatting (Markdown, lists, code blocks, placeholders like {{variable}} or $t('key')), tone ({{tone}}), and domain-specific terminology. Do not reinterpret the content — translate what is there. Keep proper names, product names, code identifiers, and URLs unchanged. When {{qaCheck}} is yes, use qa_guard to spot-check critical sentences for meaning preservation, and re-translate only the flagged segments. Use summarizer only when the caller explicitly asks for a bilingual summary next to the translation. Return the translation as the primary deliverable; include a brief translator's note only when ambiguous source text forced a judgement call.",
+      "allowedAgents": [
+        "document_intake",
+        "translator",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "targetLanguage": {
+          "description": "Language to translate into (ISO name or code)",
+          "default": "English"
+        },
+        "sourceLanguage": {
+          "description": "Source language (or 'auto' to detect)",
+          "default": "auto"
+        },
+        "tone": {
+          "description": "Preferred tone (formal, neutral, casual, technical)",
+          "default": "preserve source tone"
+        },
+        "qaCheck": {
+          "description": "Whether to run a QA spot-check on critical sentences (yes/no)",
+          "default": "no"
+        }
+      }
+    },
+    "infrastructure_change": {
+      "description": "Plan an infrastructure change (Terraform, Ansible, Kubernetes, shell-level ops), run a compliance review, apply the change only after explicit human approval, and verify the result. Example triggers: 'apply the Terraform change to scale the cluster', 'Infrastruktur-Änderung mit Genehmigung ausrollen', 'run the Ansible playbook to rotate credentials', 'Kubernetes-Config anpassen und anwenden', 'provision the new VPC with approval', 'Infrastrukturänderung planen und umsetzen'.",
+      "task": "Use devops_coordinator to direct the flow. First: plan only. Use infrastructure_agent to produce the change plan for {{changeDescription}} against {{targetEnvironment}} — a Terraform plan, Ansible dry-run, or Kubernetes diff — and present the exact set of resources that will be created, modified, or destroyed. Use policy_compliance_reviewer to evaluate the plan against configured policy (tag rules, naming, regions, cost guards, security posture) and flag blockers. PAUSE for operator approval before any apply step — do not execute terraform_apply, ansible_apply, or destructive shell operations without approval (these are human-in-loop gated). After approval, use shell_agent or infrastructure_agent to execute the approved plan, capturing the real tool output (not a paraphrase). Use infrastructure_agent to verify the post-change state matches the plan (resource presence, health checks, smoke checks). Use summarizer to produce the final change log: what was planned, what was approved, what actually applied, verification evidence, and rollback notes. If compliance blocks or verification fails, stop and report; do not auto-revert without explicit instruction.",
+      "allowedAgents": [
+        "devops_coordinator",
+        "infrastructure_agent",
+        "policy_compliance_reviewer",
+        "shell_agent",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "humanInLoopSteps": [
+        "terraform_apply",
+        "ansible_apply",
+        "infrastructure_apply",
+        "ssh_exec",
+        "service_check"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "changeDescription": {
+          "description": "The infrastructure change to plan and apply",
+          "default": "the requested infrastructure change"
+        },
+        "targetEnvironment": {
+          "description": "Target environment (dev, staging, production)",
+          "default": "staging"
+        },
+        "changeType": {
+          "description": "Change tooling (terraform, ansible, kubernetes, shell)",
+          "default": "terraform"
+        }
+      }
+    },
+    "calendar_scheduling": {
+      "description": "Check participant availability, propose or book a calendar event, and send channel confirmations to the invitees. Example triggers: 'schedule a 30-minute sync with the platform team next week', 'buche einen Termin mit dem Kunden für Freitag', 'find a time for a three-person kickoff meeting', 'Meeting für die Projektbesprechung planen', 'book the design review and send invites', 'Kalenderevent mit Bestätigung koordinieren'.",
+      "task": "Use calendar_agent to check availability windows for {{participants}} within {{timeRange}} and propose the earliest viable slots (at least two options when possible) matching {{durationMinutes}}. Respect working-hours conventions and timezone differences across participants. Once a slot is selected (or confirmed by the caller), use calendar_agent to create the event with a clear title, description, location/link, and the full participant list. Use mail_agent to send calendar invites when email is the primary confirmation channel, and notification_agent for Slack/Telegram/Discord reminders when {{confirmChannel}} specifies one. Use summarizer to produce a brief confirmation: scheduled date/time (with timezone), participants, join link, and next action. Do not double-book without surfacing the conflict first, and do not create recurring events unless explicitly requested.",
+      "allowedAgents": [
+        "calendar_agent",
+        "mail_agent",
+        "notification_agent",
+        "summarizer"
+      ],
+      "params": {
+        "participants": {
+          "description": "Comma-separated list of participant emails or names",
+          "default": "participants named in the user request"
+        },
+        "timeRange": {
+          "description": "Window to search for available slots",
+          "default": "next 5 working days"
+        },
+        "durationMinutes": {
+          "description": "Meeting duration in minutes",
+          "default": "30"
+        },
+        "confirmChannel": {
+          "description": "Primary confirmation channel (email, slack, telegram, discord)",
+          "default": "email"
+        }
+      }
+    },
+    "code_refactor": {
+      "description": "Perform a targeted, behaviour-preserving refactor — rename, extract, de-duplicate, narrow types, simplify — verified by existing tests and delivered as a single clean commit. Example triggers: 'refactor the order-processing module to remove duplication', 'Refactor der Authentifizierungs-Logik', 'extract the shared validation helpers into one module', 'Typ-Signaturen im Payment-Service straffen', 'simplify the config loader without behaviour changes', 'Code-Refactoring mit Test-Verifikation'.",
+      "task": "Use git_developer to capture the current branch state. Use code_analyst to scope {{refactorTarget}} to the smallest coherent change — identify exactly the files, functions, and call sites involved, and confirm the refactor is behaviour-preserving (no API change, no logic change). Reject scope creep: do not rename unrelated identifiers, do not rewrite adjacent code. Use coder to apply the refactor in a single pass. Use test_generator to run the existing relevant tests; add tests only when coverage is clearly missing at the refactored boundary. If tests fail, perform at most one more refactor-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify no public API surface changed and no call site was silently broken. Use summarizer to produce the final change summary: what was refactored, the diff scope (file + function count), why it is behaviour-preserving, and the test evidence. Use git_developer only when the caller asks to stage or commit — never push automatically.",
+      "allowedAgents": [
+        "git_developer",
+        "code_analyst",
+        "coder",
+        "test_generator",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "refactorTarget": {
+          "description": "Module, file, or concern to refactor",
+          "default": "the requested refactor target"
+        },
+        "refactorType": {
+          "description": "Kind of refactor (rename, extract, dedupe, narrow-types, simplify)",
+          "default": "simplify"
+        },
+        "maxCycles": {
+          "description": "Maximum refactor-test iterations (hard ceiling)",
+          "default": "2"
+        }
+      }
+    },
+    "database_migration": {
+      "description": "Inspect the current schema, author an idempotent migration, run a compliance review, apply it only after explicit human approval, and verify the resulting schema and data. Example triggers: 'add a not-null email column to the users table', 'Datenbankmigration für den neuen Index vorbereiten', 'create the orders_audit table with foreign keys', 'Schema-Migration mit Genehmigung ausrollen', 'add an index on payments.status', 'Datenbankänderung planen und anwenden'.",
+      "task": "Use sql_specialist in read-only mode first. Inspect the current schema for {{targetDatabase}} — columns, types, nullability, keys, indexes, and any existing migration history. Use code_analyst when the change requires code-side updates (ORM model, type definitions, query callers) so those are enumerated up front. Author the migration as an idempotent, reversible script (use IF NOT EXISTS / IF EXISTS guards, explicit UP and DOWN). For non-trivial changes, include backfill and constraint-enablement as separate phased steps (add nullable → backfill → enforce NOT NULL) so large tables do not block. Use policy_compliance_reviewer against configured data-handling rules (PII, retention, naming). PAUSE for operator approval before any write — do not execute the migration without explicit approval (sql_query write path is human-in-loop gated). After approval, execute the migration in {{targetEnvironment}} and verify: schema matches expectation, no unintended rows changed, indexes present, backfill complete. Use test_generator to run post-migration smoke tests when available. Use summarizer to produce the final migration log: planned change, approved change, applied change, verification evidence, rollback script. Do not auto-rollback without explicit instruction.",
+      "allowedAgents": [
+        "sql_specialist",
+        "code_analyst",
+        "policy_compliance_reviewer",
+        "test_generator",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "humanInLoopSteps": [
+        "sql_query",
+        "db_query_write",
+        "database_apply"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "migrationDescription": {
+          "description": "The schema or data migration to plan and apply",
+          "default": "the requested migration"
+        },
+        "targetDatabase": {
+          "description": "Database name or connection label",
+          "default": "configured primary database"
+        },
+        "targetEnvironment": {
+          "description": "Environment to apply against (dev, staging, production)",
+          "default": "staging"
+        }
+      }
+    },
+    "contract_review": {
+      "description": "Review a contract, NDA, SOW, MSA, or similar legal document — build a clause inventory, produce a risk table, and surface negotiation points. Legal analysis only; the output is advisory and requires human review before any action. Example triggers: 'review this vendor MSA for risky clauses', 'Vertrag auf Risiken prüfen', 'analyse the NDA and list negotiation points', 'Vertragsprüfung mit Risiko-Tabelle erstellen', 'flag any unusual indemnity or liability terms in this SOW', 'juristische Dokumentenprüfung mit Handlungsempfehlungen'.",
+      "task": "Use document_intake to load {{contractSource}} and extract clean text (preserve clause numbering where present). Use contract_analyst to build the clause inventory: governing law, term/termination, payment and fees, SLAs, liability cap, indemnity, IP assignment, confidentiality, data protection / GDPR, subprocessors, audit rights, warranties, force majeure, assignment, and {{jurisdictionFocus}}-specific considerations. Score each clause for risk against {{riskAppetite}} (low/medium/high tolerance) and flag non-standard or missing clauses. Use policy_compliance_reviewer to map clauses to configured internal compliance requirements (data handling, security, procurement rules). Use evidence_analyst to reconcile findings into one ledger keyed by clause: clause reference, summary, risk rating, rationale (quoting the contract text verbatim), and suggested negotiation redline. Use qa_guard to verify every risk claim quotes the actual contract text rather than paraphrasing. Use summarizer to produce the final {{outputFormat}}: one-paragraph verdict, risk table (clause / rating / issue / proposed redline), and a prioritised negotiation-points list. State explicitly that this is legal analysis assistance — final legal approval requires human counsel.",
+      "allowedAgents": [
+        "document_intake",
+        "contract_analyst",
+        "policy_compliance_reviewer",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "contractSource": {
+          "description": "Path to the contract file or description of the document",
+          "default": "the attached contract"
+        },
+        "contractType": {
+          "description": "Kind of contract (MSA, SOW, NDA, DPA, EULA, employment, vendor)",
+          "default": "MSA"
+        },
+        "jurisdictionFocus": {
+          "description": "Primary jurisdiction focus for the review",
+          "default": "EU and Germany"
+        },
+        "riskAppetite": {
+          "description": "Risk tolerance (low, medium, high)",
+          "default": "medium"
+        },
+        "outputFormat": {
+          "description": "Final report format",
+          "default": "markdown report with risk table and negotiation-points list"
+        }
+      }
     }
   }
 }
