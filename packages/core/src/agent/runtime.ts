@@ -573,13 +573,28 @@ function expandWorkflowDiscoveryVariants(token: string): string[] {
   return [...variants].filter((value) => isMeaningfulWorkflowDiscoveryToken(value));
 }
 
+/**
+ * Strip negative-example sentences ("Do NOT use ...", "Don't use ...")
+ * from a workflow description before scoring. Authors use these to steer the
+ * LLM away from passive use cases, but the heuristic catalog scorer just
+ * tokenizes the text and would otherwise treat the forbidden examples as
+ * positive matches — e.g. "do not use for 'help me understand this WireGuard
+ * tunnel'" added `wireguard` + `tunnel` to the scene's searchable text.
+ */
+function stripNegativeExamplesFromDescription(text: string): string {
+  if (!text) return text;
+  // Cut at the first negative directive on a sentence boundary.
+  const head = text.split(/(?:^|[.!?\n]\s+)(?:do\s*not\s+use|don'?t\s+use|never\s+use|do\s*not\s+route|don'?t\s+route)\b/i)[0];
+  return (head ?? text).trim();
+}
+
 function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
   const sceneHints = listAllScenes().map((scene) => ({
     name: scene.name,
     workflowType: "scene" as const,
     searchableText: [
       scene.name,
-      scene.description,
+      stripNegativeExamplesFromDescription(scene.description ?? ""),
       scene.task,
       serializeWorkflowParamHints(scene.params),
     ].filter(Boolean).join("\n"),
@@ -589,7 +604,7 @@ function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
     workflowType: "job" as const,
     searchableText: [
       job.name,
-      job.description,
+      stripNegativeExamplesFromDescription(job.description ?? ""),
       serializeWorkflowParamHints(job.params),
       ...(job.steps ?? []).map((step) => `${step.label ?? ""} ${step.scene}`.trim()),
     ].filter(Boolean).join("\n"),
