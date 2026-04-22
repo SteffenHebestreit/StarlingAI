@@ -1099,6 +1099,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  grafana_dashboard_search: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search Grafana dashboards by query / tag / folder (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  grafana_alerts_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List Grafana unified-alerting rules (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  grafana_dashboard_apply: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Create or update a Grafana dashboard via /api/dashboards/db",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  grafana_alert_apply: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Create or update a Grafana unified-alerting rule via the provisioning API",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
