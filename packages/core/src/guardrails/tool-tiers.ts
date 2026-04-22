@@ -1009,6 +1009,36 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  kubectl_get: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Get Kubernetes resources from an external cluster (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  kubectl_describe: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Describe a Kubernetes resource in detail (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  kubectl_logs: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Fetch container logs from a pod in an external Kubernetes cluster (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  kubectl_top: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Report current CPU and memory usage for pods or nodes (read-only, requires Metrics API)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  helm_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List Helm releases in the target Kubernetes cluster (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {

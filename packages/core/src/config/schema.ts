@@ -544,6 +544,10 @@ export const InfrastructureAutomationLocalCliProfileSchema = z.object({
   terraformBinary: z.string().min(1).default("terraform"),
   ansibleBinary: z.string().min(1).default("ansible"),
   ansiblePlaybookBinary: z.string().min(1).default("ansible-playbook"),
+  kubectlBinary: z.string().min(1).default("kubectl"),
+  helmBinary: z.string().min(1).default("helm"),
+  kubeconfigPath: z.string().min(1).optional(),
+  defaultKubeContext: z.string().min(1).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).optional(),
 });
 
