@@ -353,7 +353,7 @@ describe("memory tools", () => {
     const first = await executeTool("share_finding", {
       key: "headline_bbc",
       value: "BBC: UK economy grows for second consecutive quarter, beating analyst expectations.",
-    }, { sessionId: "sub:dedup-sess:researcher:1" });
+    }, { sessionId: "sub:dedup-sess:researcher:1", workspacePath: "" });
     expect(first.success).toBe(true);
     expect(first.metadata?.["deduplicated"]).toBeUndefined();
 
@@ -361,7 +361,7 @@ describe("memory tools", () => {
     const second = await executeTool("share_finding", {
       key: "headline_bbc_copy",
       value: "BBC: UK economy grows for second consecutive quarter, beating analyst expectations.",
-    }, { sessionId: "sub:dedup-sess:researcher:1" });
+    }, { sessionId: "sub:dedup-sess:researcher:1", workspacePath: "" });
     expect(second.success).toBe(true);
     expect(second.metadata?.["deduplicated"]).toBe(true);
     expect(second.output).toContain("similar to existing fact");
@@ -373,12 +373,12 @@ describe("memory tools", () => {
     await executeTool("share_finding", {
       key: "headline_weather",
       value: "Sunny skies expected in Berlin throughout the week.",
-    }, { sessionId: "sub:dedup-sess2:researcher:1" });
+    }, { sessionId: "sub:dedup-sess2:researcher:1", workspacePath: "" });
 
     const second = await executeTool("share_finding", {
       key: "headline_stocks",
       value: "DAX index closes up 1.4% driven by technology gains.",
-    }, { sessionId: "sub:dedup-sess2:researcher:1" });
+    }, { sessionId: "sub:dedup-sess2:researcher:1", workspacePath: "" });
     expect(second.success).toBe(true);
     expect(second.metadata?.["deduplicated"]).toBeUndefined();
   });
@@ -389,12 +389,12 @@ describe("memory tools", () => {
     await executeTool("share_finding", {
       key: "current_price",
       value: "Apple stock: $195.00",
-    }, { sessionId: "sub:dedup-sess3:researcher:1" });
+    }, { sessionId: "sub:dedup-sess3:researcher:1", workspacePath: "" });
 
     const update = await executeTool("share_finding", {
       key: "current_price",
       value: "Apple stock: $195.00",
-    }, { sessionId: "sub:dedup-sess3:researcher:1" });
+    }, { sessionId: "sub:dedup-sess3:researcher:1", workspacePath: "" });
     expect(update.success).toBe(true);
     // Same key → no dedup rejection (overwrite is expected)
     expect(update.metadata?.["deduplicated"]).toBeUndefined();
