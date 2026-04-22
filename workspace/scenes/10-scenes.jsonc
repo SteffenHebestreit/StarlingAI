@@ -711,6 +711,80 @@
           "default": "markdown report with risk table and negotiation-points list"
         }
       }
+    },
+    "monitoring_setup": {
+      "description": "Define or update alert rules, thresholds, and dashboards for a service or system, review for noise and coverage, apply only after explicit human approval, and verify the monitors are live. Example triggers: 'set up monitoring for the payments service', 'Alerts für den neuen Dienst konfigurieren', 'add a latency-spike alert on the API gateway', 'Dashboard für Fehlerquoten einrichten', 'tighten the CPU threshold on the workers', 'Monitoring-Konfiguration mit Freigabe ausrollen'.",
+      "task": "Use devops_coordinator to direct the flow. Use infrastructure_agent to inventory existing monitors, alert rules, and dashboards for {{targetService}} in {{monitoringStack}} so new rules do not duplicate or conflict. Author the rule changes for {{signalType}} — alert name, signal/metric expression, thresholds ({{thresholds}}), evaluation window, severity, notification channel, and a clear runbook link. Each rule must have an explicit non-flapping window and a described remediation path; reject anything that would page on normal-operation noise. Use policy_compliance_reviewer to validate the rules against configured on-call and alerting policy (naming, severity taxonomy, channel routing, silence rules). PAUSE for operator approval before any apply step — do not push the configuration without explicit approval (monitoring_apply is human-in-loop gated). After approval, use infrastructure_agent to apply the configuration and shell_agent or infrastructure_agent to verify the monitors are live (rule visible in the monitoring stack, test alert fires or dry-run evaluation succeeds, dashboard renders). Use summarizer to produce the final change log: planned rules, approved rules, applied rules, verification evidence, and rollback steps. Do not disable existing alerts without calling them out explicitly in the approval step.",
+      "allowedAgents": [
+        "devops_coordinator",
+        "infrastructure_agent",
+        "policy_compliance_reviewer",
+        "shell_agent",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "humanInLoopSteps": [
+        "monitoring_apply",
+        "prometheus_apply",
+        "grafana_apply",
+        "infrastructure_apply"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "targetService": {
+          "description": "Service, component, or system to monitor",
+          "default": "the requested service"
+        },
+        "monitoringStack": {
+          "description": "Monitoring tooling (prometheus, grafana, datadog, cloudwatch, other)",
+          "default": "prometheus"
+        },
+        "signalType": {
+          "description": "Signal class (latency, error-rate, saturation, availability, custom)",
+          "default": "error-rate and latency"
+        },
+        "thresholds": {
+          "description": "Threshold guidance (e.g. 'p95 latency > 500ms for 5m')",
+          "default": "reasonable SLO-aligned defaults — ask for confirmation if unclear"
+        }
+      }
+    },
+    "feature_planning": {
+      "description": "Turn a product feature request into a structured plan: user stories, acceptance criteria, dependency graph, and a task breakdown, with explicit human approval before locking scope and handing off to execution. Example triggers: 'plan out the multi-tenant billing feature', 'Feature-Planung für den neuen Upload-Flow', 'break this user request into acceptance criteria and tasks', 'Roadmap-Feature in User Stories aufteilen', 'turn the product brief into a task graph', 'Feature-Planung mit Abhängigkeiten und Abnahmekriterien'.",
+      "task": "Use researcher when the feature touches an unfamiliar domain or competitive context — collect the minimum evidence needed to ground scope decisions (do not run a full competitive analysis from this scene). Use evidence_analyst to consolidate stated requirements, constraints, and open questions from {{featureBrief}}. Use project_planner to produce: (1) user stories in 'As a <role>, I want <goal>, so that <outcome>' form, (2) Gherkin-style acceptance criteria for each story with explicit edge cases, (3) a dependency graph identifying upstream blockers and cross-team dependencies, (4) a task breakdown sized for {{targetTimeHorizon}} with rough t-shirt estimates, and (5) a milestone plan with entry/exit criteria. Use content_writer to render the deliverable as {{outputFormat}} structured for {{audience}}. PAUSE for operator approval once scope, acceptance criteria, and the task graph are visible — do not open tickets, hand off to `project_planner` execution mode, or kick off downstream work without explicit scope approval (plan_finalize is human-in-loop gated). Use qa_guard to verify that every acceptance criterion is testable and every task maps to at least one acceptance criterion. Do not invent scope the brief does not support — call out gaps explicitly instead.",
+      "allowedAgents": [
+        "project_planner",
+        "researcher",
+        "evidence_analyst",
+        "content_writer",
+        "summarizer",
+        "qa_guard",
+        "quality_supervisor"
+      ],
+      "humanInLoopSteps": [
+        "plan_finalize",
+        "project_planner_handoff"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "featureBrief": {
+          "description": "Product feature description, user request, or problem statement",
+          "default": "the requested feature"
+        },
+        "audience": {
+          "description": "Who the plan is written for (engineering, product, cross-functional)",
+          "default": "cross-functional team"
+        },
+        "targetTimeHorizon": {
+          "description": "Planning horizon (one-sprint, one-quarter, major-initiative)",
+          "default": "one-sprint"
+        },
+        "outputFormat": {
+          "description": "Final deliverable format",
+          "default": "structured Markdown plan with user stories, acceptance criteria, dependency graph, and milestone list"
+        }
+      }
     }
   }
 }
