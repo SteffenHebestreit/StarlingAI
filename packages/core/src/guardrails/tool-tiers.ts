@@ -1039,6 +1039,42 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  kubectl_apply: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Apply a Kubernetes manifest (create or update) against an external cluster",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  kubectl_delete: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Delete a Kubernetes resource by name or label selector",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  kubectl_rollout_restart: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Trigger a rolling restart of a Deployment, StatefulSet, or DaemonSet",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  kubectl_scale: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Scale a workload to a specific replica count",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  helm_upgrade: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Upgrade (or install with install=true) a Helm release against an external cluster",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  helm_rollback: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Roll back a Helm release to a previous revision",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
