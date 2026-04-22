@@ -581,6 +581,12 @@
         "terraform_exec",
         "ansible_playbook",
         "ansible_task",
+        "kubectl_apply",
+        "kubectl_delete",
+        "kubectl_rollout_restart",
+        "kubectl_scale",
+        "helm_upgrade",
+        "helm_rollback",
         "ssh_exec",
         "service_check"
       ],
