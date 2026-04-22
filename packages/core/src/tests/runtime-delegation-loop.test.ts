@@ -1606,6 +1606,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare multiple protocols through one reusable comparison paper workflow.",
           task: "Use the reusable comparison paper workflow for the requested protocol set.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
       },
     });
@@ -1691,6 +1696,11 @@ describe("runtime delegated-loop regressions", () => {
         n8n_project_list: {
           description: "Open the n8n Projektliste, check for neue Einträge, and stop after listing the visible workflows.",
           task: "Open {{targetUrl}}, use the named project-list URL hinted by {{projectListUrlHint}}, and list the visible workflows.",
+          triggers: {
+            patterns: [
+              { all: ["\\bn8n\\b", "\\b(projektliste|project[\\s-]?list|workflows?|einträge|eintraege|entries)\\b"] },
+            ],
+          },
           params: {
             targetUrl: {
               description: "Initial URL to open",
@@ -1782,10 +1792,20 @@ describe("runtime delegated-loop regressions", () => {
         n8n_project_list: {
           description: "List the visible n8n workflows and ask whether the highlighted candidate should be run.",
           task: "Open the project list and stop after listing the visible workflows.",
+          triggers: {
+            patterns: [
+              { all: ["\\bn8n\\b", "\\b(projektliste|project[\\s-]?list|workflows?|einträge|eintraege|entries)\\b"] },
+            ],
+          },
         },
         n8n_run_workflow: {
           description: "Run an explicitly named n8n workflow from the project list.",
           task: "Open the project list, locate {{workflowName}}, and start it.",
+          triggers: {
+            patterns: [
+              { all: ["\\bn8n\\b", "\\b(start|run|ausführ(?:en|e)?|ausfuehr(?:en|e)?|starte(?:n)?)\\b"] },
+            ],
+          },
           params: {
             workflowName: {
               description: "Workflow to run",
@@ -1913,6 +1933,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare multiple protocols through one reusable comparison paper workflow.",
           task: "Use the reusable comparison paper workflow for the requested protocol set.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
       },
     });
@@ -2248,6 +2273,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare multiple protocols through one reusable comparison paper workflow.",
           task: "Use the reusable comparison paper workflow for the requested protocol set.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
       },
     });
@@ -2366,6 +2396,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare MCP and A2A through one reusable comparison paper workflow for AI protocol requests.",
           task: "Use the reusable comparison paper workflow for the requested MCP and A2A protocol set.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
         api_test_suite: {
           description: "Test and validate API endpoints with structured request/response analysis and documentation.",
@@ -2498,6 +2533,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare multiple protocols through one reusable comparison paper workflow.",
           task: "Use the reusable comparison paper workflow for the requested protocol set.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
       },
     });
@@ -2636,6 +2676,11 @@ describe("runtime delegated-loop regressions", () => {
         protocol_comparison_paper: {
           description: "Compare multiple protocols through one reusable comparison paper workflow.",
           task: "Use mission_coordinator first. Partition the requested protocols into comparison tracks and produce one grounded paper draft.",
+          triggers: {
+            patterns: [
+              { all: ["\\bpaper\\b", "\\b(write|draft|prepare|schreib(?:en|e)?|verfass(?:en|e)?)\\b"] },
+            ],
+          },
         },
       },
     });

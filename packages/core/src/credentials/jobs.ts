@@ -44,6 +44,7 @@ export function listAllJobs(): JobSummary[] {
       params: job.params,
       steps: job.steps,
       triggers: job.triggers,
+      catalogTriggers: job.catalogTriggers,
     });
   }
 
@@ -74,6 +75,7 @@ export function getJobDefinition(name: string): JobSummary | null {
       params: configJob.params,
       steps: configJob.steps,
       triggers: configJob.triggers,
+      catalogTriggers: configJob.catalogTriggers,
     };
   }
 

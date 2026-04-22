@@ -149,50 +149,13 @@ export const WORKFLOW_REQUEST_PATTERNS = [
   /\bchain\b[\s\S]{0,40}\b(them|these|workflows?|jobs?|scenes?)\b/,
 ];
 
-export const WORKFLOW_DISCOVERY_STOP_WORDS = new Set<string>([
-  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how",
-  "i", "if", "in", "into", "is", "it", "me", "my", "of", "on", "or", "please",
-  "show", "that", "the", "these", "this", "to", "use", "using", "with", "write", "you",
-  "bitte", "das", "der", "die", "dir", "du", "ein", "eine", "für", "fuer", "hier", "im", "in", "ist", "jetzt", "kann", "kannst", "mir", "mit",
-  "oder", "schreib", "schreibe", "thema", "und", "von", "wie", "zu", "zum", "zur",
-  // Additional German function words and pronouns that frequently appear in
-  // user prose without carrying topical signal.
-  "wir", "uns", "unser", "unsere", "unseren", "unserem", "unserer",
-  "ich", "mich", "mein", "meine", "meinen", "meinem", "meiner",
-  "sie", "ihr", "ihre", "ihren", "ihrem", "ihrer",
-  "er", "ihm", "ihn", "sein", "seine", "seinen", "seinem", "seiner",
-  "des", "dem", "den", "denen", "dessen", "deren",
-  "was", "wer", "wen", "wem", "wessen", "wo", "wann", "warum", "wieso", "weshalb",
-  "muss", "musst", "müssen", "muessen",
-  "soll", "sollte", "sollten", "will", "wollen", "möchte", "moechte", "möchten", "moechten",
-  "darf", "dürfen", "duerfen", "können", "koennen", "könnte", "koennte",
-  "hat", "hatte", "hatten", "haben", "habe", "gehabt",
-  "war", "waren", "sind", "bin", "bist", "seid", "gewesen", "werden", "wird", "wurde", "wurden", "worden",
-  "nicht", "kein", "keine", "keinen", "keinem", "keiner",
-  "noch", "auch", "nur", "man", "als", "so", "dass", "weil", "wenn", "ob",
-  "über", "ueber", "unter", "vor", "nach", "bei", "aus", "an",
-  "sehr", "schon", "mal", "ganz", "gleich", "selbst", "selber", "einfach", "eigentlich",
-  "hier", "dort", "dann", "danach", "davor", "deshalb", "daher", "darum", "trotzdem",
-  "folgendes", "folgend", "folgen", "folgenden", "folgendem", "folgender",
-  "tun", "tut", "tust", "tue", "getan",
-  // Generic infra/config noise tokens — these appear in any pasted shell
-  // session, iptables rule, WireGuard config, or pfsense/router UI dump and
-  // would otherwise dominate workflow-catalog scoring without carrying intent.
-  "cat", "conf", "config", "configs", "cfg", "ini", "yaml", "yml", "json",
-  "nat", "snat", "dnat", "src", "dst", "lan", "wan", "dmz", "vlan", "opt",
-  "com", "org", "net", "io", "de", "local",
-  "description", "beschreibung", "label", "name", "value",
-  "peer", "peers", "interface", "interfaces", "address", "addresses",
-  "port", "ports", "key", "keys", "privatekey", "publickey", "presharedkey",
-  "endpoint", "endpoints", "listenport", "allowedips", "persistentkeepalive",
-  "protocol", "proto", "tcp", "udp", "icmp", "ipv4", "ipv6", "mtu",
-  "http", "https", "url", "uri", "path",
-  "true", "false", "null", "none", "default", "defaults", "enabled", "disabled",
-  // Common shell/admin command words that get harvested when prompts/commands
-  // leak through stripping (e.g. inside prose).
-  "sudo", "root", "home", "usr", "etc", "var", "opt", "tmp", "bin", "lib",
-  "iptables", "systemctl", "docker", "compose", "kubectl", "helm",
-]);
+// (Removed: WORKFLOW_DISCOVERY_STOP_WORDS.) The previous workflow-catalog detector
+// scored token overlap between the user message and a concatenated scene/job
+// blob, requiring an ever-growing stop-word list to suppress noise (German
+// pronouns, infra config keys, shell command names, ...). The new detector in
+// runtime.ts uses opt-in regex triggers per scene/job, so the noise-token
+// suppression list is no longer needed.
+
 
 export const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
   "ahoi",
