@@ -574,6 +574,49 @@ export const InfrastructureSchema = z.object({
 });
 
 
+// ─── Monitoring (Prometheus, Alertmanager, Grafana) ──────────────────────────
+// External-only: each instance points at a remote endpoint. The gateway never
+// runs its own Prometheus/Alertmanager/Grafana.
+
+export const BasicAuthSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
+export const PrometheusInstanceSchema = z.object({
+  baseUrl: z.string().url(),
+  bearerToken: z.string().optional(),
+  basicAuth: BasicAuthSchema.optional(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export const AlertmanagerInstanceSchema = z.object({
+  baseUrl: z.string().url(),
+  bearerToken: z.string().optional(),
+  basicAuth: BasicAuthSchema.optional(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export const GrafanaInstanceSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),
+  orgId: z.number().int().min(1).optional(),
+  headers: z.record(z.string()).optional(),
+  timeoutMs: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export const MonitoringSchema = z.object({
+  defaultPrometheus: z.string().min(1).optional(),
+  defaultAlertmanager: z.string().min(1).optional(),
+  defaultGrafana: z.string().min(1).optional(),
+  prometheus: z.record(PrometheusInstanceSchema).default({}),
+  alertmanager: z.record(AlertmanagerInstanceSchema).default({}),
+  grafana: z.record(GrafanaInstanceSchema).default({}),
+});
+
+
 // ─── Pentest service ──────────────────────────────────────────────────────────
 
 export const PentestKaliServiceProfileSchema = z.object({
@@ -656,6 +699,36 @@ export const SceneParamSchema = z.object({
   default: z.string().optional(),              // used when param not provided
 });
 
+/**
+ * Catalog-routing triggers for a scene/job. Authors declare narrow,
+ * high-precision regex patterns that uniquely identify when *their* workflow
+ * is being requested. The runtime tests every pattern entry against the
+ * normalised user message; an entry matches only when ALL of its `all` regexes
+ * match. ANY entry that matches → the workflow is a candidate.
+ *
+ * Without `triggers` declared, a scene/job is still discoverable via
+ * `search_workflows` by the LLM, but it never trips the workflow guardrail
+ * on its own. This is intentional: the old token-overlap heuristic was noisy.
+ *
+ * `requiresActionVerb` further gates the candidate: when true, the user
+ * message must contain an imperative/action verb (apply, deploy, run, ...,
+ * ausrollen, anwenden, durchführen, ...) before the workflow is treated as a
+ * confirmed intent. Without an action verb, the runtime will instead suggest
+ * the workflow to the user and ask whether they want it executed — i.e.
+ * passive questions like "erklär mir diesen WireGuard tunnel" never force
+ * a routing decision.
+ */
+export const WorkflowCatalogTriggerEntrySchema = z.object({
+  /** All listed regex patterns must match (case-insensitive). */
+  all: z.array(z.string().min(1)).min(1),
+});
+export const WorkflowCatalogTriggersSchema = z.object({
+  patterns: z.array(WorkflowCatalogTriggerEntrySchema).min(1),
+  /** Require an imperative/action verb in the message to count as a confirmed intent. */
+  requiresActionVerb: z.boolean().optional(),
+}).optional();
+export type WorkflowCatalogTriggers = z.infer<typeof WorkflowCatalogTriggersSchema>;
+
 export const SceneConfigSchema = z.object({
   description: z.string(),                     // shown when listing scenes
   task: z.string().min(1),                     // the prompt injected into the session
@@ -663,6 +736,8 @@ export const SceneConfigSchema = z.object({
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
   humanInLoopSteps: z.array(z.string()).optional(), // tool names that require user approval in this scene
+  /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
+  triggers: WorkflowCatalogTriggersSchema,
   /** Name of an entry in `approvalChannels` — used when this scene is triggered via webhook */
   approvalChannel: z.string().optional(),
   /** Override the approval channel timeout for this scene (ms). Min 60 s, max 24 h.
@@ -723,6 +798,8 @@ export const JobConfigSchema = z.object({
   params: z.record(SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),
+  /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
+  catalogTriggers: WorkflowCatalogTriggersSchema,
 });
 
 export const JobsSchema = z.record(JobConfigSchema);
@@ -854,6 +931,7 @@ export const ConfigSchema = z.object({
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
   infrastructure: InfrastructureSchema.default({}),
+  monitoring: MonitoringSchema.default({}),
   pentest: PentestSchema.default({}),
   mail: MailServiceSchema.default({}),
   toolDevelopment: ToolDevelopmentSchema.default({}),

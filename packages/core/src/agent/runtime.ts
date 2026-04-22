@@ -32,7 +32,6 @@ import {
   WORKFLOW_ACTION_TERMS,
   WORKFLOW_DELIVERABLE_HINT_TERMS,
   WORKFLOW_REQUEST_PATTERNS,
-  WORKFLOW_DISCOVERY_STOP_WORDS,
 } from "./intent-classifier.js";
 
 const log = childLogger("agent:runtime");
@@ -217,12 +216,6 @@ const AGENT_DISCOVERY_TOOL_NAMES = new Set([
   "search_workflows",
 ]);
 
-interface WorkflowCatalogHint {
-  name: string;
-  workflowType: "scene" | "job";
-  searchableText: string;
-}
-
 interface WorkflowCatalogMatch {
   name: string;
   workflowType: "scene" | "job";
@@ -230,25 +223,12 @@ interface WorkflowCatalogMatch {
   matchedTerms: string[];
 }
 
-function serializeWorkflowParamHints(
-  params: Record<string, { description?: string; default?: string }> | undefined,
-): string {
-  if (!params) return "";
-
-  return Object.entries(params)
-    .map(([paramName, paramDef]) => [
-      paramName,
-      paramDef.description ?? "",
-      paramDef.default ?? "",
-    ].filter(Boolean).join(" "))
-    .filter(Boolean)
-    .join("\n");
-}
-
 interface WorkflowCatalogSignal {
   required: boolean;
-  reason: "explicit_request" | "catalog_match" | "hint_terms" | "none";
+  reason: "explicit_request" | "catalog_match" | "uncertain_match" | "hint_terms" | "none";
   strongestMatch?: WorkflowCatalogMatch;
+  /** Plausible but unconfirmed candidates — used to ASK the user instead of forcing routing. */
+  uncertainCandidates?: WorkflowCatalogMatch[];
 }
 
 interface ApprovedWorkflowFollowUp {
@@ -501,198 +481,216 @@ function isWorkflowCatalogToolName(toolName: string): boolean {
   return toolName === "search_workflows" || toolName === "run_workflow";
 }
 
-/**
- * Remove content that is clearly pasted code, shell output, or config syntax
- * — those tokens are not user intent and should not drive workflow routing.
- * Real-world false positives: pasted iptables/wireguard configs caused
- * `infrastructure_change` to score 1.0 on tokens like nat/source/lan/conf/cat.
- */
-function stripPastedCodeAndConfig(value: string): string {
-  let stripped = value;
-  // Fenced code blocks (``` ... ``` and ~~~ ... ~~~), greedy non-overlapping.
-  stripped = stripped.replace(/```[\s\S]*?```/g, " ");
-  stripped = stripped.replace(/~~~[\s\S]*?~~~/g, " ");
-  // Inline backtick spans — short literal tokens, no signal for routing.
-  stripped = stripped.replace(/`[^`\n]+`/g, " ");
-  // Line-by-line filter for shell prompts, KEY = VALUE config lines, and
-  // common CLI/admin command lines.
-  const cliPrefix = /^(?:sudo\s+)?(?:iptables|ip6tables|ip|nft|wg|wg-quick|systemctl|service|journalctl|docker|docker-compose|kubectl|helm|terraform|ansible|ansible-playbook|ssh|scp|rsync|cat|tail|head|less|more|grep|awk|sed|curl|wget|netstat|ss|ping|traceroute|dig|nslookup|nmap|ps|top|htop|uname|df|du|mount|umount|chmod|chown|export|echo|set|env|printenv)\b/i;
-  stripped = stripped.split("\n").filter((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return true;
-    // Shell prompts like "root@host:~#" or "user@host:~$".
-    if (/^[\w.-]+@[\w.-]+:[^\s]*[#$]\s*/.test(trimmed)) return false;
-    if (/^[#$>]\s+\S/.test(trimmed)) return false;
-    // Config lines: KeyName = value, KeyName: value, [Section].
-    if (/^[A-Z][A-Za-z0-9_-]{1,30}\s*[:=]\s*\S/.test(trimmed)) return false;
-    if (/^\[[A-Za-z0-9_.-]+\]\s*$/.test(trimmed)) return false;
-    // Lines that lead with a known CLI tool.
-    if (cliPrefix.test(trimmed)) return false;
-    return true;
-  }).join("\n");
-  return stripped;
-}
-
-function normalizeWorkflowDiscoveryText(value: string): string {
-  return stripPastedCodeAndConfig(value)
-    .toLowerCase()
-    // Fold common diacritics (German umlauts, sharp s, accented vowels) BEFORE
-    // stripping non-ASCII so e.g. "über" → "ueber" (filtered as a stop word)
-    // instead of "ber" (a 3-char nonsense token that pollutes catalog scoring).
-    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
-    .replace(/[àáâã]/g, "a").replace(/[èéêë]/g, "e")
-    .replace(/[ìíîï]/g, "i").replace(/[òóôõ]/g, "o")
-    .replace(/[ùúû]/g, "u").replace(/[ýÿ]/g, "y").replace(/ñ/g, "n").replace(/ç/g, "c")
-    .replace(/[_:/.-]+/g, " ")
-    .replace(/[^a-z0-9\s]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isMeaningfulWorkflowDiscoveryToken(token: string): boolean {
-  if (!token || WORKFLOW_DISCOVERY_STOP_WORDS.has(token)) return false;
-  // Reject pure-digit tokens (IP octets, port numbers, version fragments) — they
-  // carry no topical signal and would otherwise inflate matchedTerms against
-  // workflows that happen to have numbers in their searchable text.
-  if (/^\d+$/.test(token)) return false;
-  return token.length >= 3 || /\d/.test(token);
-}
-
-function tokenizeWorkflowDiscoveryText(value: string): string[] {
-  return [...new Set(
-    normalizeWorkflowDiscoveryText(value)
-      .split(" ")
-      .filter((token) => isMeaningfulWorkflowDiscoveryToken(token))
-  )];
-}
-
-function expandWorkflowDiscoveryVariants(token: string): string[] {
-  const variants = new Set<string>([token]);
-  if (token.length > 4 && token.endsWith("es")) variants.add(token.slice(0, -2));
-  if (token.length > 3 && token.endsWith("s")) variants.add(token.slice(0, -1));
-  return [...variants].filter((value) => isMeaningfulWorkflowDiscoveryToken(value));
-}
+// ─── Workflow catalog detector (opt-in trigger model) ─────────────────────
+//
+// The previous detector scored token-overlap between the user message and a
+// concatenated `name + description + task + params` blob for every scene/job.
+// That design mis-fired constantly:
+//   • pasted iptables/wireguard configs dominated tokenisation
+//   • German function words (wir/ich/des/den/was/muss/tun) all looked like topic terms
+//   • topic words (`cluster`, `wireguard`, `tunnel`) legitimately overlap with infra
+//     scenes regardless of whether the user is asking how to *deploy* or how to *understand*
+//   • substring matches like `"sim"` ⊂ `"simplify"` and `"site"` ⊂ `"call sites"`
+//
+// Replacement: scenes/jobs declare narrow opt-in triggers in their config.
+// Three layered signals drive the guardrail now:
+//   A. Explicit workflow request (e.g. "use the X scene", "run workflow Y") — already covered
+//      by `WORKFLOW_REQUEST_PATTERNS`.
+//   B. Author-declared triggers (`scene.triggers.patterns: [{ all: [regex, ...] }, ...]`).
+//      An entry matches when ALL of its `all` regexes match the message; ANY entry → match.
+//   C. Action-verb gate. Scenes marked `requiresActionVerb: true` only fire as a CONFIRMED
+//      intent when the message also contains an imperative/action verb. Without one, the
+//      match becomes an UNCERTAIN candidate — we ask the user instead of forcing routing.
+//
+// Anything without `triggers` is still discoverable via `search_workflows` by the LLM —
+// it just no longer trips the guardrail on its own. This is intentional: false positives
+// were dramatically worse than the recall loss on rare borderline phrasings.
 
 /**
- * Strip negative-example sentences ("Do NOT use ...", "Don't use ...")
- * from a workflow description before scoring. Authors use these to steer the
- * LLM away from passive use cases, but the heuristic catalog scorer just
- * tokenizes the text and would otherwise treat the forbidden examples as
- * positive matches — e.g. "do not use for 'help me understand this WireGuard
- * tunnel'" added `wireguard` + `tunnel` to the scene's searchable text.
+ * Action verbs (DE + EN) that signal the user wants something *done*, not
+ * just explained. Used by `requiresActionVerb` triggers to distinguish
+ * "wie konfiguriere ich X" (no verb of execution → uncertain) from
+ * "konfiguriere X jetzt" (`konfiguriere` is action verb → confirmed).
+ *
+ * NOTE: imperative/infinitive forms only. Question words like "wie/was/wer"
+ * and modal+verb constructions ("wie konfiguriere ich") legitimately contain
+ * an action stem; we still want those to count as "uncertain" when no other
+ * imperative verb is present, so the user gets asked instead of force-routed.
  */
-function stripNegativeExamplesFromDescription(text: string): string {
-  if (!text) return text;
-  // Cut at the first negative directive on a sentence boundary.
-  const head = text.split(/(?:^|[.!?\n]\s+)(?:do\s*not\s+use|don'?t\s+use|never\s+use|do\s*not\s+route|don'?t\s+route)\b/i)[0];
-  return (head ?? text).trim();
+const WORKFLOW_ACTION_VERB_PATTERN = new RegExp(
+  "\\b(?:" + [
+    // English imperatives
+    "apply", "deploy", "rollout", "roll\\s*out", "run", "execute", "provision",
+    "scale", "migrate", "install", "uninstall", "update", "upgrade", "configure",
+    "setup", "set\\s*up", "spin\\s*up", "tear\\s*down", "restart", "reboot",
+    "create", "build", "publish", "release", "ship",
+    // German imperatives + verbal nouns
+    "ausroll(?:en|e)?", "anwend(?:en|e)?", "umsetz(?:en|e)?", "provisionier(?:en|e)?",
+    "skalier(?:en|e)?", "migrier(?:en|e)?", "installier(?:en|e)?", "deinstallier(?:en|e)?",
+    "aktualisier(?:en|e)?", "upgrade(?:n|t)?", "starte(?:n)?", "neu\\s*starte(?:n)?",
+    "richte\\s*ein", "einricht(?:en|e)?", "aufsetz(?:en|e)?", "anlegen", "erstell(?:en|e)?",
+    "baue(?:n)?", "ver(?:o|oe|\u00f6)ffentlich(?:en|e)?", "ausf(?:u|ue|\u00fc)hr(?:en|e)?",
+    "durchf(?:u|ue|\u00fc)hr(?:en|e)?", "einspiel(?:en|e)?", "auspielen",
+  ].join("|") + ")\\b",
+  "i",
+);
+
+interface WorkflowCatalogTriggerCandidate {
+  name: string;
+  workflowType: "scene" | "job";
+  patternsCompiled: Array<RegExp[]>;
+  requiresActionVerb: boolean;
 }
 
-function buildWorkflowCatalogHints(): WorkflowCatalogHint[] {
-  const sceneHints = listAllScenes().map((scene) => ({
-    name: scene.name,
-    workflowType: "scene" as const,
-    searchableText: [
-      scene.name,
-      stripNegativeExamplesFromDescription(scene.description ?? ""),
-      scene.task,
-      serializeWorkflowParamHints(scene.params),
-    ].filter(Boolean).join("\n"),
-  }));
-  const jobHints = listAllJobs().map((job) => ({
-    name: job.name,
-    workflowType: "job" as const,
-    searchableText: [
-      job.name,
-      stripNegativeExamplesFromDescription(job.description ?? ""),
-      serializeWorkflowParamHints(job.params),
-      ...(job.steps ?? []).map((step) => `${step.label ?? ""} ${step.scene}`.trim()),
-    ].filter(Boolean).join("\n"),
-  }));
-  return [...sceneHints, ...jobHints];
-}
+function compileWorkflowTriggerEntries(): WorkflowCatalogTriggerCandidate[] {
+  const out: WorkflowCatalogTriggerCandidate[] = [];
 
-function scoreWorkflowCatalogHint(query: string, hint: WorkflowCatalogHint): WorkflowCatalogMatch | null {
-  const queryTokens = tokenizeWorkflowDiscoveryText(query);
-  if (queryTokens.length === 0) return null;
-
-  const nameText = normalizeWorkflowDiscoveryText(hint.name);
-  const searchableText = normalizeWorkflowDiscoveryText(hint.searchableText);
-  const matchedTerms = new Set<string>();
-  let score = 0;
-
-  for (const token of queryTokens) {
-    const variants = expandWorkflowDiscoveryVariants(token);
-    let tokenScore = 0;
-    if (variants.some((variant) => nameText.includes(variant))) tokenScore = Math.max(tokenScore, 1);
-    if (variants.some((variant) => searchableText.includes(variant))) tokenScore = Math.max(tokenScore, 0.72);
-    if (tokenScore > 0) {
-      matchedTerms.add(token);
-      score += tokenScore;
+  const compileEntry = (
+    name: string,
+    workflowType: "scene" | "job",
+    triggers: { patterns: { all: string[] }[]; requiresActionVerb?: boolean } | undefined,
+  ): void => {
+    if (!triggers || !Array.isArray(triggers.patterns) || triggers.patterns.length === 0) return;
+    const patternsCompiled: RegExp[][] = [];
+    for (const entry of triggers.patterns) {
+      const compiled: RegExp[] = [];
+      for (const raw of entry.all) {
+        try {
+          compiled.push(new RegExp(raw, "iu"));
+        } catch (err) {
+          log.warn({ err, name, workflowType, raw }, "Skipping invalid workflow trigger regex");
+          compiled.length = 0;
+          break;
+        }
+      }
+      if (compiled.length > 0) patternsCompiled.push(compiled);
     }
-  }
-
-  if (matchedTerms.size === 0) return null;
-
-  const normalizedScore = Math.min(1, score / Math.min(queryTokens.length, 4));
-  return {
-    name: hint.name,
-    workflowType: hint.workflowType,
-    score: normalizedScore,
-    matchedTerms: [...matchedTerms],
+    if (patternsCompiled.length === 0) return;
+    out.push({
+      name,
+      workflowType,
+      patternsCompiled,
+      requiresActionVerb: triggers.requiresActionVerb === true,
+    });
   };
+
+  for (const scene of listAllScenes()) {
+    compileEntry(scene.name, "scene", scene.triggers);
+  }
+  for (const job of listAllJobs()) {
+    compileEntry(job.name, "job", job.catalogTriggers);
+  }
+  return out;
 }
 
 function detectWorkflowCatalogSignal(userMessage: string): WorkflowCatalogSignal {
+  const trimmed = userMessage.trim();
+  if (!trimmed) return { required: false, reason: "none" };
+
   const normalized = userMessage.toLowerCase();
-  if (!normalized.trim()) {
-    return { required: false, reason: "none" };
+
+  // Signal A: explicit workflow request — these are unambiguous.
+  if (WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return { required: true, reason: "explicit_request" };
   }
 
-  const explicitWorkflowRequest = WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+  // Signal B: author-declared triggers + Signal C: action-verb gate.
+  const candidates = compileWorkflowTriggerEntries();
+  if (candidates.length === 0) {
+    // No catalog triggers configured anywhere — fall through to hint-term heuristic only.
+  } else {
+    const hasActionVerb = WORKFLOW_ACTION_VERB_PATTERN.test(userMessage);
+
+    const confirmedMatches: WorkflowCatalogMatch[] = [];
+    const uncertainMatches: WorkflowCatalogMatch[] = [];
+
+    for (const candidate of candidates) {
+      const matchedEntry = candidate.patternsCompiled.find((entryRegexes) =>
+        entryRegexes.every((rx) => rx.test(userMessage)),
+      );
+      if (!matchedEntry) continue;
+      const match: WorkflowCatalogMatch = {
+        name: candidate.name,
+        workflowType: candidate.workflowType,
+        score: 1,
+        matchedTerms: matchedEntry.map((rx) => rx.source.replace(/\\b/g, "").slice(0, 60)),
+      };
+      if (candidate.requiresActionVerb && !hasActionVerb) {
+        uncertainMatches.push(match);
+      } else {
+        confirmedMatches.push(match);
+      }
+    }
+
+    if (confirmedMatches.length > 0) {
+      // Prefer scenes over jobs at equal precision (jobs orchestrate scenes).
+      const strongestMatch = confirmedMatches.sort((left, right) => {
+        if (left.workflowType !== right.workflowType) return left.workflowType === "scene" ? -1 : 1;
+        return left.name.localeCompare(right.name);
+      })[0];
+      return { required: true, reason: "catalog_match", strongestMatch };
+    }
+
+    if (uncertainMatches.length > 0) {
+      // Don't FORCE routing — just suggest, and ask the user.
+      return {
+        required: true,
+        reason: "uncertain_match",
+        strongestMatch: uncertainMatches[0],
+        uncertainCandidates: uncertainMatches,
+      };
+    }
+  }
+
+  // Last-resort heuristic: explicit workflow vocabulary in user prose
+  // (e.g. "show me available scenes", "list workflows"). Cheap and bounded —
+  // these terms are themselves narrow signals of intent.
   const matchedHints = WORKFLOW_HINT_TERMS.filter((term) => normalized.includes(term));
   const matchedDeliverableHints = WORKFLOW_DELIVERABLE_HINT_TERMS.filter((term) => normalized.includes(term));
-  const strongestMatch = buildWorkflowCatalogHints()
-    .map((hint) => scoreWorkflowCatalogHint(userMessage, hint))
-    .filter((match): match is WorkflowCatalogMatch => Boolean(match))
-    .sort((left, right) => {
-      if (right.score !== left.score) return right.score - left.score;
-      if (right.matchedTerms.length !== left.matchedTerms.length) return right.matchedTerms.length - left.matchedTerms.length;
-      return left.name.localeCompare(right.name);
-    })[0];
-
-  if (explicitWorkflowRequest) {
-    return { required: true, reason: "explicit_request", strongestMatch };
+  if (
+    matchedHints.length >= 2
+    || (matchedHints.length === 1 && WORKFLOW_ACTION_TERMS.some((term) => normalized.includes(term)))
+    || matchedDeliverableHints.length >= 2
+  ) {
+    return { required: true, reason: "hint_terms" };
   }
 
-  if (strongestMatch && (
-    strongestMatch.score >= 0.6
-    || (matchedDeliverableHints.length > 0 && strongestMatch.score >= 0.32)
-    || (strongestMatch.matchedTerms.length >= 2 && strongestMatch.score >= 0.42)
-  )) {
-    return { required: true, reason: "catalog_match", strongestMatch };
-  }
-
-  if (matchedHints.length >= 2 || (matchedHints.length === 1 && WORKFLOW_ACTION_TERMS.some((term) => normalized.includes(term)))) {
-    return { required: true, reason: "hint_terms", strongestMatch };
-  }
-
-  return { required: false, reason: "none", strongestMatch };
+  return { required: false, reason: "none" };
 }
 
 function buildWorkflowCatalogGuidance(signal: WorkflowCatalogSignal): string {
   if (!signal.required) return "";
 
-  const strongestMatchText = signal.strongestMatch
-    ? ` Strongest current reusable match: ${signal.strongestMatch.name} [${signal.strongestMatch.workflowType}] (score ${signal.strongestMatch.score.toFixed(2)}).`
-    : "";
+  if (signal.reason === "uncertain_match" && signal.strongestMatch) {
+    const candidates = (signal.uncertainCandidates ?? [signal.strongestMatch])
+      .slice(0, 3)
+      .map((match) => `${match.name} [${match.workflowType}]`)
+      .join(", ");
+    return [
+      "POSSIBLE WORKFLOW MATCH (UNCERTAIN):",
+      `One or more reusable workflows might fit this request: ${candidates}.`,
+      "However, the message lacks a clear action verb (apply / deploy / run / ausrollen / anwenden / durchführen ...) — the user may just be asking for an explanation.",
+      "Do NOT call run_workflow yet. Ask the user in ONE concise sentence (in their language) whether they want one of these workflows executed, or whether they just want an answer to their question.",
+      "After they confirm, on the next turn either call run_workflow with the chosen workflow or answer normally.",
+    ].join(" ");
+  }
 
+  const strongestMatchText = signal.strongestMatch
+    ? ` Strongest current reusable match: ${signal.strongestMatch.name} [${signal.strongestMatch.workflowType}].`
+    : "";
   return [
     "Reusable workflow guidance for this turn: check the workflow catalog before inventing an ad hoc coordinator plan when a reusable scene or job may already fit.",
     strongestMatchText.trim(),
     "If the match is exact, call run_workflow directly. Otherwise call search_workflows first and then either run_workflow or explain honestly why no reusable workflow fits.",
   ].filter(Boolean).join(" ");
 }
+
+// Internal exports for unit tests.
+export const __workflowCatalog = {
+  detectWorkflowCatalogSignal,
+  buildWorkflowCatalogGuidance,
+  WORKFLOW_ACTION_VERB_PATTERN,
+};
 
 function collapseMixedOrchestrationLaunchersInResponse(
   toolCalls: LLMResponse["tool_calls"],
@@ -1683,7 +1681,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     && !isWorkflowExecutionTurn
     && !initialDynamicGuidance?.pentestMethodologySensitive
     && !workflowCatalogSuppressedForMaintenance
-    && workflowCatalogSignal.required,
+    && workflowCatalogSignal.required
+    // Uncertain matches advise the model to ASK the user; they do NOT enforce
+    // that a workflow tool must be called this turn.
+    && workflowCatalogSignal.reason !== "uncertain_match",
   );
   let workflowCatalogRetryUsed = false;
   let workflowCatalogEnforcementPrompt = "";

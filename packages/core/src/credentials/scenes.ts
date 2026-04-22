@@ -12,6 +12,7 @@
  */
 import { getCredential, setCredential, deleteCredential, listCredentialNames } from "./store.js";
 import { getConfig } from "../config/loader.js";
+import type { WorkflowCatalogTriggers } from "../config/schema.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("credentials:scenes");
@@ -36,6 +37,8 @@ export interface SceneSummary {
   approvalChannel?: string;
   /** Per-scene override for the approval channel timeout (ms). Falls back to channel config when absent. */
   approvalTimeoutMs?: number;
+  /** Catalog-routing triggers used by the workflow guardrail (config-file scenes only). */
+  triggers?: WorkflowCatalogTriggers;
 }
 
 export function listAllScenes(): SceneSummary[] {
@@ -57,6 +60,7 @@ export function listAllScenes(): SceneSummary[] {
       humanInLoopSteps: scene.humanInLoopSteps,
       approvalChannel: scene.approvalChannel,
       approvalTimeoutMs: scene.approvalTimeoutMs,
+      triggers: scene.triggers,
     });
   }
 
@@ -96,6 +100,7 @@ export function getScene(name: string): SceneSummary | null {
       humanInLoopSteps: configScene.humanInLoopSteps,
       approvalChannel: configScene.approvalChannel,
       approvalTimeoutMs: configScene.approvalTimeoutMs,
+      triggers: configScene.triggers,
     };
   }
   const description = getCredential(SCENE_DESCRIPTION_KEY(name));
