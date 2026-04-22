@@ -115,6 +115,31 @@ const WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES = new Set<string>([
   "share_finding",
 ]);
 
+// Tools whose output is deterministic enough within a single sub-agent run that
+// re-issuing the call with identical arguments is wasted work. The existing
+// `lastToolCallSig` map only catches *consecutive* duplicates (A→A); this set
+// powers a broader (name, args) cache that also catches A→B→A loops, which
+// account for the majority of iteration-budget burn in research and discovery
+// runs. Excluded by design: any tool that reflects mutating state (browser
+// session, computer session, swarm state, mail send/draft, file writes) or
+// queries that may legitimately need a fresh fetch (get_swarm_state, browser_*).
+const IDEMPOTENT_TOOLS = new Set<string>([
+  "read_file",
+  "list_files",
+  "list_agents",
+  "search_agents",
+  "search_workflows",
+  "extract_file_content",
+  "spreadsheet_read",
+  "list_pdf_form_fields",
+  "list_tts_voices",
+  "geocode_location",
+  "route_distance_time",
+  "web_search",
+  "web_fetch",
+  "workspace_search",
+]);
+
 function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
   if (isCoordinatorAgent) {
     const override = COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES[toolName];
@@ -1172,6 +1197,11 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
     const lastToolCallSig = new Map<string, { args: string; result: string; success: boolean }>();
+    // Broader (name, args) cache for IDEMPOTENT_TOOLS — catches A→B→A loops the
+    // consecutive map misses (the second A overwrites the first A's slot, so
+    // the third A sees no `prev` match). Bounded only by per-tool caps and the
+    // sub-agent run lifetime; both are tight, so an explicit size cap is unnecessary.
+    const idempotentCallCache = new Map<string, { result: string; success: boolean; callCount: number }>();
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
     let workflowPassthroughOutput: string | null = null;
@@ -2356,10 +2386,48 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         }
         perToolCallCount.set(tc.name, priorCount + 1);
 
+        // ABA-duplicate detection (idempotent tools only): if the same tool
+        // was previously called with these exact args at *any* point this run,
+        // return the cached result. Catches loops like read_file(a) →
+        // read_file(b) → read_file(a) that the consecutive map below misses
+        // because slot A was overwritten by B. Restricted to read-only /
+        // pure-query tools so we never short-circuit a deliberate re-poll of
+        // mutating state (browser session, swarm state, mail send, etc).
+        const argsSig = JSON.stringify(tc.arguments);
+        if (IDEMPOTENT_TOOLS.has(tc.name)) {
+          const idemKey = `${tc.name}::${argsSig}`;
+          const cached = idempotentCallCache.get(idemKey);
+          if (cached) {
+            cached.callCount += 1;
+            log.warn(
+              { agentName: opts.agentName, tool: tc.name, repeatCount: cached.callCount },
+              "Sub-agent re-issued idempotent tool call (ABA dedup) — returning cached result",
+            );
+            const cachedNote = cached.success
+              ? "[Note: This is a cached result — you already called this idempotent tool with identical arguments earlier this run. The output has not changed; move on.]"
+              : "[Note: This is a cached failed result from earlier this run — the call did not succeed and re-trying with the same arguments will not help. Work from the partial result you have or report the blocker.]";
+            emitSubAgentToolAudit({
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "done",
+              args: tc.arguments,
+              toolCallId: tc.id,
+              resultPreview: cached.result,
+              successOverride: cached.success,
+              cachedResult: true,
+            });
+            toolResults.push({
+              role: "tool",
+              content: `${cached.result}\n\n${cachedNote}`,
+              tool_call_id: tc.id,
+            });
+            continue;
+          }
+        }
+
         // Consecutive-duplicate detection: if same tool + same args as the
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
-        const argsSig = JSON.stringify(tc.arguments);
         const prev = lastToolCallSig.get(tc.name);
         if (prev && prev.args === argsSig) {
           log.warn(
@@ -2446,6 +2514,13 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           decisiveDirectRemoteToolName = tc.name;
         }
         lastToolCallSig.set(tc.name, { args: argsSig, result: resultContent, success: result.success });
+        if (IDEMPOTENT_TOOLS.has(tc.name)) {
+          idempotentCallCache.set(`${tc.name}::${argsSig}`, {
+            result: resultContent,
+            success: result.success,
+            callCount: 1,
+          });
+        }
         // Track bytes per tool for observability
         bytesByTool.set(tc.name, (bytesByTool.get(tc.name) ?? 0) + resultContent.length);
 
