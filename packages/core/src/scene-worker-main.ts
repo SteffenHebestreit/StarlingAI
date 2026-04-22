@@ -25,6 +25,7 @@ import "./tools/ansible-task.js";
 import "./tools/proxmox.js";
 import "./tools/terraform.js";
 import "./tools/kubernetes.js";
+import "./tools/prometheus.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/workflow-catalog.js";

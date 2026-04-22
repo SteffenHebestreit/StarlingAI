@@ -1075,6 +1075,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  prometheus_query: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Run a PromQL query against an external Prometheus instance (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  alertmanager_silences_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List active silences on an external Alertmanager instance (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  alertmanager_silence_create: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Create a silence on an external Alertmanager instance (mutates alert routing)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  alertmanager_silence_expire: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Expire a silence on an external Alertmanager instance",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
