@@ -140,13 +140,19 @@ async function cmdStart() {
     hdr(`Building images${noCache ? " (no cache)" : ""}...`);
     const buildArgs = noCache ? ["--no-cache"] : [];
     await run(dc("build", ...buildArgs));
+    // Build-only profile services (e.g. agent-worker) are skipped by the default
+    // build pass because they're profile-gated. Build them explicitly so the
+    // gateway can spawn them on demand.
+    await run(["docker", "compose", ...composeFiles, "--profile", "build-only", "build", ...buildArgs]);
     ok("Images built");
   } else {
     try {
       execSync("docker image inspect starlingai/gateway:dev", { stdio: "ignore" });
+      execSync("docker image inspect starlingai/agent-worker:dev", { stdio: "ignore" });
     } catch {
       hdr("First run — building images...");
       await run(dc("build"));
+      await run(["docker", "compose", ...composeFiles, "--profile", "build-only", "build"]);
       ok("Images built");
     }
   }

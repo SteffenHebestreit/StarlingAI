@@ -26,10 +26,11 @@ COPY --from=build /app/packages/core/package.json ./packages/core/
 
 # Non-root user
 RUN addgroup -S agent && adduser -S agent -G agent
-USER agent
 
-# Workspace directory (bind-mounted at runtime)
-RUN mkdir -p /workspace
+# Workspace directory (bind-mounted at runtime) — created as root before dropping privileges
+RUN mkdir -p /workspace && chown agent:agent /workspace
+
+USER agent
 
 ENV NODE_ENV=production
 
