@@ -501,8 +501,40 @@ function isWorkflowCatalogToolName(toolName: string): boolean {
   return toolName === "search_workflows" || toolName === "run_workflow";
 }
 
+/**
+ * Remove content that is clearly pasted code, shell output, or config syntax
+ * — those tokens are not user intent and should not drive workflow routing.
+ * Real-world false positives: pasted iptables/wireguard configs caused
+ * `infrastructure_change` to score 1.0 on tokens like nat/source/lan/conf/cat.
+ */
+function stripPastedCodeAndConfig(value: string): string {
+  let stripped = value;
+  // Fenced code blocks (``` ... ``` and ~~~ ... ~~~), greedy non-overlapping.
+  stripped = stripped.replace(/```[\s\S]*?```/g, " ");
+  stripped = stripped.replace(/~~~[\s\S]*?~~~/g, " ");
+  // Inline backtick spans — short literal tokens, no signal for routing.
+  stripped = stripped.replace(/`[^`\n]+`/g, " ");
+  // Line-by-line filter for shell prompts, KEY = VALUE config lines, and
+  // common CLI/admin command lines.
+  const cliPrefix = /^(?:sudo\s+)?(?:iptables|ip6tables|ip|nft|wg|wg-quick|systemctl|service|journalctl|docker|docker-compose|kubectl|helm|terraform|ansible|ansible-playbook|ssh|scp|rsync|cat|tail|head|less|more|grep|awk|sed|curl|wget|netstat|ss|ping|traceroute|dig|nslookup|nmap|ps|top|htop|uname|df|du|mount|umount|chmod|chown|export|echo|set|env|printenv)\b/i;
+  stripped = stripped.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    // Shell prompts like "root@host:~#" or "user@host:~$".
+    if (/^[\w.-]+@[\w.-]+:[^\s]*[#$]\s*/.test(trimmed)) return false;
+    if (/^[#$>]\s+\S/.test(trimmed)) return false;
+    // Config lines: KeyName = value, KeyName: value, [Section].
+    if (/^[A-Z][A-Za-z0-9_-]{1,30}\s*[:=]\s*\S/.test(trimmed)) return false;
+    if (/^\[[A-Za-z0-9_.-]+\]\s*$/.test(trimmed)) return false;
+    // Lines that lead with a known CLI tool.
+    if (cliPrefix.test(trimmed)) return false;
+    return true;
+  }).join("\n");
+  return stripped;
+}
+
 function normalizeWorkflowDiscoveryText(value: string): string {
-  return value
+  return stripPastedCodeAndConfig(value)
     .toLowerCase()
     // Fold common diacritics (German umlauts, sharp s, accented vowels) BEFORE
     // stripping non-ASCII so e.g. "über" → "ueber" (filtered as a stop word)
