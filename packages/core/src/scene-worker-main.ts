@@ -39,6 +39,7 @@ import "./tools/document-output.js";
 import "./tools/website.js";
 import "./tools/extractors.js";
 import "./tools/artifact-emitters.js";
+import "./tools/office-output.js";
 import "./tools/computer-use.js";
 import "./tools/pentest.js";
 import "./tools/telegram.js";

@@ -1171,6 +1171,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  generate_docx: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a Microsoft Word .docx in the workspace from Markdown content or structured blocks",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_pptx: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a PowerPoint .pptx in the workspace from a structured slide list",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
