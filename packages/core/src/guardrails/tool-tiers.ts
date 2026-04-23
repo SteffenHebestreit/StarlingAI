@@ -1183,6 +1183,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  bundle_artifact_zip: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Bundle workspace files, directories, or inline content into a single .zip in the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {

@@ -63,6 +63,7 @@ import "./tools/website.js";
 import "./tools/extractors.js";
 import "./tools/artifact-emitters.js";
 import "./tools/office-output.js";
+import "./tools/bundle-zip.js";
 import "./tools/pentest.js";
 import "./tools/computer-use.js";
 import "./tools/telegram.js";

@@ -496,6 +496,7 @@
         "generate_pdf",
         "generate_docx",
         "generate_pptx",
+        "bundle_artifact_zip",
         "share_finding",
         "write_file"
       ]
@@ -1239,6 +1240,7 @@
         "generate_website",
         "generate_docx",
         "generate_pptx",
+        "bundle_artifact_zip",
         "read_shared_facts",
         "share_finding"
       ]
