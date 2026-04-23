@@ -1153,6 +1153,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  generate_svg: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Write a raw SVG illustration or data visualization to the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_qr_code: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Encode text or URL into a QR code SVG and write it to the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  generate_ics: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Emit an iCalendar (.ics) file from a structured event list",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
