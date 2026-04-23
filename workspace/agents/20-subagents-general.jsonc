@@ -180,9 +180,9 @@
       ]
     },
     "document_intake": {
-      "description": "Attachment, document, and file analysis specialist for PDFs, DOCX, images, audio, video, spreadsheets, and mixed payloads. Classifies, extracts, normalizes, and prepares reusable facts and exact text for downstream agents. Example queries: 'extract all line items from this invoice PDF', 'summarize this 40-page report', 'was steht auf der gescannten Rechnung', 'Metadaten aus dem DOCX lesen', 'fill in this PDF form', 'analyze the screenshots in this ZIP', 'Tabelle aus dem Excel-Sheet extrahieren', 'OCR für das eingescannte Dokument'.",
-      "capabilities": ["document intake", "Dokument-Intake", "attachment analysis", "Anhangsanalyse", "attachment classification", "Anhangsklassifizierung", "document extraction", "Dokumentenextraktion", "content normalization", "Inhaltsnormalisierung", "metadata extraction", "Metadaten-Extraktion", "exact text extraction", "Textextraktion", "PDF form filling", "PDF-Formularausfüllung", "spreadsheet reading", "Tabellenkalkulation lesen", "image OCR prep", "Bildanalyse", "handoff preparation", "Übergabevorbereitung"],
-      "tags": ["documents", "dokumente", "files", "dateien", "intake", "attachments", "anhaenge", "pdf", "docx", "xlsx", "csv", "analysis", "analyse", "extraction", "extraktion", "ocr", "metadata", "metadaten"],
+      "description": "Attachment, document, and file analysis specialist for PDFs, DOCX, images, audio, video, spreadsheets, Jupyter notebooks (.ipynb), email files (.eml/.mbox), iCalendar files (.ics), and mixed payloads. Classifies, extracts, normalizes, and prepares reusable facts and exact text for downstream agents. Example queries: 'extract all line items from this invoice PDF', 'summarize this 40-page report', 'was steht auf der gescannten Rechnung', 'Metadaten aus dem DOCX lesen', 'fill in this PDF form', 'analyze the screenshots in this ZIP', 'Tabelle aus dem Excel-Sheet extrahieren', 'OCR für das eingescannte Dokument', 'walk through this Jupyter notebook', 'lies das .eml und gib mir den Inhalt', 'parse the .ics into structured events', 'transcribe the meeting recording video'.",
+      "capabilities": ["document intake", "Dokument-Intake", "attachment analysis", "Anhangsanalyse", "attachment classification", "Anhangsklassifizierung", "document extraction", "Dokumentenextraktion", "content normalization", "Inhaltsnormalisierung", "metadata extraction", "Metadaten-Extraktion", "exact text extraction", "Textextraktion", "PDF form filling", "PDF-Formularausfüllung", "spreadsheet reading", "Tabellenkalkulation lesen", "image OCR prep", "Bildanalyse", "handoff preparation", "Übergabevorbereitung", "jupyter notebook reading", "Jupyter-Notebook-Lesen", "email file parsing", "E-Mail-Datei-Parsing", "icalendar parsing", "iCalendar-Parsing", "video transcription", "Video-Transkription"],
+      "tags": ["documents", "dokumente", "files", "dateien", "intake", "attachments", "anhaenge", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "video", "transcription", "analysis", "analyse", "extraction", "extraktion", "ocr", "metadata", "metadaten"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -191,9 +191,14 @@
       },
       "maxIterations": 6,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
-      "systemPrompt": "You prepare documents for the rest of the swarm. Start by identifying what files are present, their formats, likely purpose, date range, authorship signals, and whether they look narrative, tabular, scanned, or mixed. Prefer extract_file_content for PDFs, office files, audio, and video, and use analyze_image when screenshots, scans, or embedded figures matter. Normalize the result into reusable findings: what the document is, what period it covers, what sections or tables matter, what data is missing, and which downstream specialist should use it next. Publish enough structured intake facts via share_finding that other agents can work from the intake summary instead of reopening every attachment.",
+      "systemPrompt": "You prepare documents for the rest of the swarm. Start by identifying what files are present, their formats, likely purpose, date range, authorship signals, and whether they look narrative, tabular, scanned, or mixed. Pick the right extractor by file extension: extract_file_content for PDFs and office files, extract_notebook for .ipynb (it preserves code + outputs as a single Markdown doc), extract_email for .eml or .mbox (decodes quoted-printable, lists attachments), extract_calendar for .ics, transcribe_audio for audio files, transcribe_video for .mp4/.mov/.webm/.mkv, spreadsheet_read for .xlsx/.csv, and analyze_image when screenshots, scans, or embedded figures matter. Normalize the result into reusable findings: what the document is, what period it covers, what sections or tables matter, what data is missing, and which downstream specialist should use it next. Publish enough structured intake facts via share_finding that other agents can work from the intake summary instead of reopening every attachment.",
       "tools": [
         "extract_file_content",
+        "extract_notebook",
+        "extract_email",
+        "extract_calendar",
+        "transcribe_audio",
+        "transcribe_video",
         "analyze_image",
         "read_file",
         "list_files",
@@ -1033,6 +1038,9 @@
         "mail_get_draft",
         "mail_categorize",
         "mail_send_draft",
+        "extract_email",
+        "read_file",
+        "list_files",
         "read_shared_facts",
         "share_finding"
       ]
@@ -1090,6 +1098,9 @@
         "contacts_create",
         "contacts_update",
         "contacts_delete",
+        "extract_calendar",
+        "read_file",
+        "list_files",
         "read_shared_facts",
         "share_finding"
       ]

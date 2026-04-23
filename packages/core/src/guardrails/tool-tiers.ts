@@ -1129,6 +1129,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  extract_notebook: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Convert a Jupyter .ipynb notebook into a single Markdown document with code, outputs, and image refs",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  extract_email: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Parse an .eml or single-message .mbox file into headers, body, and attachment list",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  extract_calendar: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Parse an .ics file into a structured event list",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  transcribe_video: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Transcribe the audio track of a workspace video file via the configured STT backend",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {
