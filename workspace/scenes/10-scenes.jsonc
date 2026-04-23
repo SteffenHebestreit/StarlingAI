@@ -206,14 +206,18 @@
       }
     },
     "code_review": {
-      "description": "Git-based code review workflow: inspect changes, analyze quality, and produce a structured review report. Example triggers: 'review the latest commits on this branch', 'führe ein Code-Review der letzten Änderungen durch', 'analyze the diff for quality issues', 'prüfe den Pull Request auf Probleme', 'review HEAD~3..HEAD for bugs', 'Code-Review mit strukturiertem Bericht'.",
-      "task": "Use git_developer to inspect the current diff and recent commits, code_analyst to review code quality and identify issues, qa_guard to verify the findings, and summarizer to produce the final review report. When a target branch or commit range is specified, use git_diff with the appropriate ref parameter.",
+      "description": "Git-based code review workflow: inspect changes, analyze quality, produce a structured review report, and optionally post the verdict as a PR comment on GitHub. Example triggers: 'review the latest commits on this branch', 'führe ein Code-Review der letzten Änderungen durch', 'analyze the diff for quality issues', 'prüfe den Pull Request auf Probleme', 'review HEAD~3..HEAD for bugs', 'Code-Review mit strukturiertem Bericht', 'review PR #42 and post a summary comment'.",
+      "task": "Use git_developer to inspect the current diff and recent commits, code_analyst to review code quality and identify issues, qa_guard to verify the findings, and summarizer to produce the final review report. When a target branch or commit range is specified, use git_diff with the appropriate ref parameter. When the review is bound to an existing GitHub PR (param prNumber set), git_developer should also call github_pr_get to read the existing PR body for context, github_check_runs_list against the PR head SHA to fold CI status into the review, and github_pr_comment to post the final verdict on the PR thread once the operator approves it. Do not open a new PR from this scene — use software_bug_fix or code_refactor for that.",
       "allowedAgents": [
         "git_developer",
         "code_analyst",
         "qa_guard",
         "summarizer"
       ],
+      "humanInLoopSteps": [
+        "github_pr_comment"
+      ],
+      "approvalChannel": "slack-approvals",
       "params": {
         "targetRef": {
           "description": "Git ref, branch, or commit range to review",
@@ -222,6 +226,10 @@
         "focusAreas": {
           "description": "Specific areas to focus on (security, performance, style, logic)",
           "default": "all"
+        },
+        "prNumber": {
+          "description": "Optional GitHub PR number — when set, the review is folded into the PR (CI status fetched, verdict posted as a comment after approval)",
+          "default": ""
         }
       }
     },
@@ -299,8 +307,8 @@
       }
     },
     "release_notes_draft": {
-      "description": "Generate release notes from git history and diff analysis for a given ref range, formatted per Keep-a-Changelog conventions and tailored to the stated audience. Example triggers: 'draft release notes for v2.3', 'Release Notes für den letzten Sprint erstellen', 'summarise the commits between HEAD~20 and HEAD', 'Versionshinweise aus Git-Log generieren', 'produce changelog entries for the upcoming release', 'technische Release-Notizen mit Breaking Changes'.",
-      "task": "Use git_developer to collect commits and diffs in {{targetRef}} and classify them into Added / Changed / Fixed / Removed / Security / Deprecated buckets (Keep-a-Changelog). Use code_analyst to flag breaking changes, migration-relevant diffs, and high-impact behaviour changes that the commit message alone may understate. Use paper_author to draft the notes for {{audience}} as grouped bullets with short, outcome-oriented phrasing — no commit hashes or author names unless the audience is `technical`. Use qa_guard to verify that no listed item contradicts the actual diff. Use summarizer to produce the final Keep-a-Changelog section headed by `## [{{version}}] — <ISO date>`. Do not invent changes not visible in the diff.",
+      "description": "Generate release notes from git history and diff analysis for a given ref range, formatted per Keep-a-Changelog conventions and tailored to the stated audience. Optionally publishes the notes as a GitHub Release. Example triggers: 'draft release notes for v2.3', 'Release Notes für den letzten Sprint erstellen', 'summarise the commits between HEAD~20 and HEAD', 'Versionshinweise aus Git-Log generieren', 'produce changelog entries for the upcoming release', 'technische Release-Notizen mit Breaking Changes', 'draft notes for v2.3 and publish the GitHub Release'.",
+      "task": "Use git_developer to collect commits and diffs in {{targetRef}} and classify them into Added / Changed / Fixed / Removed / Security / Deprecated buckets (Keep-a-Changelog). Use code_analyst to flag breaking changes, migration-relevant diffs, and high-impact behaviour changes that the commit message alone may understate. Use paper_author to draft the notes for {{audience}} as grouped bullets with short, outcome-oriented phrasing — no commit hashes or author names unless the audience is `technical`. Use qa_guard to verify that no listed item contradicts the actual diff. Use summarizer to produce the final Keep-a-Changelog section headed by `## [{{version}}] — <ISO date>`. When {{publishGithubRelease}} is yes, git_developer should call github_release_create with tagName={{version}}, name={{version}}, body=the rendered notes, prerelease=true when the version contains '-rc' or '-beta', generateReleaseNotes=false (we just authored ours); this is approval-gated. Do not invent changes not visible in the diff.",
       "allowedAgents": [
         "git_developer",
         "code_analyst",
@@ -308,6 +316,10 @@
         "summarizer",
         "qa_guard"
       ],
+      "humanInLoopSteps": [
+        "github_release_create"
+      ],
+      "approvalChannel": "slack-approvals",
       "params": {
         "version": {
           "description": "Release version label (e.g. v2.3, 0.7.0-rc1)",
@@ -323,6 +335,10 @@
         },
         "broadcast": {
           "description": "Whether to hand the notes to a broadcast step afterwards (yes/no)",
+          "default": "no"
+        },
+        "publishGithubRelease": {
+          "description": "Whether to publish the notes as a GitHub Release after the operator approves",
           "default": "no"
         }
       }
@@ -483,8 +499,8 @@
       }
     },
     "software_bug_fix": {
-      "description": "Diagnose a reported bug against the current source tree, apply the smallest viable fix, verify with tests, and hand back a clean change summary. Example triggers: 'fix the null-pointer crash in the order service', 'behebe den Fehler im Login-Flow', 'diagnose and patch the rendering bug on the dashboard', 'Bug im Zahlungs-Handler reparieren', 'apply a minimal fix for the flaky queue consumer', 'Softwarefehler untersuchen und beheben'.",
-      "task": "Use git_developer to capture the current branch state and any recent commits that touched the suspected area. Use code_analyst to diagnose the bug described by {{bugReport}} — start from the exact error or symptom, read only the code paths involved, and identify the single smallest change that fixes the root cause. Use coder to apply that minimal fix; do not refactor surrounding code. Use test_generator to add a regression test covering the bug (or amend the existing one) and to run the relevant test subset. If tests fail, perform at most one more fix-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify the fix actually addresses the reported symptom, and summarizer to produce the final change summary: what was broken, why, the exact diff (file + function), the new test, and any remaining risk. Do not rename, extract helpers, or stylistic clean-ups unless required by the fix.",
+      "description": "Diagnose a reported bug against the current source tree, apply the smallest viable fix, verify with tests, optionally open a GitHub PR with the change, and hand back a clean change summary. Example triggers: 'fix the null-pointer crash in the order service and open a PR', 'behebe den Fehler im Login-Flow und eröffne einen PR', 'diagnose and patch the rendering bug on the dashboard', 'Bug im Zahlungs-Handler reparieren', 'apply a minimal fix for the flaky queue consumer', 'Softwarefehler untersuchen, beheben und PR erstellen'.",
+      "task": "Use git_developer to capture the current branch state and any recent commits that touched the suspected area. Use code_analyst to diagnose the bug described by {{bugReport}} — start from the exact error or symptom, read only the code paths involved, and identify the single smallest change that fixes the root cause. Use coder to apply that minimal fix; do not refactor surrounding code. Use test_generator to add a regression test covering the bug (or amend the existing one) and to run the relevant test subset. If tests fail, perform at most one more fix-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify the fix actually addresses the reported symptom, and summarizer to produce the final change summary: what was broken, why, the exact diff (file + function), the new test, and any remaining risk. When {{openPr}} is yes, git_developer should commit the fix on a fresh branch (e.g. fix/<short-bug-slug>), git_push the branch, and call github_pr_create with title, the change-summary as body (Markdown), head=that branch, base={{prBaseBranch}}; this is approval-gated. Do not rename, extract helpers, or stylistic clean-ups unless required by the fix.",
       "allowedAgents": [
         "git_developer",
         "code_analyst",
@@ -493,6 +509,11 @@
         "qa_guard",
         "summarizer"
       ],
+      "humanInLoopSteps": [
+        "git_push",
+        "github_pr_create"
+      ],
+      "approvalChannel": "slack-approvals",
       "params": {
         "bugReport": {
           "description": "Description of the bug, failing behaviour, error message, or repro steps",
@@ -505,6 +526,14 @@
         "maxCycles": {
           "description": "Maximum fix-test iterations (hard ceiling)",
           "default": "2"
+        },
+        "openPr": {
+          "description": "Whether to push the fix branch and open a GitHub PR after the fix is verified",
+          "default": "no"
+        },
+        "prBaseBranch": {
+          "description": "Target branch for the PR when openPr=yes",
+          "default": "main"
         }
       }
     },
@@ -642,12 +671,12 @@
       }
     },
     "code_refactor": {
-      "description": "Perform a targeted, behaviour-preserving refactor — rename, extract, de-duplicate, narrow types, simplify — verified by existing tests and delivered as a single clean commit. Example triggers: 'refactor the order-processing module to remove duplication', 'Refactor der Authentifizierungs-Logik', 'extract the shared validation helpers into one module', 'Typ-Signaturen im Payment-Service straffen', 'simplify the config loader without behaviour changes', 'Code-Refactoring mit Test-Verifikation'.",      "triggers": {
+      "description": "Perform a targeted, behaviour-preserving refactor — rename, extract, de-duplicate, narrow types, simplify — verified by existing tests, delivered as a single clean commit, and optionally shipped as a GitHub PR. Example triggers: 'refactor the order-processing module to remove duplication', 'Refactor der Authentifizierungs-Logik', 'extract the shared validation helpers into one module and open a PR', 'Typ-Signaturen im Payment-Service straffen', 'simplify the config loader without behaviour changes', 'Code-Refactoring mit Test-Verifikation und PR'.",      "triggers": {
         "patterns": [
           { "all": ["\\brefactor(?:ing|ed|s)?\\b"] },
           { "all": ["\\b(extract|dedupe|deduplicate|narrow|simplify)\\b", "\\b(function|module|helper|class|method|component|service|type)s?\\b"] }
         ]
-      },      "task": "Use git_developer to capture the current branch state. Use code_analyst to scope {{refactorTarget}} to the smallest coherent change — identify exactly the files, functions, and call sites involved, and confirm the refactor is behaviour-preserving (no API change, no logic change). Reject scope creep: do not rename unrelated identifiers, do not rewrite adjacent code. Use coder to apply the refactor in a single pass. Use test_generator to run the existing relevant tests; add tests only when coverage is clearly missing at the refactored boundary. If tests fail, perform at most one more refactor-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify no public API surface changed and no call site was silently broken. Use summarizer to produce the final change summary: what was refactored, the diff scope (file + function count), why it is behaviour-preserving, and the test evidence. Use git_developer only when the caller asks to stage or commit — never push automatically.",
+      },      "task": "Use git_developer to capture the current branch state. Use code_analyst to scope {{refactorTarget}} to the smallest coherent change — identify exactly the files, functions, and call sites involved, and confirm the refactor is behaviour-preserving (no API change, no logic change). Reject scope creep: do not rename unrelated identifiers, do not rewrite adjacent code. Use coder to apply the refactor in a single pass. Use test_generator to run the existing relevant tests; add tests only when coverage is clearly missing at the refactored boundary. If tests fail, perform at most one more refactor-test cycle ({{maxCycles}} total), then stop and report. Use qa_guard to verify no public API surface changed and no call site was silently broken. Use summarizer to produce the final change summary: what was refactored, the diff scope (file + function count), why it is behaviour-preserving, and the test evidence. When {{openPr}} is yes, git_developer should commit the refactor on a fresh branch (e.g. refactor/<short-target-slug>), git_push the branch, and call github_pr_create with title, the change-summary as Markdown body, head=that branch, base={{prBaseBranch}}; this is approval-gated. Use git_developer only when the caller asks to stage or commit — never push automatically without openPr=yes.",
       "allowedAgents": [
         "git_developer",
         "code_analyst",
@@ -656,6 +685,11 @@
         "qa_guard",
         "summarizer"
       ],
+      "humanInLoopSteps": [
+        "git_push",
+        "github_pr_create"
+      ],
+      "approvalChannel": "slack-approvals",
       "params": {
         "refactorTarget": {
           "description": "Module, file, or concern to refactor",
@@ -664,6 +698,14 @@
         "refactorType": {
           "description": "Kind of refactor (rename, extract, dedupe, narrow-types, simplify)",
           "default": "simplify"
+        },
+        "openPr": {
+          "description": "Whether to push the refactor branch and open a GitHub PR after verification",
+          "default": "no"
+        },
+        "prBaseBranch": {
+          "description": "Target branch for the PR when openPr=yes",
+          "default": "main"
         },
         "maxCycles": {
           "description": "Maximum refactor-test iterations (hard ceiling)",

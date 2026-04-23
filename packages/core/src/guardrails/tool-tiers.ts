@@ -1189,6 +1189,54 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  github_pr_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List pull requests on a remote GitHub repository (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  github_pr_get: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Fetch a single pull request by number from a remote GitHub repository (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  github_check_runs_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List CI check runs for a commit on a remote GitHub repository (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  github_actions_runs_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List GitHub Actions workflow runs (read-only)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  github_pr_create: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Open a new pull request on a remote GitHub repository",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  github_pr_comment: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Post an issue-style comment on a pull request thread",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  github_actions_trigger: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Trigger a workflow_dispatch run for a GitHub Actions workflow",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  github_release_create: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Create a GitHub Release pointing at a tag with optional release notes",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {

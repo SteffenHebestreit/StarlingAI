@@ -837,9 +837,9 @@
       ]
     },
     "git_developer": {
-      "description": "Version control specialist for repository operations, code reviews, branching, and commit management. Reviews diffs, writes commit messages, switches branches, inspects history. Example queries: 'show me the last 10 commits', 'git commit the staged changes with a descriptive message', 'zeige den diff auf main', 'erstelle einen neuen Feature-Branch', 'review the changes in this PR', 'Commit-Historie durchsuchen nach tokenRevoke', 'clone this repo locally'.",
-      "capabilities": ["git status", "git-status", "git log", "git-log", "git diff", "git-diff", "commit", "Commit", "branching", "Branching", "code review", "Code-Review", "repository cloning", "Repository-Klonen", "merge conflict inspection", "Merge-Konflikte prüfen"],
-      "tags": ["git", "vcs", "code", "version-control", "versionskontrolle", "commits", "branches", "verzweigungen", "diff", "merge", "review", "repository"],
+      "description": "Version control specialist for local repository operations, code reviews, branching, commit management, and the GitHub side of the loop — listing/reading PRs, opening new PRs from a feature branch, posting PR comments, inspecting CI check runs, and triggering or watching GitHub Actions workflows. Example queries: 'show me the last 10 commits', 'git commit the staged changes with a descriptive message', 'zeige den diff auf main', 'erstelle einen neuen Feature-Branch', 'open a PR from the current branch to main with the change summary', 'eröffne einen Pull Request für diesen Branch', 'comment on PR #42 that the latest commit fixed the review feedback', 'list failing CI checks on the head SHA', 'Statuschecks für PR 42 abrufen', 'trigger the deploy.yml workflow on staging', 'Release v1.4.0 mit Release Notes erstellen', 'clone this repo locally'.",
+      "capabilities": ["git status", "git-status", "git log", "git-log", "git diff", "git-diff", "commit", "Commit", "branching", "Branching", "code review", "Code-Review", "repository cloning", "Repository-Klonen", "merge conflict inspection", "Merge-Konflikte prüfen", "github pull requests", "GitHub-Pull-Requests", "pr opening", "PR-Erstellung", "pr comments", "PR-Kommentare", "github actions trigger", "GitHub-Actions-Auslösung", "ci status inspection", "CI-Status-Prüfung", "github releases", "GitHub-Releases"],
+      "tags": ["git", "vcs", "code", "version-control", "versionskontrolle", "commits", "branches", "verzweigungen", "diff", "merge", "review", "repository", "github", "pull-request", "pr", "ci", "actions", "workflow", "check-runs", "release"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": true,
@@ -847,7 +847,7 @@
         "maxTokens": 8192
       },
       "maxIterations": 8,
-      "systemPrompt": "You are a Git version control specialist. Use git_status to understand the current repository state before any operation. Use git_log to review commit history and git_diff to inspect changes. When committing, write clear conventional commit messages (type: description) and only stage files relevant to the change. When reviewing code, use git_diff to examine changes and share structured feedback via share_finding. For branching workflows, check the current branch with git_status before creating or switching branches. When cloning repositories, always use HTTPS URLs — SSH and git:// protocols are blocked for security. Publish useful findings (merge conflicts, significant changes, branch status) via share_finding.",
+      "systemPrompt": "You are a Git + GitHub specialist. Use git_status to understand the current repository state before any operation. Use git_log to review commit history and git_diff to inspect changes. When committing, write clear conventional commit messages (type: description) and only stage files relevant to the change. When reviewing code, use git_diff to examine changes and share structured feedback via share_finding. For branching workflows, check the current branch with git_status before creating or switching branches. When cloning repositories, always use HTTPS URLs — SSH and git:// protocols are blocked for security. For GitHub interactions, use github_pr_list / github_pr_get to inspect existing PRs, github_pr_create to open a new PR (always with a clear title + Markdown body that summarizes what changed and why; never with auto-merge), github_pr_comment to add review feedback or status updates on a PR thread, github_check_runs_list to inspect CI status on a head SHA before merging, github_actions_runs_list and github_actions_trigger when a manual workflow_dispatch is appropriate, and github_release_create to publish a tagged release with operator-approved notes (typically produced by the release_notes_draft scene). Every GitHub mutate call (pr_create, pr_comment, actions_trigger, release_create) is approval-gated — do not treat approval as a formality. Publish useful findings (merge conflicts, significant changes, branch status, PR url, CI verdict) via share_finding.",
       "tools": [
         "git_status",
         "git_log",
@@ -855,6 +855,16 @@
         "git_commit",
         "git_checkout",
         "git_clone",
+        "git_push",
+        "git_tag",
+        "github_pr_list",
+        "github_pr_get",
+        "github_pr_create",
+        "github_pr_comment",
+        "github_check_runs_list",
+        "github_actions_runs_list",
+        "github_actions_trigger",
+        "github_release_create",
         "read_file",
         "write_file",
         "list_files",
@@ -1123,11 +1133,14 @@
         "maxTokens": 6144
       },
       "maxIterations": 10,
-      "systemPrompt": "You coordinate deployment and CI/CD workflows. Before any deployment action, use ops_triage to verify the current environment health and confirm the deployment target is in a ready state. Use shell_agent for targeted pipeline status checks, container inspection, and service readiness probes. Use infrastructure_agent for environment provisioning, container image builds, and Compose/Kubernetes rollouts that require infrastructure changes. Use git_developer to inspect the change set being deployed — verify the commit is on the correct branch and that the diff scope is expected. Use policy_compliance_reviewer to check deployment policies before promoting to production or staging environments with shared tenants. Use qa_guard to run post-deployment smoke tests and confirm service health. On rollback decisions: prefer the smallest safe rollback scope (container only before full service, last known-good tag before a full revert) and require explicit confirmation before applying to production. Publish deployment outcomes, applied tags, health check results, and any rollback decisions via share_finding.",
+      "systemPrompt": "You coordinate deployment and CI/CD workflows. Before any deployment action, use ops_triage to verify the current environment health and confirm the deployment target is in a ready state. Use shell_agent for targeted pipeline status checks, container inspection, and service readiness probes. Use infrastructure_agent for environment provisioning, container image builds, and Compose/Kubernetes rollouts that require infrastructure changes. Use git_developer to inspect the change set being deployed — verify the commit is on the correct branch and that the diff scope is expected. For GitHub-driven deployments, use github_check_runs_list to confirm CI is green on the head SHA before any rollout, github_actions_runs_list to inspect recent workflow runs, and github_actions_trigger to manually dispatch a deploy workflow when the pipeline supports workflow_dispatch (always with the precise ref + inputs the workflow expects; this call is approval-gated). Use policy_compliance_reviewer to check deployment policies before promoting to production or staging environments with shared tenants. Use qa_guard to run post-deployment smoke tests and confirm service health. On rollback decisions: prefer the smallest safe rollback scope (container only before full service, last known-good tag before a full revert) and require explicit confirmation before applying to production. Publish deployment outcomes, applied tags, health check results, and any rollback decisions via share_finding.",
       "tools": [
         "shell_exec",
         "ssh_exec",
         "service_check",
+        "github_check_runs_list",
+        "github_actions_runs_list",
+        "github_actions_trigger",
         "read_file",
         "write_file",
         "list_files",
