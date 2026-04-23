@@ -172,7 +172,7 @@
               <tr>
                 <td><span class="agent-name">document_intake</span></td>
                 <td>Attachment classification, long-report extraction, normalization</td>
-                <td>Front door for PDF, DOCX, and mixed-attachment workflows</td>
+                <td>Front door for PDF, DOCX, PPTX, XLSX, images, audio, video, Jupyter notebooks (<code>.ipynb</code>), email files (<code>.eml</code>/<code>.mbox</code>), iCalendar (<code>.ics</code>), and mixed payloads</td>
               </tr>
               <tr>
                 <td><span class="agent-name">paper_author</span></td>
@@ -186,8 +186,23 @@
               </tr>
               <tr>
                 <td><span class="agent-name">infrastructure_agent</span></td>
-                <td>Provisioning, readiness checks, Terraform, Ansible, SSH transfers</td>
-                <td>Used once diagnosis is complete and the task needs actual infrastructure change</td>
+                <td>Provisioning, readiness checks, Terraform, Ansible, Kubernetes (kubectl + helm), Prometheus + Alertmanager + Grafana, SSH transfers</td>
+                <td>Targets external clusters and monitoring stacks — never runs a local cluster. All mutating calls are HITL-gated.</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">git_developer</span></td>
+                <td>Local git ops + GitHub PRs, comments, CI checks, Actions dispatch, Releases</td>
+                <td>Closes the dev loop end-to-end: commit → push → open PR → comment → trigger CI → publish release. Every GitHub mutate is HITL-gated.</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">content_writer</span></td>
+                <td>Blog posts, newsletters, product copy, documentation, multi-page static websites, landing pages, doc sites</td>
+                <td>Picks the right artifact emitter (<code>generate_document</code>, <code>generate_docx</code>, <code>generate_pptx</code>, <code>generate_website</code>, <code>bundle_artifact_zip</code>) for the deliverable shape</td>
+              </tr>
+              <tr>
+                <td><span class="agent-name">image_creator</span></td>
+                <td>Raster image generation plus direct SVG illustrations and QR-code SVGs</td>
+                <td>Uses <code>generate_image</code> for diffusion-style artwork, <code>generate_svg</code> for hand-tuned vector graphics, and <code>generate_qr_code</code> for shareable links / Wi-Fi / vCard payloads</td>
               </tr>
               <tr>
                 <td><span class="agent-name">computer_use_agent</span></td>

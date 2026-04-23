@@ -172,6 +172,63 @@
         </p>
       </div>
 
+      <!-- Built-in scene catalog -->
+      <div class="section">
+        <div class="section-title">Built-in scenes (workspace/scenes/10-scenes.jsonc)</div>
+        <p>
+          The default workspace ships 27 scenes covering research, code, infrastructure, monitoring, content, and operational workflows.
+          Trigger any of them by phrasing your request naturally — the orchestrator matches against scene descriptions automatically — or invoke explicitly with <code>/run &lt;name&gt;</code>.
+        </p>
+
+        <div class="agent-table-wrap">
+          <table class="agent-table">
+            <thead>
+              <tr><th>Scene</th><th>Purpose</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>browser_inspection</code></td><td>Open a website, capture Playwright evidence, summarize what is visible or blocked</td></tr>
+              <tr><td><code>apply_jobs</code></td><td>Browser-assisted application workflow for one approved freelance lead (HITL on credential fill)</td></tr>
+              <tr><td><code>n8n_project_list</code> · <code>n8n_run_workflow</code></td><td>Open n8n, list available workflows, then start a confirmed one</td></tr>
+              <tr><td><code>deep_research</code></td><td>Multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate</td></tr>
+              <tr><td><code>source_backed_paper</code></td><td>Produce a paper or report grounded in official sources and verified citations</td></tr>
+              <tr><td><code>meeting_briefing_packet</code></td><td>Concise meeting brief or handoff packet from attached material and prior findings</td></tr>
+              <tr><td><code>code_review</code></td><td>Inspect changes, analyze quality, optionally post the verdict as a GitHub PR comment</td></tr>
+              <tr><td><code>software_bug_fix</code></td><td>Diagnose → minimal fix → test → optional PR open (HITL on push + pr_create)</td></tr>
+              <tr><td><code>code_refactor</code></td><td>Behaviour-preserving refactor with test verification → optional PR open</td></tr>
+              <tr><td><code>release_notes_draft</code></td><td>Keep-a-Changelog notes from git history; optional GitHub Release publish</td></tr>
+              <tr><td><code>api_test_suite</code></td><td>Test and validate API endpoints with structured request/response analysis</td></tr>
+              <tr><td><code>multi_channel_broadcast</code></td><td>Coordinated message across Slack/Discord/Telegram/email with platform-specific formatting</td></tr>
+              <tr><td><code>security_audit</code></td><td>CVE research + static code analysis + compliance check → prioritized risk report</td></tr>
+              <tr><td><code>incident_response</code></td><td>Triage live incident, gather diagnostic evidence, identify root cause, capture postmortem material</td></tr>
+              <tr><td><code>infrastructure_change</code></td><td>Plan → compliance review → human-approved apply → verify (HITL on terraform_exec, ansible_*, kubectl_apply, helm_*, ssh_exec)</td></tr>
+              <tr><td><code>database_migration</code></td><td>Inspect schema → author idempotent migration → compliance gate → approved apply (HITL on sql_query writes)</td></tr>
+              <tr><td><code>monitoring_setup</code></td><td>Author Prometheus rules / Grafana dashboards / alert rules with HITL on every apply</td></tr>
+              <tr><td><code>data_pipeline_review</code></td><td>Schema quality, null rates, anomaly detection → data quality report</td></tr>
+              <tr><td><code>competitive_analysis</code></td><td>Multi-competitor parallel research → comparison table + visual brief</td></tr>
+              <tr><td><code>content_creation</code></td><td>Research → draft → quality-check audience-ready content (blog, newsletter, docs, microsite)</td></tr>
+              <tr><td><code>onboarding_packet</code></td><td>Gather resources → translate → structured onboarding doc with quick-reference table</td></tr>
+              <tr><td><code>accessibility_audit</code></td><td>WCAG 2.2 browser-driven audit → structured issue report</td></tr>
+              <tr><td><code>translation_task</code></td><td>Document/message translation with optional QA spot-check</td></tr>
+              <tr><td><code>calendar_scheduling</code></td><td>Check availability → book event → channel confirmation</td></tr>
+              <tr><td><code>contract_review</code></td><td>Intake → clause inventory → risk table → negotiation points (legal analysis only — requires human review)</td></tr>
+              <tr><td><code>feature_planning</code></td><td>User stories + Gherkin acceptance criteria + dependency graph + task breakdown</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <div class="callout-icon">📦</div>
+          <div class="callout-body">
+            Twelve dedicated artifact emitters are available to every scene that needs to produce a deliverable:
+            <code>generate_document</code>, <code>generate_pdf</code>, <code>generate_docx</code>, <code>generate_pptx</code>,
+            <code>generate_website</code> (multi-page static sites), <code>generate_chart_html</code>,
+            <code>generate_mermaid_diagram</code>, <code>generate_svg</code>, <code>generate_qr_code</code>,
+            <code>generate_ics</code>, <code>generate_image</code>, and <code>bundle_artifact_zip</code> for packaging
+            multiple files into one downloadable archive.
+          </div>
+        </div>
+      </div>
+
       <!-- Example scene -->
       <div class="section">
         <div class="section-title">Example: source-backed paper scene</div>
