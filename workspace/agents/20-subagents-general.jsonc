@@ -547,9 +547,9 @@
       ]
     },
     "image_creator": {
-      "description": "Image generation specialist for prompt refinement and final image creation. Produces illustrations, concept art, diagrams-as-image, and marketing visuals with verified output. Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a cover illustration in watercolor style', 'Bildgenerierung für Produktwerbung', 'design a minimalist logo concept', 'Bild eines Cyberpunk-Stadtbilds rendern'.",
-      "capabilities": ["image generation", "Bildgenerierung", "prompt refinement", "Prompt-Verfeinerung", "illustration creation", "Illustrationserstellung", "concept art", "Konzeptkunst", "visual design", "visuelles Design"],
-      "tags": ["image", "bild", "design", "multimodal", "illustration", "art", "kunst", "generation", "generierung", "visual", "visuell"],
+      "description": "Image generation specialist for prompt refinement and final image creation. Produces illustrations, concept art, diagrams-as-image, marketing visuals, and direct SVG / QR code artifacts with verified output. Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a cover illustration in watercolor style', 'Bildgenerierung für Produktwerbung', 'design a minimalist logo concept', 'Bild eines Cyberpunk-Stadtbilds rendern', 'erstelle einen QR-Code für die Webseite', 'render an SVG badge with the version number', 'generate a QR code for the WiFi credentials'.",
+      "capabilities": ["image generation", "Bildgenerierung", "prompt refinement", "Prompt-Verfeinerung", "illustration creation", "Illustrationserstellung", "concept art", "Konzeptkunst", "visual design", "visuelles Design", "svg authoring", "SVG-Erstellung", "qr code generation", "QR-Code-Erstellung"],
+      "tags": ["image", "bild", "design", "multimodal", "illustration", "art", "kunst", "generation", "generierung", "visual", "visuell", "svg", "qr", "qr-code", "vector"],
       "model": {
         "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
         "enableThinking": false,
@@ -557,10 +557,12 @@
         "maxTokens": 4096
       },
       "maxIterations": 5,
-      "systemPrompt": "You generate images from descriptions. Read shared facts first when context is available. Craft detailed, specific prompts for generate_image — include style, composition, lighting, color palette, and subject details. After generation, use analyze_image to verify the result matches the request. If the result is off, refine the prompt and try again. Publish the final image path and a brief description via share_finding.",
+      "systemPrompt": "You generate visual artifacts. For raster artwork, illustrations, and photo-style imagery, use generate_image with a detailed prompt — include style, composition, lighting, color palette, and subject details — then use analyze_image to verify the result. For static vector artwork (icons, badges, geometric illustrations, simple data viz), use generate_svg with hand-written SVG markup; this is faster and more controllable than regenerating with the diffusion model. For QR codes (URL share, Wi-Fi credentials, vCard, link to a deliverable), use generate_qr_code — pick errorCorrection L for short URLs, M as the safe default, H when the QR will be printed/handled. Read shared facts first when brand colors, style references, or product context exist. Publish the final artifact path and a brief description via share_finding.",
       "tools": [
         "generate_image",
         "analyze_image",
+        "generate_svg",
+        "generate_qr_code",
         "read_file",
         "write_file",
         "read_shared_facts",
@@ -1099,6 +1101,7 @@
         "contacts_update",
         "contacts_delete",
         "extract_calendar",
+        "generate_ics",
         "read_file",
         "list_files",
         "read_shared_facts",
