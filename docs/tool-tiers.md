@@ -48,6 +48,43 @@ This tier model is also the hard boundary for self-improvement. The swarm may re
 | `memory_search` | Search the agent memory store |
 | `session_status` | Read current session metadata |
 | `get_site_credentials` | Check whether stored site credentials exist and return non-secret login metadata |
+| `extract_file_content` | Convert a workspace file (PDF/DOCX/PPTX/XLSX/image) to Markdown via the multimodal backend |
+| `extract_notebook` | Parse a Jupyter `.ipynb` into Markdown with code, outputs, and image refs |
+| `extract_email` | Parse `.eml` or single-message `.mbox` into headers, body, and attachment list |
+| `extract_calendar` | Parse a `.ics` file into a structured event list |
+| `spreadsheet_read` | Read a workspace spreadsheet (XLSX/CSV/ODS) and return sheets as JSON row arrays |
+| `list_pdf_form_fields` | Inspect AcroForm fields in an existing PDF |
+| `analyze_image` | Analyze a workspace image with the configured vision-capable LLM |
+| `transcribe_audio` | Transcribe an audio file via the configured STT backend |
+| `transcribe_video` | Transcribe the audio track of a workspace video file via the same STT backend |
+| `list_tts_voices` | List voices available from the configured TTS backend |
+| `metric_query` | Run read-only SQL queries against QuestDB time-series data |
+| `metric_list_tables` | List available QuestDB time-series tables |
+| `log_stream` | Tail and filter Docker Compose service logs or workspace log files |
+| `agent_store_read` | Read from per-agent durable key-value storage |
+| `research_notes_read` / `research_notes_summary` | Read accumulated research scratchpad notes |
+| `assistant_personality_view` | Read the persistent main-assistant personality profile |
+| `graph_query` | Run read-only Cypher queries against the MemGraph knowledge graph |
+| `graph_find_paths` | Find shortest relationship paths between graph entities |
+| `read_shared_facts` | Read the per-session shared swarm fact ledger |
+| `get_swarm_state` | Read the current turn-local swarm task state and progress |
+| `get_swarm_budget` | Aggregate token, tool-call, and wall-clock spending across swarm tasks |
+| `geocode_location` | Resolve a place name or address to coordinates via OpenStreetMap |
+| `route_distance_time` | Calculate route distance and travel time between two coordinates |
+| `kubectl_get` | List/fetch Kubernetes resources from an external cluster |
+| `kubectl_describe` | Describe a Kubernetes resource (events, conditions, related state) |
+| `kubectl_logs` | Fetch container logs from a pod, with tail/since/previous filters |
+| `kubectl_top` | Report pod or node CPU/memory usage (requires Metrics API) |
+| `helm_list` | List Helm releases in the target Kubernetes cluster |
+| `prometheus_query` | Run a PromQL instant or range query against an external Prometheus instance |
+| `alertmanager_silences_list` | List active silences on an external Alertmanager instance |
+| `grafana_dashboard_search` | Search Grafana dashboards by query, tag, or folder |
+| `grafana_alerts_list` | List Grafana unified-alerting rules in a folder |
+| `github_pr_list` | List pull requests on a remote GitHub repository |
+| `github_pr_get` | Fetch a single pull request by number |
+| `github_check_runs_list` | List CI check runs for a commit / PR head SHA |
+| `github_actions_runs_list` | List GitHub Actions workflow runs (across all workflows or one) |
+| `browser_navigate` / `browser_snapshot` / `browser_screenshot` / `browser_wait_for` | Navigate / inspect / capture the shared browser session |
 
 ### Tier 1 — Write (Workspace-Scoped)
 
@@ -65,10 +102,23 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `generate_chart_html` | Save an HTML chart report with embedded visualization data in the workspace | None |
 | `generate_mermaid_diagram` | Save a Mermaid diagram artifact in the workspace for direct preview in chat | None |
 | `generate_pdf` | Save a simple PDF document in the workspace | None |
+| `generate_docx` | Save a Microsoft Word `.docx` from Markdown content or structured blocks | None |
+| `generate_pptx` | Save a PowerPoint `.pptx` from a structured slide list (5 layouts) | None |
+| `generate_website` | Save a complete multi-page static website (HTML + theme CSS + assets) in one call | None |
+| `generate_svg` | Write a raw SVG illustration or data visualization to the workspace | None |
+| `generate_qr_code` | Encode text/URL/Wi-Fi/vCard data as a QR-code SVG | None |
+| `generate_ics` | Emit an iCalendar `.ics` file from a structured event list | None |
+| `generate_image` | Generate a raster image via the configured image-generation backend | None |
+| `synthesize_speech` | Generate a WAV audio artifact via the configured TTS backend | None |
+| `bundle_artifact_zip` | Package workspace files / directories / inline content into a single `.zip` | None |
 | `pdf_fill` | Fill form fields in an existing PDF and write the result to the workspace | None |
-| `list_pdf_form_fields` | List the fillable form fields in a PDF file | None |
-| `spreadsheet_read` | Read a spreadsheet file (xlsx, xls, csv, ods) from the workspace into structured data | None |
 | `spreadsheet_write` | Write tabular data to a spreadsheet file (xlsx, csv) in the workspace | None |
+| `metric_write` | Write rows to QuestDB time-series tables | None |
+| `agent_store_write` / `agent_store_delete` | Per-agent durable key-value store (Mongo/Postgres backed) | None |
+| `research_note` / `research_notes_clear` | Research scratchpad note write/clear | None |
+| `share_finding` / `share_evidence` | Publish a finding or evidence record to the shared swarm fact ledger | None |
+| `graph_upsert_entity` / `graph_relate` / `graph_delete_node` | Write to the MemGraph knowledge graph | None |
+| `memory_promote` / `memory_compact` | Promote ephemeral memory to durable; compact memory store | None |
 | `n8n_fetch_leads` | Fetch lead data from an n8n workflow | None |
 | `n8n_mark_applied` | Mark a lead as applied in n8n | None |
 | `webhook__<name>` | Any auto-registered webhook tool | None (auto-classified Tier 1) |
@@ -107,14 +157,42 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `parallel_delegate` | Run up to 5 agents concurrently | None | No |
 | `run_task_graph` | Execute a dependency-aware swarm task graph | None | No |
 | `run_workflow` | Execute a reusable scene or job inline in a temporary workflow session | None | No |
-| `sql_query` | Run a parameterised read query against a PostgreSQL or MySQL database | Per-call | No |
+| `sql_query` | Run a parameterised query against a PostgreSQL / MySQL / MariaDB database (writes too) | Per-call | No |
 | `shell_exec` | Execute a shell command | Per-call | Yes — Docker container |
 | `run_script` | Run a script file | Per-call | Yes — Docker container |
+| `run_test_suite` | Docker-sandboxed test runner (vitest/jest/pytest/mocha/go/cargo/make/npm/custom) | Per-call | Yes — Docker container |
 | `http_request` | Make an outbound HTTP request | Per-call | No |
 | `git_commit` | Stage files and create a git commit | Per-call | Yes — Docker container |
 | `git_checkout` | Switch or create branches, restore files | Per-call | Yes — Docker container |
+| `git_clone` | Clone a remote repository over HTTPS | Per-call | Yes — Docker container |
+| `git_tag` | Create annotated or lightweight git tags | Per-call | Yes — Docker container |
+| `git_push` | Push a branch / tag to a remote (GitHub / GitLab / etc.) | Per-call | Yes — Docker container |
+| `kubectl_apply` | Apply a Kubernetes manifest (create/update) — supports server-side apply, prune, dry-run | Per-call | No |
+| `kubectl_delete` | Delete a Kubernetes resource by name or label selector | Per-call | No |
+| `kubectl_rollout_restart` | Trigger a rolling restart of a Deployment / StatefulSet / DaemonSet | Per-call | No |
+| `kubectl_scale` | Scale a workload to a specific replica count (with current-replicas precondition) | Per-call | No |
+| `helm_upgrade` | Upgrade (or install with `install=true`) a Helm release | Per-call | No |
+| `helm_rollback` | Roll back a Helm release to a previous revision | Per-call | No |
+| `alertmanager_silence_create` | Create an Alertmanager silence (mute alerts during maintenance) | Per-call | No |
+| `alertmanager_silence_expire` | Expire an Alertmanager silence by id | Per-call | No |
+| `grafana_dashboard_apply` | Create or update a Grafana dashboard via `/api/dashboards/db` | Per-call | No |
+| `grafana_alert_apply` | Create or update a Grafana unified-alerting rule via the provisioning API | Per-call | No |
+| `github_pr_create` | Open a new pull request on a remote GitHub repository | Per-call | No |
+| `github_pr_comment` | Post an issue-style comment on a pull request thread | Per-call | No |
+| `github_actions_trigger` | Trigger a `workflow_dispatch` run for a GitHub Actions workflow | Per-call | No |
+| `github_release_create` | Create a GitHub Release pointing at a tag with optional release notes | Per-call | No |
+| `translate_text` | Tier-0 inline LLM translation (max 4 000 chars; auto-detects source language) | Per-call | No |
+| `ask_user` | Pause execution and surface a question to the operator (multi-choice or free-text) | None | No |
+| `tool_dev_start` / `tool_dev_submit` | Start / submit a self-developed tool for review | Per-call | Yes — Docker sandbox |
+| `cron_remove` / `cron_list` | Remove or list scheduled cron jobs | Per-call | No |
+| `reminder_create` / `reminder_remove` / `timer_start` / `timer_cancel` | Reminder + timer scheduling | None | No |
+| `request_new_capability` / `list_capability_gaps` | Capability-gap signaling for the self-improvement loop | None | No |
+| `assistant_personality_update` | Update the persistent main-assistant personality profile | Per-call | No |
+| `mail_send_draft` | Send an approved mail draft (mail composition is otherwise Tier 1) | Per-call | No |
 | `site_fill_credentials` | Securely fill stored credentials into browser login fields | Per-call | No |
 | `computer_type_credential` | Securely type stored credentials into a desktop login form | Per-call | No |
+| `browser_click` / `browser_type` / `browser_select_option` | Mutating browser interactions in the shared session | Per-call | No |
+| `computer_*` (mouse / keyboard / file transfer) | Remote desktop interactions via the computer-use agent | Per-call | No |
 
 Internal orchestration tools stay inside the guarded runtime, so they do not need per-call approval even though they are execution-tier. Tools that execute commands, mutate git state, or reach outside the workspace remain approval-gated.
 
@@ -127,6 +205,10 @@ Internal orchestration tools stay inside the guarded runtime, so they do not nee
 | Tool | Description | Approval |
 |------|-------------|---------|
 | `send_telegram` | Send a Telegram message via the bot | Per-call + audit |
+| `send_slack` | Send a Slack message via the bot | Per-call + audit |
+| `send_discord` | Send a Discord message via the bot | Per-call + audit |
+| `send_email` | Send an email message (separate from `mail_send_draft`) | Per-call + audit |
+| `send_agent_message` | Direct A2A message to another sub-agent (Stage 9 messaging) | Per-call + audit |
 | `cron_create` | Register a new cron schedule | Per-call + audit |
 | `vm_manage` | Manage VMs through configured infrastructure backends | Per-call + audit |
 | `proxmox_vm` | Manage Proxmox VMs via the Proxmox VE API | Per-call + audit |
@@ -138,6 +220,7 @@ Internal orchestration tools stay inside the guarded runtime, so they do not nee
 | `ssh_upload` | Upload files or directories to a remote host | Per-call + audit |
 | `ssh_download` | Download files or directories from a remote host | Per-call + audit |
 | `mcp__<server>__<tool>` (unlisted) | Any MCP tool not explicitly listed in Tier 0 | Per-call + audit |
+| `selfdev__<name>` | Self-developed dynamic tools (sandbox-loaded from `.starlingai/dynamic_tools/`) | Per-call + sandbox + audit |
 
 **MCP tools default rule:** any MCP tool that is not explicitly classified in Tier 0 is automatically assigned Tier 3. This means new MCP servers get privileged-but-allowed behaviour by default — they require per-call approval and generate an audit entry, but they are not blocked outright.
 
