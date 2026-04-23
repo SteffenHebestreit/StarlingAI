@@ -1123,6 +1123,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  generate_website: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a complete multi-page static website in the workspace (HTML + CSS + optional assets)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {

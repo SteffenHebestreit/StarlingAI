@@ -36,6 +36,7 @@ import "./tools/workspace-search.js";
 import "./tools/web.js";
 import "./tools/multimodal.js";
 import "./tools/document-output.js";
+import "./tools/website.js";
 import "./tools/computer-use.js";
 import "./tools/pentest.js";
 import "./tools/telegram.js";

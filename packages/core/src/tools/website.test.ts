@@ -1,0 +1,274 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+describe("generate_website", () => {
+  const cleanup: string[] = [];
+
+  beforeEach(() => {
+    cleanup.length = 0;
+  });
+
+  afterEach(() => {
+    for (const dir of cleanup.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function tool() {
+    const [{ getTool }] = await Promise.all([
+      import("./registry.js"),
+      import("./website.js"),
+    ]);
+    return getTool("generate_website")!;
+  }
+
+  function tempWorkspace(): string {
+    const dir = mkdtempSync(join(tmpdir(), "starlingai-website-"));
+    cleanup.push(dir);
+    return dir;
+  }
+
+  it("is registered", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("./registry.js"),
+      import("./website.js"),
+    ]);
+    expect(getTool("generate_website")).toBeDefined();
+  });
+
+  it("rejects pages without an index.html entry", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "site",
+      title: "My site",
+      pages: [
+        { path: "about.html", title: "About", content: "# About" },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("index.html");
+    expect(existsSync(join(ws, "site", "about.html"))).toBe(false);
+  });
+
+  it("writes index.html, theme.css, and renders markdown", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "site",
+      title: "My Site",
+      description: "Test description",
+      theme: "default",
+      pages: [
+        {
+          path: "index.html",
+          title: "Home",
+          content: "# Welcome\n\nThis is **my** site with `code` and a [link](https://example.com).",
+        },
+        {
+          path: "about.html",
+          title: "About",
+          content: "# About\n\n- item one\n- item two",
+        },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["artifactKind"]).toBe("website");
+    expect(result.metadata?.["pageCount"]).toBe(2);
+    expect(result.metadata?.["indexPath"]).toBe("site/index.html");
+
+    const indexHtml = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(indexHtml).toContain("<title>Home");
+    expect(indexHtml).toContain("<h1>Welcome</h1>");
+    expect(indexHtml).toContain("<strong>my</strong>");
+    expect(indexHtml).toContain("<code>code</code>");
+    expect(indexHtml).toContain("href=\"https://example.com\"");
+    expect(indexHtml).toContain("href=\"theme.css\"");
+    expect(indexHtml).toContain("<meta name=\"description\" content=\"Test description\">");
+
+    const aboutHtml = readFileSync(join(ws, "site", "about.html"), "utf8");
+    expect(aboutHtml).toContain("<li>item one</li>");
+    expect(aboutHtml).toContain("<li>item two</li>");
+
+    const css = readFileSync(join(ws, "site", "theme.css"), "utf8");
+    expect(css).toContain("generate_website theme: default");
+    expect(css).toContain("--bg:");
+  });
+
+  it("auto-generates nav from included pages; honors navLabel + includeInNav=false", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        { path: "index.html", title: "Home", content: "# Home" },
+        { path: "docs.html", title: "Documentation", content: "# Docs", navLabel: "Docs" },
+        { path: "hidden.html", title: "Hidden", content: "# Hidden", includeInNav: false },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    const indexHtml = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(indexHtml).toMatch(/<a href="index\.html"[^>]*class="active"[^>]*>\s*Home\s*<\/a>/);
+    expect(indexHtml).toMatch(/<a href="docs\.html"[^>]*>\s*Docs\s*<\/a>/);
+    expect(indexHtml).not.toContain("Hidden");
+  });
+
+  it("fenced code block renders as <pre><code class=\"language-foo\">", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        {
+          path: "index.html",
+          title: "Home",
+          content: "```ts\nconst x: number = 1;\n```\n",
+        },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const html = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(html).toContain("<pre><code class=\"language-ts\">");
+    expect(html).toContain("const x: number = 1;");
+  });
+
+  it("GFM table renders as <table>", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        {
+          path: "index.html",
+          title: "Home",
+          content: "| Name | Qty |\n|------|----:|\n| Foo  | 3   |\n| Bar  | 12  |\n",
+        },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const html = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(html).toContain("<table>");
+    expect(html).toContain("<thead>");
+    expect(html).toContain("<th>Name</th>");
+    expect(html).toContain('style="text-align:right">Qty</th>');
+    expect(html).toContain("<td>Foo</td>");
+  });
+
+  it("nested pages get ../theme.css link (correct relative depth)", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        { path: "index.html", title: "Home", content: "# Home" },
+        { path: "docs/getting-started.html", title: "Start", content: "# Start" },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const subHtml = readFileSync(join(ws, "site", "docs", "getting-started.html"), "utf8");
+    expect(subHtml).toContain('href="../theme.css"');
+    expect(subHtml).toContain('href="../index.html"');
+  });
+
+  it("writes utf8 and base64 assets into the site dir", async () => {
+    const ws = tempWorkspace();
+    const pngBase64 = Buffer.from("fake-png-bytes").toString("base64");
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [{ path: "index.html", title: "Home", content: "# Home" }],
+      assets: [
+        { path: "extra.js", content: "console.log(1);", encoding: "utf8" },
+        { path: "img/logo.png", content: pngBase64, encoding: "base64" },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(readFileSync(join(ws, "site", "extra.js"), "utf8")).toBe("console.log(1);");
+    expect(readFileSync(join(ws, "site", "img", "logo.png"))).toEqual(Buffer.from("fake-png-bytes"));
+  });
+
+  it("refuses directory traversal in page and asset paths", async () => {
+    const ws = tempWorkspace();
+    const bad1 = await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        { path: "index.html", title: "Home", content: "# Home" },
+        { path: "../evil.html", title: "Evil", content: "# Evil" },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(bad1.success).toBe(false);
+    expect(bad1.error).toContain("..");
+
+    const bad2 = await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [{ path: "index.html", title: "Home", content: "# Home" }],
+      assets: [{ path: "../secret.txt", content: "x" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(bad2.success).toBe(false);
+    expect(bad2.error).toContain("..");
+  });
+
+  it("mermaid code block renders as <pre class=\"mermaid\"> when includeMermaid=true", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        {
+          path: "index.html",
+          title: "Home",
+          content: "```mermaid\nflowchart LR; A --> B\n```\n",
+        },
+      ],
+      includeMermaid: true,
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const html = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(html).toContain("<pre class=\"mermaid\">");
+    expect(html).toContain("mermaid.esm.min.mjs");
+  });
+
+  it("raw HTML format passes through verbatim", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [
+        {
+          path: "index.html",
+          title: "Home",
+          format: "html",
+          content: "<section class=\"hero\"><h1>Welcome</h1><p>Raw HTML allowed.</p></section>",
+        },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const html = readFileSync(join(ws, "site", "index.html"), "utf8");
+    expect(html).toContain("<section class=\"hero\">");
+    expect(html).toContain("<h1>Welcome</h1>");
+  });
+
+  it("overwrite=false refuses when index.html already exists", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [{ path: "index.html", title: "Home", content: "# Home" }],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    const second = await (await tool()).execute({
+      outputDir: "site",
+      title: "S",
+      pages: [{ path: "index.html", title: "Home", content: "# Replaced" }],
+      overwrite: false,
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(second.success).toBe(false);
+    expect(second.error).toContain("Refusing");
+  });
+});
