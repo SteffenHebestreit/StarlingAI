@@ -427,8 +427,7 @@
           <textarea
             ref="composerTextareaEl"
             v-model="inputText"
-            @keydown.enter.exact.prevent="sendMessage"
-            @keydown.enter.shift.exact="inputText += '\n'"
+            @keydown="onComposerKeydown"
             :disabled="gateway.isLoading || !gateway.connected || Boolean(gateway.pendingInputRequest)"
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
@@ -2085,6 +2084,18 @@ async function speakLatestAssistant(options: { forceFullText?: boolean; reason?:
 function toggleSpeakReply() {
   speakReplyEnabled.value = !speakReplyEnabled.value;
   writeSpeakReplySummaryStorage(speakReplyEnabled.value);
+}
+
+function onComposerKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  // Let Shift/Ctrl/Alt/Meta+Enter pass through so the textarea inserts a
+  // newline at the cursor position (its native behavior).
+  if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  // Skip while an IME composition is active so we don't submit on commit
+  // (German autocomplete, CJK input methods, etc. dispatch keyCode 229).
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  void sendMessage();
 }
 
 async function sendMessage() {
