@@ -738,8 +738,12 @@ async function downloadAttachment(attachment: ChatAttachment, archive = false): 
 }
 
 // ── Rendered markdown ─────────────────────────────────────────────────────────
+// breaks=true: single \n in source becomes <br> so multi-line user messages
+//   don't get collapsed into one wrapped paragraph by CommonMark rules.
+// gfm=true:    GitHub-flavored extras (tables, autolinks, ~~strikethrough~~)
+//   that match the conventions assistant messages already use.
 function renderMarkdown(raw: string): string {
-  const html = marked.parse(raw, { async: false }) as string;
+  const html = marked.parse(raw, { async: false, breaks: true, gfm: true }) as string;
   return DOMPurify.sanitize(html);
 }
 
