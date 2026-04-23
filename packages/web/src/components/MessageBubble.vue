@@ -173,6 +173,7 @@
       <!-- Main content -->
       <div
         :class="['message-content-wrapper', { 'message-content-wrapper--collapsed': contentCollapsed && isLongContent && !isStreaming }]"
+        @click="onMessageContentClick"
       >
         <div
           v-if="isStreaming"
@@ -284,10 +285,104 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { marked } from "marked";
+import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
 import mermaid from "mermaid";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import go from "highlight.js/lib/languages/go";
+import ini from "highlight.js/lib/languages/ini";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import plaintext from "highlight.js/lib/languages/plaintext";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import shell from "highlight.js/lib/languages/shell";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
+import "highlight.js/styles/github-dark.css";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
+
+// ── highlight.js: register only the languages we expect to see in chat to keep
+// the bundle small. Aliases (sh, ts, js, html, etc.) come from the language
+// modules themselves. Unknown languages fall through to plaintext.
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("ini", ini);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("plaintext", plaintext);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("shell", shell);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function highlightCode(code: string, lang: string): string {
+  const trimmed = (lang ?? "").trim().toLowerCase();
+  if (trimmed && hljs.getLanguage(trimmed)) {
+    try {
+      return hljs.highlight(code, { language: trimmed, ignoreIllegals: true }).value;
+    } catch {
+      // fall through to escapeHtml below
+    }
+  }
+  return code
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Override marked's code renderer once at module load so every <pre><code> in
+// the chat gets a header bar with an optional language label and a copy button.
+// The button has data-copy-code so a single click handler on the message
+// wrapper can find the matching <code> and copy its text.
+marked.use({
+  renderer: {
+    code({ text, lang }: Tokens.Code): string {
+      const language = (lang ?? "").trim();
+      if (language === "mermaid") {
+        // Leave mermaid blocks untouched so the existing inline mermaid
+        // renderer / artifact preview can handle them downstream.
+        return `<pre><code class="language-mermaid">${escapeAttr(text)}</code></pre>`;
+      }
+      const highlighted = highlightCode(text, language);
+      const langLabel = language
+        ? `<span class="code-block__lang">${escapeAttr(language)}</span>`
+        : "<span class=\"code-block__lang code-block__lang--unknown\">code</span>";
+      return `<div class="code-block">
+  <div class="code-block__header">
+    ${langLabel}
+    <button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>
+  </div>
+  <pre><code class="language-${escapeAttr(language || "plaintext")} hljs">${highlighted}</code></pre>
+</div>`;
+    },
+  },
+});
 
 type ExecutionStatus = "running" | "done" | "partial" | "failed";
 
@@ -850,6 +945,56 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
 function openExternalAttachment(attachment: ChatAttachment): void {
   if (!attachment.externalUrl) return;
   window.open(attachment.externalUrl, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Single delegated click handler on the message-content-wrapper that catches
+ * clicks on any [data-copy-code] button injected by the marked code renderer
+ * and copies the matching <code> block's text to the clipboard. Falls back to
+ * a temporary <textarea> selectAll-and-copy when navigator.clipboard is
+ * unavailable (older browsers, insecure context, etc.).
+ */
+function onMessageContentClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  const button = target.closest("[data-copy-code]") as HTMLButtonElement | null;
+  if (!button) return;
+  const wrapper = button.closest(".code-block");
+  const codeEl = wrapper?.querySelector("pre code") as HTMLElement | null;
+  if (!codeEl) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const text = codeEl.textContent ?? "";
+  const flash = (label: string, modifier: string) => {
+    button.textContent = label;
+    button.classList.add(modifier);
+    setTimeout(() => {
+      button.textContent = "Copy";
+      button.classList.remove(modifier);
+    }, 1800);
+  };
+  const writePromise = (navigator.clipboard?.writeText
+    ? navigator.clipboard.writeText(text)
+    : Promise.reject(new Error("clipboard unavailable"))
+  );
+  writePromise
+    .then(() => flash("Copied", "code-block__copy--copied"))
+    .catch(() => {
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        flash("Copied", "code-block__copy--copied");
+      } catch {
+        flash("Failed", "code-block__copy--failed");
+      }
+    });
 }
 
 async function downloadAttachment(attachment: ChatAttachment, archive = false): Promise<void> {
@@ -1542,6 +1687,84 @@ onBeforeUnmount(() => {
 .prose-content :deep(code)        { background: rgba(168,85,247,0.12); color: #d8b4fe; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.82em; border: 1px solid rgba(168,85,247,0.2); }
 .prose-content :deep(pre)         { background: rgba(10, 7, 20, 0.8); border: 1px solid rgba(168,85,247,0.15); padding: 0.75rem; border-radius: 0.75rem; overflow-x: auto; margin: 0.5rem 0; }
 .prose-content :deep(pre code)    { background: none; border: none; padding: 0; color: #e2d9f3; }
+
+/* Code-block wrapper produced by the marked code renderer override.
+   Header strip with language label + Copy button; pre/code styles inherit
+   from the surrounding .prose-content rules above and the github-dark
+   highlight.js theme imported in the script section. */
+.prose-content :deep(.code-block) {
+  margin: 0.6rem 0;
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  border-radius: 0.85rem;
+  overflow: hidden;
+  background: rgba(10, 7, 20, 0.85);
+}
+.prose-content :deep(.code-block__header) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.7rem;
+  background: rgba(31, 41, 55, 0.55);
+  border-bottom: 1px solid rgba(168, 85, 247, 0.14);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+.prose-content :deep(.code-block__lang) {
+  text-transform: uppercase;
+  color: rgb(196 181 253);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-weight: 600;
+}
+.prose-content :deep(.code-block__lang--unknown) {
+  text-transform: none;
+  color: rgb(156 163 175);
+  font-weight: 500;
+}
+.prose-content :deep(.code-block__copy) {
+  appearance: none;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  background: rgba(168, 85, 247, 0.12);
+  color: rgb(216 180 254);
+  padding: 0.18rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.prose-content :deep(.code-block__copy:hover) {
+  background: rgba(168, 85, 247, 0.22);
+  color: rgb(243 232 255);
+  border-color: rgba(168, 85, 247, 0.55);
+}
+.prose-content :deep(.code-block__copy:active) { transform: scale(0.96); }
+.prose-content :deep(.code-block__copy:focus-visible) {
+  outline: 2px solid rgb(196 181 253);
+  outline-offset: 2px;
+}
+.prose-content :deep(.code-block__copy--copied) {
+  background: rgba(34, 197, 94, 0.18);
+  color: rgb(187 247 208);
+  border-color: rgba(34, 197, 94, 0.55);
+}
+.prose-content :deep(.code-block__copy--failed) {
+  background: rgba(248, 113, 113, 0.18);
+  color: rgb(254 202 202);
+  border-color: rgba(248, 113, 113, 0.55);
+}
+.prose-content :deep(.code-block pre) {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+/* Tone the github-dark hljs theme into the surrounding panel so it doesn't
+   look like a foreign element pasted in. */
+.prose-content :deep(.code-block .hljs) {
+  background: transparent;
+  color: #e2d9f3;
+  padding: 0;
+}
 .prose-content :deep(ul), .prose-content :deep(ol) { padding-left: 1.25rem; margin: 0.25rem 0; }
 .prose-content :deep(li)          { margin: 0.15rem 0; }
 .prose-content :deep(a)           { color: #a78bfa; text-decoration: underline; }
