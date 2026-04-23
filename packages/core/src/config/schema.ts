@@ -617,6 +617,25 @@ export const MonitoringSchema = z.object({
 });
 
 
+// ─── Source forge integration (GitHub today; GitLab/Gitea later) ─────────────
+// External-only: each instance points at api.github.com or a GitHub Enterprise
+// host. Token is a PAT or fine-grained PAT with $ENV / secret: ref support.
+
+export const GitHubInstanceSchema = z.object({
+  baseUrl: z.string().url().default("https://api.github.com"),
+  token: z.string().optional(),
+  defaultOwner: z.string().min(1).optional(),
+  defaultRepo: z.string().min(1).optional(),
+  userAgent: z.string().min(1).default("StarlingAI"),
+  timeoutMs: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export const SourceForgeSchema = z.object({
+  defaultGithub: z.string().min(1).optional(),
+  github: z.record(GitHubInstanceSchema).default({}),
+});
+
+
 // ─── Pentest service ──────────────────────────────────────────────────────────
 
 export const PentestKaliServiceProfileSchema = z.object({
@@ -932,6 +951,7 @@ export const ConfigSchema = z.object({
   approvalChannels: ApprovalChannelsSchema.default({}),
   infrastructure: InfrastructureSchema.default({}),
   monitoring: MonitoringSchema.default({}),
+  sourceForge: SourceForgeSchema.default({}),
   pentest: PentestSchema.default({}),
   mail: MailServiceSchema.default({}),
   toolDevelopment: ToolDevelopmentSchema.default({}),
