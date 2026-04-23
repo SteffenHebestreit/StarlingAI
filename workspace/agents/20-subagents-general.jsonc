@@ -494,6 +494,8 @@
         "delegate_to_agent",
         "generate_document",
         "generate_pdf",
+        "generate_docx",
+        "generate_pptx",
         "share_finding",
         "write_file"
       ]
@@ -633,7 +635,8 @@
         "read_file",
         "write_file",
         "generate_document",
-        "generate_pdf"
+        "generate_pdf",
+        "generate_docx"
       ]
     },
     "source_verifier": {
@@ -1234,6 +1237,8 @@
         "workspace_search",
         "generate_document",
         "generate_website",
+        "generate_docx",
+        "generate_pptx",
         "read_shared_facts",
         "share_finding"
       ]
@@ -1258,6 +1263,8 @@
         "workspace_search",
         "extract_file_content",
         "generate_document",
+        "generate_docx",
+        "generate_pdf",
         "read_shared_facts",
         "share_finding",
         "web_search",
