@@ -254,6 +254,21 @@
             :sandbox="artifactPreview.sandbox"
             referrerpolicy="no-referrer"
           />
+          <div v-else-if="artifactPreview.kind === 'website'" class="artifact-preview-website">
+            <div v-if="artifactPreview.websiteMeta" class="artifact-preview-website__meta">
+              <span class="artifact-preview-website__chip">Inlined assets: {{ artifactPreview.websiteMeta.inlinedAssetCount }}</span>
+              <span v-if="artifactPreview.websiteMeta.skippedAssetCount > 0" class="artifact-preview-website__chip artifact-preview-website__chip--warn">
+                Skipped: {{ artifactPreview.websiteMeta.skippedAssetCount }}
+              </span>
+              <span v-if="artifactPreview.websiteMeta.note" class="artifact-preview-website__note">{{ artifactPreview.websiteMeta.note }}</span>
+            </div>
+            <iframe
+              :srcdoc="artifactPreview.srcdoc"
+              class="artifact-preview-frame"
+              :sandbox="artifactPreview.sandbox"
+              referrerpolicy="no-referrer"
+            />
+          </div>
           <div v-else-if="artifactPreview.kind === 'mermaid'" class="artifact-preview-mermaid">
             <div class="artifact-preview-mermaid__canvas" v-html="artifactPreview.svg" />
             <pre v-if="artifactPreview.text">{{ artifactPreview.text }}</pre>
@@ -290,12 +305,21 @@ interface ExecutionItem {
 interface ArtifactPreviewState {
   title: string;
   filename: string;
-  kind: "html" | "pdf" | "text" | "markdown" | "audio" | "mermaid";
+  kind: "html" | "pdf" | "text" | "markdown" | "audio" | "mermaid" | "website";
   url?: string;
+  /** For kind=website only — rendered into an iframe srcdoc with theme/asset CSS inlined. */
+  srcdoc?: string;
   text?: string;
   html?: string;
   svg?: string;
   sandbox?: string;
+  /** For kind=website only — extra info shown above the iframe (page count, sub-page links). */
+  websiteMeta?: {
+    pageCount?: number;
+    inlinedAssetCount: number;
+    skippedAssetCount: number;
+    note?: string;
+  };
 }
 
 let mermaidInitialized = false;
@@ -571,6 +595,8 @@ function attachmentLabel(attachment: ChatAttachment): string {
       return "JSON artifact";
     case "text":
       return "Document artifact";
+    case "website":
+      return "Website artifact";
     default:
       return attachment.sourceTool ? `${attachment.sourceTool} output` : "Workspace artifact";
   }
@@ -585,7 +611,7 @@ function formatAttachmentSize(bytes?: number): string {
 
 function isPreviewable(attachment: ChatAttachment): boolean {
   return Boolean(attachment.relativePath || attachment.externalUrl)
-    && ["html", "pdf", "text", "markdown", "json", "audio", "mermaid"].includes(attachment.previewMode ?? "download");
+    && ["html", "pdf", "text", "markdown", "json", "audio", "mermaid", "website"].includes(attachment.previewMode ?? "download");
 }
 
 function ensureMermaidInitialized(): void {
@@ -596,6 +622,90 @@ function ensureMermaidInitialized(): void {
     theme: "neutral",
   });
   mermaidInitialized = true;
+}
+
+/**
+ * Pull every relative <link rel="stylesheet"> and <script src> in the HTML,
+ * fetch each from the workspace, and inline it as a <style> / <script> tag so
+ * the website renders correctly inside an iframe srcdoc (which is opaque to
+ * the gateway's authenticated /api/workspace/file endpoint and therefore can't
+ * resolve relative <link href="theme.css"> on its own).
+ *
+ * Returns the rewritten HTML plus counts so the preview chrome can flag if
+ * anything was skipped (external CDN, absolute URL, base64 data URI, etc.).
+ */
+async function inlineWebsiteAssets(
+  html: string,
+  baseDir: string,
+): Promise<{ srcdoc: string; inlinedCount: number; skippedCount: number }> {
+  let result = html;
+  let inlinedCount = 0;
+  let skippedCount = 0;
+
+  const isInlinable = (href: string): boolean => {
+    return Boolean(href)
+      && !href.startsWith("http://")
+      && !href.startsWith("https://")
+      && !href.startsWith("//")
+      && !href.startsWith("data:")
+      && !href.startsWith("#");
+  };
+
+  const resolveSibling = (href: string): string => {
+    if (href.startsWith("/")) return href.slice(1);
+    return baseDir ? `${baseDir}/${href}` : href;
+  };
+
+  // <link rel="stylesheet" href="theme.css">  →  <style>...</style>
+  const linkRegex = /<link\b[^>]*\brel\s*=\s*["']stylesheet["'][^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*\/?>/gi;
+  const linkMatches = Array.from(result.matchAll(linkRegex));
+  for (const match of linkMatches) {
+    const href = match[1] ?? "";
+    if (!isInlinable(href)) {
+      skippedCount++;
+      continue;
+    }
+    try {
+      const sibling = resolveSibling(href);
+      const { blob } = await gateway.fetchWorkspaceArtifactBlob(sibling, { disposition: "inline" });
+      const css = await blob.text();
+      result = result.replace(match[0], `<style data-inlined-from="${escapeHtml(href)}">\n${css}\n</style>`);
+      inlinedCount++;
+    } catch {
+      skippedCount++;
+    }
+  }
+
+  // Inline local script-src tags as inline script blocks.
+  // Only inlines workspace-local files; CDN scripts like mermaid stay as-is.
+  // The regex and the closing tag in the replacement use a no-op character
+  // class so the literal closing-script substring never appears in source —
+  // otherwise Vue's SFC parser would treat it as the end of this script setup
+  // block. Same reason we don't say the literal substring in this comment.
+  const scriptCloseTag = "<\/scr" + "ipt>";
+  const scriptRegex = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>\s*<\/scr[i]pt>/gi;
+  const scriptMatches = Array.from(result.matchAll(scriptRegex));
+  for (const match of scriptMatches) {
+    const src = match[1] ?? "";
+    if (!isInlinable(src)) {
+      skippedCount++;
+      continue;
+    }
+    try {
+      const sibling = resolveSibling(src);
+      const { blob } = await gateway.fetchWorkspaceArtifactBlob(sibling, { disposition: "inline" });
+      const js = await blob.text();
+      result = result.replace(
+        match[0],
+        `<scr` + `ipt data-inlined-from="${escapeHtml(src)}">\n${js}\n${scriptCloseTag}`,
+      );
+      inlinedCount++;
+    } catch {
+      skippedCount++;
+    }
+  }
+
+  return { srcdoc: result, inlinedCount, skippedCount };
 }
 
 async function renderMermaidSvg(source: string, suffix: string): Promise<string> {
@@ -670,6 +780,27 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
         kind: "mermaid",
         text: source,
         svg: await renderMermaidSvg(source, filename),
+      };
+      return;
+    }
+
+    if (attachment.previewMode === "website") {
+      const indexHtml = await blob.text();
+      const baseDir = attachment.relativePath ? attachment.relativePath.replace(/\/[^/]*$/, "") : "";
+      const inlined = await inlineWebsiteAssets(indexHtml, baseDir);
+      artifactPreview.value = {
+        title: attachment.title || filename,
+        filename,
+        kind: "website",
+        srcdoc: inlined.srcdoc,
+        sandbox: "allow-same-origin",
+        websiteMeta: {
+          inlinedAssetCount: inlined.inlinedCount,
+          skippedAssetCount: inlined.skippedCount,
+          note: inlined.skippedCount > 0
+            ? "Some assets could not be inlined; download the bundle for the full multi-page site."
+            : "Sub-page navigation is disabled in inline preview — use Download to browse the full site locally.",
+        },
       };
       return;
     }
@@ -756,8 +887,26 @@ function escapeHtml(raw: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function renderStreamingText(raw: string): string {
-  return `<span class="message-streaming-text">${escapeHtml(raw)}</span>`;
+/**
+ * Stabilize a stream-in-progress so marked doesn't render half-open structures
+ * as ugly artifacts that then snap into place when the closer arrives.
+ *  - Unclosed fenced code block: append a closing ``` so the partial code is
+ *    still rendered as a code block (with the right language class) instead of
+ *    cascading into the rest of the message as paragraph text.
+ *  - Half-typed inline code (``foo``) is a non-issue — a single ` rolls back
+ *    to a literal backtick at render time.
+ */
+function stabilizePartialMarkdown(raw: string): string {
+  const fenceCount = (raw.match(/^(```+)/gm) ?? []).length;
+  if (fenceCount % 2 === 1) {
+    const trailing = raw.endsWith("\n") ? "" : "\n";
+    return `${raw}${trailing}\`\`\``;
+  }
+  return raw;
+}
+
+function renderStreamingMarkdown(raw: string): string {
+  return renderMarkdown(stabilizePartialMarkdown(raw));
 }
 
 const renderedContent = computed(() => {
@@ -769,7 +918,11 @@ const renderedContent = computed(() => {
 const renderedStreamingContent = computed(() => {
   const raw = mainStreamingText.value;
   if (!raw) return "<span class=\"cursor-blink\"></span>";
-  return renderStreamingText(raw) + "<span class=\"cursor-blink\"></span>";
+  // Render streamed text with the same Markdown pipeline as completed messages
+  // so users see formatted output as it arrives instead of literal **bold**.
+  // The cursor blink follows the rendered HTML rather than living inside it,
+  // because the last block-level element (e.g. </p>) is the natural anchor.
+  return `${renderStreamingMarkdown(raw)}<span class="cursor-blink"></span>`;
 });
 
 // ── Per-message export ────────────────────────────────────────────────────────
@@ -1101,6 +1254,44 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 0.9rem;
   background: white;
+}
+
+.artifact-preview-website {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.artifact-preview-website__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: rgb(209 213 219);
+}
+
+.artifact-preview-website__chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: rgb(186 230 253);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  font-weight: 500;
+}
+
+.artifact-preview-website__chip--warn {
+  background: rgba(251, 191, 36, 0.16);
+  color: rgb(252 211 77);
+  border-color: rgba(251, 191, 36, 0.36);
+}
+
+.artifact-preview-website__note {
+  flex: 1 1 220px;
+  color: rgb(156 163 175);
+  font-style: italic;
 }
 
 .artifact-preview-audio {

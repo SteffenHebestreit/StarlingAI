@@ -48,7 +48,7 @@ export interface ChatMessage {
     relativePath?: string;
     externalUrl?: string;
     contentType?: string;
-    previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "download";
+    previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "website" | "download";
     size?: number;
     isDirectory?: boolean;
     title?: string;
@@ -235,7 +235,7 @@ export interface ChatAttachment {
   relativePath?: string;
   externalUrl?: string;
   contentType?: string;
-  previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "download";
+  previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "website" | "download";
   size?: number;
   isDirectory?: boolean;
   title?: string;
