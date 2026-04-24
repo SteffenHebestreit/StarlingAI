@@ -77,7 +77,22 @@
     <!-- Workspace -->
     <div class="relative z-10 flex-1 min-h-0 px-4 pb-4 pt-4 sm:px-5">
       <div class="chat-workspace h-full">
-        <section class="chat-main-column">
+        <section class="chat-main-column relative">
+          <!-- Smart-autoscroll resume pill: shown when the user has scrolled
+               up and new messages have arrived since. Click to jump back to
+               the bottom and re-enable auto-stick. -->
+          <Transition name="scroll-resume">
+            <button
+              v-if="!isAtBottom && hasNewBelow"
+              type="button"
+              class="chat-scroll-resume"
+              @click="jumpToBottom"
+              aria-label="Jump to latest messages"
+            >
+              <span aria-hidden="true">↓</span>
+              <span>{{ gateway.isLoading ? "New activity" : "New messages" }}</span>
+            </button>
+          </Transition>
           <div ref="messagesEl" class="chat-message-scroll">
             <details v-if="hasSidePanels" class="chat-mobile-panels lg:hidden" :open="gateway.isLoading">
               <summary class="chat-mobile-panels__summary">
@@ -797,7 +812,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onUnmounted, defineAsyncComponent } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onUnmounted, onBeforeUnmount, defineAsyncComponent } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { sanitizeAssistantMessageContent, useGatewayStore } from "@/stores/gateway";
@@ -2764,9 +2779,59 @@ async function loadOlderMessages(): Promise<void> {
   await gateway.loadOlderCurrentSessionTranscript();
 }
 
-function scrollToBottom() {
-  nextTick(() => { if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight; });
+// Smart-autoscroll: stick to bottom while the user is parked there, but bail
+// out the moment they scroll up to re-read something. While they're up, queue
+// a "↓ New messages" pill instead of yanking the viewport.
+const isAtBottom = ref(true);
+const hasNewBelow = ref(false);
+const SCROLL_BOTTOM_TOLERANCE_PX = 80;
+
+function recomputeScrollPosition() {
+  const el = messagesEl.value;
+  if (!el) return;
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+  isAtBottom.value = distance < SCROLL_BOTTOM_TOLERANCE_PX;
+  if (isAtBottom.value) hasNewBelow.value = false;
 }
+
+function scrollToBottom() {
+  nextTick(() => {
+    const el = messagesEl.value;
+    if (!el) return;
+    if (isAtBottom.value) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      hasNewBelow.value = true;
+    }
+  });
+}
+
+function jumpToBottom() {
+  const el = messagesEl.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  isAtBottom.value = true;
+  hasNewBelow.value = false;
+}
+
+let scrollListenerEl: HTMLElement | null = null;
+function attachScrollListener() {
+  const el = messagesEl.value;
+  if (scrollListenerEl === el) return;
+  if (scrollListenerEl) scrollListenerEl.removeEventListener("scroll", recomputeScrollPosition);
+  scrollListenerEl = el;
+  if (el) {
+    el.addEventListener("scroll", recomputeScrollPosition, { passive: true });
+    recomputeScrollPosition();
+  }
+}
+
+onMounted(() => { attachScrollListener(); });
+watch(messagesEl, attachScrollListener);
+onBeforeUnmount(() => {
+  if (scrollListenerEl) scrollListenerEl.removeEventListener("scroll", recomputeScrollPosition);
+  scrollListenerEl = null;
+});
 
 watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
@@ -3253,6 +3318,55 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
+}
+
+/* Smart-autoscroll resume pill — sits over the bottom of the message list
+   while the user is scrolled up and new messages have arrived. Centered
+   horizontally, doesn't block clicks on the message below it (only the pill
+   itself is clickable; the surrounding container is pointer-events:none). */
+.chat-scroll-resume {
+  position: absolute;
+  bottom: 0.85rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.95rem;
+  border-radius: 999px;
+  background: rgba(168, 85, 247, 0.92);
+  color: #fff;
+  border: 1px solid rgba(216, 180, 254, 0.55);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(15, 8, 32, 0.45);
+  transition: background 120ms ease, transform 120ms ease;
+}
+.chat-scroll-resume:hover {
+  background: rgba(168, 85, 247, 1);
+  transform: translateX(-50%) translateY(-1px);
+}
+.chat-scroll-resume:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.scroll-resume-enter-active,
+.scroll-resume-leave-active {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.scroll-resume-enter-from,
+.scroll-resume-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+}
+.scroll-resume-enter-to,
+.scroll-resume-leave-from {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
 
 /* Drag-and-drop overlay shown while a file drag is hovering the chat surface.
