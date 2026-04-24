@@ -201,12 +201,33 @@
           <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
           <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
         </div>
-        <div v-if="message.usage && message.role === 'assistant'" class="message-usage">
-          {{ formatTokens(message.usage.totalTokens) }} tok
-          <template v-if="message.perf">
-            · {{ message.perf.llmCalls }} LLM
-            · {{ formatDuration(message.perf.turnDurationMs) }}
-          </template>
+        <div
+          v-if="(message.usage || message.perf) && message.role === 'assistant'"
+          class="message-usage"
+          :title="usageTooltip"
+        >
+          <span v-if="message.usage && message.usage.totalTokens > 0" class="message-usage__chip" aria-label="Total tokens">
+            <span class="message-usage__value">{{ formatTokens(message.usage.totalTokens) }}</span>
+            <span class="message-usage__label">tok</span>
+          </span>
+          <span v-if="message.perf && message.perf.turnDurationMs > 0" class="message-usage__chip" aria-label="Turn duration">
+            <span class="message-usage__value">{{ formatDuration(message.perf.turnDurationMs) }}</span>
+          </span>
+          <span v-if="message.perf && message.perf.llmCalls > 1" class="message-usage__chip" aria-label="LLM call count">
+            <span class="message-usage__value">{{ message.perf.llmCalls }}</span>
+            <span class="message-usage__label">LLM</span>
+          </span>
+          <span v-if="message.perf && message.perf.toolIterations > 0" class="message-usage__chip" aria-label="Tool iterations">
+            <span class="message-usage__value">{{ message.perf.toolIterations }}</span>
+            <span class="message-usage__label">tools</span>
+          </span>
+          <span
+            v-if="message.perf && finishReasonNeedsAttention"
+            class="message-usage__chip message-usage__chip--warn"
+            aria-label="Turn finish reason"
+          >
+            {{ message.perf.finishReason }}
+          </span>
         </div>
       </div>
     </div>
@@ -1140,6 +1161,35 @@ function formatDuration(ms: number): string {
   return `${(ms / 60000).toFixed(1)}m`;
 }
 
+// Per-turn cost / perf chip tooltip — full breakdown for operators who care
+// about prompt vs completion tokens, LLM time vs total turn time, etc.
+const usageTooltip = computed(() => {
+  const parts: string[] = [];
+  const usage = props.message.usage;
+  const perf = props.message.perf;
+  if (usage) {
+    parts.push(`Prompt tokens: ${usage.promptTokens.toLocaleString()}`);
+    parts.push(`Completion tokens: ${usage.completionTokens.toLocaleString()}`);
+    parts.push(`Total tokens: ${usage.totalTokens.toLocaleString()}`);
+  }
+  if (perf) {
+    if (usage) parts.push("");
+    parts.push(`Turn duration: ${formatDuration(perf.turnDurationMs)}`);
+    parts.push(`LLM time: ${formatDuration(perf.llmTimeMs)} across ${perf.llmCalls} call${perf.llmCalls === 1 ? "" : "s"}`);
+    parts.push(`Tool iterations: ${perf.toolIterations}`);
+    parts.push(`Finish: ${perf.finishReason}`);
+  }
+  return parts.join("\n");
+});
+
+// Highlight finish reasons that meant the turn didn't end on its own (the
+// user usually wants to know about these).
+const finishReasonNeedsAttention = computed(() => {
+  const reason = props.message.perf?.finishReason;
+  if (!reason) return false;
+  return ["max_iterations", "timeout", "budget_exceeded", "blocked", "interrupted", "error"].includes(reason);
+});
+
 onBeforeUnmount(() => {
   closeArtifactPreview();
 });
@@ -1834,10 +1884,54 @@ onBeforeUnmount(() => {
   color: rgba(255,255,255,0.2);
 }
 .message-usage {
-  font-size: 0.65rem;
-  color: rgba(168,85,247,0.4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: rgba(216, 180, 254, 0.75);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
+  cursor: help;
+}
+
+.message-usage__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(168, 85, 247, 0.22);
+  background: rgba(168, 85, 247, 0.08);
+  color: rgba(216, 180, 254, 0.85);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.message-usage__chip:hover {
+  background: rgba(168, 85, 247, 0.18);
+  color: rgb(243 232 255);
+  border-color: rgba(168, 85, 247, 0.42);
+}
+
+.message-usage__value {
+  font-weight: 600;
+}
+
+.message-usage__label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(196, 181, 253, 0.65);
+}
+
+.message-usage__chip--warn {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.14);
+  color: rgb(252 211 77);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
 }
 
 /* ── Animations ───────────────────────────────────────────────────────────────── */
