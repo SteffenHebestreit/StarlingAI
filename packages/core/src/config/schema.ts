@@ -633,6 +633,9 @@ export const GitHubInstanceSchema = z.object({
 export const SourceForgeSchema = z.object({
   defaultGithub: z.string().min(1).optional(),
   github: z.record(GitHubInstanceSchema).default({}),
+  /** Optional API key for Google PageSpeed Insights (lighthouse_audit).
+   *  Avoids the strict anonymous quota. Supports $ENV / secret: refs. */
+  pageSpeedInsightsApiKey: z.string().optional(),
 });
 
 

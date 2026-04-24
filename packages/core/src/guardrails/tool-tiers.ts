@@ -1237,6 +1237,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  browser_axe_audit: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Run an axe-core WCAG accessibility audit against the current Playwright browser page",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  lighthouse_audit: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Run a Google PageSpeed Insights (Lighthouse) audit against a public URL",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Computer Use: Session Management (Stage 9) ─────────────────────────
   computer_list_nodes: {

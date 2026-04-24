@@ -28,6 +28,7 @@ import "./tools/kubernetes.js";
 import "./tools/prometheus.js";
 import "./tools/grafana.js";
 import "./tools/github.js";
+import "./tools/accessibility.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/workflow-catalog.js";
