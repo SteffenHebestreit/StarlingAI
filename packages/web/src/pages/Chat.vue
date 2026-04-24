@@ -1,9 +1,28 @@
 <template>
-  <div class="relative flex flex-col" style="height: calc(100vh - 56px)">
+  <div
+    class="relative flex flex-col"
+    style="height: calc(100vh - 56px)"
+    @dragover="onChatDragOver"
+    @dragleave="onChatDragLeave"
+    @drop="onChatDrop"
+  >
 
     <!-- Orb background canvas -->
     <div class="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
       <OrbCanvas :ai-state="orbAiState" class="w-full h-full" />
+    </div>
+
+    <!-- Drag-drop overlay: visible while a file drag is hovering the chat surface -->
+    <div
+      v-if="dropActive"
+      class="chat-drop-overlay"
+      aria-hidden="true"
+    >
+      <div class="chat-drop-overlay__panel">
+        <div class="chat-drop-overlay__icon" aria-hidden="true">📎</div>
+        <div class="chat-drop-overlay__title">Drop to attach</div>
+        <div class="chat-drop-overlay__hint">Images queue for analysis · audio gets transcribed · documents convert to Markdown context</div>
+      </div>
     </div>
 
     <!-- Session bar -->
@@ -202,7 +221,8 @@
               v-model="inputRequestText"
               type="text"
               placeholder="Type your answer…"
-              @keydown.enter.exact.prevent="submitInputFreeText"
+              @keydown="onInputRequestKeydown"
+              aria-label="Free-text answer to the agent's question"
               class="flex-1 rounded-xl bg-gray-800/60 border border-white/10 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-sky-500/50" />
             <button
               @click="submitInputFreeText"
@@ -424,6 +444,30 @@
 
       <div class="chat-composer" :class="compactComposer ? 'chat-composer--compact' : ''">
         <div class="chat-composer__field">
+          <!-- Slash-command autocomplete popup. Shown when the textarea starts with '/'
+               and the user is still typing the command name (no space yet). -->
+          <div
+            v-if="slashOpen && slashSuggestions.length > 0"
+            class="slash-popup"
+            role="listbox"
+            aria-label="Slash command suggestions"
+          >
+            <div class="slash-popup__hint">↑↓ navigate · Enter / Tab to insert · Esc to dismiss</div>
+            <button
+              v-for="(item, index) in slashSuggestions"
+              :key="`${item.kind}:${item.name}`"
+              type="button"
+              :class="['slash-popup__item', index === slashIndex ? 'slash-popup__item--active' : '']"
+              role="option"
+              :aria-selected="index === slashIndex"
+              @mousedown.prevent="acceptSlashSuggestion(index)"
+              @mouseenter="slashIndex = index"
+            >
+              <span class="slash-popup__name">/{{ item.name }}</span>
+              <span class="slash-popup__kind">{{ item.kind }}</span>
+              <span v-if="item.description" class="slash-popup__desc">{{ item.description }}</span>
+            </button>
+          </div>
           <textarea
             ref="composerTextareaEl"
             v-model="inputText"
@@ -432,7 +476,7 @@
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            placeholder="Message StarlingAI… (Enter to send, Shift+Enter for newline)"
+            placeholder="Message StarlingAI… (Enter to send, Shift+Enter for newline, / for commands)"
             rows="3"
           />
         </div>
@@ -1976,6 +2020,10 @@ async function onAudioSelected(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  await transcribeDroppedAudio(file);
+}
+
+async function transcribeDroppedAudio(file: File): Promise<void> {
   multimodalBusy.value = true;
   wakeStatus.value = `Transcribing ${file.name}`;
   try {
@@ -1988,6 +2036,97 @@ async function onAudioSelected(event: Event) {
     wakeStatus.value = error instanceof Error ? error.message : String(error);
   } finally {
     multimodalBusy.value = false;
+  }
+}
+
+// ── Drag-and-drop file ingestion ─────────────────────────────────────────────
+// Files dropped anywhere on the chat surface are auto-routed by MIME / extension:
+//   audio/*       → transcribed, transcript inserted into the composer
+//   image/*       → queued for analysis at send time (same as the file picker)
+//   everything    → converted to Markdown via the multimodal backend (or a
+//                   local text-decode fallback when the backend is offline)
+const dropActive = ref(false);
+let dropDepth = 0;
+
+function isAudioFile(file: File): boolean {
+  return file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(file.name);
+}
+
+async function ingestDroppedFile(file: File): Promise<void> {
+  if (isAudioFile(file)) {
+    await transcribeDroppedAudio(file);
+    return;
+  }
+  const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
+  multimodalBusy.value = true;
+  try {
+    if (isImage) {
+      pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
+      wakeStatus.value = `Image attached — click Send`;
+      return;
+    }
+    wakeStatus.value = `Converting ${file.name}`;
+    let markdown = "";
+    let sourceName = file.name;
+    if (filesAvailable.value) {
+      const result = await gateway.convertFileToMarkdown(file);
+      markdown = result.markdown?.trim() ?? "";
+      sourceName = result.filename ?? file.name;
+      if (!markdown) throw new Error(result.error ?? "File conversion returned no markdown");
+    } else {
+      if (!isTextLikeFile(file)) {
+        throw new Error("File conversion service is offline. Only text, markdown, CSV, JSON, YAML, and XML files can be attached locally right now.");
+      }
+      markdown = await convertLocalTextFileToMarkdown(file);
+    }
+    appendToComposer(`Context from ${sourceName}:\n\n${markdown}`);
+    wakeStatus.value = `Attached ${file.name}`;
+  } catch (error) {
+    wakeStatus.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    multimodalBusy.value = false;
+  }
+}
+
+function onChatDragOver(event: DragEvent): void {
+  // Only intercept drags that carry actual files (ignore text selections etc.).
+  if (!event.dataTransfer?.types?.includes("Files")) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  if (!dropActive.value) {
+    dropActive.value = true;
+    dropDepth = 0;
+  }
+  dropDepth++;
+}
+
+function onChatDragLeave(event: DragEvent): void {
+  if (!dropActive.value) return;
+  // dragleave fires on every child enter/exit too. Use a depth counter so we
+  // only hide the overlay when we've truly left the chat surface.
+  dropDepth = Math.max(0, dropDepth - 1);
+  if (dropDepth === 0) {
+    dropActive.value = false;
+  }
+  // Some browsers fire dragleave with relatedTarget=null when leaving the
+  // window; force-close in that case.
+  if (event.relatedTarget === null) {
+    dropDepth = 0;
+    dropActive.value = false;
+  }
+}
+
+async function onChatDrop(event: DragEvent): Promise<void> {
+  if (!event.dataTransfer?.types?.includes("Files")) return;
+  event.preventDefault();
+  dropDepth = 0;
+  dropActive.value = false;
+  const files = Array.from(event.dataTransfer.files ?? []);
+  if (files.length === 0) return;
+  // Process sequentially so wakeStatus messages stay coherent and we don't
+  // overwhelm the multimodal backend with parallel uploads.
+  for (const file of files) {
+    await ingestDroppedFile(file);
   }
 }
 
@@ -2086,7 +2225,113 @@ function toggleSpeakReply() {
   writeSpeakReplySummaryStorage(speakReplyEnabled.value);
 }
 
+// ── Slash-command autocomplete ──────────────────────────────────────────────
+// Triggered when the textarea starts with '/' and the user is still typing the
+// command name (no whitespace yet). Surfaces matching scenes + configured jobs
+// with name + description; Enter / Tab inserts the chosen name + a trailing
+// space so the user can keep typing key=value args.
+interface SlashSuggestion {
+  kind: "scene" | "job";
+  name: string;
+  description: string;
+}
+
+const slashIndex = ref(0);
+
+const slashQuery = computed<string | null>(() => {
+  const text = inputText.value;
+  if (!text.startsWith("/")) return null;
+  // Stop suggesting once any whitespace separates the command name from args.
+  if (/\s/.test(text)) return null;
+  return text.slice(1).toLowerCase();
+});
+
+const slashSuggestions = computed<SlashSuggestion[]>(() => {
+  const query = slashQuery.value;
+  if (query === null) return [];
+  const items: SlashSuggestion[] = [];
+  for (const scene of gateway.scenes) {
+    items.push({ kind: "scene", name: scene.name, description: scene.description ?? "" });
+  }
+  for (const job of configuredJobs.value) {
+    items.push({ kind: "job", name: job.name, description: job.description ?? "" });
+  }
+  if (!query) return items.slice(0, 12);
+  return items
+    .filter((item) => {
+      const lname = item.name.toLowerCase();
+      if (lname.startsWith(query)) return true;
+      if (lname.includes(query)) return true;
+      if (item.description.toLowerCase().includes(query)) return true;
+      return false;
+    })
+    // Prefix matches first, then substring matches.
+    .sort((a, b) => {
+      const aPref = a.name.toLowerCase().startsWith(query) ? 0 : 1;
+      const bPref = b.name.toLowerCase().startsWith(query) ? 0 : 1;
+      if (aPref !== bPref) return aPref - bPref;
+      return a.name.localeCompare(b.name);
+    })
+    .slice(0, 12);
+});
+
+const slashOpen = computed(() => slashQuery.value !== null && slashSuggestions.value.length > 0);
+
+watch(slashQuery, () => { slashIndex.value = 0; });
+
+function acceptSlashSuggestion(index: number): void {
+  const suggestion = slashSuggestions.value[index];
+  if (!suggestion) return;
+  inputText.value = `/${suggestion.name} `;
+  // Refocus the textarea and move cursor to the end so the user can keep
+  // typing arguments without an extra click.
+  void nextTick(() => {
+    const textarea = composerTextareaEl.value;
+    if (!textarea) return;
+    textarea.focus();
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  });
+}
+
 function onComposerKeydown(event: KeyboardEvent) {
+  // Slash-popup navigation takes priority when it's open.
+  if (slashOpen.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      slashIndex.value = (slashIndex.value + 1) % slashSuggestions.value.length;
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const len = slashSuggestions.value.length;
+      slashIndex.value = (slashIndex.value - 1 + len) % len;
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      acceptSlashSuggestion(slashIndex.value);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      // Close the popup without dropping the leading '/' in case the user
+      // wants to continue typing — they can press Esc again to cancel input
+      // entirely. Force-close by appending a sentinel space then re-trim.
+      inputText.value = `${inputText.value} `;
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      // When the popup is open, Enter accepts the highlighted suggestion
+      // instead of submitting the message. Hold Shift/Ctrl/etc. to insert a
+      // newline normally.
+      if (event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      acceptSlashSuggestion(slashIndex.value);
+      return;
+    }
+  }
+
   if (event.key !== "Enter") return;
   // Let Shift/Ctrl/Alt/Meta+Enter pass through so the textarea inserts a
   // newline at the cursor position (its native behavior).
@@ -2179,6 +2424,19 @@ async function submitInputFreeText() {
   if (!answer) return;
   inputRequestText.value = "";
   await gateway.respondInput(gateway.pendingInputRequest.inputId, answer);
+}
+
+// Same IME / Shift+Enter rules as the composer: bare Enter submits, modified
+// Enter inserts a newline (here it'd just lose the keystroke since the input
+// is single-line, but we still let the modifier through), and IME composition
+// is skipped so German autocomplete-confirm and CJK input methods don't
+// accidentally submit the buffer mid-composition.
+function onInputRequestKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  void submitInputFreeText();
 }
 
 async function handleInterventionAction(action: InterventionAction) {
@@ -2997,11 +3255,145 @@ onUnmounted(() => {
   gap: 0.85rem;
 }
 
+/* Drag-and-drop overlay shown while a file drag is hovering the chat surface.
+   Sits above all chat content but below modals (z-30 vs z-50). Pointer-events
+   stay on so the overlay itself receives the drop event. */
+.chat-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 17, 28, 0.78);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  animation: chatDropOverlayIn 120ms ease-out;
+}
+
+.chat-drop-overlay__panel {
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 2rem 3rem;
+  border-radius: 1.25rem;
+  border: 2px dashed rgba(168, 85, 247, 0.55);
+  background: rgba(31, 41, 55, 0.65);
+  color: rgb(243 232 255);
+  text-align: center;
+  max-width: 32rem;
+}
+
+.chat-drop-overlay__icon {
+  font-size: 2.4rem;
+  line-height: 1;
+}
+
+.chat-drop-overlay__title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.chat-drop-overlay__hint {
+  font-size: 0.85rem;
+  color: rgb(196 181 253);
+}
+
+@keyframes chatDropOverlayIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
 .chat-composer__field {
   min-width: 0;
   width: 100%;
   flex: 1 1 auto;
+  position: relative;
 }
+
+/* Slash-command autocomplete popup. Anchored to the bottom of the field so it
+   floats above the textarea — keyboard nav (↑↓), Enter/Tab to accept, Esc to
+   dismiss. Mouse hover updates the active index for parity. */
+.slash-popup {
+  position: absolute;
+  bottom: calc(100% + 0.45rem);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 18rem;
+  overflow-y: auto;
+  border-radius: 1rem;
+  border: 1px solid rgba(168, 85, 247, 0.32);
+  background: rgba(15, 17, 28, 0.96);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 38px rgba(15, 8, 32, 0.55);
+  padding: 0.4rem 0.35rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.slash-popup__hint {
+  padding: 0.2rem 0.65rem 0.4rem;
+  font-size: 0.68rem;
+  color: rgb(156 163 175);
+  letter-spacing: 0.04em;
+}
+
+.slash-popup__item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  text-align: left;
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  align-items: baseline;
+  gap: 0.65rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.6rem;
+  color: rgb(229 231 235);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.slash-popup__item:hover,
+.slash-popup__item--active {
+  background: rgba(168, 85, 247, 0.18);
+  color: rgb(243 232 255);
+}
+
+.slash-popup__name {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.85rem;
+  color: rgb(216 180 254);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.slash-popup__kind {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgb(156 163 175);
+  background: rgba(75, 85, 99, 0.45);
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  align-self: center;
+}
+
+.slash-popup__desc {
+  font-size: 0.78rem;
+  color: rgb(156 163 175);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-popup__item--active .slash-popup__desc { color: rgb(209 213 219); }
+.slash-popup__item--active .slash-popup__kind { color: rgb(216 180 254); background: rgba(168, 85, 247, 0.28); }
 
 .chat-composer__textarea {
   width: 100%;
