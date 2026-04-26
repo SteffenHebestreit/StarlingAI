@@ -5,7 +5,7 @@
       "capabilities": ["web research", "Recherche", "Web-Recherche", "documentation lookup", "Dokumentationssuche", "source triangulation", "Quellenprüfung", "fact checking", "Faktenprüfung", "citation research", "Zitationsrecherche", "official source lookup", "offizielle Quellen", "specification discovery", "Spezifikationssuche", "bibliography prep", "Bibliographie", "security advisory research", "Sicherheitsadvisory", "CVE lookup", "CVE-Suche", "vulnerability research", "Schwachstellenrecherche", "Sicherheitslücken", "CVSS scoring", "exploit-db search", "NVD queries", "threat intelligence", "Bedrohungsaufklärung", "news research", "Nachrichtenrecherche", "technical investigation", "patch status research", "Patch-Status", "malware analysis research"],
       "tags": ["research", "recherche", "docs", "sources", "quellen", "verification", "citations", "papers", "cve", "vulnerability", "schwachstelle", "sicherheitsluecke", "security", "sicherheit", "advisory", "news", "nachrichten", "investigation", "cvss", "nvd", "exploit", "infosec", "threat", "patch", "malware", "pentest-intel", "bibliographie"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -36,7 +36,7 @@
       "capabilities": ["code reading", "Codeanalyse", "architecture review", "Architekturprüfung", "bug diagnosis", "Fehlerdiagnose", "workspace search", "Workspace-Suche", "code retrieval", "Code-Abruf", "symbol lookup", "Symbolsuche", "reference tracing", "Referenzverfolgung", "config value search", "Konfigurationssuche", "cross-file analysis", "dateiübergreifende Analyse", "security review", "Sicherheitsreview", "edge case review", "Randfallprüfung"],
       "tags": ["code", "analysis", "analyse", "retrieval", "workspace", "search", "suche", "symbol", "references", "referenzen", "review", "bug", "fehler", "architecture", "architektur"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -59,7 +59,7 @@
       "tags": ["browser", "playwright", "screenshot", "snapshot", "website", "webseite", "form", "formular", "click", "klick", "navigation", "automation", "automatisierung", "login", "anmeldung"],
       "container": { "disabled": true }, // uses Playwright MCP tools that require in-process gateway connection
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -88,7 +88,7 @@
       "capabilities": ["accessibility testing", "Barrierefreiheitstests", "wcag 2.2 audits", "WCAG-Audits", "semantic html review", "semantische HTML-Prüfung", "keyboard navigation review", "Tastaturnavigation", "landmark and heading audit", "Landmark- und Überschriftenprüfung", "form labeling review", "Formularbeschriftung", "alt text review", "Alt-Text-Prüfung", "browser automation", "Browser-Automatisierung", "focus visibility audit", "Fokus-Sichtbarkeit"],
       "tags": ["accessibility", "barrierefreiheit", "a11y", "wcag", "playwright", "html", "audit", "qa", "keyboard", "tastatur", "screen-reader", "alt-text", "landmark", "headings", "ueberschriften"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -119,7 +119,7 @@
       "tags": ["coordination", "koordination", "web", "browser", "research", "news", "nachrichten", "headlines", "schlagzeilen", "weather", "wetter", "live", "freshness", "aktuell", "scores", "ergebnisse", "lottery", "lotto", "stocks", "boerse", "realtime", "echtzeit"],
 
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -145,7 +145,7 @@
       "tags": ["navigation", "navigation", "distance", "entfernung", "travel", "reise", "maps", "karten", "osm", "osrm", "fahrzeit", "reisezeit", "route", "weg", "anfahrt", "drive", "fahren", "walking", "laufen", "geocode", "geokodierung"],
       "domain": "navigation",
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -165,7 +165,7 @@
       "capabilities": ["browser evidence interpretation", "Browser-Evidenz-Interpretation", "visual inspection", "visuelle Inspektion", "exact value extraction", "exakte Wertextraktion", "screenshot reading", "Screenshot-Analyse", "snapshot reading", "Snapshot-Analyse", "table extraction from images", "Tabellenextraktion aus Bildern"],
       "tags": ["browser", "vision", "sicht", "analysis", "analyse", "screenshot", "snapshot", "bild", "image", "ocr", "extraction", "extraktion"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -186,7 +186,7 @@
       "capabilities": ["document intake", "Dokument-Intake", "attachment analysis", "Anhangsanalyse", "attachment classification", "Anhangsklassifizierung", "document extraction", "Dokumentenextraktion", "content normalization", "Inhaltsnormalisierung", "metadata extraction", "Metadaten-Extraktion", "exact text extraction", "Textextraktion", "PDF form filling", "PDF-Formularausfüllung", "spreadsheet reading", "Tabellenkalkulation lesen", "image OCR prep", "Bildanalyse", "handoff preparation", "Übergabevorbereitung", "jupyter notebook reading", "Jupyter-Notebook-Lesen", "email file parsing", "E-Mail-Datei-Parsing", "icalendar parsing", "iCalendar-Parsing", "video transcription", "Video-Transkription"],
       "tags": ["documents", "dokumente", "files", "dateien", "intake", "attachments", "anhaenge", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "video", "transcription", "analysis", "analyse", "extraction", "extraktion", "ocr", "metadata", "metadaten"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -219,7 +219,7 @@
       "capabilities": ["evidence synthesis", "Evidenz-Synthese", "cross-source reconciliation", "Quellenabgleich", "document grounding", "Dokumentengrundlage", "research handoff", "Forschungsübergabe", "claim verification", "Aussagenprüfung", "conflict detection", "Konflikterkennung"],
       "tags": ["evidence", "evidenz", "analysis", "analyse", "research", "forschung", "grounding", "reconciliation", "abgleich", "verification", "pruefung", "ledger"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -242,7 +242,7 @@
       "capabilities": ["data analysis", "Datenanalyse", "csv review", "CSV-Auswertung", "json inspection", "JSON-Inspektion", "metrics interpretation", "Metrik-Interpretation", "tabular summarization", "Tabellen-Zusammenfassung", "aggregation", "Aggregation", "trend analysis", "Trendanalyse", "anomaly detection", "Anomalieerkennung", "kpi computation", "KPI-Berechnung"],
       "tags": ["data", "daten", "analysis", "analyse", "csv", "json", "xlsx", "spreadsheet", "tabelle", "metrics", "metriken", "kpi", "trend", "aggregation", "statistik"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -273,7 +273,7 @@
       "capabilities": ["research organization", "Forschungsorganisation", "evidence indexing", "Evidenz-Indexierung", "knowledge graph curation", "Wissensgraph-Pflege", "timeline logging", "Zeitleistenführung", "scratchpad maintenance", "Notizbuch-Pflege", "entity extraction", "Entitätenextraktion", "relation extraction", "Beziehungsextraktion"],
       "tags": ["research", "forschung", "librarian", "bibliothek", "scratchpad", "notizen", "graph", "wissensgraph", "timeline", "zeitleiste", "evidence", "evidenz", "indexing", "indexierung"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -303,7 +303,7 @@
       "capabilities": ["mermaid diagrams", "Mermaid-Diagramme", "workflow visualization", "Workflow-Visualisierung", "architecture mapping", "Architektur-Darstellung", "timeline visualization", "Zeitleisten-Visualisierung", "evidence visualization", "Evidenz-Visualisierung", "flowchart design", "Flussdiagramm-Entwurf", "sequence diagrams", "Sequenzdiagramme", "mindmap creation", "Mindmap-Erstellung"],
       "tags": ["diagram", "diagramm", "mermaid", "visualization", "visualisierung", "workflow", "architecture", "architektur", "timeline", "zeitleiste", "flowchart", "flussdiagramm", "sequence", "mindmap"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -330,7 +330,7 @@
       "capabilities": ["html charts", "HTML-Diagramme", "data visualization", "Datenvisualisierung", "time-series charting", "Zeitreihen-Diagramme", "table design", "Tabellen-Entwurf", "artifact rendering", "Artefakt-Rendering", "line charts", "Liniendiagramme", "bar charts", "Balkendiagramme", "scatter plots", "Streudiagramme"],
       "tags": ["chart", "diagramm", "html", "visualization", "visualisierung", "data", "daten", "table", "tabelle", "plot", "graph", "timeseries", "zeitreihe"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -356,7 +356,7 @@
       "capabilities": ["api integration", "API-Integration", "webhook design", "Webhook-Entwurf", "mcp setup", "MCP-Setup", "automation glue", "Automatisierungs-Kleber", "workflow handoff", "Workflow-Übergabe", "retry design", "Retry-Entwurf", "contract documentation", "Vertragsdokumentation"],
       "tags": ["integration", "api", "webhook", "mcp", "automation", "automatisierung", "glue", "anbindung", "contract", "vertrag", "endpoint", "endpunkt"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -380,7 +380,7 @@
       "capabilities": ["shell execution", "Shell-Ausführung", "CLI diagnostics", "CLI-Diagnose", "SSH execution", "SSH-Ausführung", "remote server inspection", "Remote-Server-Inspektion", "build checks", "Build-Prüfungen", "command execution", "Befehlsausführung"],
       "tags": ["shell", "cli", "kommandozeile", "ops", "ssh", "server", "remote", "command", "befehl", "bash", "powershell", "terminal"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -402,7 +402,7 @@
       "capabilities": ["test execution", "Testausführung", "regression verification", "Regressionsprüfung", "bug reproduction", "Fehlerreproduktion", "implementation review", "Implementierungsprüfung", "acceptance criteria check", "Akzeptanzkriterien-Prüfung"],
       "tags": ["qa", "qs", "tests", "verification", "pruefung", "regression", "bug", "fehler", "reproduction", "reproduktion", "vitest", "jest", "pytest"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -424,7 +424,7 @@
       "capabilities": ["service triage", "Service-Triage", "runtime incident triage", "Laufzeit-Incident-Triage", "deployment diagnosis", "Deployment-Diagnose", "log inspection", "Log-Analyse", "container troubleshooting", "Container-Fehlerbehebung", "health-check analysis", "Health-Check-Analyse", "SSH diagnostics", "SSH-Diagnose", "provider troubleshooting", "Provider-Diagnose", "gateway diagnosis", "Gateway-Diagnose", "config drift detection", "Konfigurationsdrift", "invalid model id detection", "root cause analysis", "Ursachenanalyse"],
       "tags": ["ops", "triage", "logs", "logdateien", "containers", "container", "reliability", "zuverlaessigkeit", "ssh", "server", "incident", "vorfall", "provider", "gateway", "debugging", "fehlersuche", "health", "gesundheit", "rootcause", "ursache", "config", "konfiguration"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -457,7 +457,7 @@
       "capabilities": ["policy review", "Policy-Prüfung", "approval analysis", "Freigabeanalyse", "compliance screening", "Compliance-Prüfung", "risk flagging", "Risikomarkierung", "workflow constraints", "Workflow-Einschränkungen", "credential-handling review", "Credential-Prüfung", "data-sensitivity assessment", "Datenklassifizierung"],
       "tags": ["policy", "richtlinie", "compliance", "compliance-pruefung", "approval", "freigabe", "risk", "risiko", "review", "pruefung", "guardrail", "leitplanke", "privacy", "datenschutz"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -479,7 +479,7 @@
       "capabilities": ["meeting briefings", "Meeting-Briefings", "handoff notes", "Übergabe-Notizen", "status packets", "Statuspakete", "executive summaries", "Executive Summaries", "action lists", "Aktionslisten", "stand-up prep", "Stand-up-Vorbereitung"],
       "tags": ["briefing", "handoff", "uebergabe", "meetings", "besprechungen", "summary", "zusammenfassung", "status", "executive", "fuehrungskraefte", "standup"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 6144
@@ -508,7 +508,7 @@
       "capabilities": ["infrastructure automation", "Infrastruktur-Automatisierung", "vm provisioning", "VM-Bereitstellung", "terraform workflows", "Terraform-Workflows", "terraform plan review", "Terraform-Plan-Prüfung", "service readiness checks", "Dienst-Readiness-Prüfung", "ansible playbooks", "Ansible-Playbooks", "ansible tasks", "Ansible-Tasks", "ansible vault", "Ansible-Vault", "kubernetes inspection", "Kubernetes-Inspektion", "kubectl read-only", "kubectl Lesezugriff", "helm release inventory", "Helm-Release-Überblick", "kubernetes deployments", "Kubernetes-Deployments", "prometheus queries", "Prometheus-Abfragen", "alertmanager silences", "Alertmanager-Silences", "grafana dashboards", "Grafana-Dashboards", "grafana alert rules", "Grafana-Alarmregeln", "ssh execution", "SSH-Ausführung", "ssh uploads", "SSH-Uploads", "ssh downloads", "SSH-Downloads", "docker deployment", "Docker-Deployment"],
       "tags": ["infrastructure", "infrastruktur", "ops", "devops", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "cluster", "pods", "deployments", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "monitoring", "ueberwachung", "ssh", "scp", "docker", "proxmox", "readiness", "bereitstellung", "provisioning", "deployment"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -556,7 +556,7 @@
       "capabilities": ["image generation", "Bildgenerierung", "prompt refinement", "Prompt-Verfeinerung", "illustration creation", "Illustrationserstellung", "concept art", "Konzeptkunst", "visual design", "visuelles Design", "svg authoring", "SVG-Erstellung", "qr code generation", "QR-Code-Erstellung"],
       "tags": ["image", "bild", "design", "multimodal", "illustration", "art", "kunst", "generation", "generierung", "visual", "visuell", "svg", "qr", "qr-code", "vector"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.45,
         "maxTokens": 4096
@@ -579,7 +579,7 @@
       "capabilities": ["code generation", "Code-Generierung", "sandbox execution", "Sandbox-Ausführung", "javascript scripting", "JavaScript-Skripting", "typescript scripting", "TypeScript-Skripting", "data transformation", "Datentransformation", "prototype code", "Prototypen-Code"],
       "tags": ["code", "programmierung", "sandbox", "javascript", "js", "typescript", "ts", "script", "skript", "prototype", "prototyp"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -601,7 +601,7 @@
       "capabilities": ["summarization", "Zusammenfassung", "structured summaries", "strukturierte Zusammenfassungen", "bullet summaries", "Bullet-Zusammenfassungen", "tl;dr creation", "TL;DR-Erstellung", "key-point extraction", "Kernpunkt-Extraktion"],
       "tags": ["summary", "zusammenfassung", "summarize", "tldr", "kurzfassung", "key-points", "kernpunkte", "bullets"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -623,7 +623,7 @@
       "capabilities": ["scientific writing", "wissenschaftliches Schreiben", "paper drafting", "Paper-Verfassen", "literature review drafting", "Literaturüberblick verfassen", "source-grounded reports", "quellenbasierte Berichte", "white paper drafting", "White-Paper-Entwurf", "citation management", "Zitationsverwaltung"],
       "tags": ["papers", "paper", "reports", "berichte", "citations", "zitate", "research", "forschung", "drafting", "entwurf", "whitepaper", "academic", "akademisch", "scientific", "wissenschaftlich"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.15,
         "maxTokens": 8192
@@ -647,7 +647,7 @@
       "capabilities": ["citation verification", "Zitationsprüfung", "fact checking", "Faktenprüfung", "source validation", "Quellenvalidierung", "bibliography audit", "Bibliographie-Audit", "quote drift detection", "Zitat-Abweichungserkennung", "unsupported claim detection", "Erkennung unbelegter Aussagen"],
       "tags": ["verification", "pruefung", "citations", "zitate", "fact-checking", "faktencheck", "research", "bibliography", "bibliographie", "validation", "validierung", "sources", "quellen"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -669,7 +669,7 @@
       "capabilities": ["prompt analysis", "Prompt-Analyse", "prompt rewriting", "Prompt-Umschreibung", "tool-use convergence", "Tool-Use-Konvergenz", "agent quality review", "Agenten-Qualitätsprüfung", "grounding improvement", "Verbesserung der Quellentreue", "stopping-condition tuning", "Abbruchbedingungs-Feintuning"],
       "tags": ["prompts", "prompt", "quality", "qualitaet", "agents", "agenten", "optimization", "optimierung", "convergence", "konvergenz", "tuning"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -690,7 +690,7 @@
       "capabilities": ["swarm maintenance", "Swarm-Wartung", "agent prompt editing", "Agentenprompt-Bearbeitung", "tool routing", "Tool-Routing", "workspace configuration", "Workspace-Konfiguration", "repo self-improvement", "Repo-Selbstverbesserung", "scene creation", "Szenen-Erstellung", "job creation", "Job-Erstellung", "workflow catalog editing", "Workflow-Katalog-Bearbeitung"],
       "tags": ["swarm", "maintenance", "wartung", "agents", "agenten", "tooling", "routing", "workspace", "workflow", "scene", "szene", "job", "create", "erstellen", "catalog", "katalog", "selfimprovement"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -715,7 +715,7 @@
       "capabilities": ["tool development", "Tool-Entwicklung", "tool testing", "Tool-Tests", "self-improvement", "Selbstverbesserung", "dynamic tool creation", "dynamische Tool-Erstellung", "sandbox execution", "Sandbox-Ausführung", "typescript tool authoring", "TypeScript-Tool-Erstellung"],
       "tags": ["selfimprovement", "selbstverbesserung", "tools", "werkzeuge", "development", "entwicklung", "testing", "tests", "sandbox", "typescript"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -740,14 +740,14 @@
       "capabilities": ["agent design", "Agenten-Entwurf", "prompt writing", "Prompt-Erstellung", "model selection", "Modellauswahl", "ephemeral agents", "Ad-hoc-Agenten", "tool-set selection", "Toolset-Auswahl"],
       "tags": ["meta", "agents", "agenten", "architecture", "architektur", "design", "entwurf", "ephemeral", "adhoc"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 4,
       "container": { "disabled": true }, // pure read-only meta tools — in-process is safe
-      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen/qwen3.5-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
+      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen3.6-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
       "tools": [
         "list_agents",
         "search_agents",
@@ -761,7 +761,7 @@
       "tags": ["computer", "desktop", "vscode", "automation", "automatisierung", "remote", "fernzugriff", "vnc", "rdp", "ip-address", "ip-adresse", "lm-studio", "screen", "bildschirm", "windows", "fenster", "maus", "tastatur", "mouse", "keyboard"],
       "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -800,7 +800,7 @@
       "capabilities": ["meta orchestration", "Meta-Orchestrierung", "ephemeral agents", "Ad-hoc-Agenten", "dynamic agent creation", "dynamische Agentenerstellung", "capability-gap resolution", "Lückenschließung bei Fähigkeiten"],
       "tags": ["meta", "agents", "agenten", "factory", "werkstatt", "ephemeral", "adhoc", "dynamic", "dynamisch"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -820,7 +820,7 @@
       "capabilities": ["API testing", "API-Tests", "REST calls", "REST-Aufrufe", "GraphQL queries", "GraphQL-Abfragen", "webhook testing", "Webhook-Tests", "HTTP debugging", "HTTP-Debugging", "response validation", "Antwortvalidierung", "endpoint health checks", "Endpunkt-Healthchecks"],
       "tags": ["api", "http", "rest", "graphql", "integration", "integrationen", "testing", "tests", "endpoint", "endpunkt", "webhook", "json"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -843,7 +843,7 @@
       "capabilities": ["git status", "git-status", "git log", "git-log", "git diff", "git-diff", "commit", "Commit", "branching", "Branching", "code review", "Code-Review", "repository cloning", "Repository-Klonen", "merge conflict inspection", "Merge-Konflikte prüfen", "github pull requests", "GitHub-Pull-Requests", "pr opening", "PR-Erstellung", "pr comments", "PR-Kommentare", "github actions trigger", "GitHub-Actions-Auslösung", "ci status inspection", "CI-Status-Prüfung", "github releases", "GitHub-Releases"],
       "tags": ["git", "vcs", "code", "version-control", "versionskontrolle", "commits", "branches", "verzweigungen", "diff", "merge", "review", "repository", "github", "pull-request", "pr", "ci", "actions", "workflow", "check-runs", "release"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -881,7 +881,7 @@
       "capabilities": ["translation", "Übersetzung", "localization", "Lokalisierung", "multilingual content", "mehrsprachige Inhalte", "language detection", "Spracherkennung", "technical term preservation", "Fachbegriffserhalt", "tone adaptation", "Tonanpassung"],
       "tags": ["translation", "uebersetzung", "language", "sprache", "localization", "lokalisierung", "i18n", "l10n", "multilingual", "mehrsprachig", "english", "deutsch", "german", "french", "spanish", "japanese"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -903,7 +903,7 @@
       "capabilities": ["project planning", "Projektplanung", "task breakdown", "Aufgabenzerlegung", "roadmapping", "Roadmap-Erstellung", "timeline estimation", "Zeitplanung", "work tracking", "Arbeitsverfolgung", "deliverable tracking", "Lieferobjekt-Tracking", "dependency management", "Abhängigkeitsmanagement", "milestone definition", "Meilensteindefinition", "acceptance criteria", "Akzeptanzkriterien"],
       "tags": ["planning", "planung", "project", "projekt", "tasks", "aufgaben", "roadmap", "fahrplan", "management", "dependencies", "abhaengigkeiten", "milestones", "meilensteine", "timeline", "zeitplan"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -928,7 +928,7 @@
       "capabilities": ["multi-agent coordination", "Mehragenten-Koordination", "parallel task partitioning", "parallele Aufgabenverteilung", "dependency management", "Abhaengigkeitsmanagement", "result synthesis", "Ergebnissynthese", "quality gating", "Qualitaetspruefung", "acceptance checking", "Akzeptanzpruefung", "ephemeral agent generation", "temporaere Agentenerstellung", "memory persistence", "Speicherpersistenz", "workflow execution", "Workflow-Ausfuehrung", "task graph execution", "Aufgabengraph-Ausfuehrung"],
       "tags": ["coordination", "koordination", "orchestration", "orchestrierung", "parallel", "workflow", "ablauf", "dependencies", "abhaengigkeiten", "synthesis", "synthese", "quality", "qualitaet", "acceptance", "akzeptanz", "mission", "execution", "ausfuehrung"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -961,7 +961,7 @@
       "capabilities": ["quality assurance", "Qualitaetssicherung", "acceptance criteria review", "Akzeptanzkriterienpruefung", "gap analysis", "Luckenanalyse", "verification", "Verifikation", "rerun gating", "Wiederholungsentscheidung", "completeness check", "Vollstaendigkeitspruefung", "grounding verification", "Begruendungspruefung"],
       "tags": ["quality", "qualitaet", "qa", "review", "pruefung", "acceptance", "akzeptanz", "verification", "verifikation", "gaps", "luecken", "completeness", "vollstaendigkeit", "gate", "abnahme"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -982,7 +982,7 @@
       "capabilities": ["telegram messaging", "Telegram-Nachrichten", "slack messaging", "Slack-Nachrichten", "discord messaging", "Discord-Nachrichten", "email sending", "E-Mail-Versand", "multi-channel notifications", "Mehrkanal-Benachrichtigungen", "alert routing", "Alarmweiterleitung", "status broadcasts", "Status-Broadcasts", "platform formatting", "Plattform-Formatierung"],
       "tags": ["notifications", "benachrichtigungen", "messaging", "nachrichten", "telegram", "slack", "discord", "email", "e-mail", "alerts", "alarme", "broadcast", "channels", "kanaele"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -1005,7 +1005,7 @@
       "capabilities": ["note taking", "Notizen erfassen", "workspace memory", "Arbeitsbereichspeicher", "reminder scheduling", "Erinnerungsplanung", "timer management", "Timer-Verwaltung", "follow-up tracking", "Nachfassverfolgung", "memory promotion", "Speicherhochstufung", "memory cleanup", "Speicherbereinigung", "todo tracking", "Aufgabenverfolgung"],
       "tags": ["productivity", "produktivitaet", "notes", "notizen", "note", "notiz", "reminder", "erinnerung", "reminders", "erinnerungen", "timer", "zeitmesser", "timers", "alarm", "wecker", "todo", "aufgabe", "follow-up", "nachfassen", "memory", "speicher", "recall", "merken"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -1033,7 +1033,7 @@
       "capabilities": ["mail triage", "Posteingangstriage", "mail search", "Mail-Suche", "mail drafting", "Mail-Entwurf", "email drafting", "E-Mail-Entwurf", "reply composition", "Antwortverfassen", "follow-up sequences", "Follow-up-Sequenzen", "professional writing", "professionelles Schreiben", "tone adaptation", "Tonanpassung", "subject line generation", "Betreffzeilen-Erstellung", "mail categorization", "Mail-Kategorisierung", "multi-account mailbox operations", "Mehrkonto-Mailverwaltung", "folder management", "Ordnerverwaltung"],
       "tags": ["mail", "email", "e-mail", "emails", "inbox", "mailbox", "posteingang", "postfach", "drafts", "entwurf", "triage", "reply", "antwort", "follow-up", "nachfassen", "communications", "kommunikation", "compose", "verfassen"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -1068,7 +1068,7 @@
       "capabilities": ["sql queries", "SQL-Abfragen", "sql query writing", "SQL-Formulierung", "query optimization", "Abfrageoptimierung", "database inspection", "Datenbankinspektion", "schema discovery", "Schema-Erkennung", "schema design", "Schema-Entwurf", "index recommendation", "Index-Empfehlung", "migration scripts", "Migrationsskripte", "query performance analysis", "Abfrageperformance", "explain plan analysis", "EXPLAIN-Plan-Analyse", "data export", "Datenexport", "postgres", "mysql", "mariadb"],
       "tags": ["database", "datenbank", "sql", "postgres", "mysql", "mariadb", "data", "daten", "query", "abfrage", "schema", "migration", "index", "performance", "optimization", "optimierung", "explain"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -1096,7 +1096,7 @@
       "capabilities": ["calendar management", "Kalenderverwaltung", "event creation", "Terminerstellung", "event scheduling", "Terminplanung", "meeting management", "Besprechungsverwaltung", "contacts management", "Kontaktverwaltung", "address book", "Adressbuch", "CalDAV", "CardDAV", "conflict detection", "Konflikterkennung", "recurring events", "Serientermine"],
       "tags": ["calendar", "kalender", "contacts", "kontakte", "meetings", "besprechungen", "appointments", "termine", "scheduling", "terminplanung", "address book", "adressbuch", "caldav", "carddav", "nextcloud", "fastmail", "icloud", "events", "ereignisse", "invite", "einladung"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 2048
@@ -1129,7 +1129,7 @@
       "capabilities": ["ci/cd orchestration", "CI/CD-Orchestrierung", "deployment coordination", "Deployment-Koordination", "rollback planning", "Rollback-Planung", "environment promotion", "Umgebungspromotion", "pipeline diagnosis", "Pipeline-Diagnose", "container lifecycle", "Container-Lebenszyklus", "deployment health", "Deployment-Gesundheit", "release management", "Release-Management", "canary deployment", "Canary-Deployment"],
       "tags": ["devops", "cicd", "ci-cd", "deployment", "bereitstellung", "pipeline", "rollback", "zurückrollen", "container", "release", "freigabe", "promote", "befoerdern", "environment", "umgebung", "staging", "production", "produktion", "canary"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -1159,7 +1159,7 @@
       "capabilities": ["unit test generation", "Unit-Test-Erstellung", "integration test generation", "Integrationstest-Erstellung", "test stub creation", "Teststub-Erstellung", "test coverage analysis", "Testabdeckungsanalyse", "vitest", "jest", "pytest", "test planning", "Testplanung", "edge case identification", "Randfall-Identifizierung", "mock generation", "Mock-Erstellung"],
       "tags": ["tests", "tests", "testing", "testen", "unit-tests", "integration-tests", "vitest", "jest", "pytest", "coverage", "abdeckung", "stubs", "tdd", "test-suite", "randfaelle", "edge-cases"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -1181,7 +1181,7 @@
       "capabilities": ["log parsing", "Log-Parsing", "error pattern detection", "Fehlermustererkennung", "anomaly detection", "Anomalieerkennung", "latency analysis", "Latenzanalyse", "access log analysis", "Zugriffslog-Analyse", "journald", "container logs", "Container-Logs", "security log analysis", "Sicherheits-Log-Analyse", "log summarization", "Log-Zusammenfassung", "incident timeline reconstruction", "Vorfallszeitleiste", "correlation id tracing", "Korrelations-ID-Verfolgung"],
       "tags": ["logs", "logdateien", "log-analysis", "log-analyse", "errors", "fehler", "anomaly", "anomalie", "journald", "nginx", "container-logs", "latency", "latenz", "monitoring", "ueberwachung", "audit-log", "vorfall", "incident"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -1210,7 +1210,7 @@
       "capabilities": ["financial statement analysis", "Jahresabschluss-Analyse", "budget review", "Budgetpruefung", "cash flow analysis", "Cashflow-Analyse", "kpi calculation", "KPI-Berechnung", "financial ratios", "Finanzkennzahlen", "p&l review", "GuV-Analyse", "spreadsheet analysis", "Tabellenanalyse", "financial forecasting", "Finanzprognose", "variance analysis", "Abweichungsanalyse", "runway estimation", "Runway-Schaetzung"],
       "tags": ["finance", "finanzen", "financial", "finanziell", "budget", "cash-flow", "cashflow", "balance-sheet", "bilanz", "income-statement", "guv", "kpi", "kennzahlen", "ratios", "p&l", "forecast", "prognose", "accounting", "buchhaltung", "runway", "margin", "marge"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -1238,7 +1238,7 @@
       "capabilities": ["blog post writing", "Blogartikel-Schreiben", "product copy", "Produkttexte", "newsletter writing", "Newsletter-Schreiben", "documentation writing", "Dokumentationsschreiben", "social media copy", "Social-Media-Texte", "press release drafting", "Pressemitteilungsentwurf", "brand tone adaptation", "Markenton-Anpassung", "seo-friendly writing", "SEO-optimiertes Schreiben", "headline writing", "Ueberschriften-Erstellung", "call-to-action drafting", "CTA-Formulierung", "static site generation", "Statische-Website-Erstellung", "microsite authoring", "Microsite-Erstellung", "landing page authoring", "Landingpage-Erstellung"],
       "tags": ["content", "inhalt", "writing", "schreiben", "blog", "copy", "text", "newsletter", "documentation", "dokumentation", "marketing", "seo", "press-release", "pressemitteilung", "social-media", "headline", "ueberschrift", "draft", "entwurf", "website", "webseite", "microsite", "landing-page", "landingpage", "static-site", "docs-site"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.3,
         "maxTokens": 8192
@@ -1265,7 +1265,7 @@
       "capabilities": ["contract review", "Vertragsprüfung", "legal document analysis", "juristische Dokumentenanalyse", "clause extraction", "Klauselextraktion", "risk scoring", "Risikobewertung", "nda review", "NDA-Prüfung", "service-agreement analysis", "Dienstleistungsvertrag-Analyse", "liability analysis", "Haftungsanalyse", "ip clause analysis", "IP-Klausel-Analyse", "termination clause review", "Kündigungsklausel-Prüfung", "compliance check", "Compliance-Prüfung", "obligation extraction", "Pflichtenextraktion"],
       "tags": ["contract", "vertrag", "legal", "juristisch", "nda", "agreement", "vereinbarung", "risk", "risiko", "compliance", "liability", "haftung", "ip", "terms", "bedingungen", "legal-analysis", "rechtsanalyse", "clauses", "klauseln", "termination", "kuendigung"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-35b-a3b",
+        "primary": "lmstudio/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192

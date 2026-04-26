@@ -388,6 +388,87 @@ describe("runtime delegated-loop regressions", () => {
     expect(session.getHistory().at(-1)?.content).toBe("synthesized");
   });
 
+  it("falls back to delegated evidence when both the final draft and forced synthesis are empty", async () => {
+    const delegatedEvidence = [
+      "## Recherche-Ergebnis: Ultra-flache Mikrofon-Arrays für ESP32",
+      "",
+      "### Keine fertige ultra-flache 5-Mic-I2S-Lösung",
+      "Es gibt kein fertiges Breakout-Board, das gleichzeitig sehr flach, 5 Mikrofone stark und direkt für ESP32-I2S optimiert ist.",
+      "",
+      "### Beste Custom-PCB-Kandidaten",
+      "| Mikrofon | Schnittstelle | Dicke | SNR | Hinweis |",
+      "|----------|--------------|-------|-----|---------|",
+      "| Infineon ICS-43434 | I2S | 1.0mm | 67dB | Standard Philips I2S, kein Timing-Hack nötig |",
+      "| Knowles SPH0645LM4H | I2S | 1.0mm | 64dB | Non-Standard, ESP32 Workaround nötig |",
+      "| Infineon IM73A130/131 | PDM | 0.85mm | 66dB | Dünnste Option, PDM über ESP32 lesbar |",
+      "",
+      "### PDM-zu-I2S/TDM-Option",
+      "- TLV320ADCX360: 4 Kanäle, 5x5mm WQFN, I2S/TDM, 24-bit, Low-Power.",
+      "- Empfehlung: Custom PCB mit 4 bis 5 Mics und Record-/Sync-Button statt fertigem HAT-Board.",
+      "",
+      "### Fazit",
+      "1. ICS-43434 ist die beste Standard-I2S-Option für ein flaches ESP32-Design.",
+      "2. IM73A130 ist die dünnste Option, wenn PDM im Layout akzeptabel ist.",
+      "3. Für dein Projekt ist ein Custom-Array mit lokalem Record/On-Button und getrenntem Sync-Button die realistischste Bauform.",
+    ].join("\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("call_empty_backstop", {
+          agentName: "researcher",
+          task: "Find ultra-flat microphone arrays for an ESP32 recorder.",
+        });
+      }
+
+      return createTextStream("");
+    });
+
+    completeMock.mockImplementationOnce(async () => ({
+      content: "",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: delegatedEvidence,
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Find ultra-flat microphone arrays for an ESP32 recorder.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("## Recherche-Ergebnis: Ultra-flache Mikrofon-Arrays für ESP32");
+    expect(result.response).toContain("ICS-43434");
+    expect(result.response).not.toContain("I wasn't able to generate a usable reply for that turn");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(session.getHistory().at(-1)?.content).toContain("TLV320ADCX360");
+  });
+
   it("rewrites next-turn handoff responses into a direct synthesized answer", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

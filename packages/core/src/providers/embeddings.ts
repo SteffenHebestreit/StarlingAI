@@ -9,6 +9,10 @@
 import type { LMStudioProvider } from "./lmstudio.js";
 import type { SubAgentConfig } from "../config/schema.js";
 import { childLogger } from "../logger.js";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { homedir } from "node:os";
 
 const log = childLogger("embeddings");
 
@@ -879,6 +883,12 @@ let _lastProvider: LMStudioProvider | null = null;
 let _lastSubAgents: Record<string, SubAgentConfig> = {};
 let _retryTimer: ReturnType<typeof setTimeout> | null = null;
 let _retryDelayMs = 0;
+// Concurrency guard: only one buildAgentIndex may run at a time.
+// If a second call arrives while one is in progress, it is coalesced into a
+// single follow-up build so callers never see stale data but the embedding
+// endpoint is never flooded with duplicate batches.
+let _buildInProgress = false;
+let _pendingBuild: { subAgents: Record<string, SubAgentConfig>; provider: LMStudioProvider; embeddingModel: string } | null = null;
 
 const QUERY_CACHE_TTL_MS = 5 * 60_000;
 const QUERY_CACHE_MAX_ENTRIES = 64;
@@ -1049,7 +1059,70 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return normA === 0 || normB === 0 ? 0 : dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export async function buildAgentIndex(
+// ── Persistent embedding cache ────────────────────────────────────────────────
+
+interface PersistedEmbeddingEntry {
+  /** SHA-256 of the agent's search document — used to detect changes. */
+  hash: string;
+  /** Base64-encoded Float32Array (little-endian). */
+  vector: string;
+}
+
+interface PersistedEmbeddingCache {
+  /** Embedding model name the vectors were produced with. */
+  model: string;
+  agents: Record<string, PersistedEmbeddingEntry>;
+}
+
+function resolveEmbeddingCachePath(): string {
+  const explicit = process.env["SAI_EMBEDDING_CACHE"]?.trim();
+  if (explicit) return resolve(explicit);
+  const workspacePath = resolve(process.cwd(), ".starlingai", "embedding-cache.json");
+  const homePath = resolve(homedir(), ".starlingai", "embedding-cache.json");
+  if (existsSync(workspacePath)) return workspacePath;
+  return workspacePath; // default to workspace even if it doesn't exist yet
+}
+
+function hashAgentDocument(doc: string): string {
+  return createHash("sha256").update(doc).digest("hex");
+}
+
+function float32ToBase64(v: Float32Array): string {
+  return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64");
+}
+
+function base64ToFloat32(s: string): Float32Array {
+  const buf = Buffer.from(s, "base64");
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+}
+
+function loadEmbeddingCache(model: string): Record<string, PersistedEmbeddingEntry> {
+  try {
+    const path = resolveEmbeddingCachePath();
+    if (!existsSync(path)) return {};
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as PersistedEmbeddingCache;
+    if (raw.model !== model) {
+      log.info({ cached: raw.model, current: model }, "Embedding model changed — discarding cache");
+      return {};
+    }
+    return raw.agents ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function saveEmbeddingCache(model: string, agents: Record<string, PersistedEmbeddingEntry>): void {
+  try {
+    const path = resolveEmbeddingCachePath();
+    mkdirSync(resolve(path, ".."), { recursive: true });
+    const data: PersistedEmbeddingCache = { model, agents };
+    writeFileSync(path, JSON.stringify(data), "utf-8");
+  } catch (err) {
+    log.warn({ err }, "Failed to save embedding cache");
+  }
+}
+
+async function _buildAgentIndexInner(
   subAgents: Record<string, SubAgentConfig>,
   provider: LMStudioProvider,
   embeddingModel: string
@@ -1057,7 +1130,10 @@ export async function buildAgentIndex(
   _lastProvider = provider;
   _lastSubAgents = { ...subAgents };
   _embeddingModel = embeddingModel;
-  clearEmbeddingQueryCache();
+  // Only invalidate the search-result cache; preserve the query-vector cache
+  // and its inflight-dedup map so concurrent rerankToolsForTask / memory
+  // lookups keep their dedup guard and do NOT fire duplicate HTTP requests.
+  _queryCache.clear();
   const entries = Object.entries(subAgents);
   if (entries.length === 0) {
     _index = [];
@@ -1066,23 +1142,122 @@ export async function buildAgentIndex(
     return;
   }
 
-  const texts = entries.map(([name, cfg]) => buildAgentSearchDocument(name, cfg));
+  // ── Load persisted cache ──────────────────────────────────────────────────
+  const cachedAgents = loadEmbeddingCache(embeddingModel);
 
-  try {
-    const vectors = await provider.embed(texts, embeddingModel);
-    _index = entries.map(([name, cfg], i) => ({
+  // Compute current hash for every agent
+  const currentDocs = new Map<string, { doc: string; hash: string; cfg: SubAgentConfig }>();
+  for (const [name, cfg] of entries) {
+    const doc = buildAgentSearchDocument(name, cfg);
+    currentDocs.set(name, { doc, hash: hashAgentDocument(doc), cfg });
+  }
+
+  // Identify which agents actually need a new embedding
+  const toEmbed: Array<{ name: string; doc: string }> = [];
+  for (const [name, { doc, hash }] of currentDocs) {
+    const cached = cachedAgents[name];
+    if (!cached || cached.hash !== hash) {
+      toEmbed.push({ name, doc });
+    }
+  }
+
+  const unchanged = entries.length - toEmbed.length;
+  if (toEmbed.length === 0) {
+    // Everything is cached — restore index directly without any HTTP calls
+    _index = entries.map(([name, cfg]) => ({
       agentName: name,
       description: cfg.description,
-      vector: vectors[i]!,
+      vector: base64ToFloat32(cachedAgents[name]!.vector),
     }));
     _available = true;
     _retryDelayMs = 0;
     clearEmbeddingRetryTimer();
-    log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index built");
-  } catch (err) {
-    _available = false;
-    log.warn({ err, model: embeddingModel }, "Failed to build embedding index — semantic search disabled, using keyword fallback");
+    log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index loaded from cache (no changes)");
+    return;
+  }
+
+  // ── Carry over unchanged entries from the disk cache ─────────────────────
+  const updatedCache: Record<string, PersistedEmbeddingEntry> = {};
+  for (const [name, { hash }] of currentDocs) {
+    const cached = cachedAgents[name];
+    if (cached && cached.hash === hash) {
+      updatedCache[name] = cached;
+    }
+  }
+
+  // ── Embed changed agents one at a time and save incremental progress ──────
+  // Sending all texts in a single HTTP call causes LM Studio to queue hundreds
+  // of embedding computations at once. When the request eventually times out,
+  // the retry sends another full batch while LM Studio is still working on the
+  // first — queue grows unboundedly. Processing one-at-a-time ensures LM
+  // Studio's queue never exceeds 1 entry from this code path, and partial
+  // progress is saved after every agent so retries only redo what's missing.
+  let failed = false;
+  for (const { name, doc } of toEmbed) {
+    try {
+      const [vec] = await provider.embed([doc], embeddingModel);
+      if (vec) {
+        updatedCache[name] = { hash: currentDocs.get(name)!.hash, vector: float32ToBase64(vec) };
+        // Persist incremental progress so a retry starts from where we left off
+        saveEmbeddingCache(embeddingModel, updatedCache);
+      }
+    } catch (err) {
+      log.warn({ err, agent: name, model: embeddingModel }, "Failed to embed agent — will retry remaining agents");
+      failed = true;
+      break;
+    }
+  }
+
+  // Build in-memory index from whatever we have so far (partial is better than nothing)
+  _index = entries.flatMap(([name, cfg]) => {
+    const entry = updatedCache[name];
+    if (!entry) return [];
+    return [{ agentName: name, description: cfg.description, vector: base64ToFloat32(entry.vector) }];
+  });
+
+  const embeddedCount = Object.keys(updatedCache).length - unchanged;
+
+  if (failed) {
+    // Keep whatever is indexed so far available; schedule retry for the rest
+    _available = _index.length > 0;
+    log.warn(
+      { model: embeddingModel, indexed: _index.length, embedded: embeddedCount, cached: unchanged, remaining: toEmbed.length - embeddedCount },
+      "Embedding index partially built — scheduling retry for remaining agents"
+    );
     scheduleEmbeddingRetry();
+  } else {
+    _available = true;
+    _retryDelayMs = 0;
+    clearEmbeddingRetryTimer();
+    log.info(
+      { model: embeddingModel, agentCount: _index.length, embedded: embeddedCount, cached: unchanged },
+      "Agent embedding index built"
+    );
+  }
+}
+
+export async function buildAgentIndex(
+  subAgents: Record<string, SubAgentConfig>,
+  provider: LMStudioProvider,
+  embeddingModel: string
+): Promise<void> {
+  if (_buildInProgress) {
+    // Coalesce: remember the latest request; it will be picked up after the
+    // current build finishes. Overwriting a previous pending entry is correct
+    // — the most recent config is always what matters.
+    _pendingBuild = { subAgents: { ...subAgents }, provider, embeddingModel };
+    return;
+  }
+  _buildInProgress = true;
+  try {
+    await _buildAgentIndexInner(subAgents, provider, embeddingModel);
+  } finally {
+    _buildInProgress = false;
+    const pending = _pendingBuild;
+    if (pending) {
+      _pendingBuild = null;
+      buildAgentIndex(pending.subAgents, pending.provider, pending.embeddingModel).catch(() => undefined);
+    }
   }
 }
 
@@ -1181,6 +1356,8 @@ export function resetEmbeddingSearchStateForTests(): void {
   _lastProvider = null;
   _lastSubAgents = {};
   _retryDelayMs = 0;
+  _buildInProgress = false;
+  _pendingBuild = null;
   clearEmbeddingRetryTimer();
   clearEmbeddingQueryCache();
 }
