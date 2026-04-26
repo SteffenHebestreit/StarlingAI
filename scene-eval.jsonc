@@ -1,0 +1,85 @@
+// scene-eval.jsonc — sample live-mode scene evaluation plan.
+//
+// Run with:
+//   pnpm --filter @starlingai/core scenes:evaluate
+//   pnpm --filter @starlingai/core scenes:evaluate ./my-plan.jsonc reports/today.json
+//   pnpm --filter @starlingai/core scenes:evaluate ./my-plan.jsonc reports/today.json --baseline reports/baseline.json
+//
+// Each case runs end-to-end through the real run_workflow tool against
+// the configured providers — this is real LLM traffic, not mocked. Cap
+// the duration / tool calls / output checks tightly to keep runs cheap
+// and to surface regressions early.
+{
+  // workspacePath defaults to the gateway's configured workspacePath when omitted.
+  // outputPath: optional auto-write of the JSON report.
+
+  cases: [
+    {
+      name: "deep_research-smoke",
+      sceneName: "deep_research",
+      params: {
+        deliverable: "two-paragraph brief on the topic with at least one cited source",
+        audience: "engineering team",
+      },
+      context: "Topic: how Redis Streams compares to Kafka for an internal event bus that needs ~10k events/s.",
+      expectIncludes: ["Redis Streams"],
+      expectExcludes: ["I cannot", "as an AI"],
+      maxDurationMs: 180000,
+      maxToolCalls: 25,
+      expectSuccess: true,
+    },
+    {
+      name: "code_review-recent-history",
+      sceneName: "code_review",
+      params: {
+        targetRef: "HEAD~3..HEAD",
+        focusAreas: "security,logic",
+      },
+      expectIncludes: ["review"],
+      maxDurationMs: 120000,
+      maxToolCalls: 20,
+      expectSuccess: true,
+    },
+    {
+      name: "content_creation-blog-post",
+      sceneName: "content_creation",
+      params: {
+        contentType: "blog-post",
+        topic: "Why we standardised on TypeScript for our agent runtime",
+        audience: "engineering managers",
+        tone: "direct",
+        requiresResearch: "no",
+      },
+      expectIncludes: ["TypeScript"],
+      expectExcludes: ["I cannot", "as an AI"],
+      maxDurationMs: 150000,
+      maxToolCalls: 18,
+    },
+    {
+      name: "translation_task-de-to-en",
+      sceneName: "translation_task",
+      params: {
+        targetLanguage: "English",
+        sourceLanguage: "de",
+        tone: "formal",
+      },
+      context: "Source text:\n\nSehr geehrte Damen und Herren, anbei finden Sie unseren aktuellen Quartalsbericht.",
+      expectIncludes: ["quarterly"],
+      expectExcludes: ["sehr geehrte"],
+      maxDurationMs: 60000,
+      maxToolCalls: 8,
+    },
+    {
+      name: "data_pipeline_review-no-source",
+      sceneName: "data_pipeline_review",
+      params: {
+        dataSource: "(no live data source — describe how you would approach the audit)",
+      },
+      // This case is intentionally underspecified to make sure the scene
+      // declines gracefully rather than fabricating findings.
+      expectIncludes: ["no", "without", "cannot"],
+      maxDurationMs: 60000,
+      maxToolCalls: 8,
+    },
+  ],
+}

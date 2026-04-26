@@ -26,6 +26,7 @@
     "check": "tsc --noEmit",
     "lint": "eslint src",
     "agents:evaluate": "tsx src/agent/evaluation-cli.ts",
+    "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",
     "worker:scene": "tsx src/scene-worker-main.ts"
   },
   "dependencies": {

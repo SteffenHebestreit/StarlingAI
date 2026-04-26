@@ -361,6 +361,37 @@ pnpm --filter @starlingai/core agents:evaluate my-evals.jsonc</code></pre>
         </div>
 
         <p>The evaluator prints pass/fail summaries, case previews, and can compare the run against a saved baseline.</p>
+
+        <h3>Evaluating scenes</h3>
+        <p>Scenes get their own harness — same shape as the agent eval but each case names a scene from the workflow catalog and runs it end-to-end through <code>run_workflow</code>:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code># Default plan path is ./scene-eval.jsonc in the repo root
+pnpm --filter @starlingai/core scenes:evaluate
+
+# Explicit plan + report + regression check
+pnpm --filter @starlingai/core scenes:evaluate ./my-scenes.jsonc reports/today.json --baseline reports/baseline.json</code></pre>
+        </div>
+        <p>Per-case assertions: <code>expectIncludes</code>, <code>expectExcludes</code>, <code>maxDurationMs</code>, <code>maxToolCalls</code>, <code>expectedBootstrapAgent</code>, and <code>expectSuccess</code>. The regression check flags newly-failing cases, latency spikes (&gt;50%), tool-call spikes (&gt;50%), and bootstrap-agent changes against a saved baseline.</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">jsonc</span><button class="copy-btn">Copy</button></div>
+          <pre><code>// scene-eval.jsonc
+{
+  cases: [
+    {
+      name: "deep_research-smoke",
+      sceneName: "deep_research",
+      params: { audience: "engineering team" },
+      context: "Topic: Redis Streams vs Kafka for an internal event bus.",
+      expectIncludes: ["Redis Streams"],
+      expectExcludes: ["I cannot", "as an AI"],
+      maxDurationMs: 180000,
+      maxToolCalls: 25,
+      expectSuccess: true,
+    },
+  ],
+}</code></pre>
+        </div>
       </div>
 
       <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
