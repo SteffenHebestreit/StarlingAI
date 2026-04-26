@@ -38,6 +38,7 @@ export type RpcMethod =
   | "session.archive"
   | "session.delete"
   | "session.reset"
+  | "session.rewind"
   | "audit.subscribe"
   | "audit.unsubscribe"
   | "notifications.subscribe"
@@ -349,6 +350,18 @@ export class RpcConnection {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
         getSessionRecord(sid)?.reset();
         return { reset: true };
+      }
+
+      case "session.rewind": {
+        const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        const historyIndex = Number(params["historyIndex"] ?? -1);
+        if (!Number.isInteger(historyIndex) || historyIndex < 0) {
+          throw new Error("session.rewind requires a non-negative integer historyIndex");
+        }
+        const session = getSessionRecord(sid);
+        if (!session) throw new Error(`Session not found: ${sid}`);
+        session.rewindBeforeIndex(historyIndex);
+        return { rewound: true, historyIndex };
       }
 
       case "scenes.list":

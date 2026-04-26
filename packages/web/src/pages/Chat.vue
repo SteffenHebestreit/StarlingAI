@@ -145,6 +145,7 @@
               :is-streaming="msg.id === 'streaming'"
               :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
               :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
+              @rewind="handleRewind"
             />
           </div>
         </section>
@@ -2482,6 +2483,17 @@ async function resetSession() {
   } catch {
     // If reset fails, create a fresh session instead
     await gateway.createSession();
+  }
+}
+
+async function handleRewind(messageId: string) {
+  try {
+    const text = await gateway.rewindToMessage(messageId);
+    inputText.value = text;
+    await nextTick();
+    composerTextareaEl.value?.focus();
+  } catch (err) {
+    console.error("Rewind failed:", err);
   }
 }
 

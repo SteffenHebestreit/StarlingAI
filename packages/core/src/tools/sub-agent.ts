@@ -1854,6 +1854,11 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
     tools,
     maxIterations,
     model,
+    // Architect-spawned agents run in-process so they can reach gateway-bound
+    // tools (web_search via SearXNG, Playwright browser, MCP tools). The
+    // agent-worker container image cannot satisfy these dependencies and would
+    // return "container error: unknown". Disable containerization unconditionally.
+    container: { disabled: true, enabled: false, image: "starlingai/agent-worker:dev", memoryMb: 512, cpus: 0.5, timeoutMs: 60_000 },
   };
 
   const ephemeralName = `ephemeral:${agentName}`;
@@ -3111,6 +3116,10 @@ registerTool({
         temperature: typeof modelOverride["temperature"] === "number" ? modelOverride["temperature"] : undefined,
         maxTokens: typeof modelOverride["maxTokens"] === "number" ? modelOverride["maxTokens"] : undefined,
       } : undefined,
+      // Ephemeral agents run in-process: the agent-worker container cannot reach
+      // gateway-bound tools (web_search, Playwright, MCP). Disable containerization
+      // so tool calls resolve through the live gateway runtime instead.
+      container: { disabled: true, enabled: false, image: "starlingai/agent-worker:dev", memoryMb: 512, cpus: 0.5, timeoutMs: 60_000 },
     };
 
     const ephemeralName = `ephemeral:${agentName}`;

@@ -2064,6 +2064,52 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
+  /**
+   * Rewind the current session to just before the message with the given client ID.
+   * The message's text is returned so the caller can pre-fill the composer.
+   * The local messages array is truncated to exclude that message and everything after it.
+   */
+  async function rewindToMessage(msgId: string): Promise<string> {
+    const sid = currentSessionId.value;
+    if (!sid) throw new Error("No active session");
+
+    const msgIndex = messages.value.findIndex((m) => m.id === msgId);
+    if (msgIndex < 0) throw new Error("Message not found");
+
+    const msg = messages.value[msgIndex]!;
+    const text = msg.content;
+
+    // Parse the server-side history index from transcript IDs formatted as "${sessionId}:${index}"
+    let historyIndex: number | null = null;
+    const colonIdx = msgId.lastIndexOf(":");
+    if (colonIdx > 0) {
+      const parsed = Number(msgId.slice(colonIdx + 1));
+      if (Number.isInteger(parsed) && parsed >= 0) historyIndex = parsed;
+    }
+
+    if (historyIndex === null) {
+      // Live message (UUID) — fetch transcript to resolve the server-side index
+      try {
+        const transcript = await getSessionTranscript(sid, { limit: 200 });
+        const found = transcript.transcript.find((t) => t.role === "user" && t.content === text);
+        if (found) {
+          const ci = found.id.lastIndexOf(":");
+          if (ci > 0) historyIndex = Number(found.id.slice(ci + 1));
+        }
+      } catch {
+        // If we can't resolve the index, we still truncate locally
+      }
+    }
+
+    if (historyIndex !== null) {
+      await rpc("session.rewind", { sessionId: sid, historyIndex });
+    }
+
+    // Truncate local messages to exclude the target message and everything after
+    messages.value = messages.value.slice(0, msgIndex);
+    return text;
+  }
+
   async function sendMessage(text: string, enableThinking?: boolean, displayContent?: string, attachments?: Array<{ filename: string; dataUrl: string }>): Promise<void> {
     if (pendingRequestId.value) {
       await supersedePendingTurn();
@@ -2384,6 +2430,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     createSession,
     loadScenes,
     sendMessage,
+    rewindToMessage,
     convertFileToMarkdown,
     transcribeAudio,
     listVoices,

@@ -327,6 +327,21 @@ export class AgentSession {
     persistSessionStore(this);
   }
 
+  /**
+   * Truncate history so that `this.history[historyIndex]` and everything after it
+   * is removed.  Keeps indices 0 … historyIndex-1 (exclusive).  Used to rewind
+   * the conversation to just before a specific message so the user can branch off
+   * from that point.
+   */
+  rewindBeforeIndex(historyIndex: number): void {
+    const clamped = Math.max(0, Math.min(historyIndex, this.history.length));
+    if (clamped === this.history.length) return; // nothing to remove
+    this.history = this.history.slice(0, clamped);
+    this.touch();
+    logAudit("session_rewound", { historyIndex: clamped, remaining: this.history.length }, { sessionId: this.id });
+    persistSessionStore(this);
+  }
+
   end(): void {
     if (this.endLogged) return;
     this.endLogged = true;

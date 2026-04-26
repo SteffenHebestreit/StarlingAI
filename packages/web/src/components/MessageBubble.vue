@@ -200,6 +200,12 @@
         <div v-if="!isStreaming && mainContent" class="message-export-actions">
           <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
           <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
+          <button
+            v-if="message.role === 'user'"
+            @click="emit('rewind', message.id)"
+            title="Restart the conversation from this message"
+            class="export-btn"
+          >↩ Restart</button>
         </div>
         <div
           v-if="(message.usage || message.perf) && message.role === 'assistant'"
@@ -459,6 +465,10 @@ const props = defineProps<{
   isStreaming?: boolean;
   streamingText?: string;
   autoCollapse?: boolean;
+}>();
+
+const emit = defineEmits<{
+  rewind: [messageId: string];
 }>();
 
 const gateway = useGatewayStore();

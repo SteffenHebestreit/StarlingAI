@@ -13,7 +13,7 @@ import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
-import type { AgentSession } from "./session.js";
+import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -906,7 +906,7 @@ async function finalizeUserFacingAssistantResponse(
   const cleaned = sanitizeUserFacingAssistantResponse(rawResponse, toolIterations);
   let resolved: string;
   if (!shouldResynthesizeUserFacingResponse(rawResponse, cleaned, toolIterations)) {
-    const stableResponse = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+    const stableResponse = resolveEmptyAssistantResponseFallback(rawResponse, cleaned, session);
     resolved = await rewriteTerminalResponseIfNeeded(stableResponse, toolIterations, session, provider, signal);
   } else {
     const synthesized = await forceSynthesis(
@@ -920,11 +920,11 @@ async function finalizeUserFacingAssistantResponse(
       if (cleanedSynthesized) {
         resolved = await rewriteTerminalResponseIfNeeded(cleanedSynthesized, toolIterations, session, provider, signal);
       } else {
-        const fallback = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+        const fallback = resolveEmptyAssistantResponseFallback(rawResponse, cleaned, session);
         resolved = await rewriteTerminalResponseIfNeeded(fallback, toolIterations, session, provider, signal);
       }
     } else {
-      const fallback = cleaned || rawResponse.trim() || EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+      const fallback = resolveEmptyAssistantResponseFallback(rawResponse, cleaned, session);
       resolved = await rewriteTerminalResponseIfNeeded(fallback, toolIterations, session, provider, signal);
     }
   }
@@ -934,6 +934,48 @@ async function finalizeUserFacingAssistantResponse(
 
 const DELEGATE_TOOL_RESULT_RE = /^(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
 const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
+
+function hasRecentForcedSynthesisNudge(
+  history: readonly { role: string; content?: string | null }[],
+): boolean {
+  const recent = [...history].reverse().slice(0, 16);
+  return recent.some((message) =>
+    message.role === "system"
+    && typeof message.content === "string"
+    && (
+      message.content.startsWith("[SYNTHESIS REQUIRED]")
+      || message.content.startsWith("[WARDEN STOP — FORCED SYNTHESIS]")
+    ),
+  );
+}
+
+function resolveEmptyAssistantResponseFallback(
+  rawResponse: string,
+  cleaned: string,
+  session: AgentSession,
+): string {
+  const stableResponse = cleaned || rawResponse.trim();
+  if (stableResponse) return stableResponse;
+
+  const history = session.getHistory();
+  if (hasRecentForcedSynthesisNudge(history)) {
+    const evidence = findRecentDelegateEvidence(history);
+    if (evidence) {
+      logAudit(
+        "guardrail_flagged",
+        {
+          type: "empty_response_evidence_backstop",
+          evidenceLength: evidence.evidence.length,
+          evidenceItems: evidence.itemCount,
+        },
+        { sessionId: session.id, channel: session.channel, severity: "warn" },
+      );
+      return evidence.evidence;
+    }
+  }
+
+  return EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+}
 
 function looksLikeDelegateMetadata(meta: Record<string, unknown> | undefined): boolean {
   if (!meta) return false;
@@ -1615,7 +1657,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       objective: userMessage,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      tasks: {},
+      // Seed from previous turn so retries reuse completed research instead of
+      // running the same sub-agent tasks from scratch.
+      tasks: loadPreviousTurnSwarmTasks(session.getHistory()),
     },
   };
 
@@ -3256,6 +3300,37 @@ function blocked(reason: string, swarmState?: SwarmState, performance?: TurnPerf
     swarmState,
     performance,
   };
+}
+
+/**
+ * Walk backward through session history and extract completed/partial swarm
+ * tasks from the most recent assistant message that has persisted swarm state.
+ *
+ * These are seeded into the new turn's swarmState.tasks so that, on a retry,
+ * sub-agents see prior research and skip re-running identical tasks instead of
+ * doing all the work from scratch.
+ *
+ * Only `completed` and `partial` tasks are carried forward. `failed`, `running`,
+ * `pending`, and `blocked` tasks are dropped so they can be re-attempted cleanly.
+ */
+function loadPreviousTurnSwarmTasks(history: readonly SessionHistoryMessage[]): SwarmState["tasks"] {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]!;
+    if (msg.role !== "assistant") continue;
+    const raw = msg.metadata?.["swarmState"];
+    if (!raw || typeof raw !== "object") continue;
+    const prev = raw as SwarmState;
+    if (!prev.tasks) continue;
+    const carried: SwarmState["tasks"] = {};
+    for (const [id, task] of Object.entries(prev.tasks)) {
+      if (task.status === "completed" || task.status === "partial") {
+        carried[id] = task;
+      }
+    }
+    // Only return if there is something worth carrying forward
+    if (Object.keys(carried).length > 0) return carried;
+  }
+  return {};
 }
 
 function persistAssistantTurnState(session: AgentSession, content: string, swarmState?: SwarmState): void {

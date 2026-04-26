@@ -25,6 +25,7 @@ export type AuditEventType =
   | "credential_accessed"
   | "credential_fill"
   | "session_reset"
+  | "session_rewound"
   | "sub_agent_started"
   | "sub_agent_completed"
   | "sub_agent_soft_deadline"
