@@ -557,10 +557,10 @@
                     <button
                       v-if="showWakeMode"
                       @click="toggleWakeListening()"
-                      :disabled="recordingState === 'processing'"
+                      :disabled="recordingState === 'processing' || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="wakeListening ? 'multimodal-action-active' : ''"
-                      :title="wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection'"
+                      :title="voiceConversationMode ? 'Wake mode is folded into voice conversation mode' : (wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection')"
                       :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -569,6 +569,22 @@
                         <path d="M13.5 18.25c0 1.8 1.45 3.25 3.25 3.25S20 20.05 20 18.25 18.55 15 16.75 15c-1.17 0-2.19.62-2.76 1.54" />
                         <path d="M18.1 16.9 15.5 19.5" />
                         <path d="m15.5 16.9 2.6 2.6" />
+                      </svg>
+                    </button>
+                    <button
+                      v-if="showWakeMode && showSpeechPlayback"
+                      @click="toggleVoiceConversation()"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
+                      :class="voiceConversationMode ? 'multimodal-action-active' : ''"
+                      :title="voiceConversationMode ? `Voice conversation mode: ${voiceConversationStatusLabel}` : 'Start hands-free voice conversation mode (continuous listen + auto-speak + interrupt)'"
+                      :aria-label="voiceConversationMode ? 'Stop voice conversation' : 'Start voice conversation'"
+                      :aria-pressed="voiceConversationMode"
+                    >
+                      <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
+                        <path d="M5 12a7 7 0 0 0 14 0" />
+                        <path d="M12 19v3" />
+                        <path d="M3 6.5L21 6.5" stroke-dasharray="2 3" stroke-width="1.25" />
                       </svg>
                     </button>
                     <button
@@ -861,6 +877,12 @@ const wakeStopPhrases = useStorage<string[]>("gc_wake_stop_phrases", ["stop reco
 const wakeLanguage = useStorage<string>("gc_wake_language", "en-US");
 const wakeSilenceTimeoutMs = useStorage<number>("gc_wake_silence_ms", 4000);
 const speakReplyEnabled = useStorage<boolean>("sai_speak_reply", false);
+// Voice conversation mode: bundles wake listening + auto-speak + interrupt-on-
+// speech into a single hands-free toggle. When on, any non-trivial speech
+// triggers a recording turn (no wake keyword required), the assistant's reply
+// is spoken automatically, and speech during TTS playback interrupts and
+// captures the user's next turn.
+const voiceConversationMode = useStorage<boolean>("sai_voice_conversation", false);
 const lastSpokenSummary = ref<string | null>(null);
 const exportingTranscript = ref(false);
 const pendingSpokenAckLanguage = ref<string | null>(null);
@@ -1818,6 +1840,22 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
       return;
     }
 
+    // Voice-conversation mode: any non-trivial speech triggers a recording
+    // turn. If the assistant is currently speaking, the user's speech also
+    // interrupts the TTS playback so they can talk over it.
+    if (voiceConversationMode.value && transcript.length >= 2) {
+      const ttsActive = activeSpeechLane !== null || activeBrowserSpeechLane !== null;
+      if (ttsActive) {
+        cancelAllSpeechLanes();
+        setWakeFeedback("recording", "Interrupting and recording");
+      }
+      if (recordingState.value === "idle") {
+        wakeStatus.value = "Listening";
+        void startRecording(true);
+      }
+      return;
+    }
+
     const matchedKeyword = wakeKeywords.value.find((phrase) => lowered.includes(phrase.toLowerCase()));
     if (matchedKeyword) {
       wakeStatus.value = `Wake phrase detected: ${matchedKeyword}`;
@@ -2240,6 +2278,86 @@ function toggleSpeakReply() {
   speakReplyEnabled.value = !speakReplyEnabled.value;
   writeSpeakReplySummaryStorage(speakReplyEnabled.value);
 }
+
+/**
+ * Stop every active speech lane (server-TTS preview audio + browser
+ * synth) at once. Used when the user interrupts the assistant during
+ * voice conversation mode.
+ */
+function cancelAllSpeechLanes(): void {
+  stopSpeechLane("reply", { cancelBrowser: true, resetReplyPreview: true });
+  stopSpeechLane("ack", { cancelBrowser: true });
+  stopSpeechLane("progress", { cancelBrowser: true });
+}
+
+/** Human-readable status for the voice-conversation toggle's tooltip.
+ *  Tooltips re-evaluate on hover, so a plain reactive computed over the
+ *  refs we actually have is enough — the speaking phase is implied by
+ *  gateway.isLoading transitioning from true → false. */
+const voiceConversationStatusLabel = computed(() => {
+  if (!voiceConversationMode.value) return "off";
+  if (recordingState.value === "recording") return "recording";
+  if (recordingState.value === "processing") return "transcribing";
+  if (gateway.isLoading) return "thinking";
+  if (wakeListening.value) return "listening";
+  return "ready";
+});
+
+/**
+ * Toggle the bundled hands-free conversation mode. Composes the
+ * existing wake-listener + speak-reply pieces so the user only has
+ * one button to think about.
+ */
+async function toggleVoiceConversation(): Promise<void> {
+  if (voiceConversationMode.value) {
+    voiceConversationMode.value = false;
+    if (wakeListening.value) await toggleWakeListening();
+    cancelAllSpeechLanes();
+    setWakeFeedback("idle", "");
+    wakeStatus.value = "Voice conversation off";
+    return;
+  }
+
+  voiceConversationMode.value = true;
+  if (!speakReplyEnabled.value) {
+    speakReplyEnabled.value = true;
+    writeSpeakReplySummaryStorage(true);
+  }
+  if (!wakeListening.value) {
+    await toggleWakeListening();
+  }
+  setWakeFeedback("listening", "Voice conversation active — start talking");
+  wakeStatus.value = "Voice conversation: listening";
+}
+
+// In voice-conversation mode, re-arm the wake listener after a turn
+// completes (and any reply TTS finishes). Mirrors the auto-speak watcher
+// pattern so the user doesn't have to click anything between turns.
+watch(() => gateway.isLoading, (loading, prev) => {
+  if (!voiceConversationMode.value) return;
+  if (prev === true && loading === false) {
+    // Turn finished — wait briefly so the auto-speak watcher (separate
+    // file-scope watcher below) has a chance to fire first, then poll
+    // until the speech lane idles before re-arming the listener.
+    const armWhenIdle = (): void => {
+      if (!voiceConversationMode.value) return;
+      // activeSpeechLane / activeBrowserSpeechLane are plain `let` bindings
+      // (see top of script section) — read directly, no .value.
+      const ttsActive = activeSpeechLane !== null || activeBrowserSpeechLane !== null;
+      if (ttsActive) {
+        window.setTimeout(armWhenIdle, 400);
+        return;
+      }
+      if (recordingState.value !== "idle") return; // user already started talking
+      if (!wakeListening.value) {
+        void toggleWakeListening();
+      } else {
+        wakeStatus.value = "Voice conversation: listening";
+      }
+    };
+    window.setTimeout(armWhenIdle, 250);
+  }
+});
 
 // ── Slash-command autocomplete ──────────────────────────────────────────────
 // Triggered when the textarea starts with '/' and the user is still typing the
