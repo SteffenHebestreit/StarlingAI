@@ -236,9 +236,10 @@ Two or more StarlingAI instances delegate tasks cross-instance. Each instance re
 | Audit trail | ✅ shipped | `federation_delegate_started/completed/failed` on the caller; `federation_request_received/completed/failed` on the peer |
 | `exposeAgents` allowlist | ✅ shipped | Per-instance allowlist of agent names exposed to peers (empty array = all) |
 | Capability cache | ✅ shipped | Peer capabilities cached for `federation.capabilityCacheTtlMs` (default 5 min) |
-| Auto peer discovery | ⏳ deferred | mDNS / shared-bus heartbeat registry — manual config only for MVP |
-| Federated workspace_search | ⏳ deferred | Broadcast-and-merge variant of workspace_search across peers |
-| Streaming delegation progress | ⏳ deferred | One-shot await for MVP; SSE relay of remote turn observations is future work |
+| Streaming delegation progress | ✅ shipped (wave 2) | `POST /api/federation/delegate/stream` emits SSE; `delegate_to_remote_agent` defaults `stream=true` and forwards peer progress to `ctx.onSubAgentProgress` |
+| Federated workspace_search | ✅ shipped (wave 2) | `broadcastWorkspaceSearch` fans out across peers in parallel; `federated_workspace_search` Tier-0 tool merges local + peer matches grouped by source |
+| Dashboard panel | ✅ shipped (wave 2) | `/federation` Vue page with peer cards + recent activity timeline; backed by `/api/federation/peers` and `/api/federation/activity` |
+| Auto peer discovery | ⏳ deferred | mDNS / shared-bus heartbeat registry — manual config only |
 
 ### Configuration
 
