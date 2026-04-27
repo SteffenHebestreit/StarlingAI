@@ -21,6 +21,7 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { getConfig } from "../config/loader.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
 import { recordSelfdevToolSuccess } from "../agent/self-improve.js";
+import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import type { TestRun } from "../agent/tool-dev-session.js";
 
 const log = childLogger("dynamic-tools");
@@ -137,6 +138,14 @@ export function watchDynamicToolsDirectory(): void {
 
 export function deployApprovedTool(def: DynamicToolDefinition): void {
     ensureDir();
+
+    // Validate at the public deploy boundary so direct API callers can't
+    // bypass the file-watcher's validateDefinition() (which only runs on
+    // disk-discovered bundles).  In particular this rejects tier-escalation
+    // attempts BEFORE the file is written + registered.
+    if (!validateDefinition(def)) {
+        throw new Error(`Dynamic tool '${def.name}' validation failed — refusing to deploy`);
+    }
 
     const existing = _loadedTools.get(def.name);
     if (existing) {
@@ -412,6 +421,22 @@ export function approvePromotion(bareToolName: string, reviewedBy: string): bool
     const def = _loadedTools.get(bareToolName);
     if (!def || def.promotionStatus !== "pending") return false;
 
+    // Defense in depth: even if a stale dynamic-tool .json bundle slipped past
+    // validateDefinition() (e.g. bundle pre-dates the GAP-4 fix), refuse to
+    // promote when the bare name shadows a built-in.  Fire a tier_escalation_
+    // attempt audit so the Warden notices.
+    if (isCompileTimeMappedTool(bareToolName)) {
+        const collidingTier = getToolTier(bareToolName).tier;
+        logAudit("tier_escalation_attempt", {
+            stage: "promotion",
+            attemptedName: bareToolName,
+            collidingTier,
+            reviewedBy,
+        }, { severity: "warn" });
+        log.warn({ bareToolName, collidingTier }, "Refusing to promote dynamic tool that shadows a built-in");
+        return false;
+    }
+
     def.promotionStatus = "approved";
     const reviewedAt = new Date().toISOString();
 
@@ -492,6 +517,21 @@ function validateDefinition(def: DynamicToolDefinition): boolean {
     // by the deploy path. A name like "selfdev__something" would register as
     // "selfdev__selfdev__something", causing confusing double-prefix routing.
     if (def.name.startsWith("selfdev__")) return false;
+    // Block tier-escalation attempts: a dynamic tool whose bare name shadows
+    // a built-in tool would, after promotion, register at the bare name and
+    // override the built-in's tier semantics.  Reject + audit so the Warden
+    // can detect repeat attempts (closes GAP-4).
+    if (isCompileTimeMappedTool(def.name)) {
+        const collidingTier = getToolTier(def.name).tier;
+        logAudit("tier_escalation_attempt", {
+            stage: "validate",
+            attemptedName: def.name,
+            collidingTier,
+            approvedBy: def.approvedBy ?? null,
+            version: def.version,
+        }, { severity: "warn" });
+        return false;
+    }
     if (!def.description) return false;
     if (!def.code) return false;
     if (!def.parameters || typeof def.parameters !== "object") return false;

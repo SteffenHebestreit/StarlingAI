@@ -446,3 +446,63 @@ describe("Warden — docker daemon unreachable detection", () => {
     expect(String(intervention["detail"])).toMatch(/Docker Desktop|dockerd|defaultContainerized/);
   });
 });
+
+describe("Warden — GAP-4 self-improvement abuse detection", () => {
+  beforeEach(() => {
+    resetWardenForTests();
+    vi.mocked(logAudit).mockClear();
+    startWarden();
+  });
+
+  afterEach(() => {
+    stopWarden();
+  });
+
+  it("fires tier_escalation_attempt immediately when a dynamic tool tries to shadow a built-in", () => {
+    fireEvent({
+      type: "tier_escalation_attempt",
+      sessionId: "sess-esc-1",
+      data: { stage: "validate", attemptedName: "read_file", collidingTier: 0, approvedBy: "agent_factory" },
+    });
+    const calls = vi.mocked(logAudit).mock.calls.filter(([type]) => type === "warden_alert");
+    const tierAlerts = calls.filter(([, payload]) => (payload as Record<string, unknown>)["alertType"] === "tier_escalation_attempt");
+    expect(tierAlerts).toHaveLength(1);
+    const payload = tierAlerts[0]?.[1] as Record<string, unknown>;
+    expect(String(payload["subject"])).toBe("sess-esc-1");
+    expect(String(payload["detail"])).toMatch(/read_file/);
+    expect(String(payload["detail"])).toMatch(/Tier-0/);
+  });
+
+  it("does not fire self_improve_loop below the rejection threshold", () => {
+    for (let i = 0; i < 2; i++) {
+      fireEvent({ type: "config_proposal_rejected", sessionId: "sess-loop-1", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter((a) => a.type === "self_improve_loop")).toHaveLength(0);
+  });
+
+  it("fires self_improve_loop after 3 mixed rejections from the same session", () => {
+    fireEvent({ type: "config_proposal_rejected", sessionId: "sess-loop-2", data: {} });
+    fireEvent({ type: "tool_promotion_rejected", sessionId: "sess-loop-2", data: { toolName: "selfdev__x" } });
+    fireEvent({ type: "tool_dev_session_terminated", sessionId: "sess-loop-2", data: { reason: "max_iterations" } });
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some((a) => a.type === "self_improve_loop" && a.subject === "sess-loop-2")).toBe(true);
+  });
+
+  it("counts tier_escalation_attempt as a self-improvement rejection signal", () => {
+    fireEvent({ type: "tier_escalation_attempt", sessionId: "sess-loop-3", data: { stage: "validate", attemptedName: "host_shell", collidingTier: 4 } });
+    fireEvent({ type: "config_proposal_rejected", sessionId: "sess-loop-3", data: {} });
+    fireEvent({ type: "tier_escalation_attempt", sessionId: "sess-loop-3", data: { stage: "validate", attemptedName: "docker_socket", collidingTier: 4 } });
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some((a) => a.type === "self_improve_loop" && a.subject === "sess-loop-3")).toBe(true);
+  });
+
+  it("self_improve_loop does not re-fire on the same burst", () => {
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "config_proposal_rejected", sessionId: "sess-loop-4", data: {} });
+    }
+    sweepAnomaliesNow();
+    const alerts2 = sweepAnomaliesNow();
+    expect(alerts2.filter((a) => a.type === "self_improve_loop")).toHaveLength(0);
+  });
+});

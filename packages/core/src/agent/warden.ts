@@ -95,6 +95,13 @@ const COMPUTER_STALE_LOOP_THRESHOLD = 3;          // identical screenshots in a 
 const CONFIG_PROPOSAL_WINDOW_MS = 10 * 60 * 1_000; // 10 min
 const CONFIG_PROPOSAL_THRESHOLD = 5;               // proposals per session
 
+// Self-improvement loop detection (closes GAP-4): a session that keeps having
+// its self-improvement work REJECTED (config proposals, tool promotions,
+// tool-dev sessions) is wasting cycles or probing for a way around guardrails.
+// Either way the operator should know.
+const SELF_IMPROVE_LOOP_WINDOW_MS = 30 * 60 * 1_000; // 30 min
+const SELF_IMPROVE_LOOP_THRESHOLD = 3;               // rejections per session
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 /** sessionId → hit timestamps */
@@ -141,6 +148,7 @@ const _computerScreenshotHashes = new Map<string, string[]>();
 
 /** sessionId → config proposal timestamps (self-improvement abuse detection) */
 const _configProposalsBySession = new Map<string, number[]>();
+const _selfImproveRejectionsBySession = new Map<string, number[]>();
 
 /** sessionId → expiry ts for imminent-storm alert cooldown (E19). */
 const _toolStormImminentCooldown = new Map<string, number>();
@@ -186,7 +194,7 @@ export function isSessionTurnActive(sessionId: string): boolean {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "tool_storm_imminent" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "agent_message_flood_imminent" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "docker_daemon_unreachable";
+  type: "tool_storm" | "tool_storm_imminent" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "agent_message_flood_imminent" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "tier_escalation_attempt" | "self_improve_loop" | "docker_daemon_unreachable";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -332,6 +340,39 @@ export function startWarden(): void {
       const hits = _configProposalsBySession.get(event.sessionId) ?? [];
       hits.push(now);
       _configProposalsBySession.set(event.sessionId, hits);
+    }
+
+    // ── Self-improvement rejection accumulation (closes GAP-4) ─────────────
+    // Sustained failed self-improvement is either thrashing or guardrail
+    // probing — both worth surfacing to the operator.
+    if (
+      (event.type === "config_proposal_rejected"
+        || event.type === "tool_promotion_rejected"
+        || event.type === "tool_dev_session_terminated"
+        || event.type === "tier_escalation_attempt")
+      && event.sessionId
+    ) {
+      const hits = _selfImproveRejectionsBySession.get(event.sessionId) ?? [];
+      hits.push(now);
+      _selfImproveRejectionsBySession.set(event.sessionId, hits);
+    }
+
+    // ── Tier-escalation attempt (immediate alert, closes GAP-4) ─────────────
+    // A single occurrence is enough — validateDefinition already hard-blocked
+    // it; this surfaces the attempt to the operator without waiting for a sweep.
+    if (event.type === "tier_escalation_attempt") {
+      const stage = String(event.data["stage"] ?? "validate");
+      const attemptedName = String(event.data["attemptedName"] ?? "?");
+      const collidingTier = event.data["collidingTier"];
+      const subject = event.sessionId ?? `${attemptedName}@${stage}`;
+      const alert = makeAlert(
+        "tier_escalation_attempt",
+        "warn",
+        subject,
+        `Dynamic tool '${attemptedName}' tried to shadow a Tier-${collidingTier ?? "?"} built-in (${stage}). Hard-blocked; investigate the proposing agent.`,
+        "logged",
+      );
+      emitAlert(alert);
     }
 
     // ── Computer-use action accumulation ────────────────────────────────────
@@ -502,6 +543,7 @@ export function resetWardenForTests(): void {
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
   _configProposalsBySession.clear();
+  _selfImproveRejectionsBySession.clear();
   _toolStormImminentCooldown.clear();
   _agentMessageImminentCooldown.clear();
   _sessionAbortControllers.clear();
@@ -738,6 +780,32 @@ function sweepAnomalies(): WardenAlert[] {
       alerts.push(alert);
       // Reset window so the alert fires at most once per burst
       _configProposalsBySession.set(sessionId, []);
+    }
+  }
+
+  // 7b. Self-improvement loop (closes GAP-4) ────────────────────────────────
+  // Multiple rejected proposals / failed tool-dev sessions / tier-escalation
+  // attempts from the same session within 30 min → operator-visible warn.
+  for (const [sessionId, timestamps] of _selfImproveRejectionsBySession) {
+    const recent = timestamps.filter((t) => now - t < SELF_IMPROVE_LOOP_WINDOW_MS);
+    if (recent.length === 0) {
+      _selfImproveRejectionsBySession.delete(sessionId);
+      continue;
+    }
+    _selfImproveRejectionsBySession.set(sessionId, recent);
+
+    if (recent.length >= SELF_IMPROVE_LOOP_THRESHOLD) {
+      const alert = makeAlert(
+        "self_improve_loop",
+        "warn",
+        sessionId,
+        `Session has ${recent.length} self-improvement rejections in 30 minutes — possible thrashing or guardrail probing. Investigate proposing agent.`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      // Reset window so the alert fires at most once per burst
+      _selfImproveRejectionsBySession.set(sessionId, []);
     }
   }
 

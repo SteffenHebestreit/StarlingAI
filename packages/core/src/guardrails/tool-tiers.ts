@@ -1524,3 +1524,16 @@ export function getRegisteredTools(): string[] {
     .filter(([, def]) => def.tier < ToolTier.FOUR_BLOCKED)
     .map(([name]) => name);
 }
+
+/**
+ * Returns true when `toolName` is mapped at compile time — i.e. it is a
+ * built-in tool with an explicit tier assignment in TOOL_TIER_MAP.  Used by
+ * the dynamic-tool validator to reject self-developed tools whose bare names
+ * would shadow a privileged built-in (closes a GAP-4 vector where a promoted
+ * dynamic tool could override e.g. `read_file` and inherit its Tier-0 callsite
+ * permissions).  Pattern-matched namespaces (`mcp__*`, `selfdev__*`,
+ * `webhook__*`) are NOT considered compile-time mapped.
+ */
+export function isCompileTimeMappedTool(toolName: string): boolean {
+  return Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName);
+}
