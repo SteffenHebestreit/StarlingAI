@@ -22,6 +22,7 @@ import {
 import { ToolTier, getToolTier } from "../guardrails/tool-tiers.js";
 import { getAllTools } from "../tools/registry.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
+import { searchWorkspace } from "../tools/workspace-search.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 
@@ -35,6 +36,11 @@ interface DelegateBody {
   context?: unknown;
   originSessionId?: unknown;
   timeoutMs?: unknown;
+}
+
+interface SearchBody {
+  query?: unknown;
+  maxResults?: unknown;
 }
 
 /**
@@ -171,6 +177,43 @@ export function mountFederationRoutes(app: Hono): void {
       logAudit("federation_request_failed", { peer: verified.issuer, agentName, remoteSessionId, error: message }, { sessionId: remoteSessionId, severity: "error" });
       return c.json({ ok: false, error: message, remoteSessionId } satisfies FederationDelegateResponse, 500);
     }
+  });
+
+  // Workspace search — runs the peer's local workspace_search and returns
+  // ranked snippets to the broadcaster for cross-instance retrieval.
+  app.post("/api/federation/search", async (c) => {
+    const config = getFederationConfig();
+    if (!config.enabled) return c.json({ error: "federation disabled" }, 404);
+
+    const token = extractBearer(c.req.header("Authorization"));
+    const verified = await verifyFederationToken(token);
+    if (!verified) {
+      logAudit("federation_auth_failed", { route: "search" }, { severity: "warn" });
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    let body: SearchBody;
+    try {
+      body = await c.req.json<SearchBody>();
+    } catch {
+      return c.json({ ok: false, error: "invalid JSON body" }, 400);
+    }
+
+    const query = typeof body.query === "string" ? body.query.trim() : "";
+    if (!query) return c.json({ ok: false, error: "query is required" }, 400);
+    const requestedMax = typeof body.maxResults === "number" && body.maxResults > 0 ? body.maxResults : 10;
+    const maxResults = Math.min(30, Math.max(1, Math.floor(requestedMax)));
+
+    const startedAt = Date.now();
+    const matches = searchWorkspace(getConfig().workspacePath, query, maxResults);
+    const durationMs = Date.now() - startedAt;
+    logAudit("federation_search_served", { peer: verified.issuer, query: query.slice(0, 80), maxResults, matched: matches.length, durationMs });
+    return c.json({
+      ok: true,
+      instanceId: getFederationConfig().instanceId,
+      matches,
+      durationMs,
+    });
   });
 }
 

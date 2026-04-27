@@ -14,6 +14,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
 import { mountFederationRoutes } from "./federation-router.js";
+import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
@@ -1218,6 +1219,62 @@ export function createGateway() {
   // Federation routes — gated at request time on federation.enabled, so
   // toggling the config flag takes effect without a gateway restart.
   mountFederationRoutes(app);
+
+  // ── Federation dashboard endpoints (user-JWT auth, not HMAC) ─────────────
+  // These power the /federation Vue page; they read from the local capability
+  // cache + audit ring buffer rather than re-fetching on every poll.
+  app.get("/api/federation/peers", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const fedConfig = getConfig().federation;
+    if (!fedConfig.enabled) {
+      return c.json({ enabled: false, instanceId: fedConfig.instanceId, peers: [] });
+    }
+
+    const { fetchPeerCapability, pingPeer } = await import("../federation/index.js");
+    const wantsPing = c.req.query("ping") === "1";
+    const wantsRefresh = c.req.query("refresh") === "1";
+
+    const peers = await Promise.all(fedConfig.peers.map(async (peer) => {
+      const summary: Record<string, unknown> = {
+        id: peer.id,
+        url: peer.url,
+        description: peer.description ?? null,
+        tags: peer.tags,
+      };
+      try {
+        const capability = await fetchPeerCapability(peer.id, { force: wantsRefresh });
+        summary["instanceId"] = capability.instanceId;
+        summary["protocolVersion"] = capability.protocolVersion;
+        summary["agents"] = capability.agents;
+        summary["toolNames"] = capability.toolNames;
+        summary["capabilitiesFetchedAt"] = capability.generatedAt;
+      } catch (err) {
+        summary["capabilityError"] = (err as Error).message;
+      }
+      if (wantsPing) {
+        summary["ping"] = await pingPeer(peer.id);
+      }
+      return summary;
+    }));
+
+    return c.json({
+      enabled: true,
+      instanceId: fedConfig.instanceId,
+      peers,
+    });
+  });
+
+  app.get("/api/federation/activity", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
+    const { getRecentFederationEvents } = await import("../federation/index.js");
+    const events = getRecentFederationEvents(limit);
+    return c.json({ events });
+  });
 
   // ── Status endpoint (auth required) ─────────────────────────────────────
   app.get("/api/status", async (c) => {
@@ -3503,6 +3560,13 @@ export function createGateway() {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestUrl = new URL(req.url ?? "/", "http://localhost");
     const pathname = requestUrl.pathname;
+
+    // ── Federation streaming delegate ────────────────────────────────────────
+    // Auth handled inside the helper (HMAC bearer, NOT user JWT).  Returns
+    // true when matched + handled so we short-circuit before hitting Hono.
+    if (await handleFederationDelegateStream(req, res)) {
+      return;
+    }
 
     // ── AG-UI streaming endpoint ─────────────────────────────────────────────
     if (req.method === "POST" && pathname === "/api/chat/stream") {

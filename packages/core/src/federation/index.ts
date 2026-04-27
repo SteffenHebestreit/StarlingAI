@@ -12,7 +12,8 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { getConfig } from "../config/loader.js";
 import type { FederationConfig, FederationPeerConfig } from "../config/schema.js";
 import { childLogger } from "../logger.js";
-import { logAudit } from "../audit/logger.js";
+import { logAudit, subscribeToAudit } from "../audit/logger.js";
+import type { AuditEvent } from "../audit/schema.js";
 
 const log = childLogger("federation");
 
@@ -56,6 +57,39 @@ interface CapabilityCacheEntry {
 }
 
 const _capabilityCache = new Map<string, CapabilityCacheEntry>();
+
+/**
+ * Bounded in-memory ring of recent federation_* audit events for the
+ * dashboard.  Populated lazily on first read so test environments that
+ * never touch the dashboard don't pay for the subscription.  A pure ring
+ * (cap = 200) keeps memory bounded in long-running processes — older
+ * events fall off as new ones land.
+ */
+const FEDERATION_EVENT_BUFFER_CAP = 200;
+const _recentFederationEvents: AuditEvent[] = [];
+let _auditSubscriptionInstalled = false;
+
+function ensureAuditSubscription(): void {
+  if (_auditSubscriptionInstalled) return;
+  subscribeToAudit((event) => {
+    if (!event.type.startsWith("federation_")) return;
+    _recentFederationEvents.push(event);
+    if (_recentFederationEvents.length > FEDERATION_EVENT_BUFFER_CAP) {
+      _recentFederationEvents.splice(0, _recentFederationEvents.length - FEDERATION_EVENT_BUFFER_CAP);
+    }
+  });
+  _auditSubscriptionInstalled = true;
+}
+
+/** Recent federation_* audit events (most recent last).  Bounded ring of 200 entries. */
+export function getRecentFederationEvents(limit = 50): AuditEvent[] {
+  if (_recentFederationEvents.length <= limit) return [..._recentFederationEvents];
+  return _recentFederationEvents.slice(-limit);
+}
+
+// Install at module load so events accumulate from process start, not from
+// the first dashboard poll.
+ensureAuditSubscription();
 
 /**
  * Resolve the federation config and assert it is enabled + sufficiently
@@ -188,6 +222,27 @@ export async function pingPeer(peerId: string): Promise<{ ok: boolean; latencyMs
   }
 }
 
+/** Progress event relayed from the peer's sub-agent runner over SSE. */
+export interface FederationStreamProgress {
+  type: "progress";
+  agentName: string;
+  kind: string;
+  iteration: number;
+  toolName?: string;
+  summary?: string;
+}
+
+export interface FederationStreamCompleted extends Omit<FederationDelegateResponse, "ok"> {
+  type: "completed";
+}
+
+export interface FederationStreamError {
+  type: "error";
+  error: string;
+}
+
+export type FederationStreamEvent = FederationStreamProgress | FederationStreamCompleted | FederationStreamError;
+
 /**
  * Delegate a task to a remote agent.  The peer enforces its own tier policy,
  * tool allowlists, and humanInLoopSteps — federation never bypasses local
@@ -278,6 +333,256 @@ async function safeReadText(res: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * Stream a remote delegation, forwarding peer progress events as they arrive
+ * and resolving with the final completed/error envelope.  The peer sends
+ * Server-Sent Events of shape:
+ *
+ *   data: {"type":"progress","agentName":"researcher","kind":"tool_start", ...}
+ *   data: {"type":"completed","output":"...","stats":{...},"remoteSessionId":"..."}
+ *   data: {"type":"error","error":"..."}
+ *
+ * `onProgress` fires for each progress frame; the returned promise resolves
+ * with the final response (ok=true on completed, ok=false on error or EOF
+ * without completion).
+ */
+export async function delegateToRemotePeerStreaming(
+  peerId: string,
+  request: FederationDelegateRequest,
+  onProgress: (event: FederationStreamProgress) => void,
+): Promise<FederationDelegateResponse> {
+  const config = requireEnabledConfig();
+  const peer = findPeerById(peerId);
+  if (!peer) return { ok: false, error: `Unknown federation peer: ${peerId}` };
+
+  const timeoutMs = Math.min(request.timeoutMs ?? config.delegationTimeoutMs, config.delegationTimeoutMs);
+  const auditPayload = {
+    peerId,
+    peerUrl: peer.url,
+    agentName: request.agentName,
+    taskPreview: request.task.slice(0, 240),
+    originSessionId: request.originSessionId ?? null,
+    timeoutMs,
+    streaming: true,
+  };
+  logAudit("federation_delegate_started", auditPayload, { sessionId: request.originSessionId });
+
+  const startedAt = Date.now();
+  let token: string;
+  try {
+    token = await mintFederationToken(peer.id, "delegate");
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+  const url = joinUrl(peer.url, "/api/federation/delegate/stream");
+
+  const controller = new AbortController();
+  const overallTimer = setTimeout(() => controller.abort(), timeoutMs + 10_000);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${token}`,
+        "content-type": "application/json",
+        "accept": "text/event-stream",
+      },
+      body: JSON.stringify({
+        agentName: request.agentName,
+        task: request.task,
+        context: request.context,
+        originSessionId: request.originSessionId,
+        timeoutMs,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(overallTimer);
+    const message = (err as Error).message;
+    logAudit("federation_delegate_failed", { ...auditPayload, error: message, durationMs: Date.now() - startedAt }, { sessionId: request.originSessionId });
+    return { ok: false, error: message };
+  }
+
+  if (!res.ok || !res.body) {
+    clearTimeout(overallTimer);
+    const status = res.status;
+    const body = res.body ? await safeReadText(res) : "";
+    logAudit("federation_delegate_failed", { ...auditPayload, status, durationMs: Date.now() - startedAt, body: body.slice(0, 200) }, { sessionId: request.originSessionId });
+    return { ok: false, error: `peer ${peerId} returned HTTP ${status}` };
+  }
+
+  let final: FederationDelegateResponse | null = null;
+  try {
+    const decoder = new TextDecoder();
+    let buffered = "";
+    const reader = res.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      const events = consumeSseEvents(buffered);
+      buffered = events.remainder;
+      for (const raw of events.events) {
+        const parsed = parseSseDataLine(raw);
+        if (!parsed) continue;
+        if (parsed.type === "progress") {
+          onProgress(parsed);
+        } else if (parsed.type === "completed") {
+          final = { ok: true, output: parsed.output, remoteSessionId: parsed.remoteSessionId, stats: parsed.stats };
+        } else if (parsed.type === "error") {
+          final = { ok: false, error: parsed.error };
+        }
+      }
+    }
+  } finally {
+    clearTimeout(overallTimer);
+  }
+
+  const durationMs = Date.now() - startedAt;
+  if (!final) {
+    logAudit("federation_delegate_failed", { ...auditPayload, error: "stream ended without completion frame", durationMs }, { sessionId: request.originSessionId });
+    return { ok: false, error: "stream ended without completion frame" };
+  }
+  logAudit("federation_delegate_completed", {
+    ...auditPayload,
+    durationMs,
+    remoteSessionId: final.remoteSessionId ?? null,
+    ok: final.ok,
+  }, { sessionId: request.originSessionId });
+  return final;
+}
+
+export interface FederationSearchMatch {
+  /** Source peer ("local" for the local instance, otherwise the peer id). */
+  source: string;
+  /** Peer's advertised instanceId, or "local" for own results. */
+  instanceId: string;
+  file: string;
+  snippets: string[];
+}
+
+export interface FederationSearchPeerResult {
+  peerId: string;
+  instanceId?: string;
+  ok: boolean;
+  matched: number;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface FederationSearchResult {
+  matches: FederationSearchMatch[];
+  peers: FederationSearchPeerResult[];
+}
+
+/**
+ * Broadcast a workspace search to one or more peers in parallel and return
+ * merged matches alongside per-peer status.  When `peerIds` is empty the
+ * search hits every configured peer.  Results from unreachable peers surface
+ * as ok=false entries instead of throwing — the caller decides whether
+ * partial coverage is acceptable.
+ */
+export async function broadcastWorkspaceSearch(
+  query: string,
+  options: { peerIds?: string[]; maxResults?: number } = {},
+): Promise<FederationSearchResult> {
+  const config = requireEnabledConfig();
+  const targetPeers = options.peerIds && options.peerIds.length > 0
+    ? config.peers.filter((p) => options.peerIds!.includes(p.id))
+    : config.peers;
+
+  if (targetPeers.length === 0) {
+    return { matches: [], peers: [] };
+  }
+
+  const maxResults = Math.min(30, Math.max(1, options.maxResults ?? 10));
+
+  logAudit("federation_search_started", {
+    query: query.slice(0, 80),
+    maxResults,
+    peerCount: targetPeers.length,
+  });
+
+  const results = await Promise.all(targetPeers.map(async (peer): Promise<{ peer: typeof peer; ok: boolean; matched: number; durationMs?: number; error?: string; instanceId?: string; matches: FederationSearchMatch[] }> => {
+    const startedAt = Date.now();
+    try {
+      const token = await mintFederationToken(peer.id, "delegate");
+      const res = await fetchWithTimeout(joinUrl(peer.url, "/api/federation/search"), {
+        method: "POST",
+        headers: {
+          "authorization": `Bearer ${token}`,
+          "content-type": "application/json",
+          "accept": "application/json",
+        },
+        body: JSON.stringify({ query, maxResults }),
+      }, 30_000);
+      if (!res.ok) {
+        return { peer, ok: false, matched: 0, durationMs: Date.now() - startedAt, error: `HTTP ${res.status}`, matches: [] };
+      }
+      const body = (await res.json()) as { matches?: { file: string; snippets: string[] }[]; instanceId?: string };
+      const matches = (body.matches ?? []).map<FederationSearchMatch>((m) => ({
+        source: peer.id,
+        instanceId: body.instanceId ?? peer.id,
+        file: m.file,
+        snippets: m.snippets,
+      }));
+      return { peer, ok: true, matched: matches.length, durationMs: Date.now() - startedAt, instanceId: body.instanceId, matches };
+    } catch (err) {
+      return { peer, ok: false, matched: 0, durationMs: Date.now() - startedAt, error: (err as Error).message, matches: [] };
+    }
+  }));
+
+  const peerResults: FederationSearchPeerResult[] = results.map((r) => ({
+    peerId: r.peer.id,
+    instanceId: r.instanceId,
+    ok: r.ok,
+    matched: r.matched,
+    durationMs: r.durationMs,
+    error: r.error,
+  }));
+
+  const merged = results.flatMap((r) => r.matches);
+  logAudit("federation_search_completed", {
+    query: query.slice(0, 80),
+    peerCount: targetPeers.length,
+    okPeers: peerResults.filter((p) => p.ok).length,
+    totalMatches: merged.length,
+  });
+
+  return { matches: merged, peers: peerResults };
+}
+
+function consumeSseEvents(buffered: string): { events: string[]; remainder: string } {
+  const events: string[] = [];
+  let remainder = buffered;
+  while (true) {
+    const idx = remainder.indexOf("\n\n");
+    if (idx === -1) break;
+    events.push(remainder.slice(0, idx));
+    remainder = remainder.slice(idx + 2);
+  }
+  return { events, remainder };
+}
+
+function parseSseDataLine(raw: string): FederationStreamEvent | null {
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload) continue;
+    try {
+      const parsed = JSON.parse(payload) as FederationStreamEvent;
+      if (parsed && (parsed.type === "progress" || parsed.type === "completed" || parsed.type === "error")) {
+        return parsed;
+      }
+    } catch {
+      // Skip malformed frames silently — the peer may emit comments or
+      // keep-alives that aren't valid event JSON.
+    }
+  }
+  return null;
 }
 
 export const FEDERATION_PROTOCOL_VERSION = FEDERATION_VERSION;

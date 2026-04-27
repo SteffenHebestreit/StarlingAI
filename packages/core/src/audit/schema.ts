@@ -107,7 +107,10 @@ export type AuditEventType =
   | "federation_delegate_denied"
   | "federation_request_received"
   | "federation_request_completed"
-  | "federation_request_failed";
+  | "federation_request_failed"
+  | "federation_search_served"
+  | "federation_search_started"
+  | "federation_search_completed";
 
 export interface AuditEvent {
   id: string;
