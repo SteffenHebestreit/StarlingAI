@@ -17,11 +17,15 @@
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { getConfig } from "../config/loader.js";
 import {
+  broadcastWorkspaceSearch,
   delegateToRemotePeer,
+  delegateToRemotePeerStreaming,
   fetchPeerCapability,
   pingPeer,
   getFederationConfig,
+  type FederationStreamProgress,
 } from "../federation/index.js";
+import { searchWorkspace } from "./workspace-search.js";
 
 function ensureFederationReady(): string | null {
   const config = getFederationConfig();
@@ -139,6 +143,10 @@ registerTool({
         type: "number",
         description: "Optional hard cap on the remote delegation in ms. Bounded by the peer's federation.delegationTimeoutMs.",
       },
+      stream: {
+        type: "boolean",
+        description: "When true, consume Server-Sent Events from the peer so the orchestrator surfaces live tool-call progress in the UI. Default true. Set false to fall back to a one-shot await.",
+      },
     },
     required: ["peerId", "agentName", "task"],
   },
@@ -153,18 +161,27 @@ registerTool({
     const timeoutMs = typeof args["timeoutMs"] === "number" && args["timeoutMs"] > 0
       ? (args["timeoutMs"] as number)
       : undefined;
+    // Default to streaming so federated calls render live progress like local
+    // delegations.  Callers can opt out by passing stream=false.
+    const useStream = args["stream"] !== false;
 
     if (!peerId || !agentName || !task) {
       return { success: false, output: "", error: "peerId, agentName, and task are required" };
     }
 
-    const response = await delegateToRemotePeer(peerId, {
-      agentName,
-      task,
-      context,
-      timeoutMs,
-      originSessionId: ctx.sessionId,
-    });
+    const request = { agentName, task, context, timeoutMs, originSessionId: ctx.sessionId };
+    const response = useStream
+      ? await delegateToRemotePeerStreaming(peerId, request, (event: FederationStreamProgress) => {
+          ctx.onSubAgentProgress?.({
+            agentName: `${peerId}/${event.agentName}`,
+            kind: event.kind as "started" | "thinking" | "tool_start" | "tool_done" | "completed",
+            iteration: event.iteration,
+            toolName: event.toolName,
+            summary: event.summary,
+            metadata: { federated: true, peerId },
+          });
+        })
+      : await delegateToRemotePeer(peerId, request);
 
     if (!response.ok) {
       return {
@@ -188,3 +205,106 @@ registerTool({
     };
   },
 });
+
+registerTool({
+  name: "federated_workspace_search",
+  description: "Run workspace_search across the local instance AND federated peers in parallel, then return merged matches grouped by source. Use this when the answer might live in a peer's workspace rather than your own. Returns local matches even when federation is disabled.",
+  embeddingDescription: "federated retrieval; cross-instance workspace search; broadcast keyword search; multi-instance grep; find code across StarlingAI peers",
+  costHint: "medium",
+  latencyHint: "medium",
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Search term — matched case-insensitively across all workspace text files on each peer.",
+      },
+      maxResults: {
+        type: "number",
+        description: "Maximum number of matching files PER peer (default 10, max 30).",
+      },
+      peerIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional subset of peer ids to broadcast to. Empty/omitted = all configured peers.",
+      },
+      includeLocal: {
+        type: "boolean",
+        description: "When true (default), include local workspace matches alongside peer results so you can compare. Set false to query peers only.",
+      },
+    },
+    required: ["query"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const query = String(args["query"] ?? "").trim();
+    if (!query) return { success: false, output: "", error: "query is required" };
+    const requestedMax = Number(args["maxResults"] ?? 10) || 10;
+    const maxResults = Math.min(30, Math.max(1, Math.floor(requestedMax)));
+    const peerIds = Array.isArray(args["peerIds"]) ? args["peerIds"].map(String).filter(Boolean) : undefined;
+    const includeLocal = args["includeLocal"] !== false;
+
+    const sections: string[] = [];
+    const allMatches: { source: string; file: string; snippets: string[] }[] = [];
+
+    if (includeLocal) {
+      const localMatches = searchWorkspace(ctx.workspacePath, query, maxResults);
+      for (const m of localMatches) allMatches.push({ source: "local", file: m.file, snippets: m.snippets });
+      if (localMatches.length > 0) {
+        sections.push(`### local (${localMatches.length} match${localMatches.length === 1 ? "" : "es"})\n${formatMatches(localMatches.map((m) => ({ source: "local", file: m.file, snippets: m.snippets })))}`);
+      }
+    }
+
+    const fedConfig = getFederationConfig();
+    let peerSummary: string | null = null;
+    if (fedConfig.enabled && fedConfig.sharedSecret && fedConfig.peers.length > 0) {
+      const broadcast = await broadcastWorkspaceSearch(query, { maxResults, peerIds });
+      for (const m of broadcast.matches) allMatches.push({ source: m.source, file: m.file, snippets: m.snippets });
+      const peerLines = broadcast.peers.map((p) => {
+        if (!p.ok) return `- ${p.peerId}: ⚠ ${p.error ?? "failed"}`;
+        return `- ${p.peerId}${p.instanceId ? ` → ${p.instanceId}` : ""}: ${p.matched} match${p.matched === 1 ? "" : "es"} in ${p.durationMs ?? "?"}ms`;
+      });
+      peerSummary = peerLines.join("\n");
+      const groupedByPeer = new Map<string, typeof broadcast.matches>();
+      for (const m of broadcast.matches) {
+        const arr = groupedByPeer.get(m.source) ?? [];
+        arr.push(m);
+        groupedByPeer.set(m.source, arr);
+      }
+      for (const [peer, peerMatches] of groupedByPeer) {
+        sections.push(`### peer:${peer} (${peerMatches.length} match${peerMatches.length === 1 ? "" : "es"})\n${formatMatches(peerMatches)}`);
+      }
+    }
+
+    if (allMatches.length === 0) {
+      const reason = !fedConfig.enabled
+        ? "(federation is disabled — only the local workspace was searched)"
+        : fedConfig.peers.length === 0
+          ? "(federation is enabled but no peers are configured)"
+          : "";
+      return {
+        success: true,
+        output: `No matches for "${query}". ${reason}`.trim(),
+        metadata: { count: 0 },
+      };
+    }
+
+    const header = `Found "${query}" in ${allMatches.length} location${allMatches.length === 1 ? "" : "s"} across ${peerSummary ? `local + ${fedConfig.peers.length} peer${fedConfig.peers.length === 1 ? "" : "s"}` : "local"}:`;
+    const peerBlock = peerSummary ? `\n\n**Peer status:**\n${peerSummary}` : "";
+    return {
+      success: true,
+      output: `${header}\n\n${sections.join("\n\n---\n\n")}${peerBlock}`,
+      metadata: {
+        count: allMatches.length,
+        bySource: Object.fromEntries(
+          [...new Set(allMatches.map((m) => m.source))].map((s) => [s, allMatches.filter((m) => m.source === s).length]),
+        ),
+      },
+    };
+  },
+});
+
+function formatMatches(matches: { source: string; file: string; snippets: string[] }[]): string {
+  return matches
+    .map((m) => `**${m.file}**\n${m.snippets.map((s) => "```\n" + s + "\n```").join("\n")}`)
+    .join("\n\n");
+}

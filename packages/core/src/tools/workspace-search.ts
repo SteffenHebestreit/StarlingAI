@@ -40,6 +40,31 @@ function* walkDir(dir: string, depth = 0): Generator<string> {
   }
 }
 
+export interface WorkspaceSearchMatch {
+  file: string;
+  snippets: string[];
+}
+
+/**
+ * Run a case-insensitive keyword search over the workspace and return
+ * matching files with context snippets.  Shared between the local
+ * workspace_search tool and the federated_workspace_search broadcaster so
+ * peers return results in the same shape.
+ */
+export function searchWorkspace(workspacePath: string, query: string, maxResults: number): WorkspaceSearchMatch[] {
+  const matches: WorkspaceSearchMatch[] = [];
+  try {
+    for (const filePath of walkDir(workspacePath)) {
+      if (matches.length >= maxResults) break;
+      const snippets = extractSnippets(filePath, query);
+      if (snippets.length > 0) matches.push({ file: relative(workspacePath, filePath), snippets });
+    }
+  } catch (err) {
+    log.warn({ err, query }, "workspace_search walk error");
+  }
+  return matches;
+}
+
 function extractSnippets(filePath: string, query: string, maxSnippets = 3, snippetWindow = 200): string[] {
   try {
     if (statSync(filePath).size > MAX_FILE_BYTES) return [];
@@ -90,16 +115,7 @@ registerTool({
       return { success: false, output: "", error: `Workspace not found: ${ctx.workspacePath}` };
     }
 
-    const matches: Array<{ file: string; snippets: string[] }> = [];
-    try {
-      for (const filePath of walkDir(ctx.workspacePath)) {
-        if (matches.length >= maxResults) break;
-        const snippets = extractSnippets(filePath, query);
-        if (snippets.length > 0) matches.push({ file: relative(ctx.workspacePath, filePath), snippets });
-      }
-    } catch (err) {
-      log.warn({ err, query }, "workspace_search walk error");
-    }
+    const matches = searchWorkspace(ctx.workspacePath, query, maxResults);
 
     if (matches.length === 0) {
       return { success: true, output: `No workspace files contain "${query}".`, metadata: { count: 0 } };

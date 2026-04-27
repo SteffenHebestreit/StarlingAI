@@ -46,6 +46,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  federated_workspace_search: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Broadcast workspace_search across federated peer instances and merge ranked results",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   search_workflows: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Search reusable scenes and jobs in the workflow catalog",

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT } from "jose";
+import { Readable } from "node:stream";
 
 const SHARED_SECRET = "x".repeat(32);
 const PEER_SHARED_SECRET = "p".repeat(32);
@@ -220,6 +221,175 @@ describe("federation HTTP routes", () => {
       body: JSON.stringify({ agentName: "researcher", task: "do something" }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("federation streaming client", () => {
+  let tempDir: string | null = null;
+
+  beforeEach(() => {
+    tempDir = writeFederationConfig();
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+    vi.restoreAllMocks();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  it("forwards progress events and resolves with the completed envelope", async () => {
+    const sseFrames = [
+      `data: ${JSON.stringify({ type: "progress", agentName: "researcher", kind: "tool_start", iteration: 1, toolName: "web_search" })}\n\n`,
+      `data: ${JSON.stringify({ type: "progress", agentName: "researcher", kind: "tool_done", iteration: 1, toolName: "web_search" })}\n\n`,
+      `data: ${JSON.stringify({ type: "completed", output: "final answer", remoteSessionId: "fed:ops:abc:123", stats: { iterations: 1 } })}\n\n`,
+    ];
+    const stream = Readable.toWeb(Readable.from(sseFrames.map((f) => Buffer.from(f, "utf8"))));
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream as ReadableStream, { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    const fed = await import("../federation/index.js");
+    const progressEvents: { kind: string; toolName?: string }[] = [];
+    const result = await fed.delegateToRemotePeerStreaming(
+      "ops",
+      { agentName: "researcher", task: "find references" },
+      (event) => progressEvents.push({ kind: event.kind, toolName: event.toolName }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("final answer");
+    expect(result.remoteSessionId).toBe("fed:ops:abc:123");
+    expect(progressEvents).toEqual([
+      { kind: "tool_start", toolName: "web_search" },
+      { kind: "tool_done", toolName: "web_search" },
+    ]);
+  });
+
+  it("resolves with ok=false when the stream ends without a completion frame", async () => {
+    const sseFrames = [
+      `data: ${JSON.stringify({ type: "progress", agentName: "researcher", kind: "started", iteration: 0 })}\n\n`,
+    ];
+    const stream = Readable.toWeb(Readable.from(sseFrames.map((f) => Buffer.from(f, "utf8"))));
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream as ReadableStream, { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.delegateToRemotePeerStreaming(
+      "ops",
+      { agentName: "researcher", task: "find references" },
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/without completion/i);
+  });
+
+  it("propagates HTTP errors as ok=false without consuming the body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 503 })));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.delegateToRemotePeerStreaming(
+      "ops",
+      { agentName: "researcher", task: "find references" },
+      () => undefined,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/HTTP 503/);
+  });
+});
+
+describe("federated workspace search broadcast", () => {
+  let tempDir: string | null = null;
+
+  beforeEach(() => {
+    tempDir = writeFederationConfig({
+      peers: [
+        { id: "alpha", url: "https://alpha.example.com:8765" },
+        { id: "beta", url: "https://beta.example.com:8765" },
+      ],
+    });
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+    vi.restoreAllMocks();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  it("merges matches from every reachable peer and tags them by source", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("alpha.example.com")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          instanceId: "alpha-prod",
+          matches: [{ file: "alpha/readme.md", snippets: ["alpha snippet"] }],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("beta.example.com")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          instanceId: "beta-prod",
+          matches: [{ file: "beta/readme.md", snippets: ["beta snippet"] }],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.broadcastWorkspaceSearch("readme", { maxResults: 5 });
+
+    expect(result.peers).toHaveLength(2);
+    expect(result.peers.every((p) => p.ok)).toBe(true);
+    expect(result.matches).toHaveLength(2);
+    const sources = result.matches.map((m) => m.source).sort();
+    expect(sources).toEqual(["alpha", "beta"]);
+    const alphaMatch = result.matches.find((m) => m.source === "alpha");
+    expect(alphaMatch?.instanceId).toBe("alpha-prod");
+    expect(alphaMatch?.file).toBe("alpha/readme.md");
+  });
+
+  it("surfaces unreachable peers as ok=false without throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("alpha.example.com")) {
+        return new Response(JSON.stringify({ ok: true, instanceId: "alpha-prod", matches: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error("ECONNREFUSED");
+    }));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.broadcastWorkspaceSearch("readme");
+
+    const alpha = result.peers.find((p) => p.peerId === "alpha");
+    const beta = result.peers.find((p) => p.peerId === "beta");
+    expect(alpha?.ok).toBe(true);
+    expect(beta?.ok).toBe(false);
+    expect(beta?.error).toMatch(/ECONNREFUSED/);
+  });
+
+  it("honors the peerIds filter to broadcast to a subset", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, instanceId: "x", matches: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.broadcastWorkspaceSearch("readme", { peerIds: ["alpha"] });
+
+    expect(result.peers).toHaveLength(1);
+    expect(result.peers[0]?.peerId).toBe("alpha");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

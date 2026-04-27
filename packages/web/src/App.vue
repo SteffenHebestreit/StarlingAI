@@ -145,6 +145,7 @@ const navLinks = [
   { to: "/agents", label: "Agents" },
   { to: "/swarm", label: "Swarm" },
   { to: "/memory", label: "Memory" },
+  { to: "/federation", label: "Federation" },
   { to: "/settings", label: "Settings" },
 ];
 
