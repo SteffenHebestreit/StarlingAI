@@ -428,6 +428,63 @@ describe("AgentSession collapsed history", () => {
     });
   });
 
+  it("merges tool-call assistant turns with the final answer across transient control messages", () => {
+    const session = new AgentSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({ role: "user", content: "Research the latest MCU options." });
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_delegate",
+          type: "function",
+          function: {
+            name: "delegate_to_agent",
+            arguments: JSON.stringify({ agentName: "web_task_coordinator", task: "Research current MCU options" }),
+          },
+        },
+      ],
+    });
+    session.addMessage({
+      role: "tool",
+      tool_call_id: "call_delegate",
+      content: "Delegated result from web_task_coordinator — TASK COMPLETED.\nObserved evidence:\n- ESP32-P4\n- STM32U5",
+      metadata: {
+        agentName: "web_task_coordinator",
+        delegationOutcome: "success",
+      },
+    });
+    session.addMessage({
+      role: "system",
+      content: "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks.",
+    });
+    session.addMessage({
+      role: "system",
+      content: "[USER INTERACTION OWNERSHIP] Ask the user yourself in one concise message and stop delegating until they respond.",
+    });
+    session.addMessage({
+      role: "assistant",
+      content: "ESP32-P4 and STM32U5 are the strongest current options.",
+    });
+
+    const transcript = session.toTranscript();
+
+    expect(transcript).toHaveLength(2);
+    expect(transcript[1]?.content).toBe("ESP32-P4 and STM32U5 are the strongest current options.");
+    expect(transcript[1]?.toolCalls?.[0]).toMatchObject({
+      name: "delegate_to_agent",
+      args: {
+        agentName: "web_task_coordinator",
+        task: "Research current MCU options",
+      },
+    });
+  });
+
   it("does not persist prompt-collapse tool summaries into stored user messages", () => {
     const session = new AgentSession({
       channel: "webchat",

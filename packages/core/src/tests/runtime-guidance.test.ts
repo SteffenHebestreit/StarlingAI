@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
+import { AgentSession } from "../agent/session.js";
 import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage } from "../agent/intent-classifier.js";
 
 describe("runtime turn guidance", () => {
@@ -201,10 +202,19 @@ describe("runtime turn guidance", () => {
   });
 
   it("builds a terminal response for repeated delegation loops", () => {
-    const response = buildDelegationLoopResponse("[pentest_coordinator]: Please confirm the authorization reference.");
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const response = buildDelegationLoopResponse(
+      session,
+      "[pentest_coordinator]: Please confirm the authorization reference.",
+    );
 
     expect(response).toContain("Delegation loop detected");
-    expect(response).toContain("Latest delegated response");
+    expect(response).toContain("best grounded result collected so far");
     expect(response).toContain("Please confirm the authorization reference");
   });
 

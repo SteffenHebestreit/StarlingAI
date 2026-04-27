@@ -120,12 +120,29 @@ export function getPerTurnToolCallLimit(toolName: string): number | undefined {
   return PER_TURN_TOOL_CALL_LIMITS[toolName];
 }
 
-export function buildDelegationLoopResponse(latestOutput: string, reason: "identical-output" | "limit" = "identical-output"): string {
+export function buildDelegationLoopResponse(
+  session: AgentSession,
+  latestOutput: string,
+  reason: "identical-output" | "limit" = "identical-output",
+): string {
   const normalized = latestOutput.trim() || "The delegated agent returned no usable output.";
-  const intro = reason === "limit"
-    ? "Delegation limit reached for this turn. The delegated agent is still asking for the same missing information."
-    : "Delegation loop detected. The delegated agent is still returning the same response.";
-  return `${intro}\n\nLatest delegated response:\n\n${normalized}`;
+  const evidence = findRecentDelegateEvidence(session.getHistory());
+  const bestAvailable = evidence?.evidence?.trim() || normalized;
+
+  if (reason === "limit") {
+    const intro = evidence
+      ? "I stopped here because the delegation limit for this turn was reached. Here is the best grounded result collected so far:"
+      : "I stopped here because the delegation limit for this turn was reached before a grounded final answer could be completed.";
+    return `${intro}\n\n${bestAvailable}\n\nIf you want me to continue past this limit, tell me to raise the delegation limit for this task. Otherwise, we can stop here.`;
+  }
+
+  return [
+    "Delegation loop detected. I stopped the repeated delegation and am using the best grounded result collected so far.",
+    "",
+    bestAvailable,
+    "",
+    "If you want another attempt, tell me to try a different strategy. Otherwise, we can stop here.",
+  ].join("\n");
 }
 
 function stableSerialize(value: unknown): string {
@@ -690,7 +707,7 @@ function buildWorkflowCatalogGuidance(signal: WorkflowCatalogSignal): string {
 }
 
 // Internal exports for unit tests.
-export const __workflowCatalog = {
+const __workflowCatalog = {
   detectWorkflowCatalogSignal,
   buildWorkflowCatalogGuidance,
   WORKFLOW_ACTION_VERB_PATTERN,
@@ -780,6 +797,8 @@ function collapseMixedDiscoveryAndOrchestrationToolsInResponse(
 export function buildRepeatedOutputFingerprint(toolName: string, args: Record<string, unknown>, resultText: string): string {
   return `${toolName}|${stableSerialize(args)}|${resultText.slice(0, 500)}`;
 }
+
+export { __workflowCatalog };
 
 function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
   return sanitizeAssistantContent(value, toolIterations > 0);
@@ -1008,18 +1027,30 @@ function countStructuredItems(text: string): number {
   return Math.max(tableRows, numbered, boldNumbered, bullets, headings);
 }
 
+function measureEvidenceCoverage(
+  text: string,
+  evidence: { evidence: string; itemCount: number },
+): { textItems: number; itemShortfall: boolean; lengthShortfall: boolean } {
+  const textItems = countStructuredItems(text);
+  return {
+    textItems,
+    itemShortfall: evidence.itemCount >= 5
+      && textItems < Math.ceil(evidence.itemCount * 0.6),
+    lengthShortfall: evidence.evidence.length >= 1500
+      && text.length < Math.ceil(evidence.evidence.length * 0.4),
+  };
+}
+
 function findRecentDelegateEvidence(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
 ): { evidence: string; itemCount: number } | null {
-  const recent = [...history].reverse().slice(0, 16);
+  const recent = [...history].reverse().slice(0, 24);
+  let bestCandidate: { evidence: string; itemCount: number; score: number } | null = null;
+
   for (const message of recent) {
     if (message.role !== "tool") continue;
     const content = String(message.content ?? "");
     const meta = message.metadata ?? {};
-    const outcome = typeof meta["delegationOutcome"] === "string"
-      ? String(meta["delegationOutcome"]).toLowerCase()
-      : undefined;
-    if (outcome === "failure") continue;
 
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
     if (!isDelegate) continue;
@@ -1030,9 +1061,16 @@ function findRecentDelegateEvidence(
       : content.trim();
     if (!evidence || evidence.length < 400) continue;
 
-    return { evidence, itemCount: countStructuredItems(evidence) };
+    const itemCount = countStructuredItems(evidence);
+    const score = evidence.length + (itemCount * 200);
+    if (!bestCandidate || score > bestCandidate.score) {
+      bestCandidate = { evidence, itemCount, score };
+    }
   }
-  return null;
+
+  return bestCandidate
+    ? { evidence: bestCandidate.evidence, itemCount: bestCandidate.itemCount }
+    : null;
 }
 
 async function enforceDelegateCoverage(
@@ -1048,11 +1086,10 @@ async function enforceDelegateCoverage(
   const evidence = findRecentDelegateEvidence(session.getHistory());
   if (!evidence) return finalResponse;
 
-  const finalItems = countStructuredItems(finalResponse);
-  const itemShortfall = evidence.itemCount >= 5
-    && finalItems < Math.ceil(evidence.itemCount * 0.6);
-  const lengthShortfall = evidence.evidence.length >= 1500
-    && finalResponse.length < Math.ceil(evidence.evidence.length * 0.4);
+  const initialCoverage = measureEvidenceCoverage(finalResponse, evidence);
+  const finalItems = initialCoverage.textItems;
+  const itemShortfall = initialCoverage.itemShortfall;
+  const lengthShortfall = initialCoverage.lengthShortfall;
 
   if (!itemShortfall && !lengthShortfall) return finalResponse;
 
@@ -1152,27 +1189,19 @@ async function enforceDelegateCoverage(
     return evidence.evidence;
   }
   // Only accept if the resynthesis genuinely improved coverage.
-  const newItems = countStructuredItems(cleanedResynth);
+  const resynthCoverage = measureEvidenceCoverage(cleanedResynth, evidence);
+  const newItems = resynthCoverage.textItems;
   const improved = cleanedResynth.length > finalResponse.length * 1.2 || newItems > finalItems;
   if (!improved) {
-    // Resynthesis did not improve and original was a truncation
-    // hallucination with rich evidence \u2014 bypass to raw evidence.
-    if (evidenceIsRich && draftClaimsTruncation) {
+    // Resynthesis did not materially improve the undercovered answer.
+    // When rich delegated evidence exists, prefer that evidence over
+    // keeping the incomplete summary that triggered correction.
+    if (evidenceIsRich) {
       return evidence.evidence;
     }
     return finalResponse;
   }
-  // I14.1: Even when the resynthesis "improved" by the +20%/items gate,
-  // it may still be drastically shorter than the evidence (e.g. 496
-  // chars of summary against 3982 chars of full deliverable). When the
-  // evidence is substantial and the rewrite still falls below the
-  // length-coverage threshold, bypass to raw evidence rather than ship
-  // a coverage-failed summary.
-  const resynthStillShort =
-    evidence.evidence.length >= 1500
-    && cleanedResynth.length < Math.ceil(evidence.evidence.length * 0.4)
-    && newItems < Math.ceil(Math.max(evidence.itemCount, 1) * 0.6);
-  if (resynthStillShort) {
+  if (resynthCoverage.itemShortfall || resynthCoverage.lengthShortfall) {
     logAudit(
       "hallucinated_truncation_bypass",
       {
@@ -2514,7 +2543,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, limitMessage);
 
         if (tc.name === "delegate_to_agent") {
-          const finalResponse = buildDelegationLoopResponse(_lastToolResultByName.get(tc.name) ?? "", "limit");
+          const finalResponse = buildDelegationLoopResponse(session, _lastToolResultByName.get(tc.name) ?? "", "limit");
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 
           const performance = buildTurnPerformanceMetrics({
@@ -2855,7 +2884,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             },
             { sessionId: session.id, severity: "warn" },
           );
-          const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
+          const finalResponse = buildDelegationLoopResponse(session, result.output, "identical-output");
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
@@ -2917,7 +2946,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           );
 
           if (tc.name === "delegate_to_agent") {
-            const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
+            const finalResponse = buildDelegationLoopResponse(session, result.output, "identical-output");
             persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 
             const performance = buildTurnPerformanceMetrics({
