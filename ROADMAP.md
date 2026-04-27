@@ -219,29 +219,52 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
-## Stage 11 — Federated Swarms (Exploratory)
+## Stage 11 — Federated Swarms (MVP shipped April 2026)
 
-Two or more StarlingAI instances discover each other via the swarm bus and can delegate tasks cross-instance. Each instance remains fully self-governing; the federation is purely additive and cannot override another instance's tool policies or guardrails.
+Two or more StarlingAI instances delegate tasks cross-instance. Each instance remains fully self-governing; federation is purely additive and cannot override another instance's tool policies or guardrails.
 
-### Planned capabilities
+### Capabilities
 
-| Capability | Description |
-|-----------|-------------|
-| Peer discovery | Instances announce themselves on a shared message bus topic; peers maintain a heartbeat registry |
-| Cross-instance delegation | A coordinator on instance A can `delegate_to_agent` targeting an agent on instance B by address |
-| Result relay | Results from remote delegations are relayed back and merged into the originating session's shared facts |
-| Policy isolation | Remote instance's Tier rules, guardrails, and humanInLoopSteps are fully respected; no override path exists |
-| Capability broadcast | Each instance advertises its loaded agent set and tool tiers; coordinators can query before delegating |
-| Federated search | `workspace_search` can optionally broadcast to peer instances and merge ranked results |
-| Audit trail | All cross-instance delegations are logged to the originating instance's audit store with peer address and session ID |
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| Manual peer registry | ✅ shipped | `federation.peers[]` in `starlingai.json` lists outbound peers (id + URL + tags) |
+| HMAC bearer auth | ✅ shipped | All federation requests carry HS256 JWTs (5-min TTL) signed with `federation.sharedSecret`; both peers must share the secret |
+| Capability advertisement | ✅ shipped | `GET /api/federation/capabilities` returns `{instanceId, agents, toolNames, protocolVersion}`; only Tier 0/1/2 tools are advertised |
+| Cross-instance delegation | ✅ shipped | `delegate_to_remote_agent(peerId, agentName, task, context)` Tier-2 tool calls peer's `POST /api/federation/delegate` and returns synthesized output |
+| Peer discovery tool | ✅ shipped | `list_federation_peers({ ping, refreshCapabilities })` returns the cached capability table for orchestrator routing |
+| Policy isolation | ✅ shipped | Peer enforces ITS OWN tool tiers, agent allowlist, and `humanInLoopSteps` via `runSubAgentWithStats` — no override path |
+| Audit trail | ✅ shipped | `federation_delegate_started/completed/failed` on the caller; `federation_request_received/completed/failed` on the peer |
+| `exposeAgents` allowlist | ✅ shipped | Per-instance allowlist of agent names exposed to peers (empty array = all) |
+| Capability cache | ✅ shipped | Peer capabilities cached for `federation.capabilityCacheTtlMs` (default 5 min) |
+| Auto peer discovery | ⏳ deferred | mDNS / shared-bus heartbeat registry — manual config only for MVP |
+| Federated workspace_search | ⏳ deferred | Broadcast-and-merge variant of workspace_search across peers |
+| Streaming delegation progress | ⏳ deferred | One-shot await for MVP; SSE relay of remote turn observations is future work |
 
-### Prerequisites
+### Configuration
 
-- Stage 8 container isolation must be complete and validated on all participating instances
-- All instances must be running the same major version of the gateway protocol
-- Peer authentication uses shared HMAC tokens configured per-instance via `starlingai.json`
+```json
+{
+  "federation": {
+    "enabled": true,
+    "instanceId": "primary",
+    "sharedSecret": "<32+ char shared HMAC secret — same on every peer>",
+    "peers": [
+      { "id": "ops", "url": "https://ops.example.com:8765", "tags": ["production"] }
+    ],
+    "exposeAgents": [],
+    "delegationTimeoutMs": 600000,
+    "capabilityCacheTtlMs": 300000
+  }
+}
+```
 
-This stage is exploratory — no shipping timeline is committed. Implementation will begin once Stage 10 is fully stable in production.
+When `enabled` is false the gateway routes return 404 and the federation tools refuse to execute, regardless of tier.
+
+### Prerequisites (met)
+
+- Stage 8 container isolation is complete on participating instances
+- All instances must run protocol version `1.0` (currently advertised by every build)
+- Peer authentication uses shared HMAC secrets configured per-instance via `starlingai.json`
 
 ---
 
