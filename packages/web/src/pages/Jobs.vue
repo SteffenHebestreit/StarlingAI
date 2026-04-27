@@ -10,6 +10,35 @@
       </div>
     </div>
 
+    <!-- Scheduled triggers panel — surfaces cron-driven scenes/jobs ambiently
+         so operators can see what fires on its own without digging through
+         JSONC. Reads from the in-memory scheduler via /api/triggers/cron;
+         empty when no triggers are configured. -->
+    <section v-if="cronTriggers.length > 0 || cronTriggersLoading" class="ambient-panel">
+      <header class="ambient-panel__header">
+        <h3 class="ambient-panel__title">Scheduled triggers</h3>
+        <span class="ambient-panel__meta">{{ cronTriggers.length }} active · refreshes every 30s</span>
+      </header>
+      <div class="ambient-panel__grid">
+        <article
+          v-for="trigger in cronTriggers"
+          :key="trigger.id"
+          class="trigger-card"
+        >
+          <div class="trigger-card__top">
+            <code class="trigger-card__expression">{{ trigger.expression }}</code>
+            <span class="trigger-card__count">fired {{ trigger.fireCount }}×</span>
+          </div>
+          <h4 class="trigger-card__label">{{ trigger.label }}</h4>
+          <p class="trigger-card__action">{{ trigger.action }}</p>
+          <div class="trigger-card__times">
+            <span>Next: {{ formatTriggerTime(trigger.nextFireAt) }}</span>
+            <span>Last: {{ trigger.lastFiredAt ? formatTriggerTime(trigger.lastFiredAt) : "never" }}</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <div class="jobs-page__filters">
       <input v-model="searchQuery" type="search" class="jobs-page__search" placeholder="Search by scene, job, tool, or agent">
       <select v-model="statusFilter" class="jobs-page__select">
@@ -93,7 +122,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
@@ -103,6 +132,65 @@ const gateway = useGatewayStore();
 const scenesStore = useScenesStore();
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | SceneJob["status"]>("all");
+
+// ── Scheduled cron triggers ──────────────────────────────────────────────────
+interface CronTrigger {
+  id: string;
+  label: string;
+  expression: string;
+  action: string;
+  createdAt: string;
+  lastFiredAt: string | null;
+  fireCount: number;
+  nextFireAt: string | null;
+}
+const cronTriggers = ref<CronTrigger[]>([]);
+const cronTriggersLoading = ref(false);
+let cronTriggersTimer: ReturnType<typeof setInterval> | null = null;
+
+function apiBase(): string {
+  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+}
+
+async function loadCronTriggers(): Promise<void> {
+  if (!gateway.token) return;
+  cronTriggersLoading.value = true;
+  try {
+    const res = await fetch(`${apiBase()}/api/triggers/cron`, {
+      headers: { Authorization: `Bearer ${gateway.token}` },
+    });
+    if (!res.ok) return;
+    const data = await res.json() as { jobs?: CronTrigger[] };
+    cronTriggers.value = (data.jobs ?? []).slice().sort((a, b) => {
+      // Soonest-next-fire first; null next sorts to the end.
+      const at = a.nextFireAt ? new Date(a.nextFireAt).getTime() : Number.POSITIVE_INFINITY;
+      const bt = b.nextFireAt ? new Date(b.nextFireAt).getTime() : Number.POSITIVE_INFINITY;
+      return at - bt;
+    });
+  } catch {
+    /* non-fatal — don't surface to keep the page snappy */
+  } finally {
+    cronTriggersLoading.value = false;
+  }
+}
+
+function formatTriggerTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  const diffMs = parsed.getTime() - Date.now();
+  const absMs = Math.abs(diffMs);
+  if (absMs < 60_000) return diffMs >= 0 ? "in <1m" : "<1m ago";
+  if (absMs < 3_600_000) {
+    const mins = Math.round(absMs / 60_000);
+    return diffMs >= 0 ? `in ${mins}m` : `${mins}m ago`;
+  }
+  if (absMs < 86_400_000) {
+    const hours = Math.round(absMs / 3_600_000);
+    return diffMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
+  }
+  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
 
 const serverStatusFilter = computed<SceneJob["status"] | undefined>(() => {
   if (statusFilter.value === "all" || statusFilter.value === "active") return undefined;
@@ -196,6 +284,15 @@ function jobToneClass(status: SceneJob["status"]): string {
 
 onMounted(() => {
   void refreshJobs();
+  void loadCronTriggers();
+  cronTriggersTimer = setInterval(() => { void loadCronTriggers(); }, 30_000);
+});
+
+onBeforeUnmount(() => {
+  if (cronTriggersTimer) {
+    clearInterval(cronTriggersTimer);
+    cronTriggersTimer = null;
+  }
 });
 
 watch(statusFilter, () => {
@@ -236,6 +333,98 @@ watch(statusFilter, () => {
   padding: 0.5rem 0.85rem;
   font-size: 0.85rem;
   cursor: pointer;
+}
+
+/* Scheduled triggers panel — ambient view of cron-driven scenes/jobs.
+   Sits above the filter row so operators see what fires on its own
+   before scrolling into the recent-runs grid. */
+.ambient-panel {
+  margin-bottom: 1.25rem;
+  padding: 0.85rem 1rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  background: rgba(8, 47, 73, 0.18);
+}
+
+.ambient-panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.ambient-panel__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgb(186 230 253);
+  letter-spacing: 0.01em;
+}
+
+.ambient-panel__meta {
+  font-size: 0.72rem;
+  color: rgb(125 211 252);
+  letter-spacing: 0.04em;
+}
+
+.ambient-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: 0.6rem;
+}
+
+.trigger-card {
+  border-radius: 0.85rem;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(15, 23, 42, 0.62);
+  padding: 0.7rem 0.85rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.trigger-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.trigger-card__expression {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.78rem;
+  background: rgba(56, 189, 248, 0.16);
+  color: rgb(186 230 253);
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+}
+
+.trigger-card__count {
+  font-size: 0.7rem;
+  color: rgb(148 163 184);
+}
+
+.trigger-card__label {
+  margin: 0;
+  font-size: 0.92rem;
+  color: rgb(243 232 255);
+}
+
+.trigger-card__action {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgb(203 213 225);
+}
+
+.trigger-card__times {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: rgb(148 163 184);
+  margin-top: 0.2rem;
 }
 
 .jobs-page__filters {
