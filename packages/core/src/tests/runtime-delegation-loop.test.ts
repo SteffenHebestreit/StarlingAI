@@ -469,6 +469,143 @@ describe("runtime delegated-loop regressions", () => {
     expect(session.getHistory().at(-1)?.content).toContain("TLV320ADCX360");
   });
 
+  it("falls back to rich delegated evidence when resynthesis is still too short", async () => {
+    const detailedEvidence = [
+      "1. ESP32-P4: Includes a dual-core RISC-V application subsystem plus dedicated low-power control logic for richer local audio pipelines and UI orchestration. Current vendor and ecosystem writeups position it as the strongest forward-looking Espressif option when local DSP, display work, and more ambitious coordination logic need to live on the same portable recorder board without immediately offloading everything to a host computer.",
+      "2. STM32U5: Remains attractive for ultra-low-power capture workloads when long battery runtime matters more than aggressive on-device inference throughput. In the portable-recorder context it keeps surfacing as the conservative choice for long unattended capture, sleep-heavy duty cycles, and carefully budgeted power rails, even though it does not bring the same integrated Wi-Fi-first developer story as ESP32-class parts.",
+      "3. RP2350: Adds stronger general-purpose compute than older RP2040 boards but still depends heavily on external audio front-end choices for serious multi-mic capture. The practical takeaway from recent examples is that it can absolutely record audio, but the path from proof-of-concept I2S capture to a polished OTA recorder still involves more integration work, more board bring-up effort, and more custom software than the ESP32-S3 baseline most builders already know.",
+      "4. nRF5340: Best fit when BLE-centric audio transport matters, but Wi-Fi-first OTA streaming still favors ESP-class parts unless a companion radio is acceptable. That makes it attractive for low-power earbuds, BLE microphones, or split architectures, but less compelling when the goal is one self-contained card-sized recorder that should capture, buffer, and push audio over Wi-Fi without bolting on extra network silicon or a second controller.",
+      "5. ReSpeaker-style flat microphone arrays remain the main off-the-shelf option; most credit-card-form-factor builds still require custom PCB work for exact geometry and enclosure constraints. The market still offers voice-assistant-oriented modules and Raspberry Pi accessories, but not a turnkey 4-5 microphone flat recorder reference board with the exact thickness, button layout, battery path, and ESP32 integration this project needs.",
+      "6. A practical 2026 stack still pairs Wi-Fi-first ESP32-class silicon with a custom array PCB when OTA audio streaming matters more than turnkey module reuse. That conclusion survives the latest part comparisons because the integration burden, radio story, software examples, and developer throughput still matter just as much as raw MCU capability when the end goal is a portable transcription recorder rather than a lab-only audio demo board.",
+    ].join("\n\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("coverage_delegate_1", {
+          agentName: "web_task_coordinator",
+          task: "Research the best 2026 MCU options for portable recording.",
+        });
+      }
+
+      return createTextStream([
+        "1. ESP32-P4 is strong for audio.",
+        "2. STM32U5 is efficient.",
+        "3. RP2350 is capable.",
+        "4. nRF5340 is useful for BLE.",
+        "5. Flat mic arrays still need custom PCB work.",
+        "6. ESP32-class Wi-Fi remains practical.",
+      ].join("\n"));
+    });
+
+    completeMock.mockResolvedValueOnce({
+      content: [
+        "1. ESP32-P4 remains a strong option.",
+        "2. STM32U5 is low power.",
+        "3. RP2350 is newer.",
+        "4. nRF5340 targets BLE audio.",
+        "5. Custom PCB arrays are still common.",
+        "6. Wi-Fi-first ESP32-class parts remain practical.",
+      ].join("\n"),
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: detailedEvidence,
+      metadata: {
+        agentName: "web_task_coordinator",
+        attemptedAgents: ["web_task_coordinator"],
+        routingReason: { confidence: "high" },
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Which MCU options are best in 2026 for portable recording?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe(detailedEvidence);
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses grounded delegate evidence and asks the user whether to raise the limit when the per-turn delegation limit is hit", async () => {
+    const detailedEvidence = [
+      "1. ESP32-P4 remains the strongest current fit when the recorder needs local UI control, stronger DSP headroom, and a practical Wi-Fi-first developer path on one compact battery-powered board.",
+      "2. STM32U5 remains the conservative low-power option when unattended runtime and sleep-heavy duty cycles matter more than aggressive on-device audio or inference work.",
+      "3. RP2350 is capable but still shifts too much burden onto custom board bring-up and external audio-front-end integration for a polished OTA recorder build.",
+      "4. nRF5340 is better when BLE audio transport is the main goal, but it is less compelling than ESP32-class parts for a self-contained Wi-Fi recorder.",
+      "5. Flat multi-mic recorder arrays still mostly require custom PCB work if the target is a credit-card form factor with exact geometry and battery constraints.",
+      "6. The practical direction is still an ESP32-class Wi-Fi MCU plus a custom microphone array PCB rather than waiting for a turnkey off-the-shelf recorder board.",
+      "Next step: inspect the battery-runtime trade-off notes before deciding whether to keep delegating or stop here.",
+    ].join("\n\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      return createDelegateToolCallStream(`limit_stop_${llmCallCount}`, {
+        agentName: "web_task_coordinator",
+        task: `Research portable recorder MCU options pass ${llmCallCount}`,
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: detailedEvidence,
+      metadata: {
+        agentName: "web_task_coordinator",
+        attemptedAgents: ["web_task_coordinator"],
+        routingReason: { confidence: "high" },
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Keep researching the best portable recorder MCU stack.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("best grounded result collected so far");
+    expect(result.response).toContain("ESP32-P4 remains the strongest current fit");
+    expect(result.response).toContain("tell me to raise the delegation limit for this task");
+    expect(result.response).toContain("Otherwise, we can stop here.");
+    expect(streamMock).toHaveBeenCalledTimes(4);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(3);
+    expect(completeMock).toHaveBeenCalledTimes(0);
+  });
+
   it("rewrites next-turn handoff responses into a direct synthesized answer", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

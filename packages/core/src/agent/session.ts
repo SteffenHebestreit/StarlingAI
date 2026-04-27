@@ -27,6 +27,12 @@ const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[USER INTERACTION OWNERSHIP]",
 ];
 
+function isTransientTurnSystemMessage(message: Pick<SessionHistoryMessage, "role" | "content">): boolean {
+  const content = typeof message.content === "string" ? message.content : "";
+  return message.role === "system"
+    && TRANSIENT_TURN_SYSTEM_PREFIXES.some((prefix) => content.startsWith(prefix));
+}
+
 export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
@@ -288,9 +294,7 @@ export class AgentSession {
 
     for (let index = this.history.length - 1; index >= 0; index -= 1) {
       const message = this.history[index]!;
-      const content = typeof message.content === "string" ? message.content : "";
-      const isTransientSystem = message.role === "system"
-        && TRANSIENT_TURN_SYSTEM_PREFIXES.some((prefix) => content.startsWith(prefix));
+      const isTransientSystem = isTransientTurnSystemMessage(message);
 
       if (message.role === "user") {
         sawLaterUserMessage = true;
@@ -410,6 +414,11 @@ export class AgentSession {
     while (index < this.history.length) {
       const message = this.history[index]!;
       if (message.role === "tool") {
+        index += 1;
+        continue;
+      }
+
+      if (isTransientTurnSystemMessage(message)) {
         index += 1;
         continue;
       }
