@@ -6,31 +6,31 @@
     <div class="bg-orb bg-orb-2" aria-hidden="true" />
 
     <!-- Header -->
-    <header class="relative z-10 bg-gray-900/80 backdrop-blur-lg border-b border-purple-500/20 px-5 flex items-center justify-between h-14 shrink-0">
+    <header class="relative z-10 bg-gray-900/80 backdrop-blur-lg border-b border-purple-500/20 px-3 sm:px-5 flex items-center justify-between gap-3 h-14 shrink-0">
 
       <!-- Logo + brand -->
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 sm:gap-3 min-w-0">
         <img
           src="/swarmLogo.svg"
           alt="StarlingAI logo"
           class="h-9 w-9 shrink-0 object-contain drop-shadow-[0_8px_18px_rgba(34,211,238,0.22)]"
         />
-        <div class="flex flex-col leading-none">
+        <div class="flex flex-col leading-none min-w-0">
           <span class="font-semibold text-sm bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent tracking-wide">
             StarlingAI
           </span>
-          <span class="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70 mt-1">
+          <span class="hidden sm:inline text-[10px] uppercase tracking-[0.18em] text-cyan-200/70 mt-1">
             Guarded Agent Swarm
           </span>
         </div>
-        <span class="text-xs bg-purple-900/40 text-purple-400 border border-purple-700/30 px-2 py-0.5 rounded-full font-medium">
+        <span class="hidden md:inline text-xs bg-purple-900/40 text-purple-400 border border-purple-700/30 px-2 py-0.5 rounded-full font-medium">
           v0.6.4
         </span>
       </div>
 
-      <div class="flex items-center gap-5">
+      <div class="flex items-center gap-2 sm:gap-5 min-w-0 flex-1 justify-end">
         <!-- Connection status -->
-        <div class="flex items-center gap-2 text-xs">
+        <div class="flex items-center gap-2 text-xs shrink-0">
           <div :class="[
             'w-1.5 h-1.5 rounded-full transition-colors',
             gateway.connected   ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]'
@@ -50,13 +50,17 @@
           Enable Notifications
         </button>
 
-        <!-- Nav -->
-        <nav class="flex" aria-label="Main navigation">
+        <!-- Nav: scrolls horizontally on small screens so all routes stay reachable
+             without a hamburger menu, while keeping fast direct access on desktop. -->
+        <nav
+          class="app-nav flex overflow-x-auto scroll-smooth -mr-3 sm:mr-0 pr-3 sm:pr-0 max-w-full"
+          aria-label="Main navigation"
+        >
           <RouterLink
             v-for="link in navLinks"
             :key="link.to"
             :to="link.to"
-            class="relative px-3 py-[18px] text-sm font-medium transition-colors"
+            class="relative px-2.5 sm:px-3 py-[18px] text-sm font-medium transition-colors shrink-0"
             :class="$route.path === link.to ? 'text-purple-300' : 'text-gray-400 hover:text-gray-200'"
             :aria-current="$route.path === link.to ? 'page' : undefined"
           >
@@ -197,5 +201,14 @@ onMounted(() => {
 .toast-leave-to {
   opacity: 0;
   transform: translate3d(0, -10px, 0);
+}
+
+/* Hide the horizontal scrollbar on the mobile nav — overflow still works
+   via touch / wheel, but we don't want a visible bar shrinking the row. */
+.app-nav {
+  scrollbar-width: none;
+}
+.app-nav::-webkit-scrollbar {
+  display: none;
 }
 </style>

@@ -1,7 +1,6 @@
 <template>
   <div
-    class="relative flex flex-col"
-    style="height: calc(100vh - 56px)"
+    class="relative flex flex-col chat-viewport"
     @dragover="onChatDragOver"
     @dragleave="onChatDragLeave"
     @drop="onChatDrop"
@@ -25,19 +24,20 @@
       </div>
     </div>
 
-    <!-- Session bar -->
-    <div class="relative z-10 bg-gray-900/60 backdrop-blur-md border-b border-purple-500/10 px-5 py-2 flex items-center justify-between">
-      <div class="flex items-center gap-3 text-xs text-gray-500">
-        <span v-if="gateway.currentSessionId">
+    <!-- Session bar — wraps onto two rows on phones so the export buttons
+         stay reachable without horizontal scrolling. -->
+    <div class="relative z-10 bg-gray-900/60 backdrop-blur-md border-b border-purple-500/10 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2 sm:gap-3 text-xs text-gray-500 min-w-0">
+        <span v-if="gateway.currentSessionId" class="shrink-0">
           Session
           <code class="font-mono text-gray-400 ml-1">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
         </span>
-        <span v-else class="italic">No active session</span>
+        <span v-else class="italic shrink-0">No active session</span>
         <select
           v-if="activeSessions.length > 0"
           :value="gateway.currentSessionId ?? ''"
           aria-label="Active session"
-          class="rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300"
+          class="rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300 max-w-[10rem] sm:max-w-none truncate"
           @change="handleSessionSwitch"
         >
           <option value="">Select active session</option>
@@ -46,7 +46,7 @@
           </option>
         </select>
       </div>
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2 justify-end">
         <button @click="gateway.createSession()"
           class="btn-grad px-3 py-1 rounded-lg text-xs">New Session</button>
         <template v-if="gateway.currentSessionId">
@@ -3019,6 +3019,16 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* Use the dynamic viewport unit on mobile so the chat fills exactly what's
+   visible — iOS Safari changes viewport height as the URL bar shows/hides,
+   and 100vh would otherwise extend behind the bar (cutting off the
+   composer). 100dvh tracks the visible area; 100vh stays as a fallback for
+   browsers that don't support dvh. */
+.chat-viewport {
+  height: calc(100vh - 56px);
+  height: calc(100dvh - 56px);
+}
+
 .approval-enter-active,
 .approval-leave-active {
   transition: all 0.25s ease;
