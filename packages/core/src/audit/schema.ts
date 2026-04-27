@@ -110,7 +110,10 @@ export type AuditEventType =
   | "federation_request_failed"
   | "federation_search_served"
   | "federation_search_started"
-  | "federation_search_completed";
+  | "federation_search_completed"
+  // Self-improvement abuse detection (closes GAP-4)
+  | "tier_escalation_attempt"
+  | "self_improve_loop";
 
 export interface AuditEvent {
   id: string;

@@ -83,14 +83,21 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ### GAP-4 — Warden Has No Self-Improvement Abuse Detection
 
-> **Status: ✅ Implemented in v0.3.2**
+> **Status: ✅ Fully closed (April 2026 — `tier_escalation_attempt` + `self_improve_loop`)**
 
 **Reality today (pre-v0.3.2):** The Warden monitors for `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, and computer-use anomalies. It does **not** watch for:
 - A single agent/session flooding the config-assistant with rapid proposals (`config_proposal_flood`)
 - Repeated self-improvement cycles that keep failing and re-trying (`self_improve_loop`)
 - An agent repeatedly trying to grant itself higher tool tiers
 
-**v0.3.2 fix (Stage 8.3):** Added `config_proposal_flood` check (#7) to `warden.ts`: more than 5 `config_proposal_created` events from a single session within 10 minutes triggers a `warden_alert` (severity: warn) and clears the session's proposal counter. The Warden now subscribes to `config_proposal_created` and `config_proposal_applied` events on the audit bus.
+**v0.3.2 fix (Stage 8.3):** Added `config_proposal_flood` check (#7) to `warden.ts`: more than 5 `config_proposal_created` events from a single session within 10 minutes triggers a `warden_alert` (severity: warn) and clears the session's proposal counter.
+
+**April 2026 closure:** Added the two missing checks.
+
+- **`tier_escalation_attempt`** — `dynamic-tools.ts` `validateDefinition()` and `approvePromotion()` now reject any self-developed tool whose bare name collides with a compile-time-mapped built-in (using `isCompileTimeMappedTool()` from `tool-tiers.ts`). A promoted dynamic tool with a colliding name would otherwise shadow the built-in's tier semantics. Both rejection paths emit a `tier_escalation_attempt` audit event with stage / attemptedName / collidingTier; the Warden surfaces every such event as an immediate operator-visible alert.
+- **`self_improve_loop`** — Warden accumulates `config_proposal_rejected`, `tool_promotion_rejected`, `tool_dev_session_terminated`, and `tier_escalation_attempt` events per session. Three or more in a 30-minute window fire a `self_improve_loop` warn alert. The window resets after firing so a single burst alerts once.
+
+**Defense in depth:** `deployApprovedTool` now runs `validateDefinition` at the public deploy boundary (previously the validator only ran from the file-watcher). This closes the direct-API bypass path.
 
 ---
 
