@@ -387,6 +387,14 @@ function readUserMemoryRecords(workspacePath: string): MemoryRecord[] {
   return readDurableMemoryRecords("user", workspacePath);
 }
 
+/** Public read accessors for the memory inspector REST endpoints. */
+export function listWorkspaceMemoryRecords(workspacePath: string): MemoryRecord[] {
+  return readWorkspaceMemoryRecords(workspacePath);
+}
+export function listUserMemoryRecords(workspacePath: string): MemoryRecord[] {
+  return readUserMemoryRecords(workspacePath);
+}
+
 function readDurableMemoryRecords(scope: DurableMemoryScope, workspacePath: string): MemoryRecord[] {
   return _readDurableCached(scope, workspacePath).records;
 }

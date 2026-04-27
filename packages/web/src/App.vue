@@ -140,6 +140,7 @@ const navLinks = [
   { to: "/sessions", label: "Sessions" },
   { to: "/agents", label: "Agents" },
   { to: "/swarm", label: "Swarm" },
+  { to: "/memory", label: "Memory" },
   { to: "/settings", label: "Settings" },
 ];
 
