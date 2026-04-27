@@ -2201,6 +2201,133 @@ export function createGateway() {
     }
   });
 
+  // ── Memory inspector endpoints ────────────────────────────────────────────
+  // Read-only views into the durable memory store and the MemGraph knowledge
+  // graph for the operator UI under /memory. Both endpoints degrade gracefully
+  // when their backing store is offline.
+
+  app.get("/api/memory/entries", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const scope = c.req.query("scope") === "user" ? "user" : "workspace";
+    try {
+      const { listWorkspaceMemoryRecords, listUserMemoryRecords } = await import("../memory/service.js");
+      const cfg = (await import("../config/loader.js")).getConfig();
+      const records = scope === "user"
+        ? listUserMemoryRecords(cfg.workspacePath)
+        : listWorkspaceMemoryRecords(cfg.workspacePath);
+      const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 200)));
+      const query = (c.req.query("query") ?? "").toLowerCase().trim();
+      const filtered = query
+        ? records.filter((r) => r.content?.toLowerCase().includes(query)
+          || r.subject?.toLowerCase().includes(query)
+          || r.key?.toLowerCase().includes(query)
+          || (r.tags ?? []).some((t) => t.toLowerCase().includes(query)))
+        : records;
+      const paged = filtered.slice(0, limit);
+      return c.json({ scope, total: filtered.length, returned: paged.length, records: paged });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/graph/labels", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { isNeo4jAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
+      if (!isNeo4jAvailable()) return c.json({ available: false, labels: [] });
+      const result = await runCypher(`
+        MATCH (n)
+        UNWIND labels(n) AS label
+        RETURN label, count(*) AS count
+        ORDER BY count DESC
+      `);
+      const labels = result ? toPlainRecords(result).map((r) => ({ label: String(r["label"]), count: Number(r["count"] ?? 0) })) : [];
+      return c.json({ available: true, labels });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/graph/overview", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { isNeo4jAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
+      if (!isNeo4jAvailable()) {
+        return c.json({ available: false, nodes: [], edges: [], note: "MemGraph is offline. Set MEMGRAPH_URL and start the memgraph service to enable the knowledge-graph view." });
+      }
+      const labelFilter = (c.req.query("label") ?? "").trim();
+      const limit = Math.max(10, Math.min(500, Number(c.req.query("limit") ?? 150)));
+      // Pull a label-scoped (or global) sample of nodes plus their immediate
+      // neighbours. The visualization is a rendered bird's-eye view, not the
+      // full graph — operators that need deeper queries should use graph_query.
+      const cypher = labelFilter
+        ? `MATCH (n:${labelFilter})
+           WITH n LIMIT $limit
+           OPTIONAL MATCH (n)-[r]-(m)
+           RETURN n, r, m`
+        : `MATCH (n)
+           WITH n LIMIT $limit
+           OPTIONAL MATCH (n)-[r]-(m)
+           RETURN n, r, m`;
+      const result = await runCypher(cypher, { limit });
+      const records = result ? toPlainRecords(result) : [];
+      const nodesById = new Map<string, Record<string, unknown>>();
+      const edgesByKey = new Map<string, Record<string, unknown>>();
+      const captureNode = (raw: unknown): string | undefined => {
+        if (!raw || typeof raw !== "object") return undefined;
+        const node = raw as { identity?: { toString(): string } | string; labels?: string[]; properties?: Record<string, unknown> };
+        const id = typeof node.identity === "object" && node.identity !== null && "toString" in node.identity
+          ? (node.identity as { toString(): string }).toString()
+          : String(node.identity ?? "");
+        if (!id) return undefined;
+        if (!nodesById.has(id)) {
+          const props = node.properties ?? {};
+          const name = typeof (props as { name?: unknown }).name === "string" ? String((props as { name: string }).name) : "";
+          nodesById.set(id, {
+            id,
+            labels: Array.isArray(node.labels) ? node.labels : [],
+            name,
+            properties: props,
+          });
+        }
+        return id;
+      };
+      const captureEdge = (raw: unknown, sourceId: string | undefined, targetId: string | undefined): void => {
+        if (!raw || typeof raw !== "object" || !sourceId || !targetId) return;
+        const rel = raw as { identity?: { toString(): string } | string; type?: string; properties?: Record<string, unknown> };
+        const rid = typeof rel.identity === "object" && rel.identity !== null && "toString" in rel.identity
+          ? (rel.identity as { toString(): string }).toString()
+          : String(rel.identity ?? "");
+        const key = rid || `${sourceId}-${rel.type ?? "RELATED"}-${targetId}`;
+        if (edgesByKey.has(key)) return;
+        edgesByKey.set(key, {
+          id: key,
+          source: sourceId,
+          target: targetId,
+          type: rel.type ?? "RELATED",
+          properties: rel.properties ?? {},
+        });
+      };
+      for (const row of records) {
+        const sourceId = captureNode(row["n"]);
+        const targetId = captureNode(row["m"]);
+        captureEdge(row["r"], sourceId, targetId);
+      }
+      return c.json({
+        available: true,
+        labelFilter: labelFilter || null,
+        nodes: Array.from(nodesById.values()),
+        edges: Array.from(edgesByKey.values()),
+        truncated: nodesById.size >= limit,
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.get("/api/sessions/:sessionId/debug-markdown", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
