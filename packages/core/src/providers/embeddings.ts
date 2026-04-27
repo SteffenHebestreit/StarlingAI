@@ -1275,7 +1275,7 @@ export async function searchByEmbedding(
   }
 
   try {
-    const [queryVector] = await provider.embed([query], _embeddingModel);
+    const queryVector = await getOrComputeQueryEmbedding(query, provider, _embeddingModel);
     if (!queryVector) return [];
     const results = _index
       .map(entry => ({ agentName: entry.agentName, description: entry.description, score: cosineSimilarity(queryVector, entry.vector) }))
@@ -1309,16 +1309,24 @@ export function isEmbeddingAvailable(): boolean {
  */
 export async function computeQueryEmbedding(text: string): Promise<Float32Array | null> {
   if (!_available || !_lastProvider || !_embeddingModel) return null;
+  return getOrComputeQueryEmbedding(text, _lastProvider, _embeddingModel);
+}
+
+async function getOrComputeQueryEmbedding(
+  text: string,
+  provider: LMStudioProvider,
+  model: string,
+): Promise<Float32Array | null> {
   const normalized = normalizeSearchText(text);
   if (!normalized) {
     try {
-      const [vec] = await _lastProvider.embed([text], _embeddingModel);
+      const [vec] = await provider.embed([text], model);
       return vec ?? null;
     } catch {
       return null;
     }
   }
-  const cacheKey = `${_embeddingModel}::${normalized}`;
+  const cacheKey = `${model}::${normalized}`;
   const cached = _queryVectorCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= QUERY_VECTOR_CACHE_TTL_MS) {
     return cached.vector;
@@ -1326,8 +1334,6 @@ export async function computeQueryEmbedding(text: string): Promise<Float32Array 
   if (cached) _queryVectorCache.delete(cacheKey);
   const inflight = _queryVectorInflight.get(cacheKey);
   if (inflight) return inflight;
-  const provider = _lastProvider;
-  const model = _embeddingModel;
   const promise = (async () => {
     try {
       const [vec] = await provider.embed([text], model);

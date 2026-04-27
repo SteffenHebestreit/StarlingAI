@@ -269,48 +269,14 @@ function cloneStatusHistory(history: ChatMessage["statusHistory"]): ChatMessage[
 }
 
 function normalizeHydratedMessages(input: ChatMessage[]): ChatMessage[] {
-  const normalized: ChatMessage[] = [];
-
-  for (const entry of input) {
-    const message: ChatMessage = {
-      ...entry,
-      timestamp: new Date(entry.timestamp),
-      statusHistory: cloneStatusHistory(entry.statusHistory),
-      attachments: cloneAttachments(entry.attachments),
-      toolCalls: cloneToolCalls(entry.toolCalls),
-      guardrailEvents: cloneGuardrailEvents(entry.guardrailEvents),
-    };
-    const previous = normalized[normalized.length - 1];
-
-    if (previous?.role === "assistant" && message.role === "assistant") {
-      previous.id = message.id;
-      previous.timestamp = message.timestamp;
-      previous.toolCalls = [
-        ...(previous.toolCalls ?? []),
-        ...(message.toolCalls ?? []),
-      ];
-      previous.attachments = [
-        ...(previous.attachments ?? []),
-        ...(message.attachments ?? []),
-      ];
-      previous.guardrailEvents = [
-        ...(previous.guardrailEvents ?? []),
-        ...(message.guardrailEvents ?? []),
-      ];
-      previous.blocked = previous.blocked || message.blocked;
-      previous.swarmState = message.swarmState ?? previous.swarmState;
-      previous.usage = message.usage ?? previous.usage;
-      previous.perf = message.perf ?? previous.perf;
-      if (message.content.trim()) {
-        previous.content = message.content;
-      }
-      continue;
-    }
-
-    normalized.push(message);
-  }
-
-  return normalized;
+  return input.map((entry) => ({
+    ...entry,
+    timestamp: new Date(entry.timestamp),
+    statusHistory: cloneStatusHistory(entry.statusHistory),
+    attachments: cloneAttachments(entry.attachments),
+    toolCalls: cloneToolCalls(entry.toolCalls),
+    guardrailEvents: cloneGuardrailEvents(entry.guardrailEvents),
+  }));
 }
 
 const THINKING_BLOCK_RE = /<(thinking|think)>[\s\S]*?<\/(thinking|think)>/gi;

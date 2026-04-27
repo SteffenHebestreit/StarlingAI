@@ -350,6 +350,46 @@ describe("runtime turn guidance", () => {
     expect(result).not.toContain("TASK COMPLETED");
   });
 
+  it("marks delegated container errors as failed instead of completed", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      "Sub-agent 'coder' container error: unknown",
+      {
+        agentName: "coder",
+        attemptedAgents: ["coder"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    );
+
+    expect(result).toContain("Delegated result from coder — TASK FAILED.");
+    expect(result).toContain("container error: unknown");
+    expect(result).not.toContain("TASK COMPLETED");
+  });
+
+  it("classifies delegated container errors as failures for post-orchestration handling", () => {
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_container_failure",
+        content: [
+          "Delegated result from coder — TASK FAILED.",
+          "Observed evidence:",
+          "Sub-agent 'coder' container error: unknown",
+        ].join("\n"),
+        metadata: {
+          agentName: "coder",
+          delegationSucceeded: true,
+          delegationOutcome: "success",
+          terminalState: "completed",
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("failure");
+  });
+
   it("passes long delegated deliverables verbatim instead of truncating to 1600 chars", () => {
     const paperBody = [
       "# KI-Protokolle: MCP, A2A und AG-UI im Vergleich",
@@ -479,6 +519,21 @@ describe("runtime turn guidance", () => {
     expect(result).toContain("Observed evidence:");
     expect(result).toContain("Endpoint: /v1/health");
     expect(result).not.toContain("[ephemeral:api_inspector]:");
+  });
+
+  it("marks failed ephemeral-agent results as failed instead of completed", () => {
+    const result = buildModelVisibleToolResult(
+      "create_ephemeral_agent",
+      "Sub-agent 'ephemeral:blog_writer' timed out after 60000ms",
+      {
+        agentName: "ephemeral:blog_writer",
+      },
+    );
+
+    expect(result).toContain("Ephemeral agent ephemeral:blog_writer failed.");
+    expect(result).toContain("Do NOT claim the task was completed or delegated successfully.");
+    expect(result).toContain("timed out after 60000ms");
+    expect(result).not.toContain("completed.");
   });
 
   it("does not add extra guidance for timeless questions", () => {

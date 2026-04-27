@@ -13,6 +13,8 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_CONFIG_PATH"];
     delete process.env["SAI_WORKSPACE_CONFIG_PATH"];
     delete process.env["SAI_MUTABLE_CONFIG_PATH"];
+    delete process.env["SAI_LMSTUDIO_URL"];
+    delete process.env["SAI_LMSTUDIO_API_KEY"];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -184,6 +186,38 @@ describe("config loader mutable overlay", () => {
       expect(config.channels.webchat.port).toBe(3301);
       expect(existsSync(compiledPath)).toBe(true);
       expect(readFileSync(compiledPath, "utf8")).toContain('"delegate_only"');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("overrides LM Studio baseUrl and apiKey from environment variables", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-lmstudio-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(baseConfigPath, JSON.stringify({
+      providers: {
+        lmstudio: {
+          baseUrl: "http://config-lmstudio:1234/v1",
+          apiKey: "config-api-key",
+          timeoutMs: 30000,
+          maxRetries: 3,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_LMSTUDIO_URL"] = "http://env-lmstudio:1234/v1";
+    process.env["SAI_LMSTUDIO_API_KEY"] = "env-api-key";
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+
+      expect(config.providers.lmstudio?.baseUrl).toBe("http://env-lmstudio:1234/v1");
+      expect(config.providers.lmstudio?.apiKey).toBe("env-api-key");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

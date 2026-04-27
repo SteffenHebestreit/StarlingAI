@@ -121,7 +121,9 @@ describe("agent search helpers", () => {
 
     expect(first[0]?.agentName).toBe("browser_agent");
     expect(second[0]?.agentName).toBe("browser_agent");
-    expect(embedMock).toHaveBeenCalledTimes(2);
+    // Initial index build embeds each changed agent separately, then the
+    // repeated query reuses the cached query vector and cached ranked results.
+    expect(embedMock).toHaveBeenCalledTimes(3);
 
     const updatedAgents = {
       browser_agent: initialAgents.browser_agent,

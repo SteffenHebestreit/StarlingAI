@@ -210,6 +210,10 @@ const ORCHESTRATION_LAUNCHER_TOOL_NAMES = new Set([
   "run_task_graph",
   "run_workflow",
 ]);
+const PERSISTED_SWARM_STATE_TOOL_NAMES = new Set([
+  ...ORCHESTRATION_LAUNCHER_TOOL_NAMES,
+  "swarm_delegate",
+]);
 const AGENT_DISCOVERY_TOOL_NAMES = new Set([
   "search_agents",
   "list_agents",
@@ -1227,6 +1231,7 @@ function looksLikeDelegatedFailureEvidence(value: string): boolean {
   if (/<\|channel\>\w+/i.test(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
+    || /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview)
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
 }
 
@@ -1458,10 +1463,13 @@ export function buildModelVisibleToolResult(
     const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "ephemeral agent";
     const rejectedTools = Array.isArray(metadata?.["rejectedTools"]) ? (metadata?.["rejectedTools"] as unknown[]).map(String).filter(Boolean) : [];
     const evidence = truncatePlainText(stripPresentationFormatting(stripAgentPrefix(resultText)), 1600);
+    const failed = looksLikeDelegatedFailureEvidence(evidence);
     return [
-      `Ephemeral agent ${agentName} completed.`,
+      `Ephemeral agent ${agentName} ${failed ? "failed" : "completed"}.`,
       rejectedTools.length > 0 ? `Rejected tools: ${rejectedTools.join(", ")}.` : "",
-      "IMPORTANT: Relay ALL specific details from the evidence below in your answer.",
+      failed
+        ? "IMPORTANT: This ephemeral-agent attempt failed. Report the failure honestly using only the explicit evidence below. Do NOT claim the task was completed or delegated successfully."
+        : "IMPORTANT: Relay ALL specific details from the evidence below in your answer.",
       `Observed evidence:\n${evidence || "No usable ephemeral-agent result returned."}`,
     ].filter(Boolean).join("\n");
   }
@@ -1636,6 +1644,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     ? async (_toolName: string, _args: Record<string, unknown>) => true
     : opts.approvalCallback;
 
+  const carriedSwarmTasks = loadPreviousTurnSwarmTasks(session.getHistory());
+  const carriedSwarmTaskFingerprint = stableSerialize(carriedSwarmTasks);
   const toolContext: ToolContext = {
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
@@ -1659,9 +1669,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       updatedAt: new Date().toISOString(),
       // Seed from previous turn so retries reuse completed research instead of
       // running the same sub-agent tasks from scratch.
-      tasks: loadPreviousTurnSwarmTasks(session.getHistory()),
+      tasks: carriedSwarmTasks,
     },
   };
+  let turnUsedSwarmTools = false;
+  const getTurnSwarmState = (): SwarmState | undefined => selectPersistableSwarmState(
+    toolContext.swarmState,
+    carriedSwarmTaskFingerprint,
+    turnUsedSwarmTools,
+  );
 
   let totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let iterationCount = 0;
@@ -1777,7 +1793,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
   const blockMissingWorkflowCatalogCheck = (): TurnOutput => blocked(
     "This request required a workflow catalog check before delegation or a direct answer, but the model skipped the workflow tools.",
-    toolContext.swarmState,
+    getTurnSwarmState(),
     buildTurnPerformanceMetrics({
       turnStartedAt,
       firstModelResponseMs,
@@ -1842,7 +1858,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         );
         if (synthesized) {
           const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
-          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt, firstModelResponseMs, llmCalls, llmTimeMs, toolCallsRequested,
@@ -1852,13 +1868,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           return {
             response: finalResponse, toolCallsExecuted: iterationCount,
             guardrailEvents, usage: totalUsage, blocked: false,
-            swarmState: toolContext.swarmState, performance,
+            swarmState: getTurnSwarmState(), performance,
           };
         }
       }
       return blocked(
         "Request cancelled or timed out",
-        toolContext.swarmState,
+        getTurnSwarmState(),
         buildTurnPerformanceMetrics({
           turnStartedAt,
           firstModelResponseMs,
@@ -1951,7 +1967,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       log.error({ err, sessionId: session.id }, "LLM call failed");
       return blocked(
         `LLM error: ${String(err)}`,
-        toolContext.swarmState,
+        getTurnSwarmState(),
         buildTurnPerformanceMetrics({
           turnStartedAt,
           firstModelResponseMs,
@@ -2007,7 +2023,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       return blocked(
         "This turn required running the approved n8n workflow candidate, but the model still skipped the required run_workflow call.",
-        toolContext.swarmState,
+        getTurnSwarmState(),
         buildTurnPerformanceMetrics({
           turnStartedAt,
           firstModelResponseMs,
@@ -2053,7 +2069,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       return blocked(
         "This turn already searched the workflow catalog and found reusable matches, but the model still skipped run_workflow.",
-        toolContext.swarmState,
+        getTurnSwarmState(),
         buildTurnPerformanceMetrics({
           turnStartedAt,
           firstModelResponseMs,
@@ -2160,7 +2176,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         return blocked(
           "This workflow-authoring follow-up required an orchestration tool, but the model only promised the action without executing it.",
-          toolContext.swarmState,
+          getTurnSwarmState(),
           buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -2221,7 +2237,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         return blocked(
           "This turn found reusable workflow matches but the model tried to finish without running one.",
-          toolContext.swarmState,
+          getTurnSwarmState(),
           buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -2279,7 +2295,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         return blocked(
           "This request required delegation to a specialist agent, but the model tried to answer without using an orchestration tool.",
-          toolContext.swarmState,
+          getTurnSwarmState(),
           buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -2309,7 +2325,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         logAudit("output_redacted", { types: outputScan.detectedTypes }, { sessionId: session.id, severity: "warn" });
       }
 
-      persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+      persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 
       const performance = buildTurnPerformanceMetrics({
         turnStartedAt,
@@ -2414,7 +2430,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         guardrailEvents,
         usage: totalUsage,
         blocked: false,
-        swarmState: toolContext.swarmState,
+        swarmState: getTurnSwarmState(),
         performance,
       };
     }
@@ -2501,7 +2517,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         if (tc.name === "delegate_to_agent") {
           const finalResponse = buildDelegationLoopResponse(_lastToolResultByName.get(tc.name) ?? "", "limit");
-          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
@@ -2546,7 +2562,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             guardrailEvents,
             usage: totalUsage,
             blocked: false,
-            swarmState: toolContext.swarmState,
+            swarmState: getTurnSwarmState(),
             performance,
           };
         }
@@ -2739,6 +2755,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       const toolStartedAt = Date.now();
       const result = await executeTool(tc.name, tc.arguments, toolContext);
+      if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
+        turnUsedSwarmTools = true;
+      }
       toolExecutionTimeMs += Date.now() - toolStartedAt;
       const intervention = classifyToolIntervention({
         toolName: tc.name,
@@ -2839,7 +2858,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             { sessionId: session.id, severity: "warn" },
           );
           const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
-          persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -2859,7 +2878,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             guardrailEvents,
             usage: totalUsage,
             blocked: false,
-            swarmState: toolContext.swarmState,
+            swarmState: getTurnSwarmState(),
             performance,
           };
         }
@@ -2901,7 +2920,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
           if (tc.name === "delegate_to_agent") {
             const finalResponse = buildDelegationLoopResponse(result.output, "identical-output");
-            persistAssistantTurnState(session, finalResponse, toolContext.swarmState);
+            persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 
             const performance = buildTurnPerformanceMetrics({
               turnStartedAt,
@@ -2946,7 +2965,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               guardrailEvents,
               usage: totalUsage,
               blocked: false,
-              swarmState: toolContext.swarmState,
+              swarmState: getTurnSwarmState(),
               performance,
             };
           }
@@ -3035,7 +3054,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         session.addMessages(toolResultMessages);
         return blocked(
           "This turn searched the workflow catalog but still failed to call run_workflow with one of the returned workflow names.",
-          toolContext.swarmState,
+          getTurnSwarmState(),
           buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -3214,7 +3233,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const fallbackMsg = "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
   const finalMsg = await rewriteTerminalResponseIfNeeded(normalizedFinalMsg, iterationCount, session, provider, signal);
-  persistAssistantTurnState(session, finalMsg, toolContext.swarmState);
+  persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
   if (opts.onChunk) opts.onChunk(finalMsg);
 
   const performance = buildTurnPerformanceMetrics({
@@ -3241,7 +3260,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     guardrailEvents,
     usage: totalUsage,
     blocked: false,
-    swarmState: toolContext.swarmState,
+    swarmState: getTurnSwarmState(),
     performance,
   };
 }
@@ -3331,6 +3350,20 @@ function loadPreviousTurnSwarmTasks(history: readonly SessionHistoryMessage[]): 
     if (Object.keys(carried).length > 0) return carried;
   }
   return {};
+}
+
+function selectPersistableSwarmState(
+  swarmState: SwarmState | undefined,
+  carriedTaskFingerprint: string,
+  usedSwarmTools: boolean,
+): SwarmState | undefined {
+  if (!swarmState) return undefined;
+  const currentTasks = swarmState.tasks ?? {};
+  if (Object.keys(currentTasks).length === 0) return undefined;
+  if (!usedSwarmTools && stableSerialize(currentTasks) === carriedTaskFingerprint) {
+    return undefined;
+  }
+  return swarmState;
 }
 
 function persistAssistantTurnState(session: AgentSession, content: string, swarmState?: SwarmState): void {
