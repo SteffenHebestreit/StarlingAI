@@ -2328,6 +2328,18 @@ export function createGateway() {
     }
   });
 
+  app.get("/api/triggers/cron", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { listCronJobs } = await import("../runtime/scheduler.js");
+      const jobs = listCronJobs();
+      return c.json({ jobs });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.get("/api/sessions/:sessionId/debug-markdown", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);

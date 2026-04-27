@@ -18,9 +18,11 @@ export interface ScheduledJob {
   createdAt: Date;
   lastFiredAt: Date | null;
   fireCount: number;
+  /** ISO timestamp of the next scheduled fire, when the cron lib can compute one. */
+  nextFireAt: string | null;
 }
 
-interface InternalJob extends ScheduledJob {
+interface InternalJob extends Omit<ScheduledJob, "nextFireAt"> {
   cron: CronJob;
   executing: boolean;
 }
@@ -118,6 +120,19 @@ export function stopAllCronJobs(): void {
 }
 
 function toPublic(j: InternalJob): ScheduledJob {
+  let nextFireAt: string | null = null;
+  try {
+    // cron.CronJob.nextDate() returns a luxon DateTime with .toISO()
+    const next = j.cron.nextDate?.();
+    if (next) {
+      const iso = typeof (next as { toISO?: () => string }).toISO === "function"
+        ? (next as { toISO: () => string }).toISO()
+        : new Date(next as unknown as string | number | Date).toISOString();
+      nextFireAt = iso ?? null;
+    }
+  } catch {
+    nextFireAt = null;
+  }
   return {
     id: j.id,
     label: j.label,
@@ -126,5 +141,6 @@ function toPublic(j: InternalJob): ScheduledJob {
     createdAt: j.createdAt,
     lastFiredAt: j.lastFiredAt,
     fireCount: j.fireCount,
+    nextFireAt,
   };
 }
