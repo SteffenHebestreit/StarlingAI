@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseContainerDiagnosticLine, probeDockerReachability } from "../agent/container-runner.js";
+import {
+  parseContainerDiagnosticLine,
+  probeDockerReachability,
+  shouldExtendContainerTimeoutForRecentOutput,
+} from "../agent/container-runner.js";
 import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
 
 describe("container runner diagnostics", () => {
@@ -18,6 +22,19 @@ describe("container runner diagnostics", () => {
 
   it("ignores non-diagnostic stderr lines", () => {
     expect(parseContainerDiagnosticLine("regular stderr output")).toBeNull();
+  });
+
+  it("extends hard timeouts while meaningful output is still arriving", () => {
+    expect(shouldExtendContainerTimeoutForRecentOutput(55_000, 60_000, 0)).toBe(true);
+  });
+
+  it("does not extend hard timeouts when output has gone idle", () => {
+    expect(shouldExtendContainerTimeoutForRecentOutput(49_000, 60_000, 0)).toBe(false);
+    expect(shouldExtendContainerTimeoutForRecentOutput(undefined, 60_000, 0)).toBe(false);
+  });
+
+  it("stops extending hard timeouts after the bounded extension budget is exhausted", () => {
+    expect(shouldExtendContainerTimeoutForRecentOutput(55_000, 60_000, 12)).toBe(false);
   });
 
   it("prefers an explicit workspace mount source for docker child containers", () => {

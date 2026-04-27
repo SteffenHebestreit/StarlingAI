@@ -37,6 +37,10 @@ const HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3; // 45 s
 const HEARTBEAT_WARMUP_MS = 20_000;
 // How long to wait for graceful shutdown after SIGTERM before sending SIGKILL.
 const GRACEFUL_SHUTDOWN_MS = 5_000;
+// If the container is still producing meaningful output near the deadline,
+// extend the hard timeout in short increments instead of killing active work.
+const ACTIVE_OUTPUT_GRACE_MS = 10_000;
+const MAX_ACTIVE_OUTPUT_TIMEOUT_EXTENSIONS = 12;
 
 export interface ContainerTaskPayload {
   agentName: string;
@@ -66,6 +70,16 @@ export interface ContainerRunMetrics {
 export interface ContainerRunResult {
   output: string;
   metrics: ContainerRunMetrics;
+}
+
+export function shouldExtendContainerTimeoutForRecentOutput(
+  lastMeaningfulOutputAt: number | undefined,
+  now: number,
+  extensionCount: number,
+): boolean {
+  return typeof lastMeaningfulOutputAt === "number"
+    && now - lastMeaningfulOutputAt <= ACTIVE_OUTPUT_GRACE_MS
+    && extensionCount < MAX_ACTIVE_OUTPUT_TIMEOUT_EXTENSIONS;
 }
 
 export type ContainerDiagnosticEvent =
@@ -206,6 +220,8 @@ export async function runSubAgentInContainer(
     let stderr = "";
     let stderrBuffer = "";
     let resolved = false;
+    let lastMeaningfulOutputAt: number | undefined;
+    let hardTimeoutExtensions = 0;
 
     // Heartbeat tracking
     let lastHeartbeatAt: number = Date.now();
@@ -227,7 +243,13 @@ export async function runSubAgentInContainer(
       });
     };
 
-    proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    proc.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (text.trim()) {
+        lastMeaningfulOutputAt = Date.now();
+      }
+    });
 
     proc.stderr.on("data", (chunk: Buffer) => {
       stderrBuffer += chunk.toString();
@@ -250,27 +272,51 @@ export async function runSubAgentInContainer(
           continue;
         }
         if (line) {
+          lastMeaningfulOutputAt = Date.now();
           stderr += line + "\n";
         }
       }
     });
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
     const cleanup = () => {
       proc.stdout.removeAllListeners();
       proc.stderr.removeAllListeners();
       clearTimeout(heartbeatWarmupHandle);
       clearInterval(heartbeatWatchdogInterval);
-      clearTimeout(timeoutHandle);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     };
 
-    // Hard timeout — SIGTERM then SIGKILL
-    const timeoutHandle = setTimeout(() => {
-      log.warn({ agentName: opts.agentName, timeoutMs }, "Container hard timeout reached");
-      cleanup();
-      gracefulKill(proc.pid, proc);
-      const partial = recoverPartialOutput(stdout);
-      settle(`Sub-agent '${opts.agentName}' timed out after ${timeoutMs}ms.${partial ? ` Partial: ${partial}` : ""}`);
-    }, timeoutMs);
+    const armHardTimeout = (delayMs: number) => {
+      timeoutHandle = setTimeout(() => {
+        const now = Date.now();
+        if (shouldExtendContainerTimeoutForRecentOutput(lastMeaningfulOutputAt, now, hardTimeoutExtensions)) {
+          hardTimeoutExtensions += 1;
+          log.info(
+            {
+              agentName: opts.agentName,
+              timeoutMs,
+              extensionCount: hardTimeoutExtensions,
+              outputIdleMs: now - (lastMeaningfulOutputAt ?? now),
+            },
+            "Container hard timeout extended because output is still arriving",
+          );
+          armHardTimeout(ACTIVE_OUTPUT_GRACE_MS);
+          return;
+        }
+
+        log.warn({ agentName: opts.agentName, timeoutMs, hardTimeoutExtensions }, "Container hard timeout reached");
+        cleanup();
+        gracefulKill(proc.pid, proc);
+        const partial = recoverPartialOutput(stdout);
+        settle(`Sub-agent '${opts.agentName}' timed out after ${timeoutMs}ms.${partial ? ` Partial: ${partial}` : ""}`);
+      }, delayMs);
+      timeoutHandle.unref?.();
+    };
+
+    // Hard timeout — SIGTERM then SIGKILL unless active output keeps arriving.
+    armHardTimeout(timeoutMs);
 
     // Heartbeat watchdog — starts after warmup so slow-starting containers aren't penalised
     let heartbeatWatchdogInterval: ReturnType<typeof setInterval>;
