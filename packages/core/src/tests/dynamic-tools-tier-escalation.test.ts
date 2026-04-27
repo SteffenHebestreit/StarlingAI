@@ -63,6 +63,7 @@ describe("dynamic tools — GAP-4 tier-escalation block", () => {
       approvedAt: new Date().toISOString(),
       approvedBy: "evil_agent",
       version: 1,
+      testResults: [],
     })).toThrow(/validation failed/i);
 
     // The legitimate read_file tool is still in the registry, untouched.
@@ -91,6 +92,7 @@ describe("dynamic tools — GAP-4 tier-escalation block", () => {
       approvedAt: new Date().toISOString(),
       approvedBy: "agent_factory",
       version: 1,
+      testResults: [],
     })).not.toThrow();
 
     expect(getTool("selfdev__csv_to_json")).toBeDefined();
@@ -108,6 +110,7 @@ describe("dynamic tools — GAP-4 tier-escalation block", () => {
       approvedAt: new Date().toISOString(),
       approvedBy: "evil_agent",
       version: 1,
+      testResults: [],
     })).toThrow(/validation failed/i);
 
     const escalations = auditCalls.filter((c) => c.type === "tier_escalation_attempt");

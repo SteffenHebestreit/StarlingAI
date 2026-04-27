@@ -1276,6 +1276,21 @@ export function createGateway() {
     return c.json({ events });
   });
 
+  // ── Plugin SDK dashboard endpoint ────────────────────────────────────────
+  // Lists plugins loaded at startup with their tool surface.  Operators can
+  // sanity-check what third-party code is running.
+  app.get("/api/plugins", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const { listLoadedPlugins, resolvePluginsDir } = await import("../plugin/loader.js");
+    return c.json({
+      enabled: getConfig().plugins?.enabled !== false,
+      directory: resolvePluginsDir(),
+      plugins: listLoadedPlugins(),
+    });
+  });
+
   // ── Status endpoint (auth required) ─────────────────────────────────────
   app.get("/api/status", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));

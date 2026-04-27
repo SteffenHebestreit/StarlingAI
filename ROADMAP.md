@@ -226,6 +226,27 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
+## Plugin SDK (April 2026)
+
+Third-party tool packages loaded from a directory at gateway startup.
+Author-facing API in `packages/core/src/plugin/index.ts`; loader +
+auto-discovery in `packages/core/src/plugin/loader.ts`.
+
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| `defineTool` / `definePlugin` API | ✅ shipped | Identity helpers giving plugin authors typed completion |
+| Auto-discovery from `~/.starlingai/plugins/` | ✅ shipped | Configurable via `STARLINGAI_PLUGINS_DIR` env or `plugins.dir` in starlingai.json |
+| Single-file + directory plugin layouts | ✅ shipped | `<plugin>.js` or `<plugin>/index.{js,mjs}` |
+| Tier gating | ✅ shipped | All plugin tools register at **Tier 2** (sandboxed, per-call approval); plugins cannot self-elevate |
+| Tier-shadow rejection | ✅ shipped | Plugin tool names that collide with built-ins are rejected + audited as `tier_escalation_attempt` (closes the same vector closed for dynamic tools in GAP-4) |
+| Dashboard inspection | ✅ shipped | `GET /api/plugins` returns the loaded plugin list with version + advertised tool names |
+| Audit | ✅ shipped | `plugin_loaded` and `plugin_tool_rejected` events |
+
+Plugins are loaded once at startup. Hot-reload during a running session is
+deferred — operators restart the gateway after dropping a new plugin in.
+
+---
+
 ## Stage 11 — Federated Swarms (MVP shipped April 2026)
 
 Two or more StarlingAI instances delegate tasks cross-instance. Each instance remains fully self-governing; federation is purely additive and cannot override another instance's tool policies or guardrails.
