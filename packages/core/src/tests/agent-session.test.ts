@@ -80,6 +80,10 @@ describe("AgentSession collapsed history", () => {
     });
     session.addMessage({
       role: "system",
+      content: "[WARDEN STOP — FORCED SYNTHESIS] Two or more consecutive delegation attempts have failed.",
+    });
+    session.addMessage({
+      role: "system",
       content: "[CONTINUE ORCHESTRATION] The latest delegated evidence identifies a concrete follow-up action.",
     });
     session.addMessage({
@@ -106,6 +110,7 @@ describe("AgentSession collapsed history", () => {
     const collapsedText = collapsed.map((message) => String(message.content ?? "")).join("\n");
 
     expect(collapsedText).not.toContain("[SYNTHESIS REQUIRED]");
+    expect(collapsedText).not.toContain("[WARDEN STOP — FORCED SYNTHESIS]");
     expect(collapsedText).not.toContain("[CONTINUE ORCHESTRATION]");
     expect(collapsedText).not.toContain("[USER RESPONSE REQUIRED]");
     expect(collapsedText).not.toContain("[DELEGATION FAILED]");

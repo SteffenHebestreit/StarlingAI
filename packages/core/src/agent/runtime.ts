@@ -939,18 +939,20 @@ async function finalizeUserFacingAssistantResponse(
 const DELEGATE_TOOL_RESULT_RE = /^(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
 const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
 
-function hasRecentForcedSynthesisNudge(
-  history: readonly { role: string; content?: string | null }[],
-): boolean {
-  const recent = [...history].reverse().slice(0, 16);
-  return recent.some((message) =>
-    message.role === "system"
+function isForcedSynthesisSystemMessage(message: { role: string; content?: string | null }): boolean {
+  return message.role === "system"
     && typeof message.content === "string"
     && (
       message.content.startsWith("[SYNTHESIS REQUIRED]")
       || message.content.startsWith("[WARDEN STOP — FORCED SYNTHESIS]")
-    ),
-  );
+    );
+}
+
+function hasRecentForcedSynthesisNudge(
+  history: readonly { role: string; content?: string | null }[],
+): boolean {
+  const recent = [...history].reverse().slice(0, 16);
+  return recent.some((message) => isForcedSynthesisSystemMessage(message));
 }
 
 function resolveEmptyAssistantResponseFallback(
@@ -2113,11 +2115,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       return blockMissingWorkflowCatalogCheck();
     }
 
-    const synthesisRequiredInHistory = collapsedHistory.some((message) =>
-      message.role === "system"
-      && typeof message.content === "string"
-      && message.content.startsWith("[SYNTHESIS REQUIRED]"),
-    );
+    const synthesisRequiredInHistory = collapsedHistory.some((message) => isForcedSynthesisSystemMessage(message));
     const userResponseRequiredInHistory = collapsedHistory.some((message) =>
       message.role === "system"
       && typeof message.content === "string"
