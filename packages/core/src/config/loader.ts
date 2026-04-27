@@ -340,6 +340,11 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), lmstudio: { ...lms, baseUrl: env["SAI_LMSTUDIO_URL"] } };
   }
+  if (env["SAI_LMSTUDIO_API_KEY"]) {
+    const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
+    const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
+    raw["providers"] = { ...(p as object), lmstudio: { ...lms, apiKey: env["SAI_LMSTUDIO_API_KEY"] } };
+  }
   if (env["ANTHROPIC_API_KEY"]) {
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
     const ant = (p["anthropic"] as Record<string, unknown> | undefined) ?? {};

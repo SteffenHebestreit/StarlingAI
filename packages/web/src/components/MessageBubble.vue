@@ -177,11 +177,13 @@
       >
         <div
           v-if="isStreaming"
+          ref="renderedMessageRef"
           class="message-content prose-content"
           v-html="renderedStreamingContent"
         />
         <div
           v-else-if="mainContent"
+          ref="renderedMessageRef"
           class="message-content prose-content"
           v-html="renderedContent"
         />
@@ -311,7 +313,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
 import mermaid from "mermaid";
@@ -446,6 +448,9 @@ interface ArtifactPreviewState {
 
 let mermaidInitialized = false;
 let mermaidRenderCounter = 0;
+let mermaidInlineRenderToken = 0;
+
+const MERMAID_START_RE = /^(?:%%\{.*\}%%|%%\s|flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|block-beta|architecture-beta|packet-beta|kanban|sankey-beta|radar-beta|treemap-beta|info)\b/i;
 
 function mapExecutionStatus(status: "running" | "completed" | "partial" | "failed"): ExecutionStatus {
   if (status === "completed") return "done";
@@ -480,6 +485,7 @@ const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
+const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
 const progressHistory = computed(() => props.message.statusHistory?.slice(-4) ?? []);
 const mermaidPreviewSvg = ref<Record<string, string>>({});
@@ -836,11 +842,106 @@ async function inlineWebsiteAssets(
 
 async function renderMermaidSvg(source: string, suffix: string): Promise<string> {
   ensureMermaidInitialized();
+  const normalizedSource = normalizeMermaidSource(source);
   const id = `mermaid-${++mermaidRenderCounter}-${suffix.replace(/[^a-z0-9_-]/gi, "-")}`;
-  const rendered = await mermaid.render(id, source);
+  const rendered = await mermaid.render(id, normalizedSource);
   return DOMPurify.sanitize(rendered.svg, {
     USE_PROFILES: { html: true, svg: true, svgFilters: true },
   });
+}
+
+function normalizeMermaidSource(rawSource: string): string {
+  const withoutBom = rawSource.replace(/^\uFEFF/, "").trim();
+  const fenced = withoutBom.match(/```mermaid\s*\r?\n([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : withoutBom;
+  const lines = candidate.split(/\r?\n/);
+  const startIndex = lines.findIndex((line) => MERMAID_START_RE.test(line.trim()));
+  const diagram = startIndex >= 0 ? lines.slice(startIndex).join("\n").trim() : candidate;
+  return collapseMermaidMultilineLabels(diagram);
+}
+
+function collapseMermaidMultilineLabels(source: string): string {
+  const lines = source.split(/\r?\n/);
+  const collapsed: string[] = [];
+  let buffer = "";
+  let squareDepth = 0;
+  let roundDepth = 0;
+  let curlyDepth = 0;
+
+  const applyBalances = (line: string): void => {
+    for (const char of line) {
+      if (char === "[") squareDepth++;
+      else if (char === "]") squareDepth = Math.max(0, squareDepth - 1);
+      else if (char === "(") roundDepth++;
+      else if (char === ")") roundDepth = Math.max(0, roundDepth - 1);
+      else if (char === "{") curlyDepth++;
+      else if (char === "}") curlyDepth = Math.max(0, curlyDepth - 1);
+    }
+  };
+
+  const hasOpenLabel = (): boolean => squareDepth > 0 || roundDepth > 0 || curlyDepth > 0;
+  const flush = (): void => {
+    if (buffer) collapsed.push(buffer);
+    buffer = "";
+    squareDepth = 0;
+    roundDepth = 0;
+    curlyDepth = 0;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!buffer) {
+      buffer = line;
+      applyBalances(line);
+      continue;
+    }
+
+    if (hasOpenLabel()) {
+      buffer += ` ${line.trim()}`;
+      applyBalances(line);
+      continue;
+    }
+
+    flush();
+    buffer = line;
+    applyBalances(line);
+  }
+
+  flush();
+  return collapsed.join("\n");
+}
+
+async function renderInlineMermaidBlocks(): Promise<void> {
+  const token = ++mermaidInlineRenderToken;
+  await nextTick();
+  if (token !== mermaidInlineRenderToken) return;
+
+  const container = renderedMessageRef.value;
+  if (!container) return;
+
+  const mermaidBlocks = Array.from(container.querySelectorAll("pre > code.language-mermaid"));
+  for (const block of mermaidBlocks) {
+    if (token !== mermaidInlineRenderToken) return;
+
+    const pre = block.parentElement;
+    if (!(pre instanceof HTMLElement)) continue;
+
+    const source = block.textContent?.trim();
+    if (!source) continue;
+
+    const mount = document.createElement("div");
+    mount.className = "mermaid-inline-diagram";
+    pre.replaceWith(mount);
+
+    try {
+      mount.innerHTML = await renderMermaidSvg(source, "inline-message");
+    } catch (error) {
+      mount.replaceWith(Object.assign(document.createElement("div"), {
+        className: "artifact-card__placeholder artifact-card__placeholder--error",
+        textContent: `Diagram preview failed: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+    }
+  }
 }
 
 async function ensureMermaidPreview(attachment: ChatAttachment): Promise<void> {
@@ -1100,6 +1201,14 @@ const renderedStreamingContent = computed(() => {
   // because the last block-level element (e.g. </p>) is the natural anchor.
   return `${renderStreamingMarkdown(raw)}<span class="cursor-blink"></span>`;
 });
+
+watch(
+  [renderedContent, renderedStreamingContent, () => props.isStreaming],
+  () => {
+    void renderInlineMermaidBlocks();
+  },
+  { immediate: true, flush: "post" },
+);
 
 // ── Per-message export ────────────────────────────────────────────────────────
 function exportMessageMarkdown(): void {

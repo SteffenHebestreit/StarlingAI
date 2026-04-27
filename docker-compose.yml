@@ -16,6 +16,7 @@ services:
       - SAI_JWT_SECRET=${SAI_JWT_SECRET}
       - SAI_MASTER_KEY=${SAI_MASTER_KEY}
       - SAI_LMSTUDIO_URL=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
+      - SAI_LMSTUDIO_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
       - SAI_MULTIMODAL_STT_URL=${SAI_MULTIMODAL_STT_URL:-http://host.docker.internal:5002}
       - SAI_MULTIMODAL_TTS_URL=${SAI_MULTIMODAL_TTS_URL:-http://host.docker.internal:5004}
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai

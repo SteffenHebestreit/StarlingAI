@@ -206,10 +206,11 @@ describe("H1.1: swarm state seeding on retry turns", () => {
     streamMock.mockImplementationOnce(() => makeToolStream("c1", "delegate_to_agent", { task: "search for MEMS mic modules" }));
     streamMock.mockImplementationOnce(() => makeTextStream("Here are the results from the prior research."));
 
-    await runTurn({ session, userMessage: "try again", autoApprove: true });
+    const result = await runTurn({ session, userMessage: "try again", autoApprove: true });
 
     // The delegate tool should have been called
     expect(capturedSwarmState).toBeDefined();
+    expect(result.swarmState?.tasks["task_1"]).toBeDefined();
 
     // completed task_1 from previous turn must be present in the new swarm state
     expect(capturedSwarmState!.tasks["task_1"]).toBeDefined();
@@ -220,6 +221,64 @@ describe("H1.1: swarm state seeding on retry turns", () => {
     expect(capturedSwarmState!.tasks["task_2"]).toBeUndefined();
 
     unregisterTool("delegate_to_agent");
+  }, 30_000);
+
+  it("does not persist carried swarm state on a direct-answer follow-up turn", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-h1-direct-answer-"));
+    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    tempDirs.push(ws);
+
+    writeFileSync(join(ws, "starlingai.json"), JSON.stringify({
+      workspacePath: ws,
+      agents: {
+        defaults: { model: { primary: "mock-model" }, maxIterations: 5, turnTimeoutMs: 30_000 },
+        maxTotalDelegationsPerTurn: 3,
+        maxToolIterations: 10,
+        ephemeralGeneration: { enabled: false, skillMatchThreshold: 0.70, architectAgentName: "agent_architect" },
+      },
+      subAgents: {},
+      guardrails: { enabled: false },
+    }), "utf-8");
+    process.env["SAI_CONFIG_PATH"] = join(ws, "starlingai.json");
+
+    const [{ AgentSession, resetSessionsForTests }, { runTurn }] = await Promise.all([
+      import("../agent/session.js"),
+      import("../agent/runtime.js"),
+    ]);
+    resetSessionsForTests();
+
+    const session = new AgentSession({ sessionId: "sess-h1-direct", channel: "test", workspacePath: ws });
+    const prevSwarmState: SwarmState = {
+      objective: "search for MEMS microphones",
+      startedAt: new Date(Date.now() - 600_000).toISOString(),
+      updatedAt: new Date(Date.now() - 60_000).toISOString(),
+      tasks: {
+        task_1: {
+          id: "task_1",
+          title: "Search for MEMS mic arrays",
+          status: "completed",
+          dependsOn: [],
+          signature: "search for mems mic arrays::search for flat mems microphone arrays for esp32::",
+          selectedAgent: "researcher",
+          attempts: [],
+          output: "Found: TDK IM73A130, Infineon IM69D130, ReSpeaker 6-Mic Array",
+        },
+      },
+    };
+    (session as unknown as { history: Array<Record<string, unknown>> }).history = [
+      { role: "user", content: "search for mics", timestamp: new Date(Date.now() - 700_000).toISOString() },
+      { role: "assistant", content: "Found some results.", timestamp: new Date(Date.now() - 600_000).toISOString(), metadata: { swarmState: prevSwarmState } },
+    ];
+
+    streamMock.mockImplementationOnce(() => makeTextStream("Direct answer without delegation."));
+
+    const result = await runTurn({ session, userMessage: "what power rail should I use?", autoApprove: true });
+
+    expect(result.swarmState).toBeUndefined();
+    const transcript = session.toTranscript();
+    const lastAssistant = [...transcript].reverse().find((message) => message.role === "assistant");
+    expect(lastAssistant?.content).toContain("Direct answer without delegation.");
+    expect(lastAssistant?.swarmState).toBeUndefined();
   }, 30_000);
 });
 
