@@ -28,6 +28,7 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 // Ephemeral store + dynamic tools
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
+import { loadPlugins } from "./plugin/loader.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeNeo4j } from "./db/neo4j.js";
 import { initGraphSchema } from "./db/graph-schema.js";
@@ -152,6 +153,20 @@ export async function main() {
   // Load self-developed dynamic tools and start hot-deploy watcher
   loadDynamicTools();
   watchDynamicToolsDirectory();
+
+  // Load third-party plugin packages from the configured plugins directory.
+  // Errors during a single plugin's load are non-fatal — the loader logs
+  // them and continues so a broken plugin can't take down the gateway.
+  if (config.plugins?.enabled !== false) {
+    try {
+      const result = await loadPlugins();
+      if (result.loaded > 0 || result.rejected > 0) {
+        log.info({ loaded: result.loaded, rejected: result.rejected }, "Plugin SDK loader complete");
+      }
+    } catch (err) {
+      log.warn({ err }, "Plugin SDK loader threw — continuing without plugins");
+    }
+  }
 
   // Recover persisted dev sessions, capability gaps, and task checkpoints
   await loadPersistedSessions();

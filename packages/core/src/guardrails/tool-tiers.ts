@@ -1497,6 +1497,19 @@ export function getToolTier(toolName: string): ToolTierDef {
     };
   }
 
+  // Plugin SDK tools: plugin__<plugin-name>__<tool-name>  → Tier 2,
+  // per-call approval, sandboxed.  Plugins are third-party code loaded from
+  // the configured plugins directory; even when the operator trusts the
+  // author the runtime treats them like any other Tier 2 execute tool.
+  if (/^plugin__[a-z][a-z0-9_-]{0,32}__[a-z][a-z0-9_]{0,48}$/i.test(toolName)) {
+    return {
+      tier: ToolTier.TWO_EXECUTE,
+      description: `Plugin tool: ${toolName}`,
+      requiresPerCallApproval: true,
+      requiresSandbox: true,
+    };
+  }
+
   // Unknown tools default to BLOCKED
   return {
     tier: ToolTier.FOUR_BLOCKED,

@@ -1002,6 +1002,18 @@ export const ConfigSchema = z.object({
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   federation: FederationSchema.default({}),
+  /**
+   * Plugin SDK — third-party tool packages loaded from a directory at
+   * startup.  When `enabled` is false the loader is skipped entirely.
+   * When the directory is unset the loader falls back to
+   * `~/.starlingai/plugins`.  Plugin tools register under
+   * `plugin__<plugin-name>__<tool-name>` at Tier 2 (sandboxed, per-call
+   * approval) — plugins cannot grant themselves higher tiers.
+   */
+  plugins: z.object({
+    enabled: z.boolean().default(true),
+    dir: z.string().optional(),
+  }).default({}),
   workspacePath: z.string().default("/workspace"),
 });
 
