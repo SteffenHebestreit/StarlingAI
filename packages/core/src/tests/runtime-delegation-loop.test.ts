@@ -2979,4 +2979,65 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("delegate_to_agent");
     freshRuntime.unregisterTool("run_workflow");
   });
+
+  it("forces synthesis after a warden stop instead of allowing fresh delegation", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      return createDelegateToolCallStream(`warden_stop_delegate_${llmCallCount}`, {
+        agentName: "mission_coordinator",
+        task: `Continue researching after repeated failures (${llmCallCount}).`,
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK FAILED.\nObserved evidence:\nAll candidate agents failed.",
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: false,
+        delegationOutcome: "failure",
+        terminalState: "completed",
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Summarize what happened.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(session.getHistory().some((message) =>
+      message.role === "system"
+      && typeof message.content === "string"
+      && message.content.startsWith("[WARDEN STOP — FORCED SYNTHESIS]"),
+    )).toBe(true);
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
 });

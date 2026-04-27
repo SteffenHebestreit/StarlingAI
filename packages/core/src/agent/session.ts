@@ -20,6 +20,7 @@ import {
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[SYNTHESIS REQUIRED]",
+  "[WARDEN STOP — FORCED SYNTHESIS]",
   "[CONTINUE ORCHESTRATION]",
   "[USER RESPONSE REQUIRED]",
   "[DELEGATION FAILED]",
