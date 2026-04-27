@@ -40,6 +40,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  list_federation_peers: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List configured federation peer instances and their advertised agent + tool surface",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   search_workflows: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Search reusable scenes and jobs in the workflow catalog",
@@ -488,6 +494,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     tier: ToolTier.TWO_EXECUTE,
     description: "Delegate a task to a specialized sub-agent with its own model and tool set",
     requiresPerCallApproval: false,  // sub-agent's own tool calls carry their own approvals
+    requiresSandbox: false,
+  },
+  delegate_to_remote_agent: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Federated delegation — ship a task to a sub-agent running on a peer StarlingAI instance",
+    requiresPerCallApproval: false,  // peer enforces its own per-tool tier checks
     requiresSandbox: false,
   },
   swarm_delegate: {

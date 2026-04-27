@@ -13,6 +13,7 @@ import { ZipFile } from "yazl";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
+import { mountFederationRoutes } from "./federation-router.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
@@ -1213,6 +1214,10 @@ export function createGateway() {
     const sessions = getAllSessions().length;
     return c.json({ status: "ready", sessions });
   });
+
+  // Federation routes — gated at request time on federation.enabled, so
+  // toggling the config flag takes effect without a gateway restart.
+  mountFederationRoutes(app);
 
   // ── Status endpoint (auth required) ─────────────────────────────────────
   app.get("/api/status", async (c) => {

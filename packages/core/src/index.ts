@@ -53,6 +53,7 @@ import "./tools/github.js";
 import "./tools/accessibility.js";
 import "./tools/credentials.js";
 import "./tools/sub-agent.js";
+import "./tools/federation.js";
 import "./tools/workflow-catalog.js";
 import "./tools/memory.js";
 import "./personality/service.js";

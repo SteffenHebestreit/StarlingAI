@@ -204,6 +204,45 @@ export const GatewaySchema = z.object({
   corsAllowedOrigins: z.array(z.string().url()).default([]),
 });
 
+/** A single federation peer — another StarlingAI instance addressable over HTTP(S). */
+export const FederationPeerSchema = z.object({
+  /** Stable identifier used in tool calls and audit entries (e.g. "ops-east"). */
+  id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/i, "id must be alphanumeric/_/-"),
+  /** Base URL of the peer gateway, including protocol + port (no trailing slash). */
+  url: z.string().url(),
+  /** Optional human description shown in capability listings. */
+  description: z.string().optional(),
+  /** Optional tags used by the routing layer to filter peers (e.g. ["read-only", "production"]). */
+  tags: z.array(z.string()).default([]),
+});
+
+/**
+ * Federated swarms (Stage 11).  When `enabled` is true the gateway exposes
+ * /api/federation/{health,capabilities,delegate} for peer instances and the
+ * orchestrator gains the `delegate_to_remote_agent` + `list_federation_peers`
+ * tools.  Each instance keeps its own tool tiers and human-in-loop policies —
+ * federation never bypasses local guardrails.
+ */
+export const FederationSchema = z.object({
+  /** Master switch — when false the gateway routes are not mounted and the tools refuse to execute. */
+  enabled: z.boolean().default(false),
+  /** Stable identifier for THIS instance, advertised to peers (e.g. "primary"). */
+  instanceId: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/i).default("primary"),
+  /** Shared HMAC secret used to sign + verify federation JWTs.  Both peers must have the same value.  Must be ≥32 chars when enabled. */
+  sharedSecret: z.string().min(32).optional(),
+  /** Outbound peers we will delegate to. */
+  peers: z.array(FederationPeerSchema).default([]),
+  /** Optional allowlist of agent names exposed to peers.  Empty array = all agents. */
+  exposeAgents: z.array(z.string()).default([]),
+  /** Hard timeout on a single remote delegation in ms.  Default 10 min. */
+  delegationTimeoutMs: z.number().int().min(5_000).max(3_600_000).default(600_000),
+  /** Capability cache TTL in ms — how long fetched peer capabilities stay fresh.  Default 5 min. */
+  capabilityCacheTtlMs: z.number().int().min(0).max(3_600_000).default(300_000),
+});
+
+export type FederationPeerConfig = z.infer<typeof FederationPeerSchema>;
+export type FederationConfig = z.infer<typeof FederationSchema>;
+
 export const MultimodalServiceSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
@@ -962,6 +1001,7 @@ export const ConfigSchema = z.object({
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
+  federation: FederationSchema.default({}),
   workspacePath: z.string().default("/workspace"),
 });
 

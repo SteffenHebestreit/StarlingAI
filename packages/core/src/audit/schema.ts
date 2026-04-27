@@ -97,7 +97,17 @@ export type AuditEventType =
   | "hallucinated_truncation_bypass"
   | "trajectory_cache_hit"
   | "trajectory_cache_used"
-  | "trajectory_cache_invalidated";
+  | "trajectory_cache_invalidated"
+  // Federation (Stage 11) — cross-instance delegation
+  | "federation_auth_failed"
+  | "federation_capabilities_served"
+  | "federation_delegate_started"
+  | "federation_delegate_completed"
+  | "federation_delegate_failed"
+  | "federation_delegate_denied"
+  | "federation_request_received"
+  | "federation_request_completed"
+  | "federation_request_failed";
 
 export interface AuditEvent {
   id: string;
