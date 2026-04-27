@@ -2,9 +2,21 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover so the chat composer can pad against the iOS
+         safe area (home indicator) on iPhone, plus interactive-widget so
+         iOS Safari resizes the layout when the keyboard opens. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>StarlingAI</title>
     <link rel="icon" type="image/svg+xml" href="/swarmLogo.svg" />
+    <!-- Match the dark chrome so iOS / Android status bars blend in
+         when the app is launched from the home screen as a PWA. -->
+    <meta name="theme-color" content="#0a0512" />
+    <meta name="color-scheme" content="dark" />
+    <!-- iOS Add-to-Home-Screen hints (manifest covers Android). -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Starling" />
+    <link rel="apple-touch-icon" href="/swarmLogo.svg" />
   </head>
   <body>
     <div id="app"></div>
