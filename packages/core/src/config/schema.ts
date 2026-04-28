@@ -205,6 +205,39 @@ export const GatewaySchema = z.object({
 });
 
 /**
+ * A single user account.  Passwords are stored as bcrypt hashes; the plain
+ * value is never persisted.  Use the `POST /api/auth/users` admin endpoint
+ * (operator-authenticated) to add accounts at runtime — adding users by
+ * hand-editing config is supported but discouraged because the hash format
+ * is awkward to type correctly.
+ */
+export const AuthUserSchema = z.object({
+  username: z.string().min(1).max(64).regex(/^[a-z0-9_.-]+$/i, "username must be alphanumeric/_/-/."),
+  /** bcrypt hash (e.g. "$2a$12$..."); never plain text. */
+  passwordHash: z.string().min(20),
+  /** Optional display name shown in the dashboard. */
+  displayName: z.string().optional(),
+  /** ISO timestamp of when this account was created.  Set by the runtime; do not edit. */
+  createdAt: z.string().optional(),
+});
+
+/**
+ * Multi-user authentication (Wave A).  When `enabled` is false (the
+ * default), the gateway keeps its single-operator behavior and prints a
+ * bootstrap admin token on startup.  When enabled, login requires a
+ * username + password from `users[]` and returns a JWT scoped to that
+ * username (`sub` claim).  Wave A grants every authenticated user full
+ * operator privileges; Wave B will introduce role-based scoping.
+ */
+export const AuthSchema = z.object({
+  enabled: z.boolean().default(false),
+  users: z.array(AuthUserSchema).default([]),
+});
+
+export type AuthUser = z.infer<typeof AuthUserSchema>;
+export type AuthConfig = z.infer<typeof AuthSchema>;
+
+/**
  * OpenTelemetry distributed tracing.  When enabled, the gateway initializes
  * the OTel SDK at startup and produces spans for tool calls, sub-agent
  * runs, and federation requests.  Trace context is propagated across
@@ -1035,6 +1068,7 @@ export const ConfigSchema = z.object({
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
+  auth: AuthSchema.default({}),
   tracing: TracingSchema.default({}),
   federation: FederationSchema.default({}),
   /**
