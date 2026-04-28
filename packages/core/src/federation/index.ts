@@ -14,6 +14,7 @@ import type { FederationConfig, FederationPeerConfig } from "../config/schema.js
 import { childLogger } from "../logger.js";
 import { logAudit, subscribeToAudit } from "../audit/logger.js";
 import type { AuditEvent } from "../audit/schema.js";
+import { withSpan, injectTraceContext } from "../observability/tracing.js";
 
 const log = childLogger("federation");
 
@@ -390,6 +391,26 @@ export async function delegateToRemotePeer(
   peerId: string,
   request: FederationDelegateRequest,
 ): Promise<FederationDelegateResponse> {
+  return withSpan(
+    `federation.delegate ${peerId}`,
+    {
+      "starlingai.federation.peer": peerId,
+      "starlingai.federation.agent": request.agentName,
+      "starlingai.federation.streaming": false,
+    },
+    async (span) => {
+      const result = await delegateToRemotePeerInner(peerId, request);
+      span.setAttribute("starlingai.federation.ok", result.ok);
+      if (result.remoteSessionId) span.setAttribute("starlingai.federation.remoteSessionId", result.remoteSessionId);
+      return result;
+    },
+  );
+}
+
+async function delegateToRemotePeerInner(
+  peerId: string,
+  request: FederationDelegateRequest,
+): Promise<FederationDelegateResponse> {
   const config = requireEnabledConfig();
   const peer = findPeerById(peerId);
   if (!peer) {
@@ -457,8 +478,17 @@ function joinUrl(base: string, path: string): string {
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const handle = setTimeout(() => controller.abort(), timeoutMs);
+  // Inject the current trace context so the federation peer can attach its
+  // sub-spans to ours.  Standard W3C `traceparent`/`tracestate` headers.
+  const headers: Record<string, string> = {};
+  if (init.headers) {
+    for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
+      headers[k] = v;
+    }
+  }
+  injectTraceContext(headers);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, { ...init, headers, signal: controller.signal });
   } finally {
     clearTimeout(handle);
   }
@@ -486,6 +516,27 @@ async function safeReadText(res: Response): Promise<string> {
  * without completion).
  */
 export async function delegateToRemotePeerStreaming(
+  peerId: string,
+  request: FederationDelegateRequest,
+  onProgress: (event: FederationStreamProgress) => void,
+): Promise<FederationDelegateResponse> {
+  return withSpan(
+    `federation.delegate ${peerId}`,
+    {
+      "starlingai.federation.peer": peerId,
+      "starlingai.federation.agent": request.agentName,
+      "starlingai.federation.streaming": true,
+    },
+    async (span) => {
+      const result = await delegateToRemotePeerStreamingInner(peerId, request, onProgress);
+      span.setAttribute("starlingai.federation.ok", result.ok);
+      if (result.remoteSessionId) span.setAttribute("starlingai.federation.remoteSessionId", result.remoteSessionId);
+      return result;
+    },
+  );
+}
+
+async function delegateToRemotePeerStreamingInner(
   peerId: string,
   request: FederationDelegateRequest,
   onProgress: (event: FederationStreamProgress) => void,

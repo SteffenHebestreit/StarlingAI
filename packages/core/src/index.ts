@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { initTracing, shutdownTracing } from "./observability/tracing.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
@@ -120,6 +121,10 @@ export async function main() {
   // Load and validate config
   const config = loadConfig();
   log.info({ model: config.agents.defaults.model.primary }, "Config loaded");
+
+  // Bootstrap OpenTelemetry tracing as early as possible so subsequent
+  // initialization steps inherit the tracing context.  No-op when disabled.
+  await initTracing(config.tracing);
 
   // Initialize Postgres audit sink (optional)
   await initPostgresAudit();
@@ -274,6 +279,7 @@ export async function main() {
     stopAllTimers();
     await flushAuditLog();
     await closeSessionRedis();
+    await shutdownTracing();
     process.exit(0);
   };
 

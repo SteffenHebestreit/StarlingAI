@@ -1,6 +1,7 @@
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
+import { withSpan } from "../observability/tracing.js";
 
 export interface ToolHandler {
   name: string;
@@ -375,16 +376,36 @@ export async function executeTool(
     }
   }
 
-  // Per-tool timeout enforcement
-  if (handler.timeoutMs && handler.timeoutMs > 0) {
-    const timeoutPromise = new Promise<ToolResult>((resolve) => {
-      const timer = setTimeout(() => {
-        resolve({ success: false, output: "", error: `Tool '${name}' timed out after ${handler.timeoutMs}ms` });
-      }, handler.timeoutMs!);
-      timer.unref();
-    });
-    return Promise.race([handler.execute(args, context), timeoutPromise]);
-  }
-
-  return handler.execute(args, context);
+  // Span the tool call so traces show how a turn fanned out across tools.
+  // Attributes intentionally exclude args (privacy + payload size); the
+  // result is summarized via success / error length only.
+  return withSpan(
+    `tool ${name}`,
+    {
+      "starlingai.tool.name": name,
+      "starlingai.tool.tier": def.tier,
+      "starlingai.session.id": context.sessionId,
+      ...(context.currentAgentName ? { "starlingai.agent.name": context.currentAgentName } : {}),
+    },
+    async (span) => {
+      // Per-tool timeout enforcement
+      let result: ToolResult;
+      if (handler.timeoutMs && handler.timeoutMs > 0) {
+        const timeoutPromise = new Promise<ToolResult>((resolve) => {
+          const timer = setTimeout(() => {
+            resolve({ success: false, output: "", error: `Tool '${name}' timed out after ${handler.timeoutMs}ms` });
+          }, handler.timeoutMs!);
+          timer.unref();
+        });
+        result = await Promise.race([handler.execute(args, context), timeoutPromise]);
+      } else {
+        result = await handler.execute(args, context);
+      }
+      span.setAttribute("starlingai.tool.success", result.success);
+      if (!result.success && result.error) {
+        span.setAttribute("starlingai.tool.error", result.error.slice(0, 240));
+      }
+      return result;
+    },
+  );
 }

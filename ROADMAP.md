@@ -226,6 +226,31 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
+## OpenTelemetry Distributed Tracing (April 2026)
+
+End-to-end tracing across tool calls, sub-agent runs, and federation
+delegations. Trace context is propagated over the standard W3C
+`traceparent` / `tracestate` headers so a delegation that hops three
+StarlingAI instances appears as one trace in Jaeger / Tempo / Honeycomb.
+
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| Lazy SDK init | ✅ shipped | `initTracing(config)` is called at the top of bootstrap; failures log + continue (a misconfigured exporter cannot block startup) |
+| Config | ✅ shipped | `tracing.{enabled,otlpEndpoint,otlpHeaders,sampleRate,serviceName}` with `ParentBasedSampler` over `TraceIdRatioBasedSampler` |
+| Tool-call spans | ✅ shipped | Every `executeTool()` call produces a span with name, tier, session id, agent name, success flag |
+| Sub-agent spans | ✅ shipped | `runSubAgentWithStats` wraps in a span carrying agent name, parent session, iterations, tool count, terminal state, total tokens |
+| Federation outbound | ✅ shipped | `delegateToRemotePeer` + streaming variant produce spans; `fetchWithTimeout` injects `traceparent` into every federation HTTP call (delegate, search, peers-known, capabilities, health) |
+| Federation inbound | ✅ shipped | `/api/federation/delegate` + `/delegate/stream` extract the inbound `traceparent` and run their span tree inside that context |
+| No-op when disabled | ✅ shipped | Helpers (`withSpan`, `injectTraceContext`, `withExtractedContext`, `setSpanAttributes`) all short-circuit cheaply when `tracing.enabled` is false — callers can call them unconditionally |
+| Dashboard endpoint | ✅ shipped | `GET /api/tracing/status` returns configured / active / endpoint / serviceName / sampleRate |
+
+Run a local Jaeger/Tempo via Docker, point `tracing.otlpEndpoint` at its
+OTLP-HTTP port, set `tracing.enabled: true`, and traces start flowing.
+The tool-call → sub-agent → federation hierarchy yields a single tree
+per turn even across multiple instances.
+
+---
+
 ## Plugin SDK (April 2026)
 
 Third-party tool packages loaded from a directory at gateway startup.

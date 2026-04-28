@@ -18,6 +18,7 @@ import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { withSpan } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
@@ -904,6 +905,27 @@ export interface SubAgentRunResult {
 }
 
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
+  return withSpan(
+    `sub_agent ${opts.agentName}`,
+    {
+      "starlingai.agent.name": opts.agentName,
+      "starlingai.session.parent": opts.parentSessionId,
+      "starlingai.task.preview": opts.task.slice(0, 240),
+    },
+    async (span) => {
+      const result = await runSubAgentWithStatsInner(opts);
+      span.setAttribute("starlingai.agent.iterations", result.stats.iterations);
+      span.setAttribute("starlingai.agent.toolCount", result.stats.toolCount);
+      if (result.stats.terminalState) {
+        span.setAttribute("starlingai.agent.terminalState", result.stats.terminalState);
+      }
+      span.setAttribute("starlingai.agent.tokens", result.stats.usage.totalTokens);
+      return result;
+    },
+  );
+}
+
+async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
   const config = getConfig();
   const agentCfg = opts.inlineConfig ?? config.subAgents[opts.agentName];
   const runStartedAt = Date.now();

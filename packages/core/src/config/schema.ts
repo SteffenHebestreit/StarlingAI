@@ -204,6 +204,27 @@ export const GatewaySchema = z.object({
   corsAllowedOrigins: z.array(z.string().url()).default([]),
 });
 
+/**
+ * OpenTelemetry distributed tracing.  When enabled, the gateway initializes
+ * the OTel SDK at startup and produces spans for tool calls, sub-agent
+ * runs, and federation requests.  Trace context is propagated across
+ * federation HTTP boundaries via standard `traceparent` / `tracestate`
+ * headers, so a delegation that hops three instances appears as one trace.
+ */
+export const TracingSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** OTLP HTTP endpoint URL (e.g. http://localhost:4318/v1/traces). */
+  otlpEndpoint: z.string().url().default("http://localhost:4318/v1/traces"),
+  /** Optional headers (e.g. {"x-honeycomb-team": "..."}) for the OTLP exporter. */
+  otlpHeaders: z.record(z.string()).optional(),
+  /** Trace sampling probability 0..1.  Default 1.0 = sample every trace. */
+  sampleRate: z.number().min(0).max(1).default(1),
+  /** Service name reported in spans.  Defaults to "starlingai". */
+  serviceName: z.string().min(1).default("starlingai"),
+});
+
+export type TracingConfig = z.infer<typeof TracingSchema>;
+
 /** A single federation peer — another StarlingAI instance addressable over HTTP(S). */
 export const FederationPeerSchema = z.object({
   /** Stable identifier used in tool calls and audit entries (e.g. "ops-east"). */
@@ -1014,6 +1035,7 @@ export const ConfigSchema = z.object({
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
+  tracing: TracingSchema.default({}),
   federation: FederationSchema.default({}),
   /**
    * Plugin SDK — third-party tool packages loaded from a directory at

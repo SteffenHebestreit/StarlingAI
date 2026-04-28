@@ -25,6 +25,7 @@ import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { searchWorkspace } from "../tools/workspace-search.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { withExtractedContext, withSpan } from "../observability/tracing.js";
 
 const log = childLogger("federation:router");
 
@@ -139,15 +140,29 @@ export function mountFederationRoutes(app: Hono): void {
       timeoutMs,
     }, { sessionId: remoteSessionId });
 
+    // Extract inbound trace context (W3C traceparent) so spans produced by
+    // runSubAgentWithStats become children of the calling instance's span.
+    const inboundHeaders: Record<string, string> = {};
+    for (const k of ["traceparent", "tracestate", "baggage"]) {
+      const v = c.req.header(k);
+      if (v) inboundHeaders[k] = v;
+    }
+
     try {
-      const result = await runSubAgentWithStats({
-        agentName,
-        task,
-        context,
-        parentSessionId: remoteSessionId,
-        workspacePath: getConfig().workspacePath,
-        turnTimeoutOverrideMs: timeoutMs,
-      });
+      const result = await withExtractedContext(inboundHeaders, () =>
+        withSpan(`federation.inbound ${agentName}`, {
+          "starlingai.federation.peer": verified.issuer,
+          "starlingai.federation.agent": agentName,
+          "starlingai.federation.streaming": false,
+        }, () => runSubAgentWithStats({
+          agentName,
+          task,
+          context,
+          parentSessionId: remoteSessionId,
+          workspacePath: getConfig().workspacePath,
+          turnTimeoutOverrideMs: timeoutMs,
+        })),
+      );
       logAudit("federation_request_completed", {
         peer: verified.issuer,
         agentName,
