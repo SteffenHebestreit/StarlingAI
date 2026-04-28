@@ -243,7 +243,11 @@ role split yet; every authenticated user gets full operator privileges
 | LoginModal UX | ✅ shipped | Vue dashboard's modal has a username/password tab (default) and a token tab (legacy); the form calls `/api/auth/login` and stores the returned JWT in localStorage |
 | Header user pill + sign-out | ✅ shipped | App header shows the current user (display name or username) with a sign-out button when not the legacy `admin` token |
 | Backwards compat | ✅ shipped | When `auth.enabled` is false (the default) the bootstrap admin token printed at startup still works — operators upgrade by setting the flag. |
-| Role split (operator/viewer) | ⏳ Wave B | Per-route gating, viewer-only UI affordances |
+| Role split (operator/viewer) | ✅ shipped (Wave B) | `auth.users[].role` ∈ {operator, viewer}; default operator. Login carries role into the JWT. |
+| Operator-only mutating routes | ✅ shipped (Wave B) | Hono middleware gates POST/PUT/PATCH/DELETE on `/api/*` to operators by default; explicit allowlist for login + external webhooks. Audit: `rbac_denied`. |
+| Floor: at least one operator | ✅ shipped (Wave B) | DELETE /api/auth/users/:u refuses to drop the last operator (viewers don't count) so the deployment can't lock itself out. |
+| Viewer UI affordances | ✅ shipped (Wave B) | Header pill shows a "Viewer" badge; tooltip clarifies read-only access. Admin buttons are not yet hidden — viewers see them but get a 403 toast on click (acceptable MVP). |
+| WS chat gating | ⏳ Wave C | Viewers can currently chat over WebSocket like operators; gating turn initiation by role lands separately. |
 
 ---
 

@@ -61,12 +61,13 @@ async function buildAuthApp(): Promise<Hono> {
       return c.json({ error: "Invalid username or password" }, 401);
     }
     auth.clearAuthFailures(ip);
+    const role: "operator" | "viewer" = user.role === "viewer" ? "viewer" : "operator";
     const token = await auth.createToken(user.username, {
-      role: "operator",
+      role,
       ...(user.displayName ? { displayName: user.displayName } : {}),
     });
-    logAudit("auth_success", { username: user.username }, { userId: user.username });
-    return c.json({ token, username: user.username, displayName: user.displayName, role: "operator" });
+    logAudit("auth_success", { username: user.username, role }, { userId: user.username });
+    return c.json({ token, username: user.username, displayName: user.displayName, role });
   });
 
   app.get("/api/auth/me", async (c) => {
@@ -78,11 +79,15 @@ async function buildAuthApp(): Promise<Hono> {
   app.post("/api/auth/users", async (c) => {
     const actor = await auth.authenticatedUser(c.req.header("Authorization"));
     if (!actor) return c.json({ error: "Unauthorized" }, 401);
-    let body: { username?: unknown; password?: unknown; displayName?: unknown };
+    if (!auth.userHasRole(actor, "operator")) {
+      return c.json({ error: "Operator role required" }, 403);
+    }
+    let body: { username?: unknown; password?: unknown; displayName?: unknown; role?: unknown };
     try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
     const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
     const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
+    const role = body.role === "viewer" ? "viewer" : "operator";
     if (!username || !/^[a-z0-9_.-]+$/.test(username)) return c.json({ error: "username invalid" }, 400);
     if (password.length < 8) return c.json({ error: "password too short" }, 400);
     if (getConfig().auth.users.find((u) => u.username.toLowerCase() === username)) {
@@ -93,10 +98,10 @@ async function buildAuthApp(): Promise<Hono> {
     updateConfig((raw) => {
       const a = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
       const users = (a["users"] = (a["users"] as unknown[] | undefined) ?? []);
-      (users as unknown[]).push({ username, passwordHash, displayName, createdAt });
+      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt });
       if (a["enabled"] !== true) a["enabled"] = true;
     });
-    return c.json({ username, displayName, createdAt });
+    return c.json({ username, displayName, role, createdAt });
   });
 
   return app;
@@ -338,5 +343,115 @@ describe("multi-user auth — user creation", () => {
       body: JSON.stringify({ username: "alice", password: "anotherpass" }),
     });
     expect(res.status).toBe(409);
+  });
+});
+
+describe("multi-user auth Wave B — role gating", () => {
+  let tempDir: string | null = null;
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_MUTABLE_CONFIG_PATH"];
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+    const auth = await import("../gateway/auth.js");
+    auth.resetAuthStateForTests();
+  });
+
+  it("login carries the user's stored role into the JWT", async () => {
+    const auth = await import("../gateway/auth.js");
+    const opHash = await auth.hashPassword("op-password");
+    const viewerHash = await auth.hashPassword("viewer-password");
+    tempDir = writeAuthConfig({
+      auth: {
+        enabled: true,
+        users: [
+          { username: "alice", passwordHash: opHash, role: "operator", createdAt: "2026-04-28T00:00:00Z" },
+          { username: "bob", passwordHash: viewerHash, role: "viewer", createdAt: "2026-04-28T00:00:00Z" },
+        ],
+      },
+    });
+    vi.resetModules();
+    const auth2 = await import("../gateway/auth.js");
+    const app = await buildAuthApp();
+
+    const opRes = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "alice", password: "op-password" }),
+    });
+    const opBody = await opRes.json() as { token: string; role: string };
+    expect(opBody.role).toBe("operator");
+    expect((await auth2.authenticatedUser(`Bearer ${opBody.token}`))?.role).toBe("operator");
+
+    const viewerRes = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "bob", password: "viewer-password" }),
+    });
+    const viewerBody = await viewerRes.json() as { token: string; role: string };
+    expect(viewerBody.role).toBe("viewer");
+    expect((await auth2.authenticatedUser(`Bearer ${viewerBody.token}`))?.role).toBe("viewer");
+  });
+
+  it("viewers cannot create users (403)", async () => {
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const viewerToken = await auth.createToken("eve", { role: "viewer" });
+    const app = await buildAuthApp();
+
+    const res = await app.request("/api/auth/users", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${viewerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ username: "newuser", password: "pass1234" }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json() as { error: string };
+    expect(body.error).toMatch(/operator role/i);
+  });
+
+  it("operators can create viewer accounts via role parameter", async () => {
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const operatorToken = await auth.createToken("alice", { role: "operator" });
+    const app = await buildAuthApp();
+
+    const res = await app.request("/api/auth/users", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${operatorToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ username: "newviewer", password: "pass1234", role: "viewer" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { username: string; role: string };
+    expect(body.role).toBe("viewer");
+  });
+
+  it("userHasRole helper enforces the operator > viewer hierarchy", async () => {
+    const auth = await import("../gateway/auth.js");
+    const op = { username: "alice", role: "operator" as const };
+    const viewer = { username: "bob", role: "viewer" as const };
+
+    expect(auth.userHasRole(op, "operator")).toBe(true);
+    expect(auth.userHasRole(op, "viewer")).toBe(true); // operators include viewer access
+    expect(auth.userHasRole(viewer, "viewer")).toBe(true);
+    expect(auth.userHasRole(viewer, "operator")).toBe(false);
+    expect(auth.userHasRole(null, "viewer")).toBe(false);
+  });
+
+  it("legacy tokens without a role claim default to operator", async () => {
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    // Mint a token with no role claim, mimicking pre-Wave-B tokens.
+    const token = await auth.createToken("legacy_admin", {});
+    const me = await auth.authenticatedUser(`Bearer ${token}`);
+    expect(me?.role).toBe("operator");
   });
 });

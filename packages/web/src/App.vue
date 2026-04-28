@@ -44,14 +44,21 @@
 
         <!-- Current user pill: visible only when an authenticated identity is
              attached to the JWT (i.e. multi-user auth is enabled).  Single-
-             operator setups using the bootstrap admin token render no pill. -->
+             operator setups using the bootstrap admin token render no pill.
+             A small role badge reminds viewers they have read-only access. -->
         <div
           v-if="currentUser && currentUser.username !== 'admin'"
           class="hidden sm:flex items-center gap-2 text-xs text-gray-300 shrink-0"
-          :title="currentUser.role === 'operator' ? 'Operator account' : currentUser.role"
+          :title="currentUser.role === 'operator' ? 'Operator account — full access' : 'Viewer account — read-only'"
         >
           <span class="rounded-full bg-purple-900/40 border border-purple-500/30 px-2.5 py-0.5">
             {{ currentUser.displayName ?? currentUser.username }}
+          </span>
+          <span
+            v-if="currentUser.role === 'viewer'"
+            class="rounded-full bg-amber-900/40 border border-amber-500/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-200"
+          >
+            Viewer
           </span>
           <button
             type="button"
