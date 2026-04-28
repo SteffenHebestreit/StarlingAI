@@ -12,7 +12,7 @@ import { WebSocketServer } from "ws";
 import { ZipFile } from "yazl";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, hashPassword, verifyPassword, createToken } from "./auth.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, hashPassword, verifyPassword, createToken, type AuthRole } from "./auth.js";
 import { mountFederationRoutes } from "./federation-router.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
@@ -1216,6 +1216,45 @@ export function createGateway() {
     return c.json({ status: "ready", sessions });
   });
 
+  // ── Role-based access control (Wave B) ───────────────────────────────────
+  // Mutating verbs (POST/PUT/PATCH/DELETE) require the operator role by
+  // default.  Viewers can read every dashboard endpoint but cannot mutate
+  // persistent state.  Routes that don't fit this default — e.g. login
+  // (no user yet) and externally-driven webhooks — are explicitly bypassed.
+  //
+  // The middleware is a no-op when:
+  //   - `auth.enabled` is false (legacy single-operator mode)
+  //   - the request has no Authorization header (existing auth check elsewhere returns 401)
+  //   - the route's verb is read-only (GET / HEAD / OPTIONS)
+  //   - the route is on the bypass allowlist
+  const ROLE_GATE_BYPASS = new Set<string>([
+    "/api/auth/login",
+    "/channels/slack/events",
+    "/channels/discord/events",
+    "/channels/whatsapp/webhook",
+    "/channels/email/webhook",
+    "/channels/signal/webhook",
+  ]);
+  app.use("/api/*", async (c, next) => {
+    if (!getConfig().auth.enabled) return next();
+    const method = c.req.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+    if (ROLE_GATE_BYPASS.has(c.req.path)) return next();
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    // No user → fall through; the route's own auth check will return 401.
+    if (!user) return next();
+    if (!userHasRole(user, "operator")) {
+      logAudit("rbac_denied", {
+        username: user.username,
+        role: user.role,
+        method,
+        path: c.req.path,
+      }, { userId: user.username, severity: "warn" });
+      return c.json({ error: "Operator role required for this action" }, 403);
+    }
+    return next();
+  });
+
   // ── Multi-user authentication (Wave A) ───────────────────────────────────
   // Routes are mounted unconditionally; behavior gates on auth.enabled at
   // request time so the operator can flip the flag without a restart.
@@ -1258,15 +1297,15 @@ export function createGateway() {
 
     clearAuthFailures(ip);
     const token = await createToken(user.username, {
-      role: "operator",
+      role: user.role,
       ...(user.displayName ? { displayName: user.displayName } : {}),
     });
-    logAudit("auth_success", { username: user.username }, { userId: user.username });
+    logAudit("auth_success", { username: user.username, role: user.role }, { userId: user.username });
     return c.json({
       token,
       username: user.username,
       displayName: user.displayName,
-      role: "operator",
+      role: user.role,
     });
   });
 
@@ -1282,6 +1321,7 @@ export function createGateway() {
     const users = getConfig().auth.users.map((u) => ({
       username: u.username,
       displayName: u.displayName,
+      role: u.role,
       createdAt: u.createdAt,
     }));
     return c.json({ enabled: getConfig().auth.enabled, users });
@@ -1290,12 +1330,16 @@ export function createGateway() {
   app.post("/api/auth/users", async (c) => {
     const actor = await authenticatedUser(c.req.header("Authorization"));
     if (!actor) return c.json({ error: "Unauthorized" }, 401);
+    if (!userHasRole(actor, "operator")) {
+      return c.json({ error: "Operator role required" }, 403);
+    }
 
-    let body: { username?: unknown; password?: unknown; displayName?: unknown };
+    let body: { username?: unknown; password?: unknown; displayName?: unknown; role?: unknown };
     try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
     const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
     const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
+    const role: AuthRole = body.role === "viewer" ? "viewer" : "operator";
     if (!username || !/^[a-z0-9_.-]+$/.test(username)) {
       return c.json({ error: "username must be alphanumeric/_/-/." }, 400);
     }
@@ -1313,26 +1357,33 @@ export function createGateway() {
     updateConfig((raw) => {
       const auth = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
       const users = (auth["users"] = (auth["users"] as unknown[] | undefined) ?? []);
-      (users as unknown[]).push({ username, passwordHash, displayName, createdAt });
+      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt });
       // Auto-enable so the first added user makes the feature usable.
       if (auth["enabled"] !== true) auth["enabled"] = true;
     });
 
-    logAudit("auth_user_created", { actor: actor.username, username, displayName: displayName ?? null }, { userId: actor.username, severity: "info" });
-    return c.json({ username, displayName, createdAt });
+    logAudit("auth_user_created", { actor: actor.username, username, displayName: displayName ?? null, role }, { userId: actor.username, severity: "info" });
+    return c.json({ username, displayName, role, createdAt });
   });
 
   app.delete("/api/auth/users/:username", async (c) => {
     const actor = await authenticatedUser(c.req.header("Authorization"));
     if (!actor) return c.json({ error: "Unauthorized" }, 401);
+    if (!userHasRole(actor, "operator")) {
+      return c.json({ error: "Operator role required" }, 403);
+    }
 
     const target = c.req.param("username").toLowerCase();
-    const remaining = getConfig().auth.users.filter((u) => u.username.toLowerCase() !== target);
-    if (remaining.length === getConfig().auth.users.length) {
+    const targetUser = getConfig().auth.users.find((u) => u.username.toLowerCase() === target);
+    if (!targetUser) {
       return c.json({ error: `User '${target}' not found` }, 404);
     }
-    if (remaining.length === 0) {
-      return c.json({ error: "Refusing to delete the last user — add another account first or disable auth.enabled" }, 400);
+    const remaining = getConfig().auth.users.filter((u) => u.username.toLowerCase() !== target);
+    // Prevent locking the deployment out of administration: at least one
+    // operator must remain.  Viewers don't count toward this floor.
+    const remainingOperators = remaining.filter((u) => u.role === "operator");
+    if (remainingOperators.length === 0) {
+      return c.json({ error: "Refusing to delete the last operator — promote another account first" }, 400);
     }
 
     updateConfig((raw) => {
@@ -1340,13 +1391,14 @@ export function createGateway() {
       auth["users"] = remaining.map((u) => ({
         username: u.username,
         passwordHash: u.passwordHash,
+        role: u.role,
         ...(u.displayName ? { displayName: u.displayName } : {}),
         ...(u.createdAt ? { createdAt: u.createdAt } : {}),
       }));
       raw["auth"] = auth;
     });
 
-    logAudit("auth_user_deleted", { actor: actor.username, username: target }, { userId: actor.username, severity: "warn" });
+    logAudit("auth_user_deleted", { actor: actor.username, username: target, role: targetUser.role }, { userId: actor.username, severity: "warn" });
     return c.json({ ok: true });
   });
 

@@ -211,15 +211,31 @@ export const GatewaySchema = z.object({
  * hand-editing config is supported but discouraged because the hash format
  * is awkward to type correctly.
  */
+/**
+ * Role-based access control (Wave B).  `operator` is full access (current
+ * default behavior); `viewer` is read-only — can browse audit, sessions,
+ * jobs, federation, and the swarm dashboard but cannot mutate persistent
+ * state (no user management, no config edits, no cron-trigger creation).
+ *
+ * Wave C will extend the gate to WS chat (viewers will not be able to
+ * initiate turns); for now viewers can chat like operators, they just
+ * can't administer the deployment.
+ */
+export const AuthRoleSchema = z.enum(["operator", "viewer"]).default("operator");
+
 export const AuthUserSchema = z.object({
   username: z.string().min(1).max(64).regex(/^[a-z0-9_.-]+$/i, "username must be alphanumeric/_/-/."),
   /** bcrypt hash (e.g. "$2a$12$..."); never plain text. */
   passwordHash: z.string().min(20),
   /** Optional display name shown in the dashboard. */
   displayName: z.string().optional(),
+  /** Account role.  Defaults to operator so existing users keep full access. */
+  role: AuthRoleSchema,
   /** ISO timestamp of when this account was created.  Set by the runtime; do not edit. */
   createdAt: z.string().optional(),
 });
+
+export type AuthRole = z.infer<typeof AuthRoleSchema>;
 
 /**
  * Multi-user authentication (Wave A).  When `enabled` is false (the

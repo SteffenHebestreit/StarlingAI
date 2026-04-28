@@ -144,10 +144,16 @@ export function extractBearerToken(authHeader: string | null | undefined): strin
   return match?.[1] ?? null;
 }
 
+export type AuthRole = "operator" | "viewer";
+
 export interface AuthenticatedUser {
   username: string;
-  role: string;
+  role: AuthRole;
   displayName?: string;
+}
+
+function normalizeRole(value: unknown): AuthRole {
+  return value === "viewer" ? "viewer" : "operator";
 }
 
 /**
@@ -156,6 +162,10 @@ export interface AuthenticatedUser {
  * token's `sub` is not a string.  Used by route handlers that need to
  * audit per-user attribution; routes that only need to gate access can
  * keep using `verifyToken(extractBearerToken(...))`.
+ *
+ * Tokens minted before Wave B (no `role` claim) default to operator —
+ * matches the legacy single-operator behavior so unupgraded tokens keep
+ * working until they expire.
  */
 export async function authenticatedUser(authHeader: string | null | undefined): Promise<AuthenticatedUser | null> {
   const token = extractBearerToken(authHeader);
@@ -164,9 +174,21 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
   if (!payload || typeof payload.sub !== "string") return null;
   return {
     username: payload.sub,
-    role: typeof payload["role"] === "string" ? (payload["role"] as string) : "operator",
+    role: normalizeRole(payload["role"]),
     displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
   };
+}
+
+/**
+ * Returns true when `user` holds the required role or higher.  In Wave B
+ * the only hierarchy is `operator > viewer`.  Use to gate mutating /
+ * administrative routes — viewers should be able to read everything but
+ * not initiate state changes.
+ */
+export function userHasRole(user: AuthenticatedUser | null, required: AuthRole): boolean {
+  if (!user) return false;
+  if (required === "viewer") return true; // both roles can read
+  return user.role === "operator";
 }
 
 export function resetAuthStateForTests(): void {
