@@ -116,6 +116,9 @@ export type AuditEventType =
   // Self-improvement abuse detection (closes GAP-4)
   | "tier_escalation_attempt"
   | "self_improve_loop"
+  // Multi-user auth (Wave A)
+  | "auth_user_created"
+  | "auth_user_deleted"
   // Plugin SDK
   | "plugin_loaded"
   | "plugin_tool_rejected";

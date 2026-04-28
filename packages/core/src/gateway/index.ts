@@ -12,7 +12,7 @@ import { WebSocketServer } from "ws";
 import { ZipFile } from "yazl";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures } from "./auth.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, hashPassword, verifyPassword, createToken } from "./auth.js";
 import { mountFederationRoutes } from "./federation-router.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
@@ -1214,6 +1214,140 @@ export function createGateway() {
   app.get("/readyz", (c) => {
     const sessions = getAllSessions().length;
     return c.json({ status: "ready", sessions });
+  });
+
+  // ── Multi-user authentication (Wave A) ───────────────────────────────────
+  // Routes are mounted unconditionally; behavior gates on auth.enabled at
+  // request time so the operator can flip the flag without a restart.
+
+  app.post("/api/auth/login", async (c) => {
+    const ip = c.req.header("X-Forwarded-For") ?? "unknown";
+    const rate = checkAuthRateLimit(ip);
+    if (!rate.allowed) {
+      return c.json({ error: "Too many failed attempts. Try again later." }, 429);
+    }
+
+    let body: { username?: unknown; password?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!username || !password) {
+      return c.json({ error: "Username and password are required" }, 400);
+    }
+
+    const authConfig = getConfig().auth;
+    if (!authConfig.enabled) {
+      return c.json({ error: "Username/password login is disabled. Set auth.enabled = true and configure auth.users[] to enable it." }, 503);
+    }
+
+    const user = authConfig.users.find((u) => u.username.toLowerCase() === username);
+    if (!user) {
+      recordAuthFailure(ip);
+      return c.json({ error: "Invalid username or password" }, 401);
+    }
+
+    const ok = await verifyPassword(password, user.passwordHash);
+    if (!ok) {
+      recordAuthFailure(ip);
+      return c.json({ error: "Invalid username or password" }, 401);
+    }
+
+    clearAuthFailures(ip);
+    const token = await createToken(user.username, {
+      role: "operator",
+      ...(user.displayName ? { displayName: user.displayName } : {}),
+    });
+    logAudit("auth_success", { username: user.username }, { userId: user.username });
+    return c.json({
+      token,
+      username: user.username,
+      displayName: user.displayName,
+      role: "operator",
+    });
+  });
+
+  app.get("/api/auth/me", async (c) => {
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(user);
+  });
+
+  app.get("/api/auth/users", async (c) => {
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+    const users = getConfig().auth.users.map((u) => ({
+      username: u.username,
+      displayName: u.displayName,
+      createdAt: u.createdAt,
+    }));
+    return c.json({ enabled: getConfig().auth.enabled, users });
+  });
+
+  app.post("/api/auth/users", async (c) => {
+    const actor = await authenticatedUser(c.req.header("Authorization"));
+    if (!actor) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: { username?: unknown; password?: unknown; displayName?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
+    if (!username || !/^[a-z0-9_.-]+$/.test(username)) {
+      return c.json({ error: "username must be alphanumeric/_/-/." }, 400);
+    }
+    if (password.length < 8) {
+      return c.json({ error: "password must be at least 8 characters" }, 400);
+    }
+
+    if (getConfig().auth.users.find((u) => u.username.toLowerCase() === username)) {
+      return c.json({ error: `User '${username}' already exists` }, 409);
+    }
+
+    const passwordHash = await hashPassword(password);
+    const createdAt = new Date().toISOString();
+
+    updateConfig((raw) => {
+      const auth = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
+      const users = (auth["users"] = (auth["users"] as unknown[] | undefined) ?? []);
+      (users as unknown[]).push({ username, passwordHash, displayName, createdAt });
+      // Auto-enable so the first added user makes the feature usable.
+      if (auth["enabled"] !== true) auth["enabled"] = true;
+    });
+
+    logAudit("auth_user_created", { actor: actor.username, username, displayName: displayName ?? null }, { userId: actor.username, severity: "info" });
+    return c.json({ username, displayName, createdAt });
+  });
+
+  app.delete("/api/auth/users/:username", async (c) => {
+    const actor = await authenticatedUser(c.req.header("Authorization"));
+    if (!actor) return c.json({ error: "Unauthorized" }, 401);
+
+    const target = c.req.param("username").toLowerCase();
+    const remaining = getConfig().auth.users.filter((u) => u.username.toLowerCase() !== target);
+    if (remaining.length === getConfig().auth.users.length) {
+      return c.json({ error: `User '${target}' not found` }, 404);
+    }
+    if (remaining.length === 0) {
+      return c.json({ error: "Refusing to delete the last user — add another account first or disable auth.enabled" }, 400);
+    }
+
+    updateConfig((raw) => {
+      const auth = (raw["auth"] as Record<string, unknown>) ?? {};
+      auth["users"] = remaining.map((u) => ({
+        username: u.username,
+        passwordHash: u.passwordHash,
+        ...(u.displayName ? { displayName: u.displayName } : {}),
+        ...(u.createdAt ? { createdAt: u.createdAt } : {}),
+      }));
+      raw["auth"] = auth;
+    });
+
+    logAudit("auth_user_deleted", { actor: actor.username, username: target }, { userId: actor.username, severity: "warn" });
+    return c.json({ ok: true });
   });
 
   // Federation routes — gated at request time on federation.enabled, so

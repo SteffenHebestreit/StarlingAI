@@ -144,6 +144,31 @@ export function extractBearerToken(authHeader: string | null | undefined): strin
   return match?.[1] ?? null;
 }
 
+export interface AuthenticatedUser {
+  username: string;
+  role: string;
+  displayName?: string;
+}
+
+/**
+ * Extract the authenticated user from a request's Authorization header.
+ * Returns null when the header is missing, the token is invalid, or the
+ * token's `sub` is not a string.  Used by route handlers that need to
+ * audit per-user attribution; routes that only need to gate access can
+ * keep using `verifyToken(extractBearerToken(...))`.
+ */
+export async function authenticatedUser(authHeader: string | null | undefined): Promise<AuthenticatedUser | null> {
+  const token = extractBearerToken(authHeader);
+  if (!token) return null;
+  const payload = await verifyToken(token);
+  if (!payload || typeof payload.sub !== "string") return null;
+  return {
+    username: payload.sub,
+    role: typeof payload["role"] === "string" ? (payload["role"] as string) : "operator",
+    displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
+  };
+}
+
 export function resetAuthStateForTests(): void {
   _jwtSecret = null;
   failureCounts.clear();

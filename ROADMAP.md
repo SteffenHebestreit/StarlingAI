@@ -226,6 +226,27 @@ In practice, the orchestrator LLM almost always names agents explicitly after ca
 
 ---
 
+## Multi-User Authentication — Wave A (April 2026)
+
+Multiple operator-level accounts with username + password login.  No
+role split yet; every authenticated user gets full operator privileges
+(Wave B will introduce viewer accounts and per-route gating).
+
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| Per-user accounts | ✅ shipped (Wave A) | `auth.users[]` in config; passwords stored as bcrypt hashes; usernames match `^[a-z0-9_.-]+$` |
+| `POST /api/auth/login` | ✅ shipped | Username/password → JWT scoped to that username (`sub` claim).  Honors the existing IP-based `checkAuthRateLimit` so brute-force gets blocked.  Returns 503 when `auth.enabled` is false. |
+| `GET /api/auth/me` | ✅ shipped | Returns `{ username, role, displayName? }` for the JWT holder. |
+| `POST /api/auth/users` | ✅ shipped | Creates an account; auto-enables `auth.enabled` on first add.  Validates password length (≥8) and username pattern. |
+| `DELETE /api/auth/users/:username` | ✅ shipped | Removes an account.  Refuses to delete the last user. |
+| Audit attribution | ✅ shipped (Wave A) | `auth_user_created`, `auth_user_deleted`, plus `auth_success` now carries `userId` |
+| LoginModal UX | ✅ shipped | Vue dashboard's modal has a username/password tab (default) and a token tab (legacy); the form calls `/api/auth/login` and stores the returned JWT in localStorage |
+| Header user pill + sign-out | ✅ shipped | App header shows the current user (display name or username) with a sign-out button when not the legacy `admin` token |
+| Backwards compat | ✅ shipped | When `auth.enabled` is false (the default) the bootstrap admin token printed at startup still works — operators upgrade by setting the flag. |
+| Role split (operator/viewer) | ⏳ Wave B | Per-route gating, viewer-only UI affordances |
+
+---
+
 ## OpenTelemetry Distributed Tracing (April 2026)
 
 End-to-end tracing across tool calls, sub-agent runs, and federation

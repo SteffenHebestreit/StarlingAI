@@ -42,6 +42,27 @@
           </span>
         </div>
 
+        <!-- Current user pill: visible only when an authenticated identity is
+             attached to the JWT (i.e. multi-user auth is enabled).  Single-
+             operator setups using the bootstrap admin token render no pill. -->
+        <div
+          v-if="currentUser && currentUser.username !== 'admin'"
+          class="hidden sm:flex items-center gap-2 text-xs text-gray-300 shrink-0"
+          :title="currentUser.role === 'operator' ? 'Operator account' : currentUser.role"
+        >
+          <span class="rounded-full bg-purple-900/40 border border-purple-500/30 px-2.5 py-0.5">
+            {{ currentUser.displayName ?? currentUser.username }}
+          </span>
+          <button
+            type="button"
+            class="text-gray-400 hover:text-gray-200 transition"
+            title="Sign out"
+            @click="signOut"
+          >
+            ↪
+          </button>
+        </div>
+
         <button
           v-if="notifications.supported && notifications.permission === 'default'"
           class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
@@ -127,7 +148,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
@@ -136,6 +157,40 @@ import LoginModal from "@/components/LoginModal.vue";
 const gateway = useGatewayStore();
 const notifications = useNotificationStore();
 const $route = useRoute();
+
+interface CurrentUser { username: string; role: string; displayName?: string }
+const currentUser = ref<CurrentUser | null>(null);
+
+function apiBaseFromWsUrl(value: string): string {
+  return value.replace(/^ws/, "http").replace(/\/ws$/, "");
+}
+
+async function refreshCurrentUser(): Promise<void> {
+  if (!gateway.token) {
+    currentUser.value = null;
+    return;
+  }
+  try {
+    const res = await fetch(`${apiBaseFromWsUrl(gateway.wsUrl)}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${gateway.token}` },
+    });
+    if (!res.ok) {
+      currentUser.value = null;
+      return;
+    }
+    currentUser.value = await res.json() as CurrentUser;
+  } catch {
+    currentUser.value = null;
+  }
+}
+
+function signOut(): void {
+  gateway.disconnect();
+  gateway.token = "";
+  currentUser.value = null;
+  // Drop persisted credentials so the LoginModal reappears clean.
+  try { localStorage.removeItem("gc_token"); } catch { /* non-fatal */ }
+}
 
 const navLinks = [
   { to: "/", label: "Chat" },
@@ -188,6 +243,13 @@ async function enableBrowserNotifications(): Promise<void> {
 onMounted(() => {
   notifications.syncPermission();
   if (gateway.token) gateway.connect();
+  void refreshCurrentUser();
+});
+
+// Re-fetch the current user whenever the connection state flips to
+// connected (covers reconnects, token rotations from /api/auth/login).
+watch(() => gateway.connected, (now) => {
+  if (now) void refreshCurrentUser();
 });
 </script>
 
