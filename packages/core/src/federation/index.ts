@@ -112,9 +112,35 @@ export function getFederationConfig(): FederationConfig {
   return getConfig().federation;
 }
 
-/** Look up a peer by id from the configured peer list.  Returns undefined if unknown. */
+/**
+ * Discovered (non-configured) peers — populated by `discoverPeersTransitively`
+ * at startup + on a periodic timer when `federation.discovery.enabled` is on.
+ * These do not persist; a restart re-discovers them.
+ */
+const _discoveredPeers = new Map<string, FederationPeerConfig & { discoveredAt: string; lastSeenAt: string }>();
+
+/** Look up a peer by id from the configured peer list, then the discovered cache. */
 export function findPeerById(peerId: string): FederationPeerConfig | undefined {
-  return getConfig().federation.peers.find((p) => p.id === peerId);
+  return getConfig().federation.peers.find((p) => p.id === peerId)
+    ?? _discoveredPeers.get(peerId);
+}
+
+interface KnownPeerSummary extends FederationPeerConfig {
+  source: "configured" | "discovered";
+}
+
+/** Union of configured + discovered peers, marked by source. */
+export function listAllKnownPeers(): KnownPeerSummary[] {
+  const configured = getConfig().federation.peers.map((p) => ({ ...p, source: "configured" as const }));
+  const discovered = [..._discoveredPeers.values()]
+    .filter((p) => !configured.find((c) => c.id === p.id))
+    .map(({ discoveredAt: _d, lastSeenAt: _l, ...rest }) => ({ ...rest, source: "discovered" as const }));
+  return [...configured, ...discovered];
+}
+
+/** Test-only — clear the discovered-peer cache. */
+export function _resetDiscoveredPeersForTests(): void {
+  _discoveredPeers.clear();
 }
 
 /** Mint a federation JWT addressed to `audiencePeerId`.  Caller is the local instance. */
@@ -200,6 +226,117 @@ export async function fetchPeerCapability(peerId: string, options: { force?: boo
 /** Drop the cached capability snapshot for a peer (e.g. after auth failure). */
 export function invalidatePeerCapability(peerId: string): void {
   _capabilityCache.delete(peerId);
+}
+
+/**
+ * Transitive peer discovery — ask each currently-known peer "who else do you
+ * talk to?", probe each new candidate with `/api/federation/health`, and add
+ * any that respond successfully to the discovered-peer cache.  Trust is the
+ * shared HMAC: a probe that auths is by definition a peer in our trust web.
+ *
+ * Returns counts so the periodic loop can log progress.  Idempotent — known
+ * peers refresh their `lastSeenAt` rather than duplicating.
+ */
+export async function discoverPeersTransitively(): Promise<{ probed: number; added: number; refreshed: number; failed: number }> {
+  const config = requireEnabledConfig();
+  if (!config.discovery.enabled) return { probed: 0, added: 0, refreshed: 0, failed: 0 };
+
+  const localId = config.instanceId;
+  const seen = new Set<string>([localId, ...config.peers.map((p) => p.id)]);
+  const candidates: FederationPeerConfig[] = [];
+
+  // Ask each configured peer for THEIR known-peers list.
+  for (const peer of config.peers) {
+    try {
+      const token = await mintFederationToken(peer.id, "capabilities");
+      const res = await fetchWithTimeout(joinUrl(peer.url, "/api/federation/peers-known"), {
+        method: "GET",
+        headers: { "authorization": `Bearer ${token}`, "accept": "application/json" },
+      }, 10_000);
+      if (!res.ok) continue;
+      const body = (await res.json()) as { peers?: FederationPeerConfig[] };
+      for (const p of body.peers ?? []) {
+        if (!p.id || !p.url) continue;
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        candidates.push({ id: p.id, url: p.url, tags: p.tags ?? [] });
+      }
+    } catch {
+      // Peer may be unreachable — non-fatal, the next refresh will retry.
+    }
+  }
+
+  let added = 0;
+  let refreshed = 0;
+  let failed = 0;
+
+  // Probe each candidate via /api/federation/health to verify shared trust.
+  // We can't use mintFederationToken normally because the candidate isn't in
+  // our peer list yet — temporarily add it to discovered cache, attempt the
+  // probe, and roll back on failure.
+  for (const candidate of candidates) {
+    const now = new Date().toISOString();
+    _discoveredPeers.set(candidate.id, { ...candidate, discoveredAt: now, lastSeenAt: now });
+    const probe = await pingPeer(candidate.id);
+    if (probe.ok) {
+      added += 1;
+      logAudit("federation_peer_discovered", {
+        peerId: candidate.id,
+        peerUrl: candidate.url,
+        instanceId: probe.instanceId ?? null,
+        latencyMs: probe.latencyMs,
+      });
+    } else {
+      _discoveredPeers.delete(candidate.id);
+      failed += 1;
+    }
+  }
+
+  // Refresh lastSeenAt for already-discovered peers that still respond.
+  for (const [id, peer] of _discoveredPeers) {
+    if (candidates.find((c) => c.id === id)) continue; // just probed above
+    const probe = await pingPeer(id);
+    if (probe.ok) {
+      peer.lastSeenAt = new Date().toISOString();
+      refreshed += 1;
+    } else {
+      _discoveredPeers.delete(id);
+      logAudit("federation_peer_unreachable", { peerId: id, peerUrl: peer.url, error: probe.error ?? "ping failed" }, { severity: "warn" });
+    }
+  }
+
+  return { probed: candidates.length, added, refreshed, failed };
+}
+
+let _discoveryTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Start the periodic discovery loop. */
+export function startPeerDiscovery(): void {
+  const config = getFederationConfig();
+  if (!config.enabled || !config.discovery.enabled) return;
+  if (_discoveryTimer) return; // already running
+  // Kick off an initial pass without blocking.
+  void discoverPeersTransitively().then((counts) => {
+    log.info({ ...counts }, "Initial federation peer discovery complete");
+  }).catch((err) => log.warn({ err }, "Initial federation peer discovery failed"));
+
+  _discoveryTimer = setInterval(() => {
+    void discoverPeersTransitively().then((counts) => {
+      if (counts.added > 0 || counts.refreshed > 0 || counts.failed > 0) {
+        log.debug({ ...counts }, "Federation peer discovery refresh");
+      }
+    }).catch((err) => log.warn({ err }, "Federation peer discovery refresh failed"));
+  }, config.discovery.intervalMs);
+  // Don't keep the process alive solely for the discovery loop.
+  _discoveryTimer.unref?.();
+}
+
+/** Stop the discovery loop (graceful shutdown). */
+export function stopPeerDiscovery(): void {
+  if (_discoveryTimer) {
+    clearInterval(_discoveryTimer);
+    _discoveryTimer = null;
+  }
 }
 
 /** Probe a peer's `/api/federation/health` endpoint and return latency + identity. */

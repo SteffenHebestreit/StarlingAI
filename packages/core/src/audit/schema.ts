@@ -111,6 +111,8 @@ export type AuditEventType =
   | "federation_search_served"
   | "federation_search_started"
   | "federation_search_completed"
+  | "federation_peer_discovered"
+  | "federation_peer_unreachable"
   // Self-improvement abuse detection (closes GAP-4)
   | "tier_escalation_attempt"
   | "self_improve_loop"
