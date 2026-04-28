@@ -1276,6 +1276,22 @@ export function createGateway() {
     return c.json({ events });
   });
 
+  // ── Tracing status (dashboard) ───────────────────────────────────────────
+  app.get("/api/tracing/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const cfg = getConfig().tracing;
+    const { isTracingEnabled } = await import("../observability/tracing.js");
+    return c.json({
+      configured: cfg.enabled,
+      active: isTracingEnabled(),
+      endpoint: cfg.otlpEndpoint,
+      serviceName: cfg.serviceName,
+      sampleRate: cfg.sampleRate,
+    });
+  });
+
   // ── Plugin SDK dashboard endpoint ────────────────────────────────────────
   // Lists plugins loaded at startup with their tool surface.  Operators can
   // sanity-check what third-party code is running.

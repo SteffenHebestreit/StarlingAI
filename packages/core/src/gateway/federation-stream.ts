@@ -17,6 +17,7 @@ import { verifyFederationToken, getFederationConfig } from "../federation/index.
 import { runSubAgentWithStats, type SubAgentProgressEvent } from "../agent/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { withExtractedContext, withSpan } from "../observability/tracing.js";
 
 const log = childLogger("federation:stream");
 
@@ -137,17 +138,30 @@ export async function handleFederationDelegateStream(
     });
   };
 
+  // Extract inbound trace context so streaming spans nest under the caller.
+  const inboundHeaders: Record<string, string> = {};
+  for (const k of ["traceparent", "tracestate", "baggage"]) {
+    const v = req.headers[k];
+    if (typeof v === "string") inboundHeaders[k] = v;
+  }
+
   try {
-    const result = await runSubAgentWithStats({
-      agentName,
-      task,
-      context,
-      parentSessionId: remoteSessionId,
-      workspacePath: getConfig().workspacePath,
-      turnTimeoutOverrideMs: timeoutMs,
-      signal: abortController.signal,
-      onProgress,
-    });
+    const result = await withExtractedContext(inboundHeaders, () =>
+      withSpan(`federation.inbound ${agentName}`, {
+        "starlingai.federation.peer": verified.issuer,
+        "starlingai.federation.agent": agentName,
+        "starlingai.federation.streaming": true,
+      }, () => runSubAgentWithStats({
+        agentName,
+        task,
+        context,
+        parentSessionId: remoteSessionId,
+        workspacePath: getConfig().workspacePath,
+        turnTimeoutOverrideMs: timeoutMs,
+        signal: abortController.signal,
+        onProgress,
+      })),
+    );
     logAudit("federation_request_completed", {
       peer: verified.issuer,
       agentName,
