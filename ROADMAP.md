@@ -267,7 +267,7 @@ Two or more StarlingAI instances delegate tasks cross-instance. Each instance re
 | Streaming delegation progress | ✅ shipped (wave 2) | `POST /api/federation/delegate/stream` emits SSE; `delegate_to_remote_agent` defaults `stream=true` and forwards peer progress to `ctx.onSubAgentProgress` |
 | Federated workspace_search | ✅ shipped (wave 2) | `broadcastWorkspaceSearch` fans out across peers in parallel; `federated_workspace_search` Tier-0 tool merges local + peer matches grouped by source |
 | Dashboard panel | ✅ shipped (wave 2) | `/federation` Vue page with peer cards + recent activity timeline; backed by `/api/federation/peers` and `/api/federation/activity` |
-| Auto peer discovery | ⏳ deferred | mDNS / shared-bus heartbeat registry — manual config only |
+| Auto peer discovery | ✅ shipped (wave 3) | Transitive — each instance asks configured peers "who else do you talk to?" via `GET /api/federation/peers-known`, probes candidates via the existing health endpoint, and adds successfully-authed peers to an in-memory cache.  No new deps, no broadcast — trust is the existing shared HMAC.  Configurable refresh interval; discovered peers are forgotten on restart.  Audit: `federation_peer_discovered`, `federation_peer_unreachable`. |
 
 ### Configuration
 

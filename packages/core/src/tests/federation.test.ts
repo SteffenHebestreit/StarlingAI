@@ -393,6 +393,163 @@ describe("federated workspace search broadcast", () => {
   });
 });
 
+describe("federation transitive peer discovery", () => {
+  let tempDir: string | null = null;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "starlingai-federation-discovery-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      federation: {
+        enabled: true,
+        instanceId: "primary",
+        sharedSecret: SHARED_SECRET,
+        peers: [
+          { id: "alpha", url: "https://alpha.example.com:8765" },
+        ],
+        discovery: { enabled: true, intervalMs: 60_000 },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+    vi.restoreAllMocks();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+    const fed = await import("../federation/index.js");
+    fed._resetDiscoveredPeersForTests();
+    fed.stopPeerDiscovery();
+  });
+
+  it("adds new peers reachable through configured peers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("alpha.example.com") && u.includes("/peers-known")) {
+        return new Response(JSON.stringify({
+          instanceId: "alpha-prod",
+          peers: [
+            { id: "beta", url: "https://beta.example.com:8765", tags: [], source: "configured" },
+            { id: "gamma", url: "https://gamma.example.com:8765", tags: [], source: "discovered" },
+          ],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("/api/federation/health")) {
+        if (u.includes("beta.example.com")) {
+          return new Response(JSON.stringify({ ok: true, instanceId: "beta-prod", uptimeMs: 1234 }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (u.includes("gamma.example.com")) {
+          return new Response(JSON.stringify({ ok: true, instanceId: "gamma-prod", uptimeMs: 1234 }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.discoverPeersTransitively();
+
+    expect(result.probed).toBe(2);
+    expect(result.added).toBe(2);
+
+    const known = fed.listAllKnownPeers();
+    const beta = known.find((p) => p.id === "beta");
+    const gamma = known.find((p) => p.id === "gamma");
+    expect(beta).toBeDefined();
+    expect(beta?.source).toBe("discovered");
+    expect(gamma?.source).toBe("discovered");
+
+    // Configured alpha is also returned
+    expect(known.find((p) => p.id === "alpha")?.source).toBe("configured");
+  });
+
+  it("does not re-add peers that are already configured", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("/peers-known")) {
+        return new Response(JSON.stringify({
+          instanceId: "alpha-prod",
+          peers: [
+            { id: "alpha", url: "https://alpha.example.com:8765", tags: [], source: "configured" }, // self-reference
+            { id: "primary", url: "https://primary.example.com:8765", tags: [], source: "configured" }, // ourselves
+          ],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.discoverPeersTransitively();
+
+    expect(result.added).toBe(0);
+  });
+
+  it("drops a discovered peer that becomes unreachable on the next refresh", async () => {
+    let healthAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("/peers-known")) {
+        return new Response(JSON.stringify({
+          peers: [
+            { id: "beta", url: "https://beta.example.com:8765", tags: [], source: "configured" },
+          ],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (u.includes("beta.example.com") && u.includes("/api/federation/health")) {
+        healthAttempts += 1;
+        // First probe succeeds, subsequent probes fail.
+        if (healthAttempts === 1) {
+          return new Response(JSON.stringify({ ok: true, instanceId: "beta-prod", uptimeMs: 1 }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response("down", { status: 503 });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+
+    const fed = await import("../federation/index.js");
+    const first = await fed.discoverPeersTransitively();
+    expect(first.added).toBe(1);
+    expect(fed.listAllKnownPeers().find((p) => p.id === "beta")).toBeDefined();
+
+    const second = await fed.discoverPeersTransitively();
+    // beta was already discovered, so on the second pass it doesn't add but the
+    // health re-probe fails and it gets evicted.
+    expect(second.added).toBe(0);
+    expect(fed.listAllKnownPeers().find((p) => p.id === "beta")).toBeUndefined();
+  });
+
+  it("returns 0/0 when discovery is disabled", async () => {
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    tempDir = mkdtempSync(join(tmpdir(), "starlingai-federation-discovery-off-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      federation: {
+        enabled: true,
+        instanceId: "primary",
+        sharedSecret: SHARED_SECRET,
+        peers: [{ id: "alpha", url: "https://alpha.example.com:8765" }],
+        discovery: { enabled: false },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fed = await import("../federation/index.js");
+    const result = await fed.discoverPeersTransitively();
+
+    expect(result).toEqual({ probed: 0, added: 0, refreshed: 0, failed: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("federation tool guards", () => {
   let tempDir: string | null = null;
 

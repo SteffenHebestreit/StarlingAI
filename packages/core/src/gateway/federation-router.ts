@@ -179,6 +179,32 @@ export function mountFederationRoutes(app: Hono): void {
     }
   });
 
+  // Known-peers advertisement — used by the transitive discovery loop.
+  // Returns the union of configured peers + currently-reachable discovered
+  // peers (id + url + tags only — no secrets and no capability snapshots).
+  // The trust gate is the same federation HMAC, so a caller already proves
+  // they hold the shared secret before learning who else holds it.
+  app.get("/api/federation/peers-known", async (c) => {
+    const config = getFederationConfig();
+    if (!config.enabled) return c.json({ error: "federation disabled" }, 404);
+
+    const token = extractBearer(c.req.header("Authorization"));
+    const verified = await verifyFederationToken(token);
+    if (!verified) {
+      logAudit("federation_auth_failed", { route: "peers-known" }, { severity: "warn" });
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const { listAllKnownPeers } = await import("../federation/index.js");
+    const known = listAllKnownPeers().map((p) => ({
+      id: p.id,
+      url: p.url,
+      tags: p.tags,
+      source: p.source,
+    }));
+    return c.json({ instanceId: config.instanceId, peers: known });
+  });
+
   // Workspace search — runs the peer's local workspace_search and returns
   // ranked snippets to the broadcaster for cross-instance retrieval.
   app.post("/api/federation/search", async (c) => {

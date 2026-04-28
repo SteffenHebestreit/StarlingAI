@@ -238,6 +238,19 @@ export const FederationSchema = z.object({
   delegationTimeoutMs: z.number().int().min(5_000).max(3_600_000).default(600_000),
   /** Capability cache TTL in ms — how long fetched peer capabilities stay fresh.  Default 5 min. */
   capabilityCacheTtlMs: z.number().int().min(0).max(3_600_000).default(300_000),
+  /**
+   * Auto peer discovery — instances periodically ask configured peers
+   * "who else do you talk to?" and probe each new peer.  Reachable peers
+   * (those whose `/api/federation/health` returns 200 with the matching
+   * shared HMAC) are added to the in-memory peer list and can receive
+   * delegations.  Discovered peers DO NOT persist to config — they are
+   * forgotten on restart and re-discovered next startup.
+   */
+  discovery: z.object({
+    enabled: z.boolean().default(false),
+    /** How often to refresh the discovered-peer set, in ms.  Default 5 min. */
+    intervalMs: z.number().int().min(30_000).max(86_400_000).default(300_000),
+  }).default({}),
 });
 
 export type FederationPeerConfig = z.infer<typeof FederationPeerSchema>;

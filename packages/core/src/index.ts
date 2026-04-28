@@ -204,6 +204,10 @@ export async function main() {
   // Start Warden — background anomaly monitor
   startWarden();
 
+  // Start transitive federation peer discovery (no-op when disabled)
+  const { startPeerDiscovery } = await import("./federation/index.js");
+  startPeerDiscovery();
+
   // Start MemGraph background jobs (centrality, community detection, similarity links)
   startGraphJobs();
 
@@ -250,6 +254,8 @@ export async function main() {
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
     stopWarden();
+    const { stopPeerDiscovery } = await import("./federation/index.js");
+    stopPeerDiscovery();
     if (embeddedSceneWorkerEnabled) {
       await stopSceneJobWorker();
     }
