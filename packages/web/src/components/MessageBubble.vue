@@ -385,6 +385,26 @@ function highlightCode(code: string, lang: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function sanitizeSvgMarkup(raw: string): string | null {
+  const normalized = raw.replace(/^\uFEFF/, "").replace(/^<\?xml[^>]*>\s*/i, "").trim();
+  const match = normalized.match(/<svg[\s\S]*?<\/svg>/i);
+  if (!match) return null;
+  const sanitized = DOMPurify.sanitize(match[0], {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  }).trim();
+  return /<svg[\s\S]*?<\/svg>/i.test(sanitized) ? sanitized : null;
+}
+
+function renderSvgPreviewBlock(code: string, lang: string): string | null {
+  const normalizedLang = (lang ?? "").trim().toLowerCase();
+  if (normalizedLang && !["svg", "xml", "html"].includes(normalizedLang)) {
+    return null;
+  }
+  const svg = sanitizeSvgMarkup(code);
+  if (!svg) return null;
+  return svg;
+}
+
 // Override marked's code renderer once at module load so every <pre><code> in
 // the chat gets a header bar with an optional language label and a copy button.
 // The button has data-copy-code so a single click handler on the message
@@ -399,15 +419,26 @@ marked.use({
         return `<pre><code class="language-mermaid">${escapeAttr(text)}</code></pre>`;
       }
       const highlighted = highlightCode(text, language);
+      const svgPreview = renderSvgPreviewBlock(text, language);
       const langLabel = language
         ? `<span class="code-block__lang">${escapeAttr(language)}</span>`
         : "<span class=\"code-block__lang code-block__lang--unknown\">code</span>";
-      return `<div class="code-block">
+      const actions = svgPreview
+        ? `<div class="code-block__actions">
+    <div class="code-block__toggle-group" role="tablist" aria-label="SVG block display mode">
+      <button class="code-block__toggle code-block__toggle--active" data-svg-mode-button="preview" type="button" aria-pressed="true">Preview</button>
+      <button class="code-block__toggle" data-svg-mode-button="code" type="button" aria-pressed="false">Code</button>
+    </div>
+    <button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>
+  </div>`
+        : `<button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>`;
+      return `<div class="code-block${svgPreview ? " code-block--svg" : ""}"${svgPreview ? ' data-svg-mode="preview"' : ""}>
   <div class="code-block__header">
     ${langLabel}
-    <button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>
+    ${actions}
   </div>
-  <pre><code class="language-${escapeAttr(language || "plaintext")} hljs">${highlighted}</code></pre>
+  ${svgPreview ? `<div class="code-block__svg-preview" data-svg-panel="preview" aria-label="SVG preview">${svgPreview}</div>` : ""}
+  <pre${svgPreview ? ' data-svg-panel="code"' : ""}><code class="language-${escapeAttr(language || "plaintext")} hljs">${highlighted}</code></pre>
 </div>`;
     },
   },
@@ -1089,6 +1120,21 @@ function openExternalAttachment(attachment: ChatAttachment): void {
 function onMessageContentClick(event: MouseEvent): void {
   const target = event.target as HTMLElement | null;
   if (!target) return;
+  const toggleButton = target.closest("[data-svg-mode-button]") as HTMLButtonElement | null;
+  if (toggleButton) {
+    const wrapper = toggleButton.closest(".code-block--svg") as HTMLElement | null;
+    const mode = toggleButton.dataset.svgModeButton;
+    if (!wrapper || (mode !== "preview" && mode !== "code")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    wrapper.dataset.svgMode = mode;
+    wrapper.querySelectorAll<HTMLButtonElement>("[data-svg-mode-button]").forEach((button) => {
+      const active = button.dataset.svgModeButton === mode;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.classList.toggle("code-block__toggle--active", active);
+    });
+    return;
+  }
   const button = target.closest("[data-copy-code]") as HTMLButtonElement | null;
   if (!button) return;
   const wrapper = button.closest(".code-block");
@@ -1152,7 +1198,9 @@ async function downloadAttachment(attachment: ChatAttachment, archive = false): 
 //   that match the conventions assistant messages already use.
 function renderMarkdown(raw: string): string {
   const html = marked.parse(raw, { async: false, breaks: true, gfm: true }) as string;
-  return DOMPurify.sanitize(html);
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  });
 }
 
 function escapeHtml(raw: string): string {
@@ -1889,6 +1937,38 @@ onBeforeUnmount(() => {
   color: rgb(156 163 175);
   font-weight: 500;
 }
+.prose-content :deep(.code-block__actions) {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.prose-content :deep(.code-block__toggle-group) {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(168, 85, 247, 0.18);
+}
+.prose-content :deep(.code-block__toggle) {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: rgb(156 163 175);
+  padding: 0.18rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.prose-content :deep(.code-block__toggle:hover) {
+  color: rgb(226 232 240);
+}
+.prose-content :deep(.code-block__toggle--active) {
+  background: rgba(6, 182, 212, 0.18);
+  color: rgb(165 243 252);
+}
 .prose-content :deep(.code-block__copy) {
   appearance: none;
   border: 1px solid rgba(168, 85, 247, 0.35);
@@ -1920,6 +2000,28 @@ onBeforeUnmount(() => {
   background: rgba(248, 113, 113, 0.18);
   color: rgb(254 202 202);
   border-color: rgba(248, 113, 113, 0.55);
+}
+.prose-content :deep(.code-block__svg-preview) {
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background:
+    radial-gradient(circle at top, rgba(6, 182, 212, 0.14), transparent 52%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(10, 7, 20, 0.88));
+  border-bottom: 1px solid rgba(168, 85, 247, 0.14);
+  overflow: auto;
+}
+.prose-content :deep(.code-block__svg-preview svg) {
+  display: block;
+  max-width: min(100%, 26rem);
+  height: auto;
+  max-height: 24rem;
+}
+.prose-content :deep(.code-block--svg[data-svg-mode='preview'] pre[data-svg-panel='code']) {
+  display: none;
+}
+.prose-content :deep(.code-block--svg[data-svg-mode='code'] .code-block__svg-preview[data-svg-panel='preview']) {
+  display: none;
 }
 .prose-content :deep(.code-block pre) {
   margin: 0;

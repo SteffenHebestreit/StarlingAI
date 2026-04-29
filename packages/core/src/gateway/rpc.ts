@@ -280,8 +280,17 @@ export class RpcConnection {
     const turnTimeoutMs = getConfig().gateway.turnTimeoutMs;
 
     switch (method) {
-      case "gateway.status":
-        return { status: "running", sessions: listSessions().length, uptime: process.uptime() };
+      case "gateway.status": {
+        const requestId = typeof params["requestId"] === "string" && params["requestId"].trim()
+          ? String(params["requestId"])
+          : undefined;
+        return {
+          status: "running",
+          sessions: listSessions().length,
+          uptime: process.uptime(),
+          ...(requestId ? { requestId, activeTurn: this.abortControllers.has(requestId) } : {}),
+        };
+      }
 
       case "session.create": {
         let workspacePath: string | undefined = undefined;

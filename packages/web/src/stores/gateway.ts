@@ -147,7 +147,7 @@ const SESSION_TRANSCRIPT_PAGE_SIZE = 100;
 const CONNECT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
-const DELEGATED_TURN_LIVENESS_PROBE_TIMEOUT_MS = 8_000;
+const PENDING_TURN_LIVENESS_PROBE_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
 const TURN_RECOVERY_POLL_MS = 2_000;
 const TURN_RECOVERY_TIMEOUT_MS = 60_000;
@@ -723,40 +723,65 @@ export const useGatewayStore = defineStore("gateway", () => {
     }, backoff);
   }
 
-  async function probeDelegatedTurnLiveness(): Promise<boolean> {
-    if (!pendingRequestId.value || !connected.value || !ws || ws.readyState !== WebSocket.OPEN) {
-      return false;
+  async function probePendingTurnLiveness(requestId: string): Promise<{ connectionHealthy: boolean; requestActive: boolean }> {
+    if (!connected.value || !ws || ws.readyState !== WebSocket.OPEN) {
+      return { connectionHealthy: false, requestActive: false };
     }
 
     try {
-      await rpc("gateway.status", undefined, DELEGATED_TURN_LIVENESS_PROBE_TIMEOUT_MS);
-      return true;
+      const status = await rpc("gateway.status", { requestId }, PENDING_TURN_LIVENESS_PROBE_TIMEOUT_MS) as Record<string, unknown>;
+      return {
+        connectionHealthy: true,
+        requestActive: status["activeTurn"] === true,
+      };
     } catch {
-      return false;
+      return { connectionHealthy: false, requestActive: false };
     }
   }
 
+  async function warnAboutPossiblyStalledTurn(delegated: boolean): Promise<void> {
+    const requestId = pendingRequestId.value;
+    if (!requestId) return;
+
+    const liveness = await probePendingTurnLiveness(requestId);
+    if (pendingRequestId.value !== requestId) return;
+
+    if (liveness.connectionHealthy && liveness.requestActive) {
+      turnLikelyStalled.value = false;
+      armPendingTurnWatchdog();
+      return;
+    }
+
+    turnLikelyStalled.value = true;
+    updateStreamingStatus(
+      delegated
+        ? "Work is still in progress, but the backend has stopped confirming that this run is active. Watching closely before recovery."
+        : "No progress signal has arrived recently, and the backend no longer confirms the run as active.",
+      { appendHistory: false },
+    );
+  }
+
   async function recoverFromStalledTurn(): Promise<void> {
-    if (!pendingRequestId.value) {
+    const requestId = pendingRequestId.value;
+    if (!requestId) {
       clearTurnStallState();
       return;
     }
 
-    if (hasActiveWorkInFlight()) {
-      const connectionHealthy = await probeDelegatedTurnLiveness();
-      if (!pendingRequestId.value) {
-        clearTurnStallState();
-        return;
-      }
-      if (connectionHealthy) {
-        turnLikelyStalled.value = false;
-        updateStreamingStatus(
-          "Connection is still healthy. Work is still in progress, so the turn will stay open while waiting for the next progress event.",
-          { appendHistory: false },
-        );
-        armPendingTurnWatchdog();
-        return;
-      }
+    const liveness = await probePendingTurnLiveness(requestId);
+    if (pendingRequestId.value !== requestId) {
+      clearTurnStallState();
+      return;
+    }
+
+    if (liveness.connectionHealthy && liveness.requestActive) {
+      turnLikelyStalled.value = false;
+      updateStreamingStatus(
+        "The backend is still generating this response. Keeping the turn open while waiting for the next progress event.",
+        { appendHistory: false },
+      );
+      armPendingTurnWatchdog();
+      return;
     }
 
     turnLikelyStalled.value = true;
@@ -810,14 +835,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const { warningMs, recoveryMs, delegated } = getPendingTurnWatchdogDelays();
 
     turnStallWarningTimer = setTimeout(() => {
-      if (!pendingRequestId.value) return;
-      turnLikelyStalled.value = true;
-      updateStreamingStatus(
-        delegated
-          ? "Work is still in progress (sub-agent or tool call active). Waiting a bit longer before treating it as stalled."
-          : "No progress signal has arrived recently. The agent may be stalled.",
-        { appendHistory: false },
-      );
+      void warnAboutPossiblyStalledTurn(delegated);
     }, warningMs);
 
     turnStallRecoveryTimer = setTimeout(() => {

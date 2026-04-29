@@ -37,6 +37,8 @@ import {
 const log = childLogger("agent:runtime");
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
+const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
+const MAX_CONTINUATION_OVERLAP_CHARS = 400;
 const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
   search_agents: 2,
@@ -2002,6 +2004,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       if (firstModelResponseMs === undefined) {
         firstModelResponseMs = Date.now() - turnStartedAt;
       }
+      if (llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
+        const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
+        llmResponse = continued.response;
+        llmCalls += continued.additionalCalls;
+        llmTimeMs += continued.additionalTimeMs;
+      }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
       return blocked(
@@ -3459,6 +3467,75 @@ function persistAssistantTurnState(session: AgentSession, content: string, swarm
   }
 
   session.addMessage({ role: "assistant", content });
+}
+
+function appendNonDuplicatedContinuation(existing: string, continuation: string): string {
+  if (!continuation) return existing;
+  if (!existing) return continuation;
+  if (existing.endsWith(continuation)) return existing;
+
+  const maxOverlap = Math.min(existing.length, continuation.length, MAX_CONTINUATION_OVERLAP_CHARS);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (existing.slice(-size) === continuation.slice(0, size)) {
+      return `${existing}${continuation.slice(size)}`;
+    }
+  }
+
+  return `${existing}${continuation}`;
+}
+
+async function continueLengthLimitedResponse(
+  provider: ChatProvider,
+  baseMessages: readonly LLMMessage[],
+  initialResponse: LLMResponse,
+  signal: AbortSignal,
+  onChunk?: (text: string) => void,
+): Promise<{ response: LLMResponse; additionalCalls: number; additionalTimeMs: number }> {
+  let response: LLMResponse = { ...initialResponse, tool_calls: [...initialResponse.tool_calls] };
+  let additionalCalls = 0;
+  let additionalTimeMs = 0;
+
+  for (let attempt = 0; attempt < MAX_LENGTH_CONTINUATION_ATTEMPTS; attempt += 1) {
+    if (response.finishReason !== "length" || response.tool_calls.length > 0 || signal.aborted) {
+      break;
+    }
+
+    const partialContent = response.content ?? "";
+    if (!partialContent.trim()) {
+      break;
+    }
+
+    const continuationMessages: LLMMessage[] = [
+      ...baseMessages,
+      { role: "assistant", content: partialContent },
+      {
+        role: "user",
+        content: [
+          "Continue your previous response exactly where it stopped.",
+          "Return only the next continuation chunk.",
+          "Do not restart the answer, do not repeat earlier lines, do not add a new introduction, and do not call tools.",
+        ].join(" "),
+      },
+    ];
+
+    const continuationStartedAt = Date.now();
+    const continuationResponse = await collectStream(provider.stream(continuationMessages, [], signal), onChunk);
+    additionalCalls += 1;
+    additionalTimeMs += Date.now() - continuationStartedAt;
+
+    response = {
+      content: appendNonDuplicatedContinuation(partialContent, continuationResponse.content ?? ""),
+      tool_calls: continuationResponse.tool_calls,
+      usage: {
+        promptTokens: response.usage.promptTokens + continuationResponse.usage.promptTokens,
+        completionTokens: response.usage.completionTokens + continuationResponse.usage.completionTokens,
+        totalTokens: response.usage.totalTokens + continuationResponse.usage.totalTokens,
+      },
+      finishReason: continuationResponse.finishReason,
+    };
+  }
+
+  return { response, additionalCalls, additionalTimeMs };
 }
 
 function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly LLMMessage[]): {

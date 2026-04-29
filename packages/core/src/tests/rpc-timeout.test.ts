@@ -304,6 +304,52 @@ describe("rpc timeout cleanup", () => {
     expect(errorEvent).toBeUndefined();
   });
 
+  it("reports an in-flight request as active via gateway.status", async () => {
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(() => new Promise(() => {})),
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+
+    const active = session.createSession({ channel: "webchat" });
+    const connection = new RpcConnection(ws as never);
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-active-turn",
+      method: "chat.send",
+      params: {
+        sessionId: active.id,
+        requestId: "turn-active",
+        message: "hello",
+      },
+    }));
+
+    await connection.handleMessage(JSON.stringify({
+      id: "req-status",
+      method: "gateway.status",
+      params: {
+        requestId: "turn-active",
+      },
+    }));
+
+    const response = sent.find((event) => event["id"] === "req-status");
+    expect(response?.["ok"]).toBe(true);
+    expect((response?.["payload"] as Record<string, unknown> | undefined)?.["activeTurn"]).toBe(true);
+
+    connection.close({ abortInFlightTurns: true });
+  });
+
   it("can still abort active turns when the close is explicit", async () => {
     let capturedSignal: AbortSignal | undefined;
 
