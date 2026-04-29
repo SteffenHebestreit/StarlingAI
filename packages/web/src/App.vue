@@ -78,24 +78,32 @@
           Enable Notifications
         </button>
 
-        <!-- Nav: scrolls horizontally on small screens so all routes stay reachable
-             without a hamburger menu, while keeping fast direct access on desktop. -->
+        <!-- Nav: 5 top-level entries (Chat, Live, Logs, Memory, Manage), with
+             popover dropdowns for grouped categories.  Horizontal scroll
+             on small screens so all entries stay reachable without a
+             hamburger menu. -->
         <nav
           class="app-nav flex overflow-x-auto scroll-smooth -mr-3 sm:mr-0 pr-3 sm:pr-0 max-w-full"
           aria-label="Main navigation"
         >
-          <RouterLink
-            v-for="link in navLinks"
-            :key="link.to"
-            :to="link.to"
-            class="relative px-2.5 sm:px-3 py-[18px] text-sm font-medium transition-colors shrink-0"
-            :class="$route.path === link.to ? 'text-purple-300' : 'text-gray-400 hover:text-gray-200'"
-            :aria-current="$route.path === link.to ? 'page' : undefined"
-          >
-            {{ link.label }}
-            <span v-if="$route.path === link.to"
-              class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-t" />
-          </RouterLink>
+          <template v-for="entry in navEntries" :key="entry.kind === 'leaf' ? entry.to : entry.label">
+            <RouterLink
+              v-if="entry.kind === 'leaf'"
+              :to="entry.to"
+              class="relative px-2.5 sm:px-3 py-[18px] text-sm font-medium transition-colors shrink-0"
+              :class="$route.path === entry.to ? 'text-purple-300' : 'text-gray-400 hover:text-gray-200'"
+              :aria-current="$route.path === entry.to ? 'page' : undefined"
+            >
+              {{ entry.label }}
+              <span v-if="$route.path === entry.to"
+                class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-t" />
+            </RouterLink>
+            <NavGroup
+              v-else
+              :label="entry.label"
+              :items="entry.items"
+            />
+          </template>
         </nav>
       </div>
     </header>
@@ -161,6 +169,7 @@ import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
+import NavGroup, { type NavGroupItem } from "@/components/NavGroup.vue";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
@@ -170,29 +179,75 @@ const $route = useRoute();
 const currentUser = computed(() => auth.currentUser);
 const signOut = auth.signOut;
 
-interface NavLink { to: string; label: string; operatorOnly?: boolean }
-const allNavLinks: NavLink[] = [
-  { to: "/", label: "Chat" },
-  { to: "/audit", label: "Audit" },
-  { to: "/jobs", label: "Jobs" },
-  { to: "/sessions", label: "Sessions" },
-  { to: "/agents", label: "Agents" },
-  { to: "/swarm", label: "Swarm" },
-  { to: "/memory", label: "Memory" },
-  { to: "/federation", label: "Federation" },
-  { to: "/users", label: "Users", operatorOnly: true },
-  { to: "/plugins", label: "Plugins", operatorOnly: true },
-  { to: "/cost", label: "Cost", operatorOnly: true },
-  { to: "/settings", label: "Settings", operatorOnly: true },
+/**
+ * The top-level nav is small (5 entries) and either renders as a single
+ * RouterLink leaf or a popover NavGroup with sub-items.  Operator-only
+ * groups disappear entirely for viewers; mixed groups (some items
+ * operator-only) filter their children.
+ */
+interface NavLeaf {
+  kind: "leaf";
+  to: string;
+  label: string;
+  operatorOnly?: boolean;
+}
+interface NavGroupDef {
+  kind: "group";
+  label: string;
+  items: (NavGroupItem & { operatorOnly?: boolean })[];
+  operatorOnly?: boolean;
+}
+type NavEntry = NavLeaf | NavGroupDef;
+
+const allNavEntries: NavEntry[] = [
+  { kind: "leaf", to: "/", label: "Chat" },
+  {
+    kind: "group",
+    label: "Live",
+    items: [
+      { to: "/jobs", label: "Jobs", hint: "Scenes & runs" },
+      { to: "/swarm", label: "Swarm", hint: "Active delegations" },
+      { to: "/federation", label: "Federation", hint: "Peer activity" },
+    ],
+  },
+  {
+    kind: "group",
+    label: "Logs",
+    items: [
+      { to: "/sessions", label: "Sessions", hint: "Chat history" },
+      { to: "/audit", label: "Audit", hint: "Event log" },
+    ],
+  },
+  { kind: "leaf", to: "/memory", label: "Memory" },
+  {
+    kind: "group",
+    label: "Manage",
+    operatorOnly: true,
+    items: [
+      { to: "/agents", label: "Agents", hint: "Sub-agent definitions" },
+      { to: "/plugins", label: "Plugins", hint: "Third-party tools", operatorOnly: true },
+      { to: "/users", label: "Users", hint: "Accounts & roles", operatorOnly: true },
+      { to: "/cost", label: "Cost", hint: "Token spend & budgets", operatorOnly: true },
+      { to: "/settings", label: "Settings", hint: "Providers & config", operatorOnly: true },
+    ],
+  },
 ];
-// Hide operator-only links from viewers.  Unauthenticated users (no
+
+// Filter operator-only entries for viewers.  Unauthenticated users (no
 // currentUser) see the full set so the legacy single-operator setup keeps
 // working — the routes themselves still gate on auth via the gateway.
-const navLinks = computed<NavLink[]>(() => {
-  if (auth.isViewer) {
-    return allNavLinks.filter((link) => !link.operatorOnly);
-  }
-  return allNavLinks;
+const navEntries = computed<NavEntry[]>(() => {
+  if (!auth.isViewer) return allNavEntries;
+  return allNavEntries
+    .filter((entry) => !entry.operatorOnly)
+    .map<NavEntry>((entry) => {
+      if (entry.kind === "group") {
+        const items = entry.items.filter((item) => !item.operatorOnly);
+        return { ...entry, items };
+      }
+      return entry;
+    })
+    .filter((entry) => entry.kind === "leaf" || entry.items.length > 0);
 });
 
 function notificationCardClass(level: NotificationLevel): string {
