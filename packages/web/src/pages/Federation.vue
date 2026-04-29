@@ -104,8 +104,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { useAuditStore } from "@/stores/audit";
 
 interface PeerAgent { name: string; description?: string; tags?: string[] }
 interface PeerSummary {
@@ -132,13 +133,34 @@ interface ActivityEvent {
 }
 
 const gateway = useGatewayStore();
+const auditStore = useAuditStore();
 
 const enabled = ref(false);
 const instanceId = ref("primary");
 const peers = ref<PeerSummary[]>([]);
-const activity = ref<ActivityEvent[]>([]);
+const backfillActivity = ref<ActivityEvent[]>([]);
 const loadingPeers = ref(false);
 const loadingActivity = ref(false);
+
+/**
+ * Live activity merges three sources, deduped by event id, newest first:
+ * 1. The HTTP backfill from /api/federation/activity (events that fired
+ *    before the page opened, up to the server-side ring's cap of 200).
+ * 2. New federation_* events streamed live via the audit-store WS feed.
+ * The audit store auto-subscribes when the gateway is connected, so as
+ * long as we're online new events arrive without polling.
+ */
+const activity = computed<ActivityEvent[]>(() => {
+  const live = auditStore.events.filter((e) => e.type.startsWith("federation_"));
+  const seen = new Set<string>();
+  const merged: ActivityEvent[] = [];
+  for (const event of [...live, ...backfillActivity.value]) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event as ActivityEvent);
+  }
+  return merged;
+});
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -171,7 +193,7 @@ async function loadActivity(): Promise<void> {
     if (!res.ok) return;
     const data = await res.json() as { events: ActivityEvent[] };
     // Most recent first.
-    activity.value = (data.events ?? []).slice().reverse();
+    backfillActivity.value = (data.events ?? []).slice().reverse();
   } finally {
     loadingActivity.value = false;
   }
@@ -252,20 +274,22 @@ function formatActivityTime(iso: string): string {
 
 const _bootstrapped = computed(() => Boolean(gateway.token));
 
-let timer: ReturnType<typeof setInterval> | null = null;
-
 onMounted(() => {
   if (_bootstrapped.value) {
     void refresh(false);
   }
-  // Poll activity (cheap) every 15s; peers refresh on user action.
-  timer = setInterval(() => {
-    if (_bootstrapped.value) void loadActivity();
-  }, 15_000);
+});
+
+// When the gateway reconnects (e.g. after a network blip), refresh the
+// HTTP backfill so any events that fired while we were offline land in
+// the timeline.  The audit-store WS subscription handles live updates
+// independently — no polling timer needed.
+watch(() => gateway.connected, (now) => {
+  if (now && _bootstrapped.value) void loadActivity();
 });
 
 onBeforeUnmount(() => {
-  if (timer) clearInterval(timer);
+  // No timer to clean up — activity is now WS-driven.
 });
 </script>
 

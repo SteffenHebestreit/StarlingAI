@@ -13,6 +13,7 @@ const router = createRouter({
     { path: "/memory", component: () => import("@/pages/MemoryInspector.vue") },
     { path: "/federation", component: () => import("@/pages/Federation.vue") },
     { path: "/users", component: () => import("@/pages/Users.vue") },
+    { path: "/plugins", component: () => import("@/pages/Plugins.vue") },
     { path: "/definitions", redirect: "/agents" },
     { path: "/config-assistant", redirect: "/agents" },
     { path: "/:pathMatch(.*)*", redirect: "/" },

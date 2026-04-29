@@ -29,7 +29,7 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 // Ephemeral store + dynamic tools
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
-import { loadPlugins } from "./plugin/loader.js";
+import { loadPlugins, watchPluginsDirectory, stopPluginWatcher } from "./plugin/loader.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeNeo4j } from "./db/neo4j.js";
 import { initGraphSchema } from "./db/graph-schema.js";
@@ -168,6 +168,9 @@ export async function main() {
       if (result.loaded > 0 || result.rejected > 0) {
         log.info({ loaded: result.loaded, rejected: result.rejected }, "Plugin SDK loader complete");
       }
+      // Watch for new plugins added at runtime so operators can drop a
+      // .mjs file into the plugins directory without restarting.
+      watchPluginsDirectory();
     } catch (err) {
       log.warn({ err }, "Plugin SDK loader threw — continuing without plugins");
     }
@@ -272,6 +275,7 @@ export async function main() {
     await shutdownSceneJobStore();
     await shutdownMcpServers();
     shutdownDynamicTools();
+    stopPluginWatcher();
     await shutdownEphemeralStore();
     await closeNeo4j();
     stopAllCronJobs();
