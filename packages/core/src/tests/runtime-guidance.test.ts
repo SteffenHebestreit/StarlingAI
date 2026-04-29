@@ -195,8 +195,8 @@ describe("runtime turn guidance", () => {
   });
 
   it("enforces the documented per-turn cap for orchestration-heavy tools", () => {
-    expect(getPerTurnToolCallLimit("delegate_to_agent")).toBe(3);
-    expect(getPerTurnToolCallLimit("search_agents")).toBe(2);
+    expect(getPerTurnToolCallLimit("delegate_to_agent")).toBe(5);
+    expect(getPerTurnToolCallLimit("search_agents")).toBe(4);
     expect(getPerTurnToolCallLimit("create_ephemeral_agent")).toBe(1);
     expect(getPerTurnToolCallLimit("web_search")).toBeUndefined();
   });

@@ -40,8 +40,8 @@ const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
 const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
-  delegate_to_agent: 3,
-  search_agents: 2,
+  delegate_to_agent: 5,
+  search_agents: 4,
   search_workflows: 2,
   run_workflow: 2,
   create_ephemeral_agent: 1,
@@ -760,7 +760,13 @@ function collapseMixedDiscoveryAndOrchestrationToolsInResponse(
   sessionId: string,
   guardrailEvents: Array<{ type: string; details: string }>,
 ): LLMResponse["tool_calls"] {
-  let selectedPhase: "discovery" | "orchestration" | null = null;
+  const selectedPhase: "discovery" | "orchestration" | null = toolCalls.some((toolCall) =>
+    ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)
+  )
+    ? "orchestration"
+    : toolCalls.some((toolCall) => AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name))
+      ? "discovery"
+      : null;
   const filtered: LLMResponse["tool_calls"] = [];
 
   for (const toolCall of toolCalls) {
@@ -771,12 +777,6 @@ function collapseMixedDiscoveryAndOrchestrationToolsInResponse(
         : null;
 
     if (!phase) {
-      filtered.push(toolCall);
-      continue;
-    }
-
-    if (!selectedPhase) {
-      selectedPhase = phase;
       filtered.push(toolCall);
       continue;
     }
@@ -3219,10 +3219,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     // ── Iteration-level loop detection ──────────────────────────────────────
     // (a) Identical tool-name set repeating N iterations in a row → force-synthesise.
-    const iterToolSet = llmResponse.tool_calls.map(tc => tc.name).sort().join(",");
+    const iterToolNames = llmResponse.tool_calls.map(tc => tc.name);
+    const iterToolSet = [...iterToolNames].sort().join(",");
+    const iterToolSetFullyBoundedByPerTurnCaps = iterToolNames.length > 0
+      && iterToolNames.every((toolName) => getPerTurnToolCallLimit(toolName) !== undefined);
     _iterationToolSets.push(iterToolSet);
     if (_iterationToolSets.length > ITERATION_LOOP_THRESHOLD) _iterationToolSets.shift();
     if (
+      !iterToolSetFullyBoundedByPerTurnCaps &&
       _iterationToolSets.length >= ITERATION_LOOP_THRESHOLD &&
       _iterationToolSets.every(s => s === _iterationToolSets[0])
     ) {

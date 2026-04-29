@@ -612,8 +612,8 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.response).toContain("ESP32-P4 remains the strongest current fit");
     expect(result.response).toContain("tell me to raise the delegation limit for this task");
     expect(result.response).toContain("Otherwise, we can stop here.");
-    expect(streamMock).toHaveBeenCalledTimes(4);
-    expect(delegateExecuteMock).toHaveBeenCalledTimes(3);
+    expect(streamMock).toHaveBeenCalledTimes(6);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(5);
     expect(completeMock).toHaveBeenCalledTimes(0);
   });
 
@@ -1506,6 +1506,78 @@ describe("runtime delegated-loop regressions", () => {
 
     expect(result.blocked).toBe(false);
     expect(result.response).not.toContain("mission_coordinator");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(searchExecuteMock).not.toHaveBeenCalled();
+
+    const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
+    expect(assistantWithTools?.tool_calls).toHaveLength(1);
+    expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool_blocked", details: "search_agents:mixed_discovery_and_orchestration_same_response" }),
+    ]));
+  });
+
+  it("blocks search_agents even when discovery appears before delegation in the same response", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createMultiToolCallStream([
+          {
+            id: "search_1",
+            toolName: "search_agents",
+            args: { query: "portable embedded audio hardware specialist" },
+          },
+          {
+            id: "delegate_1",
+            toolName: "delegate_to_agent",
+            args: { task: "Recommend a portable ESP32-based transcription recorder design." },
+          },
+        ]);
+      }
+      return createTextStream("I kept the direct delegation instead of burning another routing pass.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Delegated result from researcher — TASK COMPLETED.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: '➡ NEXT ACTION: Call delegate_to_agent(agentName="mission_coordinator", task="<your task>") NOW.',
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "design a portable transcription recorder",
+    });
+
+    expect(result.blocked).toBe(false);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(searchExecuteMock).not.toHaveBeenCalled();
 
