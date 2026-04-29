@@ -156,6 +156,17 @@ function createTextStream(text: string) {
   })();
 }
 
+function createLengthLimitedTextStream(text: string) {
+  return (async function* () {
+    yield { type: "text_delta", content: text };
+    yield {
+      type: "done",
+      finishReason: "length",
+      usage: { promptTokens: 1, completionTokens: 4096, totalTokens: 4097 },
+    };
+  })();
+}
+
 afterEach(() => {
   for (const dir of tempConfigDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -3227,5 +3238,31 @@ describe("runtime delegated-loop regressions", () => {
     )).toBe(true);
 
     freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("continues a direct answer when the provider stops at the output length cap", async () => {
+    streamMock
+      .mockImplementationOnce(() => createLengthLimitedTextStream("Part one of a long answer. "))
+      .mockImplementationOnce(() => createTextStream("Part two finishes the answer."));
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const streamedChunks: string[] = [];
+    const result = await runTurn({
+      session,
+      userMessage: "Give a long answer.",
+      onChunk: (text) => streamedChunks.push(text),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("Part one of a long answer. Part two finishes the answer.");
+    expect(result.performance?.finishReason).toBe("stop");
+    expect(result.usage.completionTokens).toBe(4097);
+    expect(streamedChunks.join("")).toBe("Part one of a long answer. Part two finishes the answer.");
+    expect(streamMock).toHaveBeenCalledTimes(2);
   });
 });
