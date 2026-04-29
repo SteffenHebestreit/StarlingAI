@@ -1462,6 +1462,35 @@ export function createGateway() {
     return c.json({ events });
   });
 
+  // ── Cost governance (dashboard) ─────────────────────────────────────────
+  // Both routes are read-only and surface aggregated token usage + estimated
+  // dollar spend pulled from the in-process cost aggregator.  When
+  // cost.enabled is false the aggregator stays idle and the endpoints
+  // return zeroed buckets — operators can still wire the dashboard up
+  // without committing to alerting.
+  app.get("/api/cost/summary", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const range = Math.min(90, Math.max(1, Number(c.req.query("range")) || 30));
+    const { getCostSummary } = await import("../observability/cost.js");
+    const cfg = getConfig().cost;
+    return c.json({
+      enabled: cfg.enabled,
+      budgets: cfg.budgets,
+      summary: getCostSummary(range),
+    });
+  });
+
+  app.get("/api/cost/projection", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const window = Math.min(30, Math.max(1, Number(c.req.query("window")) || 7));
+    const { getCostProjection } = await import("../observability/cost.js");
+    return c.json(getCostProjection(window));
+  });
+
   // ── Tracing status (dashboard) ───────────────────────────────────────────
   app.get("/api/tracing/status", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
