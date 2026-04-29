@@ -661,6 +661,57 @@ describe("runtime delegated-loop regressions", () => {
     expect(session.getHistory().at(-1)?.content).toBe("synthesized");
   });
 
+  it("does not stream provisional final text live after tool-backed turns", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("call_no_live_post_tool_text", {
+          agentName: "researcher",
+          task: "Research current penetration testing frameworks.",
+        });
+      }
+
+      return createTextStream("This provisional streamed text should not be emitted live.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "OWASP WSTG, PTES, and NIST SP 800-115 are the relevant frameworks.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const chunks: string[] = [];
+    const result = await runTurn({
+      session,
+      userMessage: "Research current penetration testing frameworks.",
+      onChunk: (text) => chunks.push(text),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("This provisional streamed text should not be emitted live.");
+    expect(chunks).toEqual([]);
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(0);
+  });
+
   it("forces synthesis when the model tries to delegate again after synthesis was already required", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

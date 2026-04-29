@@ -713,6 +713,11 @@ const __workflowCatalog = {
   WORKFLOW_ACTION_VERB_PATTERN,
 };
 
+const __swarmStateContinuity = {
+  loadPreviousTurnSwarmTasks,
+  buildPersistableSwarmTaskDelta,
+};
+
 function collapseMixedOrchestrationLaunchersInResponse(
   toolCalls: LLMResponse["tool_calls"],
   sessionId: string,
@@ -799,6 +804,7 @@ export function buildRepeatedOutputFingerprint(toolName: string, args: Record<st
 }
 
 export { __workflowCatalog };
+export { __swarmStateContinuity };
 
 function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
   return sanitizeAssistantContent(value, toolIterations > 0);
@@ -1706,6 +1712,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let turnUsedSwarmTools = false;
   const getTurnSwarmState = (): SwarmState | undefined => selectPersistableSwarmState(
     toolContext.swarmState,
+    carriedSwarmTasks,
     carriedSwarmTaskFingerprint,
     turnUsedSwarmTools,
   );
@@ -1988,7 +1995,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const llmStartedAt = Date.now();
     llmCalls += 1;
     try {
-      llmResponse = await collectStream(provider.stream(messages, tools, signal), opts.onChunk);
+      const chunkSink = iterationCount === 0 ? opts.onChunk : undefined;
+      llmResponse = await collectStream(provider.stream(messages, tools, signal), chunkSink);
       const llmDurationMs = Date.now() - llmStartedAt;
       llmTimeMs += llmDurationMs;
       if (firstModelResponseMs === undefined) {
@@ -3379,18 +3387,65 @@ function loadPreviousTurnSwarmTasks(history: readonly SessionHistoryMessage[]): 
   return {};
 }
 
+function buildPersistableSwarmTaskDelta(
+  currentTasks: SwarmState["tasks"],
+  carriedTasks: SwarmState["tasks"],
+): SwarmState["tasks"] {
+  const delta: SwarmState["tasks"] = {};
+
+  for (const [taskId, task] of Object.entries(currentTasks)) {
+    const carriedTask = carriedTasks[taskId];
+    if (!carriedTask) {
+      delta[taskId] = task;
+      continue;
+    }
+
+    const carriedAttempts = carriedTask.attempts ?? [];
+    const currentAttempts = task.attempts ?? [];
+    const nextAttempts = currentAttempts.slice(carriedAttempts.length);
+    const carriedOutput = typeof carriedTask.output === "string" ? carriedTask.output : "";
+    const currentOutput = typeof task.output === "string" ? task.output : "";
+    const carriedError = typeof carriedTask.error === "string" ? carriedTask.error : "";
+    const currentError = typeof task.error === "string" ? task.error : "";
+    const outputChanged = currentOutput !== carriedOutput;
+    const errorChanged = currentError !== carriedError;
+    const statusChanged = task.status !== carriedTask.status;
+
+    if (nextAttempts.length === 0 && !outputChanged && !errorChanged && !statusChanged) {
+      continue;
+    }
+
+    delta[taskId] = {
+      ...task,
+      attempts: nextAttempts,
+      output: outputChanged ? task.output : undefined,
+      error: errorChanged ? task.error : undefined,
+    };
+  }
+
+  return delta;
+}
+
 function selectPersistableSwarmState(
   swarmState: SwarmState | undefined,
+  carriedTasks: SwarmState["tasks"],
   carriedTaskFingerprint: string,
   usedSwarmTools: boolean,
 ): SwarmState | undefined {
   if (!swarmState) return undefined;
   const currentTasks = swarmState.tasks ?? {};
   if (Object.keys(currentTasks).length === 0) return undefined;
+  const persistableTasks = buildPersistableSwarmTaskDelta(currentTasks, carriedTasks);
+  if (Object.keys(persistableTasks).length === 0) {
+    return undefined;
+  }
   if (!usedSwarmTools && stableSerialize(currentTasks) === carriedTaskFingerprint) {
     return undefined;
   }
-  return swarmState;
+  return {
+    ...swarmState,
+    tasks: persistableTasks,
+  };
 }
 
 function persistAssistantTurnState(session: AgentSession, content: string, swarmState?: SwarmState): void {
