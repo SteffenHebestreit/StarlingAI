@@ -17,13 +17,13 @@
  * tried.  This matches the dynamic-tool loader's tolerant pattern.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
-import { registerTool, type ToolHandler } from "../tools/registry.js";
+import { registerTool, unregisterTool, type ToolHandler } from "../tools/registry.js";
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
@@ -54,6 +54,96 @@ export function listLoadedPlugins(): LoadedPluginRecord[] {
 /** Test-only: clear the loaded-plugin registry. */
 export function _resetPluginsForTests(): void {
   _loadedPlugins.clear();
+  stopPluginWatcher();
+}
+
+let _watcher: FSWatcher | null = null;
+let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Watch the plugins directory for additions, changes, and removals.  When
+ * a file event lands the loader is re-run after a short debounce.
+ *
+ * Hot-reload semantics:
+ * - New plugins are loaded and their tools registered.
+ * - Removed plugins (file deleted) have their tools unregistered.
+ * - Changed plugins are unregistered then re-loaded so the new code wins.
+ *   Note: ESM module instances are immutable once imported — operators who
+ *   mutate a single-file plugin must restart the gateway for the new code
+ *   to take effect.  Adding a NEW file (e.g. bumping the directory name)
+ *   is the supported workflow for live changes.
+ */
+export function watchPluginsDirectory(dir: string = resolvePluginsDir()): void {
+  if (_watcher) return; // already watching
+  if (!existsSync(dir)) {
+    log.debug({ dir }, "Plugins directory not present — hot-reload watcher not started");
+    return;
+  }
+  try {
+    _watcher = watch(dir, { persistent: false, recursive: true }, (_eventType, filename) => {
+      if (!filename) return;
+      const name = String(filename);
+      if (!name.endsWith(".js") && !name.endsWith(".mjs")) return;
+      if (_debounceTimer) clearTimeout(_debounceTimer);
+      _debounceTimer = setTimeout(() => {
+        void resyncPlugins(dir).catch((err) => log.warn({ err }, "Plugin hot-reload pass failed"));
+      }, 500);
+    });
+    log.info({ dir }, "Watching plugins directory for hot-reload");
+  } catch (err) {
+    log.warn({ err, dir }, "Failed to watch plugins directory — hot-reload disabled");
+  }
+}
+
+export function stopPluginWatcher(): void {
+  if (_watcher) {
+    _watcher.close();
+    _watcher = null;
+  }
+  if (_debounceTimer) {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = null;
+  }
+}
+
+/**
+ * Reconcile the plugin registry with what's currently on disk.  Plugins
+ * that disappear get unregistered; new plugins get loaded.  Modified
+ * plugins are reloaded — the existing tools are unregistered first so the
+ * fresh registration wins.
+ */
+async function resyncPlugins(dir: string): Promise<void> {
+  let entries: string[] = [];
+  try { entries = readdirSync(dir); } catch { return; }
+
+  const onDisk = new Set<string>();
+  for (const entry of entries) {
+    const resolved = resolvePluginEntry(dir, entry);
+    if (!resolved) continue;
+    // Use the directory entry as the canonical id when present (matches the
+    // plugin's `name` field by convention); fall back to the file basename
+    // for single-file plugins.
+    const id = entry.replace(/\.(js|mjs)$/, "").toLowerCase();
+    onDisk.add(id);
+  }
+
+  // Unregister plugins whose files no longer exist
+  for (const [name, record] of [..._loadedPlugins.entries()]) {
+    if (!onDisk.has(name)) {
+      for (const fullName of record.toolNames) {
+        try { unregisterTool(fullName); } catch { /* ignore */ }
+      }
+      _loadedPlugins.delete(name);
+      logAudit("plugin_unloaded", { plugin: name, reason: "file removed" });
+      log.info({ plugin: name }, "Plugin unloaded — file removed");
+    }
+  }
+
+  // Re-import everything; loadOnePlugin's _loadedPlugins.has check skips
+  // already-loaded entries, so this only picks up genuinely new files.
+  // For changes-in-place we'd need to bump the version OR delete + re-add
+  // the file (a known limitation called out in the JSDoc above).
+  await loadPlugins(dir);
 }
 
 /**

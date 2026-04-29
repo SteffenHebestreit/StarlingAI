@@ -122,6 +122,7 @@ export type AuditEventType =
   | "rbac_denied"
   // Plugin SDK
   | "plugin_loaded"
+  | "plugin_unloaded"
   | "plugin_tool_rejected";
 
 export interface AuditEvent {

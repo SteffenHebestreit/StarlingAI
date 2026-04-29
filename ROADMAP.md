@@ -293,10 +293,16 @@ auto-discovery in `packages/core/src/plugin/loader.ts`.
 | Tier gating | ✅ shipped | All plugin tools register at **Tier 2** (sandboxed, per-call approval); plugins cannot self-elevate |
 | Tier-shadow rejection | ✅ shipped | Plugin tool names that collide with built-ins are rejected + audited as `tier_escalation_attempt` (closes the same vector closed for dynamic tools in GAP-4) |
 | Dashboard inspection | ✅ shipped | `GET /api/plugins` returns the loaded plugin list with version + advertised tool names |
-| Audit | ✅ shipped | `plugin_loaded` and `plugin_tool_rejected` events |
+| Audit | ✅ shipped | `plugin_loaded`, `plugin_unloaded`, and `plugin_tool_rejected` events |
+| Hot-reload | ✅ shipped (April 2026) | `watchPluginsDirectory()` runs at gateway start; new plugins added to the directory load within ~500 ms (debounced); removed plugin files trigger `unregisterTool` for each registered tool plus a `plugin_unloaded` audit event. Note that mutating an already-loaded plugin file in place still requires a restart — Node ESM modules are immutable post-import. |
+| `/plugins` Vue dashboard | ✅ shipped (April 2026) | Operator-only page lists loaded plugins with version/author/advertised tool names, plus a live activity timeline driven by the audit-store WS subscription. Auto-refreshes the plugin list whenever a `plugin_*` event lands. |
+| Example plugins | ✅ shipped (April 2026) | `examples/plugins/csv-utilities/` (parse_csv, csv_summary) and `examples/plugins/word-stats/` (readability) live in-repo with a README pointing operators to drop them into `~/.starlingai/plugins/`. |
 
-Plugins are loaded once at startup. Hot-reload during a running session is
-deferred — operators restart the gateway after dropping a new plugin in.
+Live observability for federation and plugin events now flows through the
+existing `audit.subscribe` WS channel — Federation and Plugins pages
+subscribe and merge events client-side rather than polling. Initial
+backfill still happens via `/api/federation/activity`; new events arrive
+in real time.
 
 ---
 

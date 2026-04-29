@@ -181,6 +181,7 @@ const allNavLinks: NavLink[] = [
   { to: "/memory", label: "Memory" },
   { to: "/federation", label: "Federation" },
   { to: "/users", label: "Users", operatorOnly: true },
+  { to: "/plugins", label: "Plugins", operatorOnly: true },
   { to: "/settings", label: "Settings", operatorOnly: true },
 ];
 // Hide operator-only links from viewers.  Unauthenticated users (no
