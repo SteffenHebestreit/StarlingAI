@@ -155,51 +155,23 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
+import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 
 const gateway = useGatewayStore();
+const auth = useAuthStore();
 const notifications = useNotificationStore();
 const $route = useRoute();
 
-interface CurrentUser { username: string; role: string; displayName?: string }
-const currentUser = ref<CurrentUser | null>(null);
+const currentUser = computed(() => auth.currentUser);
+const signOut = auth.signOut;
 
-function apiBaseFromWsUrl(value: string): string {
-  return value.replace(/^ws/, "http").replace(/\/ws$/, "");
-}
-
-async function refreshCurrentUser(): Promise<void> {
-  if (!gateway.token) {
-    currentUser.value = null;
-    return;
-  }
-  try {
-    const res = await fetch(`${apiBaseFromWsUrl(gateway.wsUrl)}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${gateway.token}` },
-    });
-    if (!res.ok) {
-      currentUser.value = null;
-      return;
-    }
-    currentUser.value = await res.json() as CurrentUser;
-  } catch {
-    currentUser.value = null;
-  }
-}
-
-function signOut(): void {
-  gateway.disconnect();
-  gateway.token = "";
-  currentUser.value = null;
-  // Drop persisted credentials so the LoginModal reappears clean.
-  try { localStorage.removeItem("gc_token"); } catch { /* non-fatal */ }
-}
-
-const navLinks = [
+interface NavLink { to: string; label: string; operatorOnly?: boolean }
+const allNavLinks: NavLink[] = [
   { to: "/", label: "Chat" },
   { to: "/audit", label: "Audit" },
   { to: "/jobs", label: "Jobs" },
@@ -208,8 +180,18 @@ const navLinks = [
   { to: "/swarm", label: "Swarm" },
   { to: "/memory", label: "Memory" },
   { to: "/federation", label: "Federation" },
-  { to: "/settings", label: "Settings" },
+  { to: "/users", label: "Users", operatorOnly: true },
+  { to: "/settings", label: "Settings", operatorOnly: true },
 ];
+// Hide operator-only links from viewers.  Unauthenticated users (no
+// currentUser) see the full set so the legacy single-operator setup keeps
+// working — the routes themselves still gate on auth via the gateway.
+const navLinks = computed<NavLink[]>(() => {
+  if (auth.isViewer) {
+    return allNavLinks.filter((link) => !link.operatorOnly);
+  }
+  return allNavLinks;
+});
 
 function notificationCardClass(level: NotificationLevel): string {
   switch (level) {
@@ -250,13 +232,13 @@ async function enableBrowserNotifications(): Promise<void> {
 onMounted(() => {
   notifications.syncPermission();
   if (gateway.token) gateway.connect();
-  void refreshCurrentUser();
+  void auth.refreshCurrentUser();
 });
 
 // Re-fetch the current user whenever the connection state flips to
 // connected (covers reconnects, token rotations from /api/auth/login).
 watch(() => gateway.connected, (now) => {
-  if (now) void refreshCurrentUser();
+  if (now) void auth.refreshCurrentUser();
 });
 </script>
 
