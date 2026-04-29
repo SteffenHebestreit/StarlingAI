@@ -182,6 +182,7 @@ const allNavLinks: NavLink[] = [
   { to: "/federation", label: "Federation" },
   { to: "/users", label: "Users", operatorOnly: true },
   { to: "/plugins", label: "Plugins", operatorOnly: true },
+  { to: "/cost", label: "Cost", operatorOnly: true },
   { to: "/settings", label: "Settings", operatorOnly: true },
 ];
 // Hide operator-only links from viewers.  Unauthenticated users (no

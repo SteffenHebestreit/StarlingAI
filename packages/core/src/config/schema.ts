@@ -254,6 +254,41 @@ export type AuthUser = z.infer<typeof AuthUserSchema>;
 export type AuthConfig = z.infer<typeof AuthSchema>;
 
 /**
+ * Cost governance.  When `enabled` is true the gateway aggregates token
+ * usage from `sub_agent_completed` and `turn_performance` audit events,
+ * prices each entry against the configured per-model rate card, and
+ * emits `cost_budget_threshold` audit events at soft (75% of cap) and
+ * hard (100% of cap) crossings.  Daily and monthly caps are independent;
+ * leave either at 0 to disable that scope.
+ *
+ * Pricing is best-effort — the orchestrator's reported `model` field is
+ * matched against `models[].matches` (regex) and the first hit's
+ * `{promptPer1m, completionPer1m}` rate (per 1 000 000 tokens, in the
+ * configured currency) is applied.  An empty rate card yields $0
+ * everywhere so operators who only care about token volume can run with
+ * `enabled: true, models: []` without bogus dollar amounts in the UI.
+ */
+export const CostModelRateSchema = z.object({
+  matches: z.string().min(1),
+  promptPer1m: z.number().min(0),
+  completionPer1m: z.number().min(0),
+  label: z.string().optional(),
+});
+
+export const CostSchema = z.object({
+  enabled: z.boolean().default(false),
+  currency: z.string().min(3).max(8).default("USD"),
+  models: z.array(CostModelRateSchema).default([]),
+  budgets: z.object({
+    dailyUsd: z.number().min(0).default(0),
+    monthlyUsd: z.number().min(0).default(0),
+  }).default({}),
+});
+
+export type CostModelRate = z.infer<typeof CostModelRateSchema>;
+export type CostConfig = z.infer<typeof CostSchema>;
+
+/**
  * OpenTelemetry distributed tracing.  When enabled, the gateway initializes
  * the OTel SDK at startup and produces spans for tool calls, sub-agent
  * runs, and federation requests.  Trace context is propagated across
@@ -1085,6 +1120,7 @@ export const ConfigSchema = z.object({
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   auth: AuthSchema.default({}),
+  cost: CostSchema.default({}),
   tracing: TracingSchema.default({}),
   federation: FederationSchema.default({}),
   /**

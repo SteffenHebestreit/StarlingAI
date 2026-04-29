@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
+import { startCostAggregator, stopCostAggregator } from "./observability/cost.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
@@ -125,6 +126,10 @@ export async function main() {
   // Bootstrap OpenTelemetry tracing as early as possible so subsequent
   // initialization steps inherit the tracing context.  No-op when disabled.
   await initTracing(config.tracing);
+
+  // Cost aggregator subscribes to audit events; safe to start unconditionally
+  // (handler is a no-op when cost.enabled is false).
+  startCostAggregator();
 
   // Initialize Postgres audit sink (optional)
   await initPostgresAudit();
@@ -276,6 +281,7 @@ export async function main() {
     await shutdownMcpServers();
     shutdownDynamicTools();
     stopPluginWatcher();
+    stopCostAggregator();
     await shutdownEphemeralStore();
     await closeNeo4j();
     stopAllCronJobs();

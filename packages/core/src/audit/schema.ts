@@ -123,7 +123,9 @@ export type AuditEventType =
   // Plugin SDK
   | "plugin_loaded"
   | "plugin_unloaded"
-  | "plugin_tool_rejected";
+  | "plugin_tool_rejected"
+  // Cost governance
+  | "cost_budget_threshold";
 
 export interface AuditEvent {
   id: string;

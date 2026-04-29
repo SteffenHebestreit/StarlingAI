@@ -254,6 +254,28 @@ role split yet; every authenticated user gets full operator privileges
 
 ---
 
+## Cost Governance (April 2026)
+
+In-process aggregator that subscribes to the existing audit bus
+(`sub_agent_completed` + `turn_performance` events both carry token
+usage), buckets spend by day / session / agent / model, and emits
+`cost_budget_threshold` alerts at soft (75% of cap) and hard (100%)
+crossings.  Pricing comes from a per-model rate card with sensible
+defaults for Claude / GPT-4o families; operators override via
+`cost.models[]`.
+
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| Aggregator | ✅ shipped | `startCostAggregator()` wires onto the audit bus; rolls up by day (90-day cap) and hour (1-week cap), plus per-source maps for sessions / agents / models.  No-op when `cost.enabled` is false. |
+| Default rate card | ✅ shipped | Claude 4 family, Claude 3.5, GPT-4o variants, GPT-4 / GPT-3.5, o1-preview / o1-mini.  Empty rate card yields $0 spend so volume tracking still works. |
+| Custom rates | ✅ shipped | `cost.models: [{ matches: "^foo$", promptPer1m, completionPer1m, label? }]` — first regex match wins; replaces (not extends) the default card so operators see exactly what they configured. |
+| Budget thresholds | ✅ shipped | `cost.budgets.{dailyUsd,monthlyUsd}`.  Soft alert (warn) at 75%, hard alert (error) at 100%.  Each scope alerts at most once per period — re-arms when the day/month rolls over. |
+| Endpoints | ✅ shipped | `GET /api/cost/summary?range=N` (per-day + top sessions/agents/models) and `GET /api/cost/projection?window=N` (avg daily × 30, excludes today). |
+| Dashboard | ✅ shipped | `/cost` Vue page (operator-only) with stat cards, daily-spend bar chart, and top sessions/agents/models tables.  Range selector swaps between 24h / 7d / 30d / 90d. |
+| Audit | ✅ shipped | New `cost_budget_threshold` event with `{scope, spend, budget, currency, bucket, day|month}`. |
+
+---
+
 ## OpenTelemetry Distributed Tracing (April 2026)
 
 End-to-end tracing across tool calls, sub-agent runs, and federation
