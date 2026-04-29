@@ -247,7 +247,10 @@ role split yet; every authenticated user gets full operator privileges
 | Operator-only mutating routes | ✅ shipped (Wave B) | Hono middleware gates POST/PUT/PATCH/DELETE on `/api/*` to operators by default; explicit allowlist for login + external webhooks. Audit: `rbac_denied`. |
 | Floor: at least one operator | ✅ shipped (Wave B) | DELETE /api/auth/users/:u refuses to drop the last operator (viewers don't count) so the deployment can't lock itself out. |
 | Viewer UI affordances | ✅ shipped (Wave B) | Header pill shows a "Viewer" badge; tooltip clarifies read-only access. Admin buttons are not yet hidden — viewers see them but get a 403 toast on click (acceptable MVP). |
-| WS chat gating | ⏳ Wave C | Viewers can currently chat over WebSocket like operators; gating turn initiation by role lands separately. |
+| Pinia auth store | ✅ shipped (Wave C) | `useAuthStore` exposes `currentUser`, `isOperator`, `isViewer`, `refreshCurrentUser`, `signOut`.  Components branch on derived flags instead of duplicating `/api/auth/me` fetches. |
+| `/users` admin page | ✅ shipped (Wave C) | Vue page with peer-style cards: list users, add (with operator/viewer role selector), delete (refuses to delete self).  Operator-only nav link — viewers don't see the entry.  Wires to existing `/api/auth/users` REST endpoints. |
+| Operator-only nav links | ✅ shipped (Wave C) | `/users` and `/settings` are filtered out of the header for viewers; the routes still exist (just hidden) so the gateway's RBAC middleware remains the source of truth. |
+| WS chat gating | ⏳ deferred | Viewers can currently chat over WebSocket like operators; gating turn initiation by role is intentionally deferred — some deployments want viewers to be able to ask questions about state they can already see. |
 
 ---
 
