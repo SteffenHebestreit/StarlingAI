@@ -210,7 +210,7 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 
     // The delegate tool should have been called
     expect(capturedSwarmState).toBeDefined();
-    expect(result.swarmState?.tasks["task_1"]).toBeDefined();
+    expect(result.swarmState?.tasks["task_1"]).toBeUndefined();
 
     // completed task_1 from previous turn must be present in the new swarm state
     expect(capturedSwarmState!.tasks["task_1"]).toBeDefined();
@@ -222,6 +222,57 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 
     unregisterTool("delegate_to_agent");
   }, 30_000);
+
+  it("persists only the current turn swarm-task delta back to the UI", async () => {
+    const { __swarmStateContinuity } = await import("../agent/runtime.js");
+
+    const carriedTasks: SwarmState["tasks"] = {
+      task_1: {
+        id: "task_1",
+        title: "Search for MEMS mic arrays",
+        status: "completed",
+        dependsOn: [],
+        selectedAgent: "researcher",
+        attempts: [{
+          agentName: "researcher",
+          status: "completed",
+          startedAt: new Date("2026-04-28T18:00:00.000Z").toISOString(),
+          finishedAt: new Date("2026-04-28T18:01:00.000Z").toISOString(),
+          toolCount: 2,
+          iterations: 1,
+        }],
+        output: "Found prior result",
+      },
+    };
+
+    const currentTasks: SwarmState["tasks"] = {
+      task_1: {
+        ...carriedTasks["task_1"]!,
+      },
+      task_3: {
+        id: "task_3",
+        title: "New current-turn task",
+        status: "completed",
+        dependsOn: [],
+        selectedAgent: "researcher",
+        attempts: [{
+          agentName: "researcher",
+          status: "completed",
+          startedAt: new Date("2026-04-28T19:00:00.000Z").toISOString(),
+          finishedAt: new Date("2026-04-28T19:01:00.000Z").toISOString(),
+          toolCount: 1,
+          iterations: 1,
+        }],
+        output: "new turn result",
+      },
+    };
+
+    const delta = __swarmStateContinuity.buildPersistableSwarmTaskDelta(currentTasks, carriedTasks);
+
+    expect(delta["task_1"]).toBeUndefined();
+    expect(delta["task_3"]).toBeDefined();
+    expect(delta["task_3"]?.output).toBe("new turn result");
+  });
 
   it("does not persist carried swarm state on a direct-answer follow-up turn", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-h1-direct-answer-"));

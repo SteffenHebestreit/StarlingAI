@@ -507,22 +507,37 @@ function extractCompletedThinkingBlocks(text: string): string {
   return (text.match(THINKING_BLOCK_RE) ?? []).join("\n\n").trim();
 }
 
+function extractVisibleAssistantContent(
+  content: string | null | undefined,
+  toolCalls?: ChatMessage["toolCalls"],
+): string {
+  const raw = typeof content === "string" ? content.trim() : "";
+  if (!raw) return "";
+  const withoutThinking = raw.replace(THINKING_BLOCK_RE, "").trim();
+  if (!withoutThinking) return "";
+  return sanitizeAssistantMessageContent(withoutThinking, toolCalls) || withoutThinking;
+}
+
+function mergeCompletedThinkingBlocks(...values: Array<string | null | undefined>): string {
+  const blocks = values
+    .flatMap((value) => (typeof value === "string" ? (value.match(THINKING_BLOCK_RE) ?? []) : []))
+    .map((block) => block.trim())
+    .filter(Boolean);
+  return [...new Set(blocks)].join("\n\n").trim();
+}
+
 function mergeFinalAssistantContent(response: unknown, streamedText: string, toolCalls?: ChatMessage["toolCalls"]): string {
   const finalResponse = String(response ?? "").trim();
-  if (/<(thinking|think)>/i.test(finalResponse)) {
-    return finalResponse;
-  }
+  const completedThinking = mergeCompletedThinkingBlocks(streamedText, finalResponse);
+  const visibleFinal = extractVisibleAssistantContent(finalResponse, toolCalls);
+  const visibleStreamed = extractVisibleAssistantContent(streamedText, toolCalls);
+  const visibleContent = visibleFinal || visibleStreamed || summarizeToolOnlyAssistantTurn(toolCalls);
+  const merged = [completedThinking, visibleContent].filter(Boolean).join("\n\n").trim();
 
-  const completedThinking = extractCompletedThinkingBlocks(streamedText);
-  if (!completedThinking) {
-    return sanitizeAssistantMessageContent(finalResponse, toolCalls)
-      || finalResponse
-      || summarizeToolOnlyAssistantTurn(toolCalls);
-  }
-
-  const merged = [completedThinking, finalResponse].filter(Boolean).join("\n\n");
-  return sanitizeAssistantMessageContent(merged, toolCalls)
-    || merged
+  return merged
+    || visibleContent
+    || finalResponse
+    || streamedText.trim()
     || summarizeToolOnlyAssistantTurn(toolCalls);
 }
 
@@ -1400,7 +1415,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       id: message.id,
       role: message.role,
       content: message.role === "assistant"
-        ? sanitizeAssistantMessageContent(message.content, message.toolCalls)
+        ? mergeFinalAssistantContent(message.content, "", message.toolCalls)
         : message.content,
       timestamp: new Date(message.timestamp),
       toolCalls: message.toolCalls,
