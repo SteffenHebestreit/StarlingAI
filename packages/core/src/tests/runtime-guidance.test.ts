@@ -76,6 +76,18 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("agentName='ops_triage'");
   });
 
+  it("does not force web research for pasted local WireGuard server configs", () => {
+    const guidance = buildDynamicTurnGuidance(`folgendes szenario:\n\nroot@ubuntu:~# cat /etc/wireguard/wg0.conf\n[Interface]\nPrivateKey = test\nAddress = 10.10.0.1/24\nListenPort = 51820\nPostUp = iptables -t nat -A PREROUTING -p udp --dport 51821 -j DNAT --to-destination 10.10.0.2:51821\n\n[Peer]\nPublicKey = test\nAllowedIPs = 10.10.0.2/32\n\npfsense\nWGTUNNEL 10.10.0.2\nWas muss ich anpassen? Was muss ich für einen neuen peer konfigurieren`);
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.serverAccessSensitive).toBe(true);
+    expect(guidance?.sourceSensitive).toBe(false);
+    expect(guidance?.freshnessSensitive).toBe(false);
+    expect(guidance?.prompt).toContain("headless server");
+    expect(guidance?.prompt).toContain("agentName='shell_agent'");
+    expect(guidance?.prompt).not.toContain("A tool-free answer is invalid");
+  });
+
   it("routes mail drafting and sending requests to mail_agent", () => {
     const guidance = buildDynamicTurnGuidance("schreibe eine testmail an info@steffen-hebestreit.com und sende sie");
 

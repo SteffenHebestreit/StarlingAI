@@ -84,6 +84,20 @@ export const SERVER_ACCESS_PATTERNS = [
   /\b(server|host|vm|vps|instance|n8n(?:-server)?)\b[\s\S]{0,80}\b(docker|container|containers|systemctl|journalctl|ssh|logs?)\b/,
 ];
 
+export const LOCAL_SERVER_CONFIG_PATTERNS = [
+  /\/etc\/wireguard\/\w+\.conf/,
+  /\ballowedips\s*=/,
+  /\blistenport\s*=/,
+  /\bpostup\s*=/,
+  /\bpostdown\s*=/,
+  /\bpublickey\s*=/,
+  /\bprivatekey\s*=/,
+  /\biptables\b/,
+  /\broot@[\w.-]+:/,
+  /\bpfsense\b/,
+  /\bwireguard\b/,
+];
+
 export const PENTEST_HINT_TERMS = [
   "pentest", "pentesting", "penetration test", "penetration testing", "security test", "security assessment", "vulnerability", "vuln", "scan",
   "nmap", "nikto", "sqlmap", "exploit", "cve", "audit", "hardening",
@@ -198,15 +212,17 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const normalized = userMessage.trim().toLowerCase();
   if (!normalized) return null;
 
-  const freshnessSensitive = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
-  const sourceSensitive = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
+  const freshnessSensitiveByTerm = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
+  const sourceSensitiveByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
     || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
     || PRODUCTIVITY_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
+  const localServerConfigEvidence = LOCAL_SERVER_CONFIG_PATTERNS.some((pattern) => pattern.test(normalized));
   const serverAccessSensitive = SERVER_ACCESS_HINT_TERMS.some((term) => normalized.includes(term))
-    || SERVER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized));
+    || SERVER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized))
+    || localServerConfigEvidence;
   const computerAccessSensitive = !serverAccessSensitive && (
     COMPUTER_ACCESS_HINT_TERMS.some((term) => normalized.includes(term))
     || OWNED_COMPUTER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized))
@@ -218,6 +234,12 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
   const navigationSensitive = NAVIGATION_HINT_TERMS.some((term) => normalized.includes(term))
     || NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
+  const localServerConfigReview = serverAccessSensitive
+    && !sourceSensitiveByTerm
+    && !WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
+    && localServerConfigEvidence;
+  const freshnessSensitive = localServerConfigReview ? false : freshnessSensitiveByTerm;
+  const sourceSensitive = localServerConfigReview ? false : sourceSensitiveByTerm;
 
   const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive };
   if (!Object.values(flags).some(Boolean)) return null;
