@@ -1038,6 +1038,123 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
+  it("keeps mail_agent in-process when defaultContainerized is enabled", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mail-no-container-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const runSubAgentInContainerMock = vi.fn(async () => ({
+      output: "container path should not run",
+      metrics: {
+        containerColdStartMs: 1,
+        containerBootstrapMs: 1,
+        containerRuntimeMs: 1,
+        heartbeatSupported: true,
+      },
+    }));
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaultContainerized: true,
+        defaults: {
+          model: {
+            primary: "lmstudio/gemma-4-26b-a4b-it",
+            temperature: 0.1,
+            maxTokens: 1024,
+          },
+        },
+      },
+      subAgents: {
+        mail_agent: {
+          description: "Mail agent",
+          systemPrompt: "Use mail tools first.",
+          tools: [
+            "mail_list_accounts",
+            "mail_list_unread",
+            "mail_read",
+          ],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/container-runner.js", () => ({
+      runSubAgentInContainer: runSubAgentInContainerMock,
+    }));
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+
+    registerTool({
+      name: "mail_list_accounts",
+      description: "List mail accounts",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "- work: user@example.com <user@example.com>",
+          metadata: { accounts: [{ id: "work", address: "user@example.com" }] },
+        };
+      },
+    });
+
+    registerTool({
+      name: "mail_list_unread",
+      description: "List unread messages",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "- [work] Project Update from boss@example.com (INBOX#101 on 2026-04-03)",
+          metadata: {
+            messages: [{
+              accountId: "work",
+              mailbox: "INBOX",
+              uid: 101,
+              subject: "Project Update",
+              from: "boss@example.com",
+              date: "2026-04-03",
+            }],
+          },
+        };
+      },
+    });
+
+    registerTool({
+      name: "mail_read",
+      description: "Read a message",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "Project Update body",
+          metadata: {
+            message: {
+              textBody: "Here is the latest project update with the next milestones and owners.",
+            },
+          },
+        };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mail_agent",
+        task: "Check mal ob ich neue email bekommen habe",
+        parentSessionId: "parent-mail-containerized",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Unread messages found: 1.");
+      expect(runSubAgentInContainerMock).not.toHaveBeenCalled();
+    } finally {
+      unregisterTool("mail_list_accounts");
+      unregisterTool("mail_list_unread");
+      unregisterTool("mail_read");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards computer callbacks into delegated tool execution", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-computer-callbacks-"));
     const configPath = join(tempDir, "starlingai.json");

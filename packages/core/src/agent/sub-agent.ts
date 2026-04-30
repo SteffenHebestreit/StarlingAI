@@ -111,6 +111,12 @@ const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "run_task_graph",
 ]);
 
+const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
+  "mail_",
+  "calendar_",
+  "contacts_",
+];
+
 const WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES = new Set<string>([
   "search_workflows",
   "share_finding",
@@ -1019,21 +1025,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     //   b) agents.defaultContainerized is true globally AND container.disabled !== true
     //      (opt-out model — closed GAP-1 from ROADMAP)
     //
-    // EXCEPTION: agents whose tool list contains any orchestration/discovery tool
-    // (delegate_to_agent, swarm_delegate, parallel_delegate, run_task_graph,
-    // run_workflow, search_agents, search_workflows, list_agents) must run
-    // in-process. Those tools require access to the parent process's tool
-    // registry and Docker socket; inside a sandboxed `--network none --read-only`
-    // worker the LLM call or the very first orchestration tool dispatch fails
-    // before any iteration runs — surfacing as a near-instant `exited with code
-    // 125` from the daemon. Forcing in-process for these agents avoids the
-    // unavoidable cold failure and keeps the existing per-agent
-    // `container.disabled: true` opt-out as the manual override.
+    // EXCEPTION: agents whose tool list contains orchestration/discovery tools
+    // or gateway-bound service tools must run in-process.
+    //
+    // Orchestration/discovery tools (delegate_to_agent, swarm_delegate,
+    // parallel_delegate, run_task_graph, run_workflow, search_agents,
+    // search_workflows, list_agents) require access to the parent process's
+    // tool registry and Docker socket.
+    //
+    // Mail/calendar/contacts tools call the headless mail-service via gateway
+    // config and service discovery. Inside the generic agent-worker container
+    // they do not inherit the gateway's runtime config and usually run with
+    // `--network none`, which turns simple inbox checks into opaque container
+    // failures before the deterministic mail fast path can run.
     const requiresHostRegistry = (agentCfg.tools ?? []).some((t: string) =>
       ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t),
     );
+    const requiresGatewayServices = (agentCfg.tools ?? []).some((toolName: string) =>
+      GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix)),
+    );
     const isContainerized =
-      !requiresHostRegistry && (
+      !requiresHostRegistry && !requiresGatewayServices && (
         agentCfg.container?.enabled === true ||
         (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
       );
