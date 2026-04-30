@@ -361,6 +361,46 @@ export const FederationSchema = z.object({
 export type FederationPeerConfig = z.infer<typeof FederationPeerSchema>;
 export type FederationConfig = z.infer<typeof FederationSchema>;
 
+/**
+ * Public Agent-to-Agent (A2A) protocol — Stage 12 / Open Interop.
+ *
+ * Where federation is StarlingAI-to-StarlingAI HMAC, A2A is the open public
+ * spec at https://a2aproject.dev so cross-vendor agents (LangGraph, CrewAI,
+ * Vertex AI, …) can delegate tasks back and forth.  We act as both a server
+ * (advertising sub-agents via `/.well-known/agent-card.json`) and a client
+ * (fetching peer agent cards and registering each as a virtual sub-agent).
+ */
+export const A2APeerSchema = z.object({
+  /** Stable id used in `a2a__<peerId>__<agentName>` names + audit entries. */
+  id: z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/i),
+  /** Base URL of the peer (no trailing slash).  Agent card resolves at `<url>/.well-known/agent-card.json`. */
+  url: z.string().url(),
+  /** Optional human description shown in dashboards. */
+  description: z.string().optional(),
+  /** Bearer token required by the peer's `/a2a/v1` endpoint (resolves `$ENV` and `secret:` prefixes). */
+  bearerToken: z.string().optional(),
+  /** Skip outbound calls to this peer when false; useful for staging while keeping the entry. */
+  enabled: z.boolean().default(true),
+});
+
+export const A2ASchema = z.object({
+  /** Master switch — when false `/a2a/v1` returns 404 and the client doesn't poll peers. */
+  enabled: z.boolean().default(false),
+  /** Bearer token clients must present.  Unset = require gateway JWT. */
+  inboundBearerToken: z.string().optional(),
+  /** Optional allowlist of locally-defined agents exposed via A2A.  Empty = all. */
+  exposeAgents: z.array(z.string()).default([]),
+  /** Outbound peers we will pull agent cards from at startup. */
+  peers: z.array(A2APeerSchema).default([]),
+  /** Hard timeout on a single A2A `tasks/send` outbound call in ms. */
+  taskTimeoutMs: z.number().int().min(5_000).max(3_600_000).default(600_000),
+  /** Refresh interval in ms for re-fetching peer agent cards.  0 = once at startup. */
+  refreshIntervalMs: z.number().int().min(0).max(86_400_000).default(900_000),
+});
+
+export type A2APeerConfig = z.infer<typeof A2APeerSchema>;
+export type A2AConfig = z.infer<typeof A2ASchema>;
+
 export const MultimodalServiceSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
@@ -508,8 +548,53 @@ export const McpServerConfigSchema = z.discriminatedUnion("transport", [
   McpTcpServerSchema,
 ]);
 
+/**
+ * Outbound MCP-server expose config (Stage 12 / Open Interop).
+ *
+ * When `enabled` is true, the gateway publishes itself as an MCP endpoint so
+ * external clients (Claude Desktop, Claude Code, Cursor, Zed, …) can call
+ * StarlingAI tools, sub-agents, scenes, and jobs.  Two transports are
+ * supported simultaneously:
+ *
+ *   - **stdio** — the `mcp-stdio` entrypoint.  Operators wire this into
+ *     external tooling via `claude mcp add starlingai -- node dist/mcp-stdio.js`.
+ *   - **HTTP/SSE** — mounted at `/mcp` on the regular gateway listener;
+ *     reuses the existing JWT auth so operator/viewer rules apply.
+ *
+ * Tier gating mirrors federation: Tier 0/1 surface by default, Tier 2 is
+ * opt-in per-tool, Tier 3+ never.
+ */
+export const McpServerExposeSchema = z.object({
+  /** Master switch.  When false, `/mcp` returns 404 and the stdio entrypoint exits with a hint. */
+  enabled: z.boolean().default(false),
+  /**
+   * Allowlist of tool names exposed via MCP.  Empty array = expose every
+   * Tier 0/1 tool.  Tier 2 tools must be listed explicitly; Tier 3+ are
+   * never exposed regardless of allowlist contents.
+   */
+  exposeTools: z.array(z.string()).default([]),
+  /** Allowlist of sub-agent names exposed as `agent__<name>` tools.  Empty array = all. */
+  exposeAgents: z.array(z.string()).default([]),
+  /** Allowlist of scenes exposed as `scene__<name>` tools.  Empty array = all. */
+  exposeScenes: z.array(z.string()).default([]),
+  /** Allowlist of jobs exposed as MCP prompts.  Empty array = all. */
+  exposeJobs: z.array(z.string()).default([]),
+  /** When true, allow Tier 2 tools listed in `exposeTools` (per-call approval still applies). */
+  allowTier2: z.boolean().default(false),
+  /** HTTP transport (`/mcp`) on/off.  Stdio transport is governed by whether the entrypoint is launched. */
+  http: z.object({
+    enabled: z.boolean().default(true),
+    /** When true the HTTP transport requires the same JWT as `/api/*`.  Disable only for trusted local sockets. */
+    requireAuth: z.boolean().default(true),
+  }).default({}),
+});
+
+export type McpServerExposeConfig = z.infer<typeof McpServerExposeSchema>;
+
 export const McpConfigSchema = z.object({
   servers: z.record(McpServerConfigSchema).default({}),
+  /** Expose StarlingAI itself as an MCP server (Stage 12 / Open Interop). */
+  expose: McpServerExposeSchema.default({}),
 });
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
@@ -1123,6 +1208,7 @@ export const ConfigSchema = z.object({
   cost: CostSchema.default({}),
   tracing: TracingSchema.default({}),
   federation: FederationSchema.default({}),
+  a2a: A2ASchema.default({}),
   /**
    * Plugin SDK — third-party tool packages loaded from a directory at
    * startup.  When `enabled` is false the loader is skipped entirely.

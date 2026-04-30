@@ -6,9 +6,10 @@
  * - Handles graceful shutdown
  */
 import { cleanupConfiguredDockerMcpContainers, connectMcpServer, type McpClientConnection } from "./client.js";
-import { registerTool, unregisterTool } from "../tools/registry.js";
+import { registerTool, unregisterTool, warmToolEmbeddings } from "../tools/registry.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "../runtime/status.js";
 
 const log = childLogger("mcp:registry");
@@ -75,6 +76,29 @@ export async function syncMcpServers(): Promise<void> {
       markRuntimeComponentSuccess("mcp", { connected: ok, failed, servers: [..._connections.keys()] }, { healthy: false, error: `${failed} MCP server(s) failed to connect` });
     } else {
       markRuntimeComponentSuccess("mcp", { connected: ok, failed, servers: [..._connections.keys()] });
+    }
+
+    // Incrementally warm embeddings for the freshly-bridged tools so the
+    // reranker can route to them on the very next turn.  A no-op when the
+    // embedding provider is unavailable.
+    const newToolNames: string[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const names = _serverToolNames.get(r.value.name);
+        if (names) newToolNames.push(...names);
+      }
+    }
+    if (newToolNames.length > 0) {
+      void warmToolEmbeddings(newToolNames).then((warm) => {
+        if (warm.warmed > 0) {
+          logAudit("tool_embeddings_warmed", {
+            warmed: warm.warmed,
+            skipped: warm.skipped,
+            durationMs: warm.durationMs,
+            source: "mcp_sync",
+          });
+        }
+      }).catch(() => undefined);
     }
   } catch (err) {
     markRuntimeComponentFailure("mcp", err, { connected: _connections.size, servers: [..._connections.keys()] });

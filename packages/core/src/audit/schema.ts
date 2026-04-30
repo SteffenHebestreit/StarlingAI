@@ -125,7 +125,28 @@ export type AuditEventType =
   | "plugin_unloaded"
   | "plugin_tool_rejected"
   // Cost governance
-  | "cost_budget_threshold";
+  | "cost_budget_threshold"
+  // Tool embedding warm-up (Stage 12 / Open Interop)
+  | "tool_embeddings_warmed"
+  // MCP client (consumed servers) — runtime registry
+  | "mcp_server_added"
+  | "mcp_server_updated"
+  | "mcp_server_removed"
+  | "mcp_server_reconnected"
+  | "mcp_server_connect_failed"
+  // MCP server (we expose ourselves as an MCP endpoint)
+  | "mcp_server_request"
+  | "mcp_server_tool_called"
+  | "mcp_server_tool_rejected"
+  | "mcp_server_session_opened"
+  | "mcp_server_session_closed"
+  // A2A — public Agent-to-Agent protocol
+  | "a2a_request_received"
+  | "a2a_request_failed"
+  | "a2a_task_completed"
+  | "a2a_peer_added"
+  | "a2a_peer_removed"
+  | "a2a_peer_unreachable";
 
 export interface AuditEvent {
   id: string;
