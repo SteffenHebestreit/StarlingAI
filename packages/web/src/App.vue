@@ -8,7 +8,7 @@
     <!-- Header -->
     <header class="relative z-10 shrink-0 border-b border-purple-500/20 bg-gray-900/80 px-3 py-3 backdrop-blur-lg sm:px-5">
 
-      <div class="flex items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
         <!-- Logo + brand -->
         <div class="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -26,11 +26,11 @@
             </span>
           </div>
           <span class="hidden md:inline text-xs bg-purple-900/40 text-purple-400 border border-purple-700/30 px-2 py-0.5 rounded-full font-medium">
-            v0.6.4
+            v{{ appVersion }}
           </span>
         </div>
 
-        <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-5">
+        <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
           <!-- Connection status -->
           <div class="flex items-center gap-2 text-xs shrink-0">
             <div :class="[
@@ -79,37 +79,33 @@
           >
             Enable Notifications
           </button>
+          <!-- Nav: keep a single desktop row, but let it wrap below the
+               metadata cluster on small screens so every control stays
+               reachable without collapsing into a hamburger menu. -->
+          <nav
+            class="app-nav order-last flex min-w-0 basis-full items-center justify-end gap-1 overflow-x-auto scroll-smooth pt-1 -mr-3 pr-3 sm:order-none sm:basis-auto sm:flex-1 sm:pt-0 sm:mr-0 sm:pr-0"
+            aria-label="Main navigation"
+          >
+            <template v-for="entry in navEntries" :key="entry.kind === 'leaf' ? entry.to : entry.label">
+              <RouterLink
+                v-if="entry.kind === 'leaf'"
+                :to="entry.to"
+                class="inline-flex shrink-0 items-center rounded-full border px-3 py-2 text-sm font-medium transition-colors"
+                :class="$route.path === entry.to
+                  ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
+                  : 'border-transparent text-gray-400 hover:border-white/10 hover:bg-white/5 hover:text-gray-100'"
+                :aria-current="$route.path === entry.to ? 'page' : undefined"
+              >
+                {{ entry.label }}
+              </RouterLink>
+              <NavGroup
+                v-else
+                :label="entry.label"
+                :items="entry.items"
+              />
+            </template>
+          </nav>
         </div>
-      </div>
-
-      <!-- Nav: 5 top-level entries (Chat, Live, Logs, Memory, Manage), with
-           popover dropdowns for grouped categories.  Horizontal scroll
-           on small screens so all entries stay reachable without a
-           hamburger menu. -->
-      <div class="mt-3 border-t border-white/5 pt-2">
-        <nav
-          class="app-nav flex max-w-full items-center gap-1 overflow-x-auto scroll-smooth -mr-3 pr-3 sm:mr-0 sm:pr-0"
-          aria-label="Main navigation"
-        >
-          <template v-for="entry in navEntries" :key="entry.kind === 'leaf' ? entry.to : entry.label">
-            <RouterLink
-              v-if="entry.kind === 'leaf'"
-              :to="entry.to"
-              class="inline-flex shrink-0 items-center rounded-full border px-3 py-2 text-sm font-medium transition-colors"
-              :class="$route.path === entry.to
-                ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
-                : 'border-transparent text-gray-400 hover:border-white/10 hover:bg-white/5 hover:text-gray-100'"
-              :aria-current="$route.path === entry.to ? 'page' : undefined"
-            >
-              {{ entry.label }}
-            </RouterLink>
-            <NavGroup
-              v-else
-              :label="entry.label"
-              :items="entry.items"
-            />
-          </template>
-        </nav>
       </div>
     </header>
 
@@ -175,6 +171,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 import NavGroup, { type NavGroupItem } from "@/components/NavGroup.vue";
+import { appVersion } from "@/appVersion";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();

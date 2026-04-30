@@ -593,7 +593,7 @@
         <div v-if="isSettingsPage" class="glass-card p-5">
           <h3 class="section-title">About StarlingAI</h3>
           <div class="text-sm text-gray-500 space-y-1">
-            <p>Version: <span class="text-gray-300">0.6.4</span></p>
+            <p>Version: <span class="text-gray-300">{{ appVersion }}</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
             <p class="text-xs mt-2">All conversations are processed locally via LM Studio. No data is sent to external services unless you explicitly use web tools.</p>
           </div>
@@ -1815,6 +1815,7 @@ import { useMultimodalStore, type MultimodalConfig } from "@/stores/multimodal";
 import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type ConfigAssistantMode, type FlowMemoryOutcome, type FlowMemoryScope } from "@/stores/configAssistant";
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
+import { appVersion } from "@/appVersion";
 
 const route = useRoute();
 const gateway = useGatewayStore();
