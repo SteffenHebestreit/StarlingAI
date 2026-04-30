@@ -14,6 +14,8 @@ const router = createRouter({
     { path: "/federation", component: () => import("@/pages/Federation.vue") },
     { path: "/users", component: () => import("@/pages/Users.vue") },
     { path: "/plugins", component: () => import("@/pages/Plugins.vue") },
+    { path: "/mcp", component: () => import("@/pages/McpServers.vue") },
+    { path: "/a2a", component: () => import("@/pages/A2APeers.vue") },
     { path: "/cost", component: () => import("@/pages/Cost.vue") },
     { path: "/definitions", redirect: "/agents" },
     { path: "/config-assistant", redirect: "/agents" },

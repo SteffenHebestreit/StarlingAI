@@ -186,6 +186,30 @@ export async function main() {
   await loadPersistedGaps();
   loadCheckpointsFromDisk(getConfig().workspacePath);
 
+  // Pre-warm tool embeddings now that every loader (built-ins, MCP bridge,
+  // plugins, dynamic tools) has registered.  The first `rerankToolsForTask`
+  // call in a live turn is otherwise a thundering herd against the embedding
+  // provider; warming up here amortizes that cost into startup.
+  try {
+    const { warmToolEmbeddings } = await import("./tools/registry.js");
+    const warm = await warmToolEmbeddings();
+    if (warm.warmed > 0 || warm.skipped > 0) {
+      log.info(
+        { warmed: warm.warmed, skipped: warm.skipped, durationMs: warm.durationMs },
+        "Tool embeddings warmed",
+      );
+      const { logAudit } = await import("./audit/logger.js");
+      logAudit("tool_embeddings_warmed", {
+        warmed: warm.warmed,
+        skipped: warm.skipped,
+        durationMs: warm.durationMs,
+        source: "startup",
+      });
+    }
+  } catch (err) {
+    log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
+  }
+
   // Start gateway (WS + REST)
   const gateway = createGateway();
   await gateway.start();
@@ -220,6 +244,16 @@ export async function main() {
   // Start transitive federation peer discovery (no-op when disabled)
   const { startPeerDiscovery } = await import("./federation/index.js");
   startPeerDiscovery();
+
+  // Start public A2A client — pulls each configured peer's agent card and
+  // registers every advertised skill as a virtual sub-agent.  No-op when
+  // a2a.enabled is false.
+  try {
+    const { startA2AClient } = await import("./a2a/client.js");
+    await startA2AClient();
+  } catch (err) {
+    log.warn({ err }, "A2A client failed to start — peer skills will be unavailable");
+  }
 
   // Start MemGraph background jobs (centrality, community detection, similarity links)
   startGraphJobs();
@@ -269,6 +303,12 @@ export async function main() {
     stopWarden();
     const { stopPeerDiscovery } = await import("./federation/index.js");
     stopPeerDiscovery();
+    try {
+      const { stopA2AClient } = await import("./a2a/client.js");
+      stopA2AClient();
+    } catch {
+      // best-effort
+    }
     if (embeddedSceneWorkerEnabled) {
       await stopSceneJobWorker();
     }
@@ -278,6 +318,12 @@ export async function main() {
     await stopManagedChannels();
     await gateway.stop();
     await shutdownSceneJobStore();
+    try {
+      const { shutdownMcpHttpSessions } = await import("./mcp/server-http.js");
+      await shutdownMcpHttpSessions();
+    } catch {
+      // best-effort
+    }
     await shutdownMcpServers();
     shutdownDynamicTools();
     stopPluginWatcher();

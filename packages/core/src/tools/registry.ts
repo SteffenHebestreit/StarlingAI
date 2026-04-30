@@ -276,6 +276,48 @@ export function _clearToolEmbeddingCacheForTests(): void {
 }
 
 /**
+ * Pre-warm embeddings for the given tools (or every registered tool when
+ * `toolNames` is omitted).  Used at gateway startup after MCP / plugin /
+ * dynamic-tool loaders complete so the first `rerankToolsForTask` call in a
+ * live turn doesn't pay the full embedding-batch latency.  Called again
+ * incrementally whenever a new external surface (MCP server, plugin) brings
+ * fresh tools into the registry.
+ *
+ * Cheap when embeddings are unavailable (returns immediately) and idempotent
+ * (anything cached is skipped).  Failures inside individual embedding calls
+ * are swallowed — a missing vector just means that tool falls back to input
+ * order in the reranker, which is the same behavior we'd see lazily.
+ */
+export async function warmToolEmbeddings(
+  toolNames?: string[],
+): Promise<{ warmed: number; skipped: number; durationMs: number }> {
+  const startedAt = Date.now();
+  if (!isEmbeddingAvailable()) {
+    return { warmed: 0, skipped: 0, durationMs: 0 };
+  }
+
+  const targets: ToolHandler[] = toolNames
+    ? toolNames.map((n) => _registry.get(n)).filter((h): h is ToolHandler => !!h)
+    : [..._registry.values()];
+
+  let warmed = 0;
+  let skipped = 0;
+  await Promise.all(
+    targets.map(async (handler) => {
+      const key = _toolEmbeddingKey(handler);
+      if (_toolEmbeddingCache.has(key)) {
+        skipped += 1;
+        return;
+      }
+      const vec = await _getToolEmbedding(handler);
+      if (vec) warmed += 1;
+    }),
+  );
+
+  return { warmed, skipped, durationMs: Date.now() - startedAt };
+}
+
+/**
  * Repair a tool call whose name was mangled by the model.
  * Some models emit `tool_name(arg=val, …)` as the function name instead of
  * using the structured name + arguments fields.  Detect the pattern of a `(`

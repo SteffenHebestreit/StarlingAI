@@ -1,0 +1,337 @@
+/**
+ * A2A server — exposes locally-defined sub-agents via the public A2A
+ * protocol so cross-vendor agents (LangGraph, CrewAI, Vertex, …) can call
+ * us the same way they call any other A2A peer.
+ *
+ *   GET  /.well-known/agent-card.json   — discovery
+ *   POST /a2a/v1                        — JSON-RPC 2.0 (tasks/send, tasks/get)
+ *
+ * Auth: bearer.  `a2a.inboundBearerToken` overrides; otherwise the same
+ * gateway JWT used for `/api/*` is accepted.  Tier policy is identical to
+ * federation — the peer's tools/agents stay on the peer's side; we run
+ * the requested sub-agent inside our own `runSubAgentWithStats` runner so
+ * humanInLoopSteps + tier gates apply unmodified.
+ */
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
+
+import { getConfig } from "../config/loader.js";
+import { runSubAgentWithStats } from "../agent/sub-agent.js";
+import { verifyToken, extractBearerToken } from "../gateway/auth.js";
+import { logAudit } from "../audit/logger.js";
+import { childLogger } from "../logger.js";
+import {
+  A2A_ERROR,
+  A2A_PROTOCOL_VERSION,
+  type A2AAgentCard,
+  type A2AAgentSkill,
+  type A2AJsonRpcRequest,
+  type A2AJsonRpcResponse,
+  type A2ATask,
+  type A2ATasksSendParams,
+} from "./protocol.js";
+
+const log = childLogger("a2a:server");
+
+/** In-memory task store.  Single-node by design — federation/A2A clients hit one instance. */
+const _tasks = new Map<string, A2ATask>();
+const TASK_RETENTION_MS = 30 * 60_000;
+
+/** Match a path against the A2A surface; returns true when handled. */
+export async function handleA2ARequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const pathname = url.pathname;
+
+  if (req.method === "GET" && pathname === "/.well-known/agent-card.json") {
+    return handleAgentCardRequest(req, res);
+  }
+  if (req.method === "POST" && pathname === "/a2a/v1") {
+    return handleJsonRpcRequest(req, res);
+  }
+  return false;
+}
+
+function handleAgentCardRequest(req: IncomingMessage, res: ServerResponse): boolean {
+  const config = getConfig();
+  if (!config.a2a.enabled) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "A2A is disabled" }));
+    return true;
+  }
+
+  const card = buildAgentCard(req);
+  res.writeHead(200, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-cache",
+  });
+  res.end(JSON.stringify(card));
+  return true;
+}
+
+async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  const config = getConfig();
+  if (!config.a2a.enabled) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "A2A is disabled" }));
+    return true;
+  }
+
+  const authResult = await authorizeInbound(req);
+  if (!authResult.ok) {
+    logAudit("a2a_request_failed", { reason: "unauthorized" }, { severity: "warn" });
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ jsonrpc: "2.0", error: A2A_ERROR.UNAUTHORIZED, id: null }));
+    return true;
+  }
+
+  const body = await readBody(req);
+  let rpc: A2AJsonRpcRequest;
+  try {
+    rpc = JSON.parse(body) as A2AJsonRpcRequest;
+  } catch {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ jsonrpc: "2.0", error: A2A_ERROR.PARSE, id: null }));
+    return true;
+  }
+
+  const id = rpc.id ?? null;
+  const caller = authResult.caller;
+
+  logAudit("a2a_request_received", { method: rpc.method, caller, rpcId: id });
+
+  try {
+    let result: unknown;
+    switch (rpc.method) {
+      case "tasks/send":
+        result = await handleTasksSend(rpc.params as A2ATasksSendParams, caller);
+        break;
+      case "tasks/get": {
+        const params = rpc.params as { id?: string };
+        if (!params?.id) {
+          return respondError(res, id, A2A_ERROR.INVALID_PARAMS);
+        }
+        const task = _tasks.get(params.id);
+        if (!task) return respondError(res, id, A2A_ERROR.TASK_NOT_FOUND);
+        result = task;
+        break;
+      }
+      case "agent/authenticatedExtendedCard":
+        result = buildAgentCard(req);
+        break;
+      default:
+        return respondError(res, id, A2A_ERROR.METHOD_NOT_FOUND);
+    }
+    const ok: A2AJsonRpcResponse = { jsonrpc: "2.0", result, id };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(ok));
+    return true;
+  } catch (err) {
+    log.error({ err, method: rpc.method }, "A2A request threw");
+    logAudit("a2a_request_failed", { method: rpc.method, caller, reason: String(err) }, { severity: "warn" });
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      jsonrpc: "2.0",
+      error: { ...A2A_ERROR.INTERNAL, data: { message: String(err) } },
+      id,
+    }));
+    return true;
+  }
+}
+
+function respondError(
+  res: ServerResponse,
+  id: string | number | null,
+  err: { code: number; message: string },
+): boolean {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ jsonrpc: "2.0", error: err, id }));
+  return true;
+}
+
+async function handleTasksSend(params: A2ATasksSendParams, caller: string): Promise<A2ATask> {
+  const config = getConfig();
+  if (!params || !params.message?.parts?.[0]?.text) {
+    throw new Error("message.parts[0].text is required");
+  }
+
+  const agentName = params.agentId ?? "";
+  if (!agentName) {
+    throw new Error("agentId is required");
+  }
+  const allowed = config.a2a.exposeAgents;
+  if (allowed.length > 0 && !allowed.includes(agentName)) {
+    throw new Error(`Agent '${agentName}' is not exposed via A2A`);
+  }
+  if (!config.subAgents?.[agentName]) {
+    throw new Error(`Agent '${agentName}' is not configured`);
+  }
+
+  const taskId = params.id ?? randomUUID();
+  const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
+  const userText = params.message.parts.map((p) => p.text).join("\n").trim();
+  const context =
+    typeof (params.metadata?.["context"]) === "string"
+      ? (params.metadata!["context"] as string)
+      : undefined;
+
+  const initialTask: A2ATask = {
+    id: taskId,
+    sessionId,
+    status: { state: "working", timestamp: new Date().toISOString() },
+    history: [params.message],
+  };
+  _tasks.set(taskId, initialTask);
+  scheduleTaskExpiry(taskId);
+
+  try {
+    const run = await runSubAgentWithStats({
+      agentName,
+      task: userText,
+      context,
+      parentSessionId: sessionId,
+      workspacePath: config.workspacePath,
+    });
+
+    const finalTask: A2ATask = {
+      id: taskId,
+      sessionId,
+      status: { state: "completed", timestamp: new Date().toISOString() },
+      history: [
+        params.message,
+        { role: "agent", parts: [{ type: "text", text: run.output }] },
+      ],
+      artifacts: [{ role: "agent", parts: [{ type: "text", text: run.output }] }],
+    };
+    _tasks.set(taskId, finalTask);
+    logAudit("a2a_task_completed", {
+      taskId,
+      sessionId,
+      agentName,
+      caller,
+      tokens: run.stats.usage.totalTokens,
+      iterations: run.stats.iterations,
+    });
+    return finalTask;
+  } catch (err) {
+    const failed: A2ATask = {
+      id: taskId,
+      sessionId,
+      status: {
+        state: "failed",
+        message: { role: "agent", parts: [{ type: "text", text: String(err) }] },
+        timestamp: new Date().toISOString(),
+      },
+      history: [params.message],
+    };
+    _tasks.set(taskId, failed);
+    logAudit("a2a_request_failed", {
+      taskId,
+      sessionId,
+      agentName,
+      caller,
+      reason: String(err),
+    }, { severity: "warn" });
+    throw err;
+  }
+}
+
+interface AuthResult { ok: boolean; caller: string }
+
+async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
+  const config = getConfig();
+  const authHeader = req.headers["authorization"];
+  const token = authHeader ? extractBearerToken(authHeader as string) : null;
+  if (!token) return { ok: false, caller: "anonymous" };
+
+  // Custom A2A bearer overrides everything when set.
+  if (config.a2a.inboundBearerToken) {
+    const expected = resolveSecret(config.a2a.inboundBearerToken);
+    return constantTimeEquals(token, expected)
+      ? { ok: true, caller: "a2a-shared-bearer" }
+      : { ok: false, caller: "anonymous" };
+  }
+
+  // Otherwise, fall back to a regular gateway JWT — operators get full
+  // access; viewer tokens are accepted (tier policies still apply).
+  const verified = await verifyToken(token);
+  if (!verified) return { ok: false, caller: "anonymous" };
+  return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+}
+
+function resolveSecret(value: string): string {
+  if (value.startsWith("$")) return process.env[value.slice(1)] ?? "";
+  return value;
+}
+
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return false;
+  }
+}
+
+function buildAgentCard(req: IncomingMessage): A2AAgentCard {
+  const config = getConfig();
+  const baseUrl = inferPublicUrl(req);
+  const agentNames =
+    config.a2a.exposeAgents.length > 0
+      ? config.a2a.exposeAgents.filter((n) => config.subAgents[n])
+      : Object.keys(config.subAgents ?? {});
+
+  const skills: A2AAgentSkill[] = agentNames.map((name) => {
+    const cfg = config.subAgents[name];
+    return {
+      id: name,
+      name,
+      description: cfg?.description ?? `StarlingAI sub-agent ${name}`,
+      tags: cfg?.tags ?? [],
+    };
+  });
+
+  return {
+    name: `StarlingAI (${config.federation?.instanceId ?? "primary"})`,
+    description:
+      "StarlingAI multi-agent swarm exposed via the public A2A protocol.  " +
+      "Each skill maps to a configured sub-agent; tier policies and " +
+      "human-in-the-loop gates are enforced server-side.",
+    url: `${baseUrl}/a2a/v1`,
+    version: "0.7.1",
+    protocolVersion: A2A_PROTOCOL_VERSION,
+    defaultInputModes: ["text"],
+    defaultOutputModes: ["text"],
+    capabilities: {
+      streaming: false,
+      pushNotifications: false,
+      stateTransitionHistory: false,
+    },
+    authentication: {
+      schemes: config.a2a.inboundBearerToken ? ["bearer"] : ["bearer"],
+    },
+    skills,
+  };
+}
+
+function inferPublicUrl(req: IncomingMessage): string {
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] ?? "http";
+  const host = (req.headers["host"] as string | undefined) ?? "localhost";
+  return `${proto}://${host}`;
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let buf = "";
+    req.on("data", (chunk: Buffer) => { buf += chunk.toString("utf8"); });
+    req.on("end", () => resolve(buf));
+  });
+}
+
+function scheduleTaskExpiry(taskId: string): void {
+  const timer = setTimeout(() => _tasks.delete(taskId), TASK_RETENTION_MS);
+  timer.unref();
+}

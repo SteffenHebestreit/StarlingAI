@@ -378,6 +378,65 @@ When `enabled` is false the gateway routes return 404 and the federation tools r
 
 ---
 
+## Stage 12 — Open Interop (April 2026)
+
+**Theme:** Stop being a closed garden.  Two-way interop with the wider
+agent ecosystem so external clients (Claude Desktop, Claude Code, Cursor,
+Zed) can call StarlingAI tools/agents/scenes, and so cross-vendor agent
+platforms (LangGraph, CrewAI, Vertex AI, …) can be reached via the public
+A2A protocol — both directions.
+
+### Capabilities
+
+| Capability | Status | Description |
+|-----------|--------|-------------|
+| Tool embedding warm-up | ✅ shipped | `warmToolEmbeddings()` runs at gateway start (after MCP/plugin/dynamic loaders) and incrementally on every MCP sync + plugin load.  Eliminates the cold-start herd against the embedding provider when external surfaces drop fresh tools into the registry. |
+| MCP server (HTTP/SSE) | ✅ shipped | `/mcp` endpoint on the gateway listener, backed by `StreamableHTTPServerTransport`.  JWT auth (operator + viewer accepted; tier policies still apply at call time).  One transport + Server pair per MCP session id. |
+| MCP server (stdio) | ✅ shipped | `node dist/mcp-stdio.js` entrypoint loads a minimal runtime (config + audit + tools + plugins, no scene worker / channels / federation).  Wire into Claude Desktop / Cursor / Zed via the standard MCP server config. |
+| Tool / agent / scene exposure | ✅ shipped | Native Tier 0/1 tools by default; Tier 2 opt-in via `mcp.expose.allowTier2` + explicit allowlist; Tier 3+ never exposed.  Sub-agents → `agent__<name>` tools; scenes → `scene__<name>` tools with their declared params surfaced as JSON schema. |
+| Runtime MCP-server CRUD | ✅ shipped | `GET/POST/PATCH/DELETE /api/mcp/servers/:id`, `POST /api/mcp/servers/:id/reconnect`.  Adds/edits persist into `starlingai.json` via `updateConfig`; immediate `syncMcpServers()` + embedding warm-up on success.  `mcp_server_added/updated/removed/reconnected/connect_failed` audit events. |
+| `/mcp` Vue dashboard | ✅ shipped | Operator-only `/mcp` page covers both directions: outbound expose toggle (enabled/HTTP/auth) with metrics + advertised surface, plus inbound peer cards with connect status, transport details, and an add form for every supported transport. |
+| Public A2A server | ✅ shipped | `GET /.well-known/agent-card.json` advertises every locally-allowed sub-agent as an A2A skill; `POST /a2a/v1` handles JSON-RPC `tasks/send`, `tasks/get`, and `agent/authenticatedExtendedCard`.  Bearer auth — shared `a2a.inboundBearerToken` overrides; otherwise gateway JWT is accepted. |
+| Public A2A client | ✅ shipped | At gateway start, every configured `a2a.peers[]` entry is polled for its agent card.  Each advertised skill registers as a virtual sub-agent named `a2a__<peerId>__<skillId>` (also added to `config.subAgents` in-process so `delegate_to_agent` finds it).  Calls translate to outbound `tasks/send` with the configured bearer token. |
+| `/a2a` Vue dashboard | ✅ shipped | Operator-only `/a2a` page lists configured peers, their advertised skills (with the full virtual-agent name shown), and allows adding/removing peers at runtime.  Self-card location + auth scheme is shown alongside. |
+| Audit events | ✅ shipped | `tool_embeddings_warmed`, `mcp_server_request`, `mcp_server_tool_called`, `mcp_server_tool_rejected`, `mcp_server_session_opened/closed`, `mcp_server_added/updated/removed/reconnected/connect_failed`, `a2a_request_received`, `a2a_request_failed`, `a2a_task_completed`, `a2a_peer_added/removed/unreachable`. |
+
+### Configuration
+
+```json
+{
+  "mcp": {
+    "servers": { /* unchanged — inbound MCP clients we consume */ },
+    "expose": {
+      "enabled": true,
+      "exposeTools": ["list_agents", "search_agents"],
+      "exposeAgents": [],
+      "exposeScenes": [],
+      "allowTier2": false,
+      "http": { "enabled": true, "requireAuth": true }
+    }
+  },
+  "a2a": {
+    "enabled": true,
+    "exposeAgents": [],
+    "inboundBearerToken": "$A2A_INBOUND_TOKEN",
+    "peers": [
+      { "id": "langgraph-prod", "url": "https://peer.example.com", "bearerToken": "$LANGGRAPH_TOKEN" }
+    ],
+    "taskTimeoutMs": 600000,
+    "refreshIntervalMs": 900000
+  }
+}
+```
+
+### Tier policy invariants (preserved end-to-end)
+
+- **Tier 3+ never reachable** through MCP server, A2A server, or A2A client paths — guarded at advertise time, dispatch time, and at the central `executeTool` boundary.
+- **Per-call approval still applies** to Tier 2 calls reached via MCP/A2A — operators see the same human-in-the-loop prompts they would for in-process delegations.
+- **A2A peers run their own policy** — the StarlingAI A2A client never tries to override remote peer guardrails, just like federation.
+
+---
+
 ## Invariants — What Will Never Change
 
 These properties are not on any roadmap because they will never be relaxed:

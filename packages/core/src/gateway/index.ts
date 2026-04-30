@@ -66,6 +66,8 @@ import { getWardenAlerts } from "../agent/warden.js";
 import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
+import { handleMcpHttpRequest, shutdownMcpHttpSessions, getMcpHttpSessionCount } from "../mcp/server-http.js";
+import { getMcpExposeSummary } from "../mcp/server.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { proposeConversationConfigChange } from "../agent/config-assistant.js";
 import {
@@ -1520,6 +1522,277 @@ export function createGateway() {
       directory: resolvePluginsDir(),
       plugins: listLoadedPlugins(),
     });
+  });
+
+  // ── MCP integration (Stage 12 — Open Interop) ────────────────────────────
+  //
+  //   GET    /api/mcp/servers           — list configured + active inbound servers
+  //   POST   /api/mcp/servers           — add/replace one (validates against schema, persists, syncs)
+  //   PATCH  /api/mcp/servers/:id       — partial update (e.g. flip autoStart)
+  //   DELETE /api/mcp/servers/:id       — remove + tear down
+  //   POST   /api/mcp/servers/:id/reconnect — force a fresh handshake
+  //
+  //   GET    /api/mcp/expose            — outbound server status + advertised surface
+  //   PATCH  /api/mcp/expose            — toggle / re-allowlist exposure
+  //
+  // Mutating routes inherit the existing operator-only RBAC middleware
+  // mounted at the top of /api/*; no extra role check required here.
+
+  app.get("/api/mcp/servers", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const config = getConfig();
+    const connections = getMcpConnections();
+    const servers = Object.entries(config.mcp.servers ?? {}).map(([id, cfg]) => {
+      const conn = connections.get(id);
+      return {
+        id,
+        config: cfg,
+        status: conn ? "connected" : (cfg.autoStart ? "disconnected" : "disabled"),
+        toolCount: conn?.tools.length ?? 0,
+        tools: conn?.tools.map((t) => ({ name: t.name, description: t.description })) ?? [],
+      };
+    });
+    return c.json({ servers });
+  });
+
+  app.post("/api/mcp/servers", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: { id?: unknown; config?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const id = typeof body.id === "string" ? body.id.trim() : "";
+    if (!id || !/^[a-z0-9_-]+$/i.test(id)) {
+      return c.json({ error: "id is required and must match /^[a-z0-9_-]+$/i" }, 400);
+    }
+
+    const { McpServerConfigSchema } = await import("../config/schema.js");
+    const parsed = McpServerConfigSchema.safeParse(body.config);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid MCP server config", issues: parsed.error.issues }, 400);
+    }
+
+    updateConfig((raw) => {
+      const mcp = (raw["mcp"] ??= {}) as Record<string, unknown>;
+      const servers = (mcp["servers"] ??= {}) as Record<string, unknown>;
+      servers[id] = body.config as Record<string, unknown>;
+    });
+
+    const { syncMcpServers } = await import("../mcp/registry.js");
+    try {
+      await syncMcpServers();
+    } catch (err) {
+      logAudit("mcp_server_connect_failed", { id, reason: String(err) }, { severity: "warn" });
+      return c.json({ ok: false, id, error: String(err) }, 502);
+    }
+
+    logAudit("mcp_server_added", { id, transport: parsed.data.transport });
+    const conn = getMcpConnections().get(id);
+    return c.json({
+      ok: true,
+      id,
+      status: conn ? "connected" : "disconnected",
+      toolCount: conn?.tools.length ?? 0,
+    });
+  });
+
+  app.patch("/api/mcp/servers/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const id = c.req.param("id");
+    const existing = getConfig().mcp.servers?.[id];
+    if (!existing) return c.json({ error: "Unknown MCP server id" }, 404);
+
+    let patch: Record<string, unknown>;
+    try {
+      patch = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const merged = { ...existing, ...patch };
+    const { McpServerConfigSchema } = await import("../config/schema.js");
+    const parsed = McpServerConfigSchema.safeParse(merged);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid MCP server config", issues: parsed.error.issues }, 400);
+    }
+
+    updateConfig((raw) => {
+      const mcp = (raw["mcp"] ??= {}) as Record<string, unknown>;
+      const servers = (mcp["servers"] ??= {}) as Record<string, unknown>;
+      servers[id] = merged;
+    });
+
+    const { syncMcpServers } = await import("../mcp/registry.js");
+    try {
+      await syncMcpServers();
+    } catch (err) {
+      logAudit("mcp_server_connect_failed", { id, reason: String(err) }, { severity: "warn" });
+      return c.json({ ok: false, id, error: String(err) }, 502);
+    }
+
+    logAudit("mcp_server_updated", { id, transport: parsed.data.transport });
+    return c.json({ ok: true, id });
+  });
+
+  app.delete("/api/mcp/servers/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const id = c.req.param("id");
+    if (!getConfig().mcp.servers?.[id]) {
+      return c.json({ error: "Unknown MCP server id" }, 404);
+    }
+
+    updateConfig((raw) => {
+      const mcp = (raw["mcp"] ??= {}) as Record<string, unknown>;
+      const servers = (mcp["servers"] ??= {}) as Record<string, unknown>;
+      delete servers[id];
+    });
+
+    const { syncMcpServers } = await import("../mcp/registry.js");
+    try {
+      await syncMcpServers();
+    } catch (err) {
+      log.warn({ err, id }, "MCP sync after delete threw");
+    }
+
+    logAudit("mcp_server_removed", { id });
+    return c.json({ ok: true, id });
+  });
+
+  app.post("/api/mcp/servers/:id/reconnect", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const id = c.req.param("id");
+    if (!getConfig().mcp.servers?.[id]) {
+      return c.json({ error: "Unknown MCP server id" }, 404);
+    }
+
+    const { syncMcpServers } = await import("../mcp/registry.js");
+    try {
+      await syncMcpServers();
+      logAudit("mcp_server_reconnected", { id });
+      const conn = getMcpConnections().get(id);
+      return c.json({
+        ok: true,
+        id,
+        status: conn ? "connected" : "disconnected",
+        toolCount: conn?.tools.length ?? 0,
+      });
+    } catch (err) {
+      logAudit("mcp_server_connect_failed", { id, reason: String(err) }, { severity: "warn" });
+      return c.json({ ok: false, id, error: String(err) }, 502);
+    }
+  });
+
+  app.get("/api/mcp/expose", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    return c.json({
+      ...getMcpExposeSummary(),
+      activeHttpSessions: getMcpHttpSessionCount(),
+      stdioCommandHint: "node packages/core/dist/mcp-stdio.js",
+    });
+  });
+
+  // ── Public A2A protocol — peer + expose management ──────────────────────
+  app.get("/api/a2a/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const a2a = getConfig().a2a;
+    const { listA2APeers } = await import("../a2a/client.js");
+    return c.json({
+      enabled: a2a.enabled,
+      exposeAgents: a2a.exposeAgents,
+      requireSharedBearer: !!a2a.inboundBearerToken,
+      peers: listA2APeers().map((p) => ({
+        id: p.id,
+        url: p.url,
+        description: p.description,
+        skillCount: p.skills.length,
+        skills: p.skills.map((s) => ({ id: s.id, name: s.name, description: s.description, tags: s.tags })),
+        virtualAgents: p.virtualAgents,
+        lastPolledAt: p.lastPolledAt,
+        lastError: p.lastError,
+      })),
+    });
+  });
+
+  app.post("/api/a2a/peers", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: Record<string, unknown>;
+    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    const { A2APeerSchema } = await import("../config/schema.js");
+    const parsed = A2APeerSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid A2A peer", issues: parsed.error.issues }, 400);
+    }
+
+    updateConfig((raw) => {
+      const a2a = (raw["a2a"] ??= {}) as Record<string, unknown>;
+      const peers = (a2a["peers"] ??= []) as Array<Record<string, unknown>>;
+      const idx = peers.findIndex((p) => p["id"] === parsed.data.id);
+      if (idx >= 0) peers[idx] = parsed.data;
+      else peers.push(parsed.data);
+    });
+
+    const { startA2AClient } = await import("../a2a/client.js");
+    await startA2AClient();
+    return c.json({ ok: true, id: parsed.data.id });
+  });
+
+  app.delete("/api/a2a/peers/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const id = c.req.param("id");
+
+    updateConfig((raw) => {
+      const a2a = (raw["a2a"] ??= {}) as Record<string, unknown>;
+      const peers = (a2a["peers"] as Array<Record<string, unknown>> | undefined) ?? [];
+      a2a["peers"] = peers.filter((p) => p["id"] !== id);
+    });
+
+    const { startA2AClient } = await import("../a2a/client.js");
+    await startA2AClient();
+    return c.json({ ok: true, id });
+  });
+
+  app.patch("/api/mcp/expose", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let patch: Record<string, unknown>;
+    try {
+      patch = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const { McpServerExposeSchema } = await import("../config/schema.js");
+    const merged = { ...getConfig().mcp.expose, ...patch };
+    const parsed = McpServerExposeSchema.safeParse(merged);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid expose config", issues: parsed.error.issues }, 400);
+    }
+
+    updateConfig((raw) => {
+      const mcp = (raw["mcp"] ??= {}) as Record<string, unknown>;
+      mcp["expose"] = parsed.data;
+    });
+
+    return c.json({ ok: true, expose: getMcpExposeSummary() });
   });
 
   // ── Status endpoint (auth required) ─────────────────────────────────────
@@ -3812,6 +4085,23 @@ export function createGateway() {
     // true when matched + handled so we short-circuit before hitting Hono.
     if (await handleFederationDelegateStream(req, res)) {
       return;
+    }
+
+    // ── Outbound MCP server (HTTP/SSE) ───────────────────────────────────────
+    // Mounted at /mcp.  Handler enforces auth + transport dispatch; returns
+    // true when the request belongs to MCP so we never hit Hono with it.
+    if (await handleMcpHttpRequest(req, res)) {
+      return;
+    }
+
+    // ── Public A2A protocol — agent card + JSON-RPC /a2a/v1 ───────────────
+    // Note: this is the *public* A2A surface.  The internal `/a2a/agents/:name`
+    // path below is the legacy in-process A2A and stays for backward compat.
+    {
+      const { handleA2ARequest } = await import("../a2a/server.js");
+      if (await handleA2ARequest(req, res)) {
+        return;
+      }
     }
 
     // ── AG-UI streaming endpoint ─────────────────────────────────────────────

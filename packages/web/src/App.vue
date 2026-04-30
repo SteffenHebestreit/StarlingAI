@@ -231,6 +231,8 @@ const allNavEntries: NavEntry[] = [
     items: [
       { to: "/agents", label: "Agents", hint: "Sub-agent definitions" },
       { to: "/plugins", label: "Plugins", hint: "Third-party tools", operatorOnly: true },
+      { to: "/mcp", label: "MCP", hint: "External servers + publish self", operatorOnly: true },
+      { to: "/a2a", label: "A2A", hint: "Agent-to-Agent peers", operatorOnly: true },
       { to: "/users", label: "Users", hint: "Accounts & roles", operatorOnly: true },
       { to: "/cost", label: "Cost", hint: "Token spend & budgets", operatorOnly: true },
       { to: "/settings", label: "Settings", hint: "Providers & config", operatorOnly: true },

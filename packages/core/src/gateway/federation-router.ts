@@ -293,7 +293,7 @@ function buildCapabilitySnapshot(): FederationCapability {
 
   return {
     instanceId: fedConfig.instanceId,
-    version: "0.7.0",
+    version: "0.7.1",
     protocolVersion: FEDERATION_PROTOCOL_VERSION,
     agents,
     toolNames,

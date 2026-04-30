@@ -23,7 +23,7 @@ import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
-import { registerTool, unregisterTool, type ToolHandler } from "../tools/registry.js";
+import { registerTool, unregisterTool, warmToolEmbeddings, type ToolHandler } from "../tools/registry.js";
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
@@ -316,6 +316,21 @@ async function loadOnePlugin(entryPath: string, label: string): Promise<LoadResu
     tools: registeredToolNames,
   });
   log.info({ plugin: plugin.name, version: plugin.version, tools: registeredToolNames.length }, "Plugin loaded");
+
+  // Warm embeddings for the new tools so the reranker can route to them on
+  // the next turn without a cold-start penalty.  Fire-and-forget — failures
+  // in the embedding provider don't block plugin load.
+  void warmToolEmbeddings(registeredToolNames).then((warm) => {
+    if (warm.warmed > 0) {
+      logAudit("tool_embeddings_warmed", {
+        warmed: warm.warmed,
+        skipped: warm.skipped,
+        durationMs: warm.durationMs,
+        source: "plugin_load",
+        plugin: plugin.name,
+      });
+    }
+  }).catch(() => undefined);
   return { ok: true };
 }
 
