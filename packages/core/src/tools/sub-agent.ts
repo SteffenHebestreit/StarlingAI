@@ -25,7 +25,24 @@ import { recordCapabilityGap } from "../agent/self-improve.js";
 import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
+/**
+ * Minimum score for a candidate to qualify when semantic embeddings are
+ * actually used (rerank mode).  Semantic similarity scores are normalized
+ * narrowly around 0.5–0.95, so the cutoff sits high.
+ */
 const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
+
+/**
+ * Minimum score for a candidate to qualify when only keyword scoring is
+ * available (no embedding endpoint reachable — typical in unit tests and
+ * when LM Studio is unavailable).  Keyword scores are aggressively
+ * normalized down by the per-token-then-average-and-clamp pipeline in
+ * scoreAgentKeywordMatch; they rarely cross 0.72 even for unambiguous
+ * specialist matches like "git commit" → git_developer.  A higher floor
+ * here causes the routing layer to silently drop legitimate candidates
+ * and return "none" for common queries.
+ */
+const KEYWORD_AGENT_ROUTING_MIN_SCORE = 0.45;
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
@@ -537,7 +554,11 @@ export async function resolveAgentRouting(
   const raw = query.trim();
   const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(raw);
   const minConfidence = opts?.minConfidence ?? "medium";
-  const minScore = Math.max(confidenceThreshold(minConfidence), SEMANTIC_AGENT_ROUTING_MIN_SCORE);
+  // The qualification floor is computed AFTER we know whether semantic
+  // search produced results (see further down), since the floor depends
+  // on which scoring mode is in use.  Keep it as `let` here so the
+  // post-rerank gate can read the resolved value.
+  let minScore = Math.max(confidenceThreshold(minConfidence), SEMANTIC_AGENT_ROUTING_MIN_SCORE);
   const config = getConfig();
   // Merge promoted agents — they are visible to routing but don't override
   // permanent config entries.
@@ -578,6 +599,21 @@ export async function resolveAgentRouting(
     } catch {
       // fallback to keyword-only ranking
     }
+  }
+
+  // Resolve the qualification floor now that we know which scoring mode
+  // is active.  Keyword-only scores are aggressively normalized down by
+  // scoreAgentKeywordMatch (per-token-then-coverage-then-clamp) and rarely
+  // cross 0.72 even for unambiguous specialist matches; using the
+  // semantic floor in that mode silently drops legitimate candidates.
+  // At keyword mode we honor the requested confidence label verbatim:
+  //   high   → 0.72  (only confident keyword matches qualify)
+  //   medium → 0.45  (specialist matches with one or two keyword hits)
+  //   low    → 0     (anything with score > 0 surfaces — useful when the
+  //                   caller is doing its own re-rank or mining the long
+  //                   tail for capability-gap detection)
+  if (!usedSemanticSearch) {
+    minScore = confidenceThreshold(minConfidence);
   }
 
   // Pre-compute whether any agent in the pool declares GPU capability, so the
