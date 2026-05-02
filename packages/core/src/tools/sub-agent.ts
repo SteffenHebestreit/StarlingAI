@@ -90,10 +90,17 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
   const looksDocumentDeliverable = /\b(report|reports|brief|briefs|paper|papers|summary|summaries|presentation|writeup|write-ups?|document|documents|whitepaper|white paper|essay|bericht|berichte|aufsatz)\b/i.test(normalized);
   const looksResearchTask = /\b(research|researching|researcher|recherche|recherchiere|forschung|investigate|investigation)\b/i.test(normalized);
-  const looksWebTask = /\b(web|website|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
+  // Bare `web` matches casual phrasing like "search the web for X" which
+  // is researcher's idiom — not a real browser/online task.  Require an
+  // explicit web/browser/online noun so wtc only owns true web tasks.
+  const looksWebTask = /\b(website|webseite|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
   const looksArtifactRender = /\b(create|build|generate|render|produce|turn|convert|visuali[sz]e|present|html)\b/i.test(normalized);
   const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
-  const looksSequential = /\b(first|then|after|before|next|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
+  // Plain `next` matches "next Friday" / "next week" — those are date
+  // qualifiers, not sequential-workflow signals.  Require a workflow noun
+  // after `next` (step, task, phase, …) so weather/scheduler queries
+  // don't get classified as multi-step missions.
+  const looksSequential = /\b(first|then|after|before|next\s+(step|task|phase|stage|action|item|iteration|round)|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
   const looksVisualization = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalized);
   const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized)
     || looksMarketData
@@ -121,7 +128,10 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   const hasDesktopKeyword = /\b(meinem?\s+(?:pc|computer|rechner|desktop|workstation)|my\s+(?:pc|computer|desktop|workstation)|on\s+(?:the\s+)?(?:pc|computer|desktop|machine)\s+at|lokale[mnrs]?\s+(?:pc|computer|rechner|desktop))\b/i.test(normalized);
   const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
   const hasDesktopAppContext = /\b(rdp|vnc|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
-  const hasServerTarget = /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|ssh)\b/i.test(normalized);
+  // `n8n` alone is the workflow product, not a server.  Only the explicit
+  // `n8n-server` form indicates an admin/ops target.  Bare `n8n` belongs
+  // to workflow_designer's scope.
+  const hasServerTarget = /\b(server|host|vm|vps|instance|container|containers|n8n-server|ssh)\b/i.test(normalized);
   const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|tail(?:\s+-f)?|ps\s+aux|df\s+-h|container|containers)\b/i.test(normalized)
     || /\b(?:show|view|check|inspect|read|tail)\s+logs?\b/i.test(normalized)
     || /(?:^|\s)(?:top|htop)(?=$|\s|[.,;:!?])/i.test(normalized);
@@ -695,7 +705,12 @@ export async function resolveAgentRouting(
   }
 
   const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
-  const looksNewsTask = /\b(news|updates?|nachrichten|neuigkeiten|meldungen|trends)\b/i.test(raw);
+  // Freshness lookups owned by web_task_coordinator: news, weather, live
+  // scores, lottery results, stock quotes — anything that's a one-shot
+  // current-state query (vs. a sourced/citation-grade research task,
+  // which goes to researcher).  Includes German equivalents so DE
+  // queries route the same way as EN ones.
+  const looksNewsTask = /\b(news|updates?|headlines|breaking|nachrichten|neuigkeiten|meldungen|trends|schlagzeilen|weather|wetter|forecast|vorhersage|score|scores|spielstand|live|ergebnisse|lottery|lotto|jackpot|eurojackpot|stocks?|aktien|b[oö]rse|markets?)\b/i.test(raw);
   const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(raw);
   const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksSourceGroundedDocumentWorkflow
     && !(preferenceSignals.looksGroundedInput
@@ -712,7 +727,14 @@ export async function resolveAgentRouting(
     && !preferenceSignals.looksDataHeavy
     && !preferenceSignals.looksVisualization
     && !preferenceSignals.looksDocumentDeliverable
-    && (preferenceSignals.looksWebTask || preferenceSignals.looksSourceHeavy || preferenceSignals.looksFresh);
+    // Source-heavy queries (release notes, official documentation, specs,
+    // citations, references) are researcher's territory.  When the query
+    // looks source-heavy AND has no real "freshness" or "web task"
+    // signal, drop the wtc preference so researcher wins on its keyword
+    // strength rather than getting bumped to second place by the
+    // preferredNames re-sort.
+    && (preferenceSignals.looksWebTask
+      || (preferenceSignals.looksFresh && !preferenceSignals.looksSourceHeavy));
   const preferProjectPlannerInSearch = preferenceSignals.prefersPlanner
     && !preferMissionInSearch
     && !preferenceSignals.looksSourceHeavy
@@ -731,7 +753,11 @@ export async function resolveAgentRouting(
     preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
     preferMissionInSearch ? "mission_coordinator" : null,
-    preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
+    // Either signal is enough to put wtc above researcher in the
+    // preferredNames bump.  looksNewsTask covers freshness lookups
+    // (weather, scores, lottery, breaking) where wtc is the actual
+    // owner; researcher stays the fallback if wtc isn't in the catalog.
+    (preferWebCoordinatorInSearch || looksNewsTask) ? "web_task_coordinator" : null,
     (preferWebCoordinatorInSearch || looksNewsTask) ? "researcher" : null,
     preferProjectPlannerInSearch ? "project_planner" : null,
   ].filter((value): value is string => Boolean(value));

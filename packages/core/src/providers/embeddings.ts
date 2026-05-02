@@ -34,7 +34,15 @@ interface CachedEmbeddingQuery {
 }
 
 const TOOL_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [
-  { pattern: /web_search|web_fetch|searxng/, keywords: ["research", "web", "search", "facts", "documentation", "sources", "news", "updates", "latest", "current", "release notes"] },
+  // The web_search/web_fetch rule used to inject ["news","updates","latest",
+  // "current","release notes"] into every agent that owns a web tool.  That
+  // pulled FRESHNESS queries to incidental web-tool holders (channel_operator,
+  // prompt_optimizer, etc.) just because they happened to have web_fetch.
+  // Keep "release notes" — it's a documentation-shaped artifact specific
+  // to researcher's scope — but drop the news/freshness keywords; those
+  // routing decisions now flow through the freshnessNewsIntent /
+  // looksNewsTask heuristics rather than via tool-rule keyword inflation.
+  { pattern: /web_search|web_fetch|searxng/, keywords: ["research", "web", "search", "facts", "documentation", "sources", "release notes"] },
   { pattern: /playwright|browser_/, keywords: ["browser", "automation", "login", "forms", "screenshots", "navigation", "scraping"] },
   { pattern: /code_sandbox|run_js|run_ts/, keywords: ["coding", "scripts", "execution", "analysis", "transform"] },
   { pattern: /shell_exec|run_script/, keywords: ["shell", "terminal", "devops", "ops", "commands"] },
