@@ -17,6 +17,7 @@
       "tools": [
         "web_search",
         "web_fetch",
+        "url_inspect",
         "read_shared_facts",
         "share_finding",
         "read_file",
@@ -50,6 +51,7 @@
         "workspace_search",
         "write_file",
         "regex_test",
+        "text_diff",
         "read_shared_facts",
         "share_finding"
       ]
@@ -237,6 +239,8 @@
         "json_query",
         "regex_test",
         "datetime_arithmetic",
+        "url_inspect",
+        "hash_compute",
         "share_finding",
         "write_file"
       ]
@@ -272,7 +276,8 @@
         "spreadsheet_read",
         "json_query",
         "regex_test",
-        "datetime_arithmetic"
+        "datetime_arithmetic",
+        "hash_compute"
       ]
     },
     "research_librarian": {
@@ -378,6 +383,7 @@
         "shell_exec",
         "web_search",
         "web_fetch",
+        "url_inspect",
         "json_query",
         "regex_test",
         "read_shared_facts",
@@ -449,6 +455,7 @@
         "list_files",
         "workspace_search",
         "regex_test",
+        "text_diff",
         "read_shared_facts",
         "share_finding",
         "write_file"
@@ -696,10 +703,12 @@
       "tools": [
         "web_search",
         "web_fetch",
+        "url_inspect",
         "read_shared_facts",
         "read_file",
         "share_finding",
-        "write_file"
+        "write_file",
+        "text_diff"
       ]
     },
     "prompt_optimizer": {
@@ -869,6 +878,7 @@
         "http_request",
         "web_search",
         "web_fetch",
+        "url_inspect",
         "read_file",
         "write_file",
         "list_files",
