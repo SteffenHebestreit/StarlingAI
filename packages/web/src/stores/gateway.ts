@@ -1527,11 +1527,20 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   async function loadSession(sessionId: string, allowArchived = false): Promise<void> {
     currentSessionTranscriptLoading.value = true;
+    // Stake the target session id BEFORE awaiting so the post-await guard can
+    // distinguish "user switched FROM a prior session" (the normal case) from
+    // "a second loadSession call superseded this one" (the race we want to
+    // drop).  The previous logic compared against `null`, which conflated the
+    // two and silently discarded every legitimate switch from one session to
+    // another — leaving the chat showing the prior transcript and chat.send
+    // routing to the wrong session id.
+    const previousSessionId = currentSessionId.value;
+    currentSessionId.value = sessionId;
     try {
       const result = await getSessionTranscript(sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
-      // Guard: if the user switched sessions while we were loading, discard.
-      if (currentSessionId.value !== null && currentSessionId.value !== sessionId) return;
+      if (currentSessionId.value !== sessionId) return; // concurrent switch won
       if (!allowArchived && result.session.archivedAt) {
+        currentSessionId.value = previousSessionId;
         throw new Error("Archived sessions cannot be resumed");
       }
       currentSessionId.value = result.session.archivedAt ? null : sessionId;
@@ -1539,6 +1548,11 @@ export const useGatewayStore = defineStore("gateway", () => {
       currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
       hydrateTranscript(result.transcript);
       applyCurrentSessionRunSelection(currentSessionId.value ?? sessionId);
+    } catch (err) {
+      if (currentSessionId.value === sessionId) {
+        currentSessionId.value = previousSessionId;
+      }
+      throw err;
     } finally {
       currentSessionTranscriptLoading.value = false;
     }

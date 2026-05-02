@@ -83,6 +83,7 @@ import "./tools/ask-user.js";
 import "./tools/run-test-suite.js";
 import "./tools/log-stream.js";
 import "./tools/translate-text.js";
+import "./tools/inline-utils.js";
 import "./tools/mail.js";
 import "./tools/calendar.js";
 import "./tools/contacts.js";

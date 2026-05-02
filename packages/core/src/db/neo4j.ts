@@ -42,14 +42,28 @@ export function getNeo4jDriver(): Driver | null {
 }
 
 export function isNeo4jAvailable(): boolean {
+  // Lazy-init: callers (initGraphSchema, /api/graph/*, the runtime status
+  // probe) ask "is MemGraph available?" before any Cypher query.  Without
+  // an eager driver attempt here, `_available` stays `false` forever — the
+  // schema bootstrap short-circuits, no graph operation ever runs, and the
+  // dashboard reports "MemGraph offline" even when MEMGRAPH_URL is wired.
+  if (!_driver) getNeo4jDriver();
   return _available && _driver !== null;
 }
 
-/** Run a Cypher query. Returns null if Neo4j is unavailable. */
+/**
+ * Run a Cypher query. Returns null if Neo4j is unavailable.
+ *
+ * `opts.autoCommit` runs the query through `session.run()` directly,
+ * bypassing the managed-transaction wrapper. Required for DDL on MemGraph
+ * (CREATE INDEX, CREATE VECTOR INDEX, …) — MemGraph rejects index
+ * manipulation inside multicommand transactions, which is what
+ * `executeWrite`/`executeRead` opens. Plain Neo4j accepts both modes.
+ */
 export async function runCypher(
   cypher: string,
   params: Record<string, unknown> = {},
-  opts: { write?: boolean } = {},
+  opts: { write?: boolean; autoCommit?: boolean } = {},
 ): Promise<QueryResult | null> {
   const driver = getNeo4jDriver();
   if (!driver) return null;
@@ -58,10 +72,20 @@ export async function runCypher(
     defaultAccessMode: opts.write ? neo4j.session.WRITE : neo4j.session.READ,
   });
 
+  // Bolt sends JS numbers as floats by default.  MemGraph (and Neo4j)
+  // rejects float values for clauses that require integers — most commonly
+  // `LIMIT $n` ("Limit on number of returned elements must be an integer").
+  // Coerce any safe-integer parameter to a Bolt Integer here so call sites
+  // can keep using plain JS numbers without per-query wrapping.
+  const coerced = coerceIntParams(params);
+
   try {
+    if (opts.autoCommit) {
+      return await session.run(cypher, coerced);
+    }
     const result = opts.write
-      ? await session.executeWrite(tx => tx.run(cypher, params))
-      : await session.executeRead(tx => tx.run(cypher, params));
+      ? await session.executeWrite(tx => tx.run(cypher, coerced))
+      : await session.executeRead(tx => tx.run(cypher, coerced));
     return result;
   } catch (err) {
     log.error({ err, cypher: cypher.slice(0, 200) }, "Cypher query failed");
@@ -69,6 +93,24 @@ export async function runCypher(
   } finally {
     await session.close();
   }
+}
+
+function coerceIntParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(params)) {
+    if (typeof val === "number" && Number.isFinite(val) && Number.isInteger(val)) {
+      out[key] = neo4j.int(val);
+    } else if (Array.isArray(val)) {
+      out[key] = val.map((item) =>
+        typeof item === "number" && Number.isFinite(item) && Number.isInteger(item)
+          ? neo4j.int(item)
+          : item,
+      );
+    } else {
+      out[key] = val;
+    }
+  }
+  return out;
 }
 
 /** Convert a Neo4j QueryResult to plain JS objects. */
