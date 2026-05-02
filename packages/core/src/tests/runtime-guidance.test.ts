@@ -120,6 +120,16 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("Do NOT stop at a generic estimate or a plan to look it up");
   });
 
+  it("does not treat agent-routing maintenance language as route navigation", () => {
+    const guidance = buildDynamicTurnGuidance("fix the agent routing mismatch; it chose distance_specialist for a prompt that has nothing to do with calculating distance", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
+    expect(guidance?.navigationSensitive).toBe(false);
+    expect(guidance?.prompt).not.toContain("route distance or travel time between places");
+    expect(guidance?.prompt).not.toContain("agentName='distance_specialist'");
+  });
+
   it("does not block pentest guidance when the user explicitly asks for a scan", () => {
     const guidance = buildDynamicTurnGuidance("run a vulnerability scan on my Windows PC with nmap");
 

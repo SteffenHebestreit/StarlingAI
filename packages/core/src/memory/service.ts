@@ -59,6 +59,11 @@ export interface StoreWorkspaceMemoryInput {
   subject?: string;
 }
 
+export interface DurableMemoryWriteContext {
+  agentName?: string;
+  sessionId?: string;
+}
+
 export interface SearchMemoryOptions {
   limit?: number;
   scopes?: MemoryScope[];
@@ -134,12 +139,20 @@ const COMPACT_MIN_RECORDS = 500;
 const _writeCounters = new Map<string, number>();
 const _compactingScopes = new Set<string>();
 
-export function storeWorkspaceMemoryRecord(workspacePath: string, input: StoreWorkspaceMemoryInput): MemoryRecord {
-  return storeDurableMemoryRecord("workspace", workspacePath, input);
+export function storeWorkspaceMemoryRecord(
+  workspacePath: string,
+  input: StoreWorkspaceMemoryInput,
+  writeContext?: DurableMemoryWriteContext,
+): MemoryRecord {
+  return storeDurableMemoryRecord("workspace", workspacePath, input, writeContext);
 }
 
-export function storeUserMemoryRecord(workspacePath: string, input: StoreWorkspaceMemoryInput): MemoryRecord {
-  return storeDurableMemoryRecord("user", workspacePath, input);
+export function storeUserMemoryRecord(
+  workspacePath: string,
+  input: StoreWorkspaceMemoryInput,
+  writeContext?: DurableMemoryWriteContext,
+): MemoryRecord {
+  return storeDurableMemoryRecord("user", workspacePath, input, writeContext);
 }
 
 export async function searchMemoryRecords(
@@ -272,7 +285,12 @@ export async function formatScopedMemoryGuidance(
 export async function promoteMemoryRecords(
   workspacePath: string,
   query: string,
-  opts: SearchMemoryOptions & { destinationKind?: MemoryKind; destinationScope?: DurableMemoryScope; maxPromotions?: number } = {},
+  opts: SearchMemoryOptions & {
+    destinationKind?: MemoryKind;
+    destinationScope?: DurableMemoryScope;
+    maxPromotions?: number;
+    writeContext?: DurableMemoryWriteContext;
+  } = {},
 ): Promise<PromoteMemoryResult> {
   const destinationScope = opts.destinationScope ?? "workspace";
   const candidates = await searchMemoryRecords(workspacePath, query, {
@@ -297,7 +315,7 @@ export async function promoteMemoryRecords(
         content: mergeRecordContents([duplicate, candidate]),
         tags: normalizeTags([...duplicate.tags, ...candidate.tags, "promoted", `source:${candidate.scope}`]),
         kind: choosePreferredKind(duplicate.kind, opts.destinationKind ?? candidate.kind),
-      });
+      }, opts.writeContext);
       replaceDurableRecord(existing, updated);
       merged.push(updated);
       continue;
@@ -309,7 +327,7 @@ export async function promoteMemoryRecords(
       content: candidate.content,
       tags: normalizeTags([...candidate.tags, "promoted", `source:${candidate.scope}`]),
       kind: choosePreferredKind(opts.destinationKind ?? null, candidate.kind),
-    });
+    }, opts.writeContext);
     existing.push(created);
     promoted.push(created);
   }
@@ -441,7 +459,12 @@ export function _clearDurableMemoryCaches(): void {
   _writeCounters.clear();
 }
 
-function storeDurableMemoryRecord(scope: DurableMemoryScope, workspacePath: string, input: StoreWorkspaceMemoryInput): MemoryRecord {
+function storeDurableMemoryRecord(
+  scope: DurableMemoryScope,
+  workspacePath: string,
+  input: StoreWorkspaceMemoryInput,
+  writeContext?: DurableMemoryWriteContext,
+): MemoryRecord {
   const dir = ensureDirForScope(scope, workspacePath);
   const cacheKey = _cacheKey(scope, dir);
   const key = safeKey(input.key);
@@ -489,7 +512,8 @@ function storeDurableMemoryRecord(scope: DurableMemoryScope, workspacePath: stri
   }
 
   // Fire-and-forget graph write-through — MemGraph enhances search but is not critical path
-  upsertMemoryToGraph(result).catch(err => log.debug({ err }, "Graph write-through failed"));
+  upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId)
+    .catch(err => log.debug({ err }, "Graph write-through failed"));
 
   // Best-effort auto-compaction: every COMPACT_CHECK_INTERVAL writes, compact
   // if the store has grown past COMPACT_MIN_RECORDS.

@@ -4,9 +4,10 @@
       <div>
         <h1 class="memory-page__title">Memory &amp; Knowledge</h1>
         <p class="memory-page__subtitle">
-          What the swarm has learned, persisted, and connected. Memory entries live in the workspace
-          memory store; the knowledge graph is the MemGraph entity index that agents build through
-          <code>graph_upsert_entity</code> + <code>graph_relate</code>.
+          Two different stores live here. The Memory Store tab shows durable workspace or user memory
+          records. The Knowledge Graph tab shows MemGraph nodes and edges, including durable memory
+          write-through, FACT promotions, and explicit entity links created through
+          <code>graph_upsert_entity</code> and <code>graph_relate</code>.
         </p>
       </div>
       <div class="memory-page__tabs" role="tablist" aria-label="Memory views">
@@ -58,7 +59,9 @@
         {{ graphUnavailableNote || "MemGraph is not reachable." }}
       </div>
       <div v-else-if="graphData.nodes.length === 0 && !graphLoading" class="memory-page__notice">
-        No entities yet. Agents that call <code>graph_upsert_entity</code> will populate this view.
+        No graph nodes yet. This view is populated by MemGraph-backed memory write-through,
+        FACT promotion, and explicit graph entity tools such as <code>graph_upsert_entity</code>
+        and <code>graph_relate</code>.
       </div>
 
       <div ref="cyContainer" class="graph-canvas" />
@@ -105,7 +108,8 @@
       <div v-if="memoryError" class="memory-page__notice memory-page__notice--error">{{ memoryError }}</div>
       <div v-else-if="memoryRecords.length === 0 && !memoryLoading" class="memory-page__notice">
         No memory entries match. Workspace memory is written by <code>memory_store</code>,
-        <code>record_lesson</code>, and durable promotions from session memory.
+        <code>record_lesson</code>, and durable promotions from session memory. Session shared facts,
+        trajectory cache entries, and arbitrary workspace files are not shown in this tab.
       </div>
       <div class="memory-list">
         <article

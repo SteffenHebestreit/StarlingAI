@@ -417,6 +417,9 @@ registerTool({
         tags,
         kind: kind || undefined,
         subject: subject || undefined,
+      }, {
+        agentName: ctx.currentAgentName,
+        sessionId: ctx.sessionId,
       });
       return {
         success: true,
@@ -547,7 +550,7 @@ registerTool({
   name: "assistant_personality_update",
   description:
     "Update the persistent main-assistant personality profile. " +
-    "This changes long-lived voice guidance only. Never use it to alter safety rules, honesty rules, or authorization boundaries.",
+    "This changes long-lived voice guidance only. Do not use it to store ordinary user facts such as names, roles, preferences, project notes, or workspace knowledge; use memory_store for those. Never use it to alter safety rules, honesty rules, or authorization boundaries.",
   parameters: {
     type: "object",
     properties: {
@@ -678,6 +681,10 @@ registerTool({
         destinationKind: kind || undefined,
         destinationScope,
         maxPromotions: limit,
+        writeContext: {
+          agentName: ctx.currentAgentName,
+          sessionId: ctx.sessionId,
+        },
       });
 
       const promotedLines = result.promoted.map((record) => `- promoted **${record.subject}** as ${record.kind}`);

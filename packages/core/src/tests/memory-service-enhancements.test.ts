@@ -11,6 +11,16 @@ import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const upsertMemoryToGraphMock = vi.fn(async () => undefined);
+
+vi.mock("../memory/graph-service.js", async () => {
+  const actual = await vi.importActual<typeof import("../memory/graph-service.js")>("../memory/graph-service.js");
+  return {
+    ...actual,
+    upsertMemoryToGraph: upsertMemoryToGraphMock,
+  };
+});
+
 // ── Deterministic fake embedding provider ─────────────────────────────────
 // Maps any string to a 4-dim vector by counting marker words.  Similar text
 // → similar vector; disjoint text → orthogonal.
@@ -60,6 +70,7 @@ describe("memory service — LRU + decay + embedding", () => {
 
   afterEach(() => {
     _clearDurableMemoryCaches();
+    upsertMemoryToGraphMock.mockClear();
     for (const dir of dirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -83,6 +94,29 @@ describe("memory service — LRU + decay + embedding", () => {
 
     const files = readdirSync(join(ws, ".starlingai/memory"));
     expect(files).toContain("latency_goal.json");
+  });
+
+  it("passes agent and session metadata into graph write-through for durable memory", () => {
+    const ws = mkWorkspace();
+
+    storeWorkspaceMemoryRecord(ws, {
+      key: "operator_profile",
+      subject: "Operator profile",
+      content: "Steffen is the operator and main user of the system.",
+      kind: "fact",
+    }, {
+      agentName: "productivity_agent",
+      sessionId: "session-memory-graph-1",
+    });
+
+    expect(upsertMemoryToGraphMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "operator_profile",
+        subject: "Operator profile",
+      }),
+      "productivity_agent",
+      "session-memory-graph-1",
+    );
   });
 
   it("applies kind-based decay: 180-day half-life decisions outrank 14-day notes of same age", async () => {

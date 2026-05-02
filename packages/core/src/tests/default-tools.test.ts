@@ -38,7 +38,6 @@ describe("default main assistant tools", () => {
   it("returns only direct tools that are currently registered", () => {
     registerStubTool("read_file");
     registerStubTool("export_workspace_artifact");
-    registerStubTool("memory_search");
     registerStubTool("web_search");
     // delegate_to_agent is orchestration — must not appear in direct list
     registerStubTool("delegate_to_agent");
@@ -46,7 +45,7 @@ describe("default main assistant tools", () => {
     const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
     const directToolSet = new Set<string>(DIRECT_MAIN_TOOL_NAMES);
 
-    expect(availableDirectTools).toEqual(["read_file", "export_workspace_artifact", "memory_search", "web_search"]);
+    expect(availableDirectTools).toEqual(["read_file", "export_workspace_artifact", "web_search"]);
     expect(availableDirectTools.every(name => directToolSet.has(name))).toBe(true);
   });
 
@@ -92,6 +91,8 @@ describe("default main assistant tools", () => {
   });
 
   it("can restrict the main assistant to orchestration tools only", () => {
+    registerStubTool("memory_store");
+    registerStubTool("memory_search");
     registerStubTool("assistant_personality_view");
     registerStubTool("assistant_personality_update");
     registerStubTool("browser_snapshot");
@@ -100,10 +101,12 @@ describe("default main assistant tools", () => {
 
     const tools = getMainAssistantToolNames("orchestration_only");
 
-    expect(tools).toEqual(["assistant_personality_view", "assistant_personality_update", "delegate_to_agent", "search_agents"]);
+    expect(tools).toEqual(["memory_store", "memory_search", "assistant_personality_view", "assistant_personality_update", "delegate_to_agent", "search_agents"]);
   });
 
   it("can restrict the main assistant to delegate_to_agent only", () => {
+    registerStubTool("memory_store");
+    registerStubTool("memory_search");
     registerStubTool("assistant_personality_view");
     registerStubTool("assistant_personality_update");
     registerStubTool("browser_snapshot");
@@ -113,7 +116,18 @@ describe("default main assistant tools", () => {
 
     const tools = getMainAssistantToolNames("delegate_only");
 
-    expect(tools).toEqual(["assistant_personality_view", "assistant_personality_update", "delegate_to_agent"]);
+    expect(tools).toEqual(["memory_store", "memory_search", "assistant_personality_view", "assistant_personality_update", "delegate_to_agent"]);
+  });
+
+  it("surfaces always-available durable memory tools ahead of regular direct tools", () => {
+    registerStubTool("memory_store");
+    registerStubTool("memory_search");
+    registerStubTool("read_file");
+    registerStubTool("web_search");
+
+    const tools = getAvailableDirectMainToolNames("hybrid");
+
+    expect(tools).toEqual(["memory_store", "memory_search", "read_file", "web_search"]);
   });
 
   it("returns an empty array when no direct tools are registered", () => {
@@ -137,7 +151,7 @@ describe("default main assistant tools", () => {
     const tools = getMainAssistantToolNames("hybrid");
     // may include tools registered by other imported modules — just verify
     // that it only contains known names from both lists
-    const knownNames = new Set<string>([...DIRECT_MAIN_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES]);
+    const knownNames = new Set<string>([...ALWAYS_AVAILABLE_MAIN_TOOL_NAMES, ...DIRECT_MAIN_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES]);
     for (const name of tools) {
       expect(knownNames.has(name)).toBe(true);
     }
@@ -147,12 +161,11 @@ describe("default main assistant tools", () => {
     // Register a subset of direct tools in reverse order; output should follow declaration order
     registerStubTool("web_fetch");
     registerStubTool("web_search");
-    registerStubTool("memory_search");
 
     const availableDirectTools = getAvailableDirectMainToolNames("hybrid");
 
     const expectedOrder = DIRECT_MAIN_TOOL_NAMES.filter(n =>
-      ["web_fetch", "web_search", "memory_search"].includes(n),
+      ["web_fetch", "web_search"].includes(n),
     );
     expect(availableDirectTools).toEqual(expectedOrder);
   });

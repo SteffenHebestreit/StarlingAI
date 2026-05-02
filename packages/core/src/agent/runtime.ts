@@ -1831,6 +1831,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : (opts.maxIterationsOverride === 0
         ? Number.MAX_SAFE_INTEGER
         : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
+  let terminalSynthesisInstruction =
+    "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
+  let terminalFinishReason = "max_tool_iterations";
   const blockMissingWorkflowCatalogCheck = (): TurnOutput => blocked(
     "This request required a workflow catalog check before delegation or a direct answer, but the model skipped the workflow tools.",
     getTurnSwarmState(),
@@ -2173,6 +2176,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
       }, { sessionId: session.id, severity: "warn" });
       guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
+      _forcedSynthesisFired = true;
+      terminalFinishReason = "synthesis_required_tool_call_rejected";
+      terminalSynthesisInstruction =
+        "A previous orchestration result already required final synthesis, but the model attempted another tool call. Reject that tool call. Using ONLY the evidence already present in the tool results above, write the final user-facing answer now. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
       log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
       break;
     }
@@ -2183,6 +2190,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
       }, { sessionId: session.id, severity: "warn" });
       guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
+      _forcedSynthesisFired = true;
+      terminalFinishReason = "user_response_required_tool_call_rejected";
+      terminalSynthesisInstruction =
+        "A previous delegated result requires a user response, clarification, authorization, or approval, but the model attempted another tool call. Reject that tool call. Ask the user the required question in one concise message using only the evidence already present above. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
       log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after delegated results required a user response — forcing synthesis");
       break;
     }
@@ -3274,10 +3285,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   const synthesized = await forceSynthesis(
-    session, provider, signal,
-    "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.",
+    session, provider, signal, terminalSynthesisInstruction,
   );
-  const fallbackMsg = "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details.";
+  const fallbackMsg = terminalFinishReason === "max_tool_iterations"
+    ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
+    : resolveEmptyAssistantResponseFallback("", "", session);
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
   const finalMsg = await rewriteTerminalResponseIfNeeded(normalizedFinalMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
@@ -3292,7 +3304,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     toolExecutionTimeMs,
     lastPromptMetrics,
     completionChars: finalMsg.length,
-    finishReason: "max_tool_iterations",
+    finishReason: terminalFinishReason,
     blocked: false,
     toolIterations: iterationCount,
   });
@@ -3301,6 +3313,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     channel: session.channel,
     severity: "warn",
   });
+  logAudit("message_sent", { length: finalMsg.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+    sessionId: session.id,
+    channel: session.channel,
+    severity: "warn",
+  });
+  logAudit("turn_scorecard", {
+    delegationCount: _turnDelegationCount,
+    shareFindingCount: _turnShareFindingCount,
+    forcedSynthesisFired: _forcedSynthesisFired,
+    wardenFailureCount: _consecutiveDelegationFailures,
+    finalAnswerLength: finalMsg.length,
+    toolIterations: iterationCount,
+    finishReason: terminalFinishReason,
+  }, { sessionId: session.id, channel: session.channel, severity: "warn" });
   return {
     response: finalMsg,
     toolCallsExecuted: iterationCount,

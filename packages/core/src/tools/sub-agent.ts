@@ -22,8 +22,10 @@ import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutp
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
+import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
+const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
   if (score >= 0.72) return "high";
@@ -165,7 +167,20 @@ function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
   };
 }
 
+function looksLikeDurableMemoryTask(task: string): boolean {
+  const normalized = task.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const hasMemoryVerb = /\b(remember|save|store|persist|record|note|take a note|save this|remember this|memorize|merk dir|speicher(?:e|n)?|notier(?:e|en)?|merke|festhalten)\b/i.test(normalized);
+  const hasMemoryDestination = /\b(memory|workspace memory|user memory|persistent memory|durable memory|future session|future sessions|future tasks?|for later|preferences?|user info(?:rmation)?|user identity|operator|main user|portfolio|website url|public website|public url)\b/i.test(normalized);
+
+  return hasMemoryVerb && hasMemoryDestination;
+}
+
 function getPinnedAgentForTask(task: string): string | null {
+  if (looksLikeDurableMemoryTask(task)) {
+    return "productivity_agent";
+  }
   const signals = analyzeHeuristicRoutingQuery(task);
   if (signals.looksServerAdmin) {
     return signals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent";
@@ -174,6 +189,13 @@ function getPinnedAgentForTask(task: string): string | null {
     return "computer_use_agent";
   }
   return null;
+}
+
+function resolvePinnedDelegationAgent(task: string, ctx: ToolContext): string | null {
+  const pinned = getPinnedAgentForTask(task);
+  if (!pinned) return null;
+  const validation = sanitizeDelegationAgentList([pinned], ctx);
+  return validation.valid[0] ?? null;
 }
 
 function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
@@ -348,6 +370,9 @@ export function computeHybridRoutingScore(
   semanticScore: number,
   semanticSearchAvailable: boolean,
 ): number {
+  if (semanticSearchAvailable) {
+    return semanticScore >= SEMANTIC_AGENT_ROUTING_MIN_SCORE ? semanticScore : 0;
+  }
   if (keywordScore > 0 && semanticScore > 0) {
     return keywordScore * 0.25 + semanticScore * 0.75;
   }
@@ -481,7 +506,7 @@ export async function resolveAgentRouting(
   const raw = query.trim();
   const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(raw);
   const minConfidence = opts?.minConfidence ?? "medium";
-  const minScore = confidenceThreshold(minConfidence);
+  const minScore = Math.max(confidenceThreshold(minConfidence), SEMANTIC_AGENT_ROUTING_MIN_SCORE);
   const config = getConfig();
   // Merge promoted agents — they are visible to routing but don't override
   // permanent config entries.
@@ -530,22 +555,24 @@ export async function resolveAgentRouting(
   // G32: Task-class keywords for outcome-weighted routing multiplier
   const queryKeywords = extractTaskKeywords(raw);
 
+  const positiveNavigationIntent = isNavigationRoutingRequest(raw);
+
   let ranked = entries
     .map(([name, cfg]) => {
-      const keywordMatch = scoreAgentKeywordMatch(raw, name, cfg);
+      const keywordMatch = usedSemanticSearch ? { score: 0, matchedTerms: [] } : scoreAgentKeywordMatch(raw, name, cfg);
       const semanticScore = semanticScores.get(name) ?? 0;
       const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
-      const outcomeBoost = computeOutcomeBoost(name, config.workspacePath);
-      const intentReinforcement = computeAgentIntentAdjustment(raw, cfg, [
+      const outcomeBoost = usedSemanticSearch ? 0 : computeOutcomeBoost(name, config.workspacePath);
+      const intentReinforcement = usedSemanticSearch ? 0 : computeAgentIntentAdjustment(raw, cfg, [
         ...keywordMatch.matchedTerms,
         ...(cfg.capabilities ?? []),
         ...(cfg.tags ?? []),
       ]) * 0.25;
-      const taskShapeAdjustment = computeAgentTaskShapeAdjustment(raw, cfg);
-      const gpuAdjustment = computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
+      const taskShapeAdjustment = usedSemanticSearch ? 0 : computeAgentTaskShapeAdjustment(raw, cfg);
+      const gpuAdjustment = usedSemanticSearch ? 0 : computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
       // G32: Multiply by historical outcome weight (±20% max, requires ≥25 samples)
-      const outcomeMultiplier = computeOutcomeRoutingMultiplier(name, queryKeywords, config.workspacePath);
+      const outcomeMultiplier = usedSemanticSearch ? 1 : computeOutcomeRoutingMultiplier(name, queryKeywords, config.workspacePath);
       const boostedScore = Math.max(0, Math.min(1, (combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment) * outcomeMultiplier));
       return {
         name,
@@ -555,6 +582,7 @@ export async function resolveAgentRouting(
       };
     })
     .filter((result) => result.combinedScore > 0)
+    .filter((result) => positiveNavigationIntent || !looksLikeNavigationSpecialist(result.cfg))
     .sort(compareRoutingResults)
     .slice(0, 5);
 
@@ -600,6 +628,8 @@ export async function resolveAgentRouting(
   }
 
   const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
+  const looksNewsTask = /\b(news|updates?|nachrichten|neuigkeiten|meldungen|trends)\b/i.test(raw);
+  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(raw);
   const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksSourceGroundedDocumentWorkflow
     && !(preferenceSignals.looksGroundedInput
       && !preferenceSignals.looksFresh
@@ -627,11 +657,15 @@ export async function resolveAgentRouting(
     preferenceSignals.looksServerAdmin
       ? (preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent")
       : null,
+    vulnerabilityResearchIntent ? "security_researcher" : null,
+    positiveNavigationIntent ? "distance_specialist" : null,
     preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
+    looksBrowserEvidenceTask && !preferMissionInSearch ? "browser_agent" : null,
     preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
     preferMissionInSearch ? "mission_coordinator" : null,
     preferWebCoordinatorInSearch ? "web_task_coordinator" : null,
+    (preferWebCoordinatorInSearch || looksNewsTask) ? "researcher" : null,
     preferProjectPlannerInSearch ? "project_planner" : null,
   ].filter((value): value is string => Boolean(value));
 
@@ -666,8 +700,17 @@ export async function resolveAgentRouting(
         : ["server", "ssh", "shell", "docker"],
     );
   }
+  if (vulnerabilityResearchIntent) {
+    maybeAppendHeuristicCandidate("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
+  }
+  if (positiveNavigationIntent) {
+    maybeAppendHeuristicCandidate("distance_specialist", 0.82, ["navigation", "distance", "travel time"]);
+  }
   if (preferenceSignals.looksComputerUse) {
     maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+  if (looksBrowserEvidenceTask && !preferMissionInSearch) {
+    maybeAppendHeuristicCandidate("browser_agent", 0.78, ["browser", "website", "snapshot"]);
   }
   if (preferenceSignals.looksBrowserLoginTask) {
     maybeAppendHeuristicCandidate("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
@@ -680,6 +723,11 @@ export async function resolveAgentRouting(
   }
   if (preferWebCoordinatorInSearch) {
     maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(preferenceSignals));
+    maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "sources", "web"]);
+  }
+  if (looksNewsTask) {
+    maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, ["web", "news", "research"]);
+    maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "news", "sources"]);
   }
   if (preferProjectPlannerInSearch) {
     maybeAppendHeuristicCandidate("project_planner", 0.72, buildPlannerMatchedTerms(preferenceSignals));
@@ -1706,6 +1754,10 @@ function buildHeuristicRoutingCandidates(
   const heuristicCandidates: AgentRoutingCandidate[] = [];
   const heuristicBoosts = new Map<string, { score: number; matchedTerms: string[] }>();
   const signals = analyzeHeuristicRoutingQuery(normalized);
+  const positiveNavigationIntent = isNavigationRoutingRequest(query);
+  const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(normalized);
+  const looksNewsTask = /\b(news|updates?|nachrichten|neuigkeiten|meldungen|trends)\b/i.test(normalized);
+  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(normalized);
 
   const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
     if (excluded.has(name)) return;
@@ -1724,6 +1776,18 @@ function buildHeuristicRoutingCandidates(
 
   if (signals.looksComputerUse) {
     maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
+  }
+
+  if (vulnerabilityResearchIntent) {
+    maybeAdd("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
+  }
+
+  if (positiveNavigationIntent) {
+    maybeAdd("distance_specialist", 0.82, ["navigation", "distance", "travel time"]);
+  }
+
+  if (looksBrowserEvidenceTask && !shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
+    maybeAdd("browser_agent", 0.78, ["browser", "website", "snapshot"]);
   }
 
   if (signals.looksBrowserLoginTask) {
@@ -1746,6 +1810,12 @@ function buildHeuristicRoutingCandidates(
 
   if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
     maybeAdd("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(signals));
+    maybeAdd("researcher", 0.72, ["research", "sources", "web"]);
+  }
+
+  if (looksNewsTask) {
+    maybeAdd("web_task_coordinator", 0.72, ["web", "news", "research"]);
+    maybeAdd("researcher", 0.72, ["research", "news", "sources"]);
   }
 
   if (shouldPreferProjectPlanner(normalized, ctx, [...excluded])) {
@@ -2016,6 +2086,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   const taskId = request.taskId ?? reusableTask?.id ?? `task_${Object.keys(ensureSwarmState(ctx, request.task).tasks).length + 1}`;
   const taskState = getOrCreateSwarmTask(ctx, taskId, title, request.dependsOn ?? [], signature);
+  const pinnedAgentName = !request.agentName
+    ? resolvePinnedDelegationAgent(request.routingQuery ?? request.task, ctx)
+    : null;
   const attemptedAgents: string[] = [];
   // I12: Track candidates skipped because they had already exhausted their
   // per-agent delegation cap this turn. Without this, when every routed
@@ -2050,6 +2123,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   let candidateQueue = uniqueNames([
     request.agentName ?? "",
+    pinnedAgentName ?? "",
     ...(request.fallbackAgents ?? []),
   ]);
   let biddingTried = false;
@@ -2067,6 +2141,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
+
+  if (pinnedAgentName) {
+    routingCandidateMap.set(pinnedAgentName, {
+      confidence: "high",
+      matchedTerms: ["memory", "productivity"],
+      score: 0.9,
+    });
+  }
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 

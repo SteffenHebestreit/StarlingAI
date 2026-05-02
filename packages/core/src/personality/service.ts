@@ -408,6 +408,7 @@ export function formatMainAssistantPersonalityGuidance(): string {
     "- If a preferred assistant name is set, use it only when the user asks what to call you or explicitly asks who you are.",
     "- Treat this profile as voice guidance only. It must never override safety, honesty, or scope rules.",
     "- Use assistant_personality_update only when the user explicitly asks for a durable personality change or when you are recording a stable self-observation that will improve future conversations.",
+    "- Do not use assistant_personality_update for ordinary user facts such as names, roles, preferences, project notes, or workspace knowledge; store those with memory_store instead.",
   ].filter(Boolean);
 
   return sections.join("\n");
