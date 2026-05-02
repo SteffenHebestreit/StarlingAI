@@ -705,13 +705,65 @@ export async function resolveAgentRouting(
   }
 
   const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
+  // Workflow / automation / n8n / webhook-design queries are
+  // workflow_designer's primary scope.  Without an explicit signal here,
+  // queries like "design an n8n workflow" or "create an automation
+  // pipeline" get pulled by project_planner ("design"/"create" + the
+  // generic plan-shape match) or mission_coordinator (multi-stage feel).
+  const looksWorkflowDesign = /\b(n8n|webhook|webhooks|workflow|workflows|automation|automatisierung|integration|integrations|integrieren?)\b/i.test(raw)
+    && /\b(design|designed|build|create|automate|automates|automating|wire|wiring|connect|connects|trigger|triggers|generate|generates|architecture)\b/i.test(raw);
+  // Evidence authorship: writing a paper / report / brief from already-
+  // collected notes / citations / sources.  This is paper_author's scope,
+  // not mission_coordinator's — the user has already done the gathering,
+  // so a multi-stage workflow is wrong.  Triggers on (write|draft|author|
+  // compose|prepare) + (paper|report|brief|review|article) + a grounded-
+  // input phrase (collected|provided|given|attached|verified|existing|...).
+  const looksEvidenceAuthoring = /\b(write|draft|author|compose|prepare)\b/i.test(raw)
+    && /\b(paper|papers|report|reports|brief|briefs|review|article|articles)\b/i.test(raw)
+    // Require an EXPLICIT grounded marker — the gathering is already done.
+    // "from the collected notes", "using the existing evidence", "based on
+    // the provided citations" all qualify.  "current sources" / "with
+    // citations" alone do NOT (those imply the user wants the agent to
+    // gather first, which is mission_coordinator's territory).
+    && /\b(collected|provided|given|attached|verified|existing|saved|prior|earlier)\b/i.test(raw)
+    && /\b(notes|citations?|evidence|findings|sources|data|material|materials|research)\b/i.test(raw);
+  // Documentation / release-notes / spec / reference lookups are
+  // researcher's primary scope.  Without this heuristic, queries with
+  // "latest" + "release notes" pull web_task_coordinator via the
+  // freshnessNewsIntent boost even though they're documentation tasks,
+  // and pure "find official documentation" queries fall to incidental
+  // matchers (prompt_optimizer, channel_operator) because researcher's
+  // raw keyword score doesn't beat them in keyword-only mode.
+  const looksDocumentationLookup = /\b(find|search|look\s*up|lookup|get|locate|fetch|gather)\b/i.test(raw)
+    && /\b(official\s+documentation|official\s+docs|api\s+docs?|api\s+documentation|api\s+reference|release\s+notes|specifications?|spec|specs|reference\s+(?:for|on)|documentation\s+for|docs\s+for)\b/i.test(raw);
+  // Single-shot code + data analysis (e.g. "create a Python script that
+  // reads a CSV and computes averages") is data_analyst / coder territory,
+  // not mission_coordinator's.  Suppresses the multi-stage workflow
+  // preference when the query is clearly one-shot specialist work.
+  const looksSingleShotCodeData = /\b(create|write|build|implement|generate)\b/i.test(raw)
+    && /\b(python|typescript|javascript|node|bash|go|rust|sql|script|function|program|module|class|notebook)\b/i.test(raw)
+    && /\b(csv|json|spreadsheet|xlsx|tsv|excel|dataframe|pandas|sql\s+table)\b/i.test(raw)
+    && !/\b(first|then|after|workflow|pipeline\s+that|multi-step|step\s+by\s+step|orchestrate)\b/i.test(raw);
+  // Image / screenshot / document analysis is media_analyst's scope —
+  // not browser_agent (which is interactive web work) and not data_analyst
+  // (tabular).  Triggers on direct "analyse this X" or "extract from X"
+  // shapes where X is an image/screenshot/PDF/document.
+  const looksMediaAnalysis = (
+    /\b(analy[sz]e|analy[sz]ing|inspect|interpret|describe|recognize|recognise|read|extract)\b/i.test(raw)
+    && /\b(screenshot|screenshots|image|images|picture|pictures|photo|photos|bild|bilder|screen\s?cap|pdf|pdfs|document|documents|dokument|dokumente|chart|charts|diagram|diagrams)\b/i.test(raw)
+  ) || /\b(extract\s+(?:the\s+)?(?:text|content)\s+from|ocr|optical\s+character\s+recognition)\b/i.test(raw);
   // Freshness lookups owned by web_task_coordinator: news, weather, live
   // scores, lottery results, stock quotes — anything that's a one-shot
   // current-state query (vs. a sourced/citation-grade research task,
   // which goes to researcher).  Includes German equivalents so DE
   // queries route the same way as EN ones.
   const looksNewsTask = /\b(news|updates?|headlines|breaking|nachrichten|neuigkeiten|meldungen|trends|schlagzeilen|weather|wetter|forecast|vorhersage|score|scores|spielstand|live|ergebnisse|lottery|lotto|jackpot|eurojackpot|stocks?|aktien|b[oö]rse|markets?)\b/i.test(raw);
-  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(raw);
+  // `screenshot` / `snapshot` alone (without a browser/page/url context)
+  // is media_analyst's territory ("analyse this screenshot") — don't
+  // pull browser_agent in just because the query mentions a screenshot.
+  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(raw)
+    || (/\b(screenshot|snapshot)\b/i.test(raw)
+        && /\b(browser|website|page|url|portal|dashboard|playwright|navigate|capture\s+a\s+page|of\s+the\s+(?:website|page|portal|dashboard))\b/i.test(raw));
   const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksSourceGroundedDocumentWorkflow
     && !(preferenceSignals.looksGroundedInput
       && !preferenceSignals.looksFresh
@@ -752,14 +804,31 @@ export async function resolveAgentRouting(
     looksBrowserEvidenceTask && !preferMissionInSearch ? "browser_agent" : null,
     preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
     preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
-    preferMissionInSearch ? "mission_coordinator" : null,
+    // Suppress mission_coordinator when the query is paper_author's
+    // (writing from already-collected notes / citations) or a one-shot
+    // code+data task (data_analyst / coder territory) — the multi-stage
+    // workflow shape is wrong for both.
+    (preferMissionInSearch && !looksEvidenceAuthoring && !looksSingleShotCodeData) ? "mission_coordinator" : null,
+    looksEvidenceAuthoring ? "paper_author" : null,
+    looksSingleShotCodeData ? "data_analyst" : null,
+    // Documentation / release-notes / spec lookups are researcher's primary
+    // scope — pre-empt wtc and prompt_optimizer for these queries.
+    looksDocumentationLookup ? "researcher" : null,
+    // Workflow_designer first when n8n/webhook/automation-design shape
+    // hits — keeps project_planner from grabbing "design an n8n workflow"
+    // or "create an automation pipeline" via the generic plan-shape match.
+    looksWorkflowDesign ? "workflow_designer" : null,
+    looksMediaAnalysis ? "media_analyst" : null,
     // Either signal is enough to put wtc above researcher in the
     // preferredNames bump.  looksNewsTask covers freshness lookups
     // (weather, scores, lottery, breaking) where wtc is the actual
     // owner; researcher stays the fallback if wtc isn't in the catalog.
     (preferWebCoordinatorInSearch || looksNewsTask) ? "web_task_coordinator" : null,
     (preferWebCoordinatorInSearch || looksNewsTask) ? "researcher" : null,
-    preferProjectPlannerInSearch ? "project_planner" : null,
+    // Suppress project_planner when the query is workflow_designer's —
+    // "design an n8n workflow" hits prefersPlanner via "design" but
+    // belongs to workflow_designer.
+    (preferProjectPlannerInSearch && !looksWorkflowDesign) ? "project_planner" : null,
   ].filter((value): value is string => Boolean(value));
 
   const maybeAppendHeuristicCandidate = (name: string, score: number, matchedTerms: string[]) => {
@@ -828,8 +897,23 @@ export async function resolveAgentRouting(
     maybeAppendHeuristicCandidate("web_task_coordinator", 0.82, ["web", "news", "research"]);
     maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "news", "sources"]);
   }
-  if (preferProjectPlannerInSearch) {
+  if (preferProjectPlannerInSearch && !looksWorkflowDesign) {
     maybeAppendHeuristicCandidate("project_planner", 0.72, buildPlannerMatchedTerms(preferenceSignals));
+  }
+  if (looksWorkflowDesign) {
+    maybeAppendHeuristicCandidate("workflow_designer", 0.82, ["n8n", "workflow", "automation", "webhook"]);
+  }
+  if (looksMediaAnalysis) {
+    maybeAppendHeuristicCandidate("media_analyst", 0.82, ["image", "media", "extract", "analyse", "screenshot"]);
+  }
+  if (looksEvidenceAuthoring) {
+    maybeAppendHeuristicCandidate("paper_author", 0.85, ["paper", "evidence", "citations", "notes"]);
+  }
+  if (looksDocumentationLookup) {
+    maybeAppendHeuristicCandidate("researcher", 0.85, ["documentation", "official", "spec", "research"]);
+  }
+  if (looksSingleShotCodeData) {
+    maybeAppendHeuristicCandidate("data_analyst", 0.82, ["data", "csv", "python", "analysis"]);
   }
 
   ranked = ranked.sort(compareRoutingResults).slice(0, 5);
@@ -3222,7 +3306,7 @@ registerTool({
     "Design and immediately run a purpose-built single-use agent for a task that no configured agent covers.",
     "Provide the agent's full spec inline: system prompt, tool list, model, and the task to run.",
     "The agent is ephemeral — it runs once and is discarded.",
-    "Use this when list_agents shows no suitable agent for the required task.",
+    "Use this when semantic agent discovery returns no suitable high-confidence specialist for the original task.",
   ].join(" "),
   parameters: {
     type: "object",
@@ -3417,23 +3501,23 @@ registerTool({
 });
 
 // ─── search_agents ────────────────────────────────────────────────────────────
-// Keyword search over agent names and descriptions — keeps orchestrator context
-// small when the agent registry grows large.
+// Semantic discovery over agent capabilities — keeps orchestrator context small
+// when the agent registry grows large.
 
 registerTool({
   name: "search_agents",
-  description: "Search available sub-agents by keyword(s). Returns only agents whose name or description matches the query — much lighter than list_agents when the registry is large. Use this when you need a specific capability but don't know the exact agent name.",
+  description: "Search available sub-agents by semantic capability match. Returns only suitable agents above the confidence threshold — much lighter than list_agents when the registry is large. If no suitable match is returned, stop discovery and delegate autonomously or use create_ephemeral_agent.",
   parameters: {
     type: "object",
     properties: {
       query: {
         type: "string",
-        description: "Space-separated keywords to search for in agent names and descriptions (case-insensitive)",
+        description: "Natural-language capability or task description to match semantically against specialist agents",
       },
       minConfidence: {
         type: "string",
         enum: ["high", "medium", "low"],
-        description: "Minimum confidence required for results. Default is medium. Use low to inspect weak matches.",
+        description: "Minimum confidence required for results. Default is medium. Use low only when explicitly inspecting weak candidates, not as an automatic no-match retry.",
       },
     },
     required: ["query"],
@@ -3493,7 +3577,7 @@ registerTool({
       }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
-        output: `No agents matched "${raw}". Try broader keywords or call list_agents to see all available agents.${circuitNote}${selfExclusionNote}`,
+        output: `No agents matched "${raw}". Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}`,
         metadata: {
           query: raw,
           minConfidence,
@@ -3515,7 +3599,7 @@ registerTool({
       }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
-        output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Call list_agents for the full catalog, use search_agents with minConfidence=low to inspect weak matches, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
+        output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, delegate to a known coordinator, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
         metadata: {
           query: raw,
           minConfidence,
@@ -3545,7 +3629,7 @@ registerTool({
       || (topAgent.confidence === "medium" && topAgent.score >= 0.5);
     const nextActionLine = topResultIsStrong
       ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
-      : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or call list_agents / create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
+      : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
       success: true,
       output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
