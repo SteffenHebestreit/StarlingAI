@@ -1180,6 +1180,38 @@ function findRecentDelegateEvidence(
     : null;
 }
 
+const EXPLICIT_SOURCE_RECHECK_RE = /\b(verify|verification|check|recheck|validate|validation|source|sources|citation|citations|cite|official|datasheet|spec(?:ification)?s?|price|prices|supplier|suppliers|mouser|digikey|lcsc|aliexpress|search|lookup|look\s+up|find\s+online|recherch|pruef|pruefe|pruefen|verifiz|validier|quelle|quellen|beleg|belege)\b/i;
+const CONTEXTUAL_DECISION_FOLLOW_UP_RE = /\b(ok|okay|thx|thanks|thank\s+you|danke|got\s+it|verstanden|we\s+will|we'll|wir\s+werden|wir\s+nutzen|wir\s+nehmen|i\s+will|ich\s+werde|ich\s+nehme|let'?s|lass\s+uns|use\s+them|using\s+them|go\s+with|nehmen\s+wir)\b/i;
+
+function shouldReusePriorDelegateEvidenceForSourceFollowUp(
+  userMessage: string,
+  guidance: DynamicTurnGuidance | null | undefined,
+  priorEvidence: { evidence: string; itemCount: number } | null,
+): boolean {
+  if (!guidance?.sourceSensitive || guidance.freshnessSensitive || guidance.artifactSensitive) return false;
+  if (!priorEvidence || priorEvidence.evidence.length < 400) return false;
+  if (EXPLICIT_SOURCE_RECHECK_RE.test(userMessage)) return false;
+  if (/[?？]/.test(userMessage)) return false;
+  return userMessage.length <= 700 && CONTEXTUAL_DECISION_FOLLOW_UP_RE.test(userMessage);
+}
+
+function buildPriorEvidenceFollowUpPrompt(evidence: { evidence: string; itemCount: number }): string {
+  return [
+    "CONTINUATION FROM PRIOR EVIDENCE: The latest user message appears to accept or refine a previously researched topic, not request fresh verification.",
+    "Use the existing delegated evidence and the user's latest decision to answer directly.",
+    "Do NOT call tools or delegate again unless the user explicitly asks for new source checks, current prices, supplier availability, or additional external facts.",
+    `Prior delegated evidence preview (${evidence.evidence.length} chars, ${evidence.itemCount} structured items): ${truncatePlainText(evidence.evidence, 2200)}`,
+  ].join(" ");
+}
+
+function shouldBypassTerminalSynthesisWithEvidence(
+  finishReason: string,
+  evidence: { evidence: string; itemCount: number } | null,
+): boolean {
+  return finishReason === "synthesis_required_tool_call_rejected"
+    && Boolean(evidence && (evidence.evidence.length >= 4000 || evidence.itemCount >= 12));
+}
+
 async function enforceDelegateCoverage(
   finalResponse: string,
   toolIterations: number,
@@ -1763,14 +1795,25 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   });
 
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
+  const priorDelegateEvidenceForFollowUp = findRecentDelegateEvidence(session.getHistory());
+  const reusePriorDelegateEvidenceForFollowUp = shouldReusePriorDelegateEvidenceForSourceFollowUp(
+    userMessage,
+    detectedDynamicGuidance,
+    priorDelegateEvidenceForFollowUp,
+  );
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
-    : ((detectedDynamicGuidance?.freshnessSensitive || detectedDynamicGuidance?.sourceSensitive || detectedDynamicGuidance?.artifactSensitive)
+    : ((detectedDynamicGuidance?.freshnessSensitive || (detectedDynamicGuidance?.sourceSensitive && !reusePriorDelegateEvidenceForFollowUp) || detectedDynamicGuidance?.artifactSensitive)
         ? "orchestration_only"
         : undefined);
-  const initialDynamicGuidance = effectiveToolMode
+  const initialDynamicGuidance = reusePriorDelegateEvidenceForFollowUp
+    ? null
+    : effectiveToolMode
     ? (buildDynamicTurnGuidance(userMessage, effectiveToolMode) ?? detectedDynamicGuidance)
     : detectedDynamicGuidance;
+  const priorEvidenceFollowUpPrompt = reusePriorDelegateEvidenceForFollowUp && priorDelegateEvidenceForFollowUp
+    ? buildPriorEvidenceFollowUpPrompt(priorDelegateEvidenceForFollowUp)
+    : "";
   let allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
   const suppressAgentCatalogTool = Boolean(
     (initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive || initialDynamicGuidance?.artifactSensitive)
@@ -2067,6 +2110,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
+      ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
@@ -2105,6 +2149,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       logAudit("turn_guidance_applied", {
         sourceSensitive: dynamicGuidance.sourceSensitive,
         freshnessSensitive: dynamicGuidance.freshnessSensitive,
+      }, { sessionId: session.id, severity: "info" });
+    } else if (iterationCount === 0 && priorEvidenceFollowUpPrompt) {
+      logAudit("turn_guidance_applied", {
+        sourceSensitive: false,
+        freshnessSensitive: false,
+        reusedPriorDelegatedEvidence: true,
+        originalSourceSensitive: detectedDynamicGuidance?.sourceSensitive ?? false,
       }, { sessionId: session.id, severity: "info" });
     }
 
@@ -3535,12 +3586,18 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
-  const synthesized = await forceSynthesis(
-    session, provider, signal, terminalSynthesisInstruction,
-  );
+  const terminalEvidenceBackstop = findRecentDelegateEvidence(session.getHistory());
+  const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
+  const synthesized = bypassTerminalSynthesis
+    ? null
+    : await forceSynthesis(
+        session, provider, signal, terminalSynthesisInstruction,
+      );
   const fallbackMsg = terminalFinishReason === "max_tool_iterations"
     ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
-    : resolveEmptyAssistantResponseFallback("", "", session);
+    : (bypassTerminalSynthesis && terminalEvidenceBackstop
+        ? terminalEvidenceBackstop.evidence
+        : resolveEmptyAssistantResponseFallback("", "", session));
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? resolveEmptyAssistantResponseFallback("", "", session)

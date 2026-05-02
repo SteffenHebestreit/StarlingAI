@@ -46,6 +46,17 @@ async function getSearchCleanup(): Promise<(sessionId: string) => void> {
 const log = childLogger("agent:sub-agent");
 
 const DEFAULT_MAX_ITERATIONS = 5;
+const SUFFICIENT_EVIDENCE_NUDGE_BYTES = 3_000;
+const SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES = 8_000;
+const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
+  "delegate_to_agent",
+  "parallel_delegate",
+  "swarm_delegate",
+  "run_task_graph",
+  "web_search",
+  "web_fetch",
+  "browser_navigate",
+]);
 
 // Per-tool call caps enforced inside sub-agent runs.
 // These prevent a single tool from dominating the iteration budget
@@ -1289,6 +1300,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
+    let sufficiencyToolsStripped = false;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
@@ -2885,18 +2897,43 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           "Cascade timeout detected — stripped delegation tools and injected direct fallbacks",
         );
       } else if (
+        !sufficiencyToolsStripped
+        && !cascadeSynthesisForced
+        && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES
+        && toolResults.length > 0
+        && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
+      ) {
+        sufficiencyToolsStripped = true;
+        const strippedToolNames = tools
+          .filter((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
+          .map((tool) => tool.name);
+        tools = tools.filter((tool) => !EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name));
+        if (effectiveToolNames) {
+          effectiveToolNames = effectiveToolNames.filter((name) => !EVIDENCE_GATHERING_TOOL_NAMES.has(name));
+        }
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content +=
+          "\n\n[✓ EVIDENCE COMPLETE] You now have approximately " +
+          cumulativeUsefulEvidenceBytes + " characters of useful tool output. " +
+          "Evidence-gathering tools are disabled for the rest of this run. " +
+          "Write the final answer now from the collected evidence. Do not call search, fetch, browser, or delegation tools again.";
+        logAudit(
+          "sub_agent_synthesis_forced",
+          {
+            agentName: opts.agentName,
+            reason: "sufficient_evidence_tools_stripped",
+            usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+            strippedToolNames,
+            iterations,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      } else if (
         !sufficiencySynthesisNudged
         && !cascadeSynthesisForced
-        && cumulativeUsefulEvidenceBytes >= 3_000
+        && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_NUDGE_BYTES
         && toolResults.length > 0
-        && toolNames.some((name) =>
-          name === "delegate_to_agent"
-          || name === "parallel_delegate"
-          || name === "swarm_delegate"
-          || name === "run_task_graph"
-          || name === "web_search"
-          || name === "web_fetch"
-          || name === "browser_navigate")
+        && toolNames.some((name) => EVIDENCE_GATHERING_TOOL_NAMES.has(name))
       ) {
         sufficiencySynthesisNudged = true;
         const lastTR = toolResults[toolResults.length - 1]!;
