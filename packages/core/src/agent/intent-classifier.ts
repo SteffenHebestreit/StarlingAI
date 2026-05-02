@@ -28,6 +28,15 @@ export const SOURCE_HINT_TERMS = [
   "beleg", "belege", "offizielle quelle", "offizielle quellen", "quelle", "quellen",
   "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
   "repo", "repository", "roadmap", "source", "sources", "spec", "specification", "standard",
+  "validate", "validated", "validation", "verify", "verified", "verification",
+  "validiere", "validieren", "verifiziere", "verifizieren", "prüfe", "pruefe",
+];
+
+export const PRODUCT_RECOMMENDATION_PATTERNS = [
+  /\b(product suggestions?|component suggestions?|part suggestions?|module suggestions?|product recommendations?|component recommendations?)\b/,
+  /\b(produkt(?:e|vorschl[äa]ge|empfehlungen)|bauteil(?:e|vorschl[äa]ge|empfehlungen)|modul(?:e|vorschl[äa]ge|empfehlungen))\b/,
+  /\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b[\s\S]{0,120}\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b/,
+  /\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b[\s\S]{0,120}\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b/,
 ];
 
 export const WEB_LOOKUP_HINT_TERMS = [
@@ -224,7 +233,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
 
   const freshnessSensitiveByTerm = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
   const sourceSensitiveByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
-    || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
+    || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
+    || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized));
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
@@ -375,8 +385,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
         ? "Use delegate_to_agent for atomic specialist routing. For multi-step specialist collaboration or requests that mix research, analysis, visualization, and synthesis, delegate to a coordinator-style or planning agent first."
         : "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
       delegateMode
-        ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists."
-        : "For broad current-source deliverables like comprehensive guides, comparisons, audits, or step-by-step reports, gather evidence from multiple sources before drafting the answer. If you choose to delegate, prefer a coordinator-style agent such as web_task_coordinator over a single researcher when that specialist exists.",
+        ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, hardware/product recommendations, verified component lists, or step-by-step reports, prefer mission_coordinator. Reserve web_task_coordinator for live single-shot lookups such as news, weather, scores, lottery numbers, stock quotes, or browser-heavy workflows."
+        : "For broad current-source deliverables like comprehensive guides, comparisons, audits, hardware/product recommendations, verified component lists, or step-by-step reports, gather evidence from multiple sources before drafting the answer. If you choose to delegate, prefer mission_coordinator over a web-only coordinator when that specialist exists.",
       delegateMode
         ? "If the deliverable is a source-grounded paper, brief, report, or merged written artifact that needs drafting plus a quality gate, prefer mission_coordinator over a lone researcher or a web-only coordinator. Reserve web_task_coordinator for retrieval- or browser-heavy web workflows."
         : "If the deliverable is a source-grounded paper, brief, report, or merged written artifact that needs drafting plus a quality gate, plan the research, drafting, and review phases explicitly instead of treating it as a single lookup.",

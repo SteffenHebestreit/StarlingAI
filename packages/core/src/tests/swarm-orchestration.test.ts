@@ -978,7 +978,7 @@ describe("swarm orchestration tools", () => {
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       if (args.agentName === "researcher") {
         return {
-          output: "Let me fetch the official documentation pages and SDK repositories to get complete information.",
+          output: "Let me get the remaining critical datasheet pages for electrical specs and pricing details.",
           stats: {
             agentName: args.agentName,
             sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
@@ -1035,7 +1035,7 @@ describe("swarm orchestration tools", () => {
     const result = await delegate!.execute({
       agentName: "researcher",
       fallbackAgents: ["retrieval_analyst"],
-      task: "Find official MCP documentation and SDK repositories",
+      task: "Research exact microphone specs, reviews, known issues, pricing, and availability.",
     }, {
       sessionId: "session-planning-fetch-output",
       workspacePath: "/workspace",
@@ -1052,6 +1052,90 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[0]?.status).toBe("failed");
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
     expect(tasks[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("redirects broad hardware verification away from web_task_coordinator", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-hardware-routing-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-4b",
+            contextWindow: 32768,
+            temperature: 0.3,
+            maxTokens: 4096,
+          },
+        },
+      },
+      subAgents: {
+        web_task_coordinator: {
+          description: "Coordinates live web and browser tasks.",
+          tools: ["web_search", "web_fetch", "parallel_delegate"],
+          tags: ["coordination"],
+        },
+        mission_coordinator: {
+          description: "Coordinates source-grounded research and final synthesis.",
+          tools: ["delegate_to_agent", "parallel_delegate", "share_finding"],
+          tags: ["coordination"],
+        },
+        researcher: {
+          description: "Researches external sources.",
+          tools: ["web_search", "web_fetch"],
+        },
+      },
+    }));
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: `${args.agentName}: verified hardware findings with cited datasheets and pricing notes.`,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 3,
+        toolNames: ["web_search", "web_fetch", "share_finding"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const result = await delegate!.execute({
+      agentName: "web_task_coordinator",
+      fallbackAgents: ["researcher"],
+      task: "Validate and verify the portable ESP32 recorder hardware findings online, include improvements, product suggestions, datasheets, pricing, and availability.",
+    }, {
+      sessionId: "session-hardware-verification-routing",
+      workspacePath,
+      swarmState: {
+        objective: "Verify hardware findings",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        tasks: {},
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("mission_coordinator");
+    expect(runSubAgentWithStatsMock.mock.calls[0]?.[0].agentName).toBe("mission_coordinator");
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {

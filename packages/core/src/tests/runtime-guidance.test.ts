@@ -12,10 +12,21 @@ describe("runtime turn guidance", () => {
     expect(guidance?.sourceSensitive).toBe(true);
     expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
     expect(guidance?.prompt).toContain("Use delegate_to_agent for atomic specialist routing");
-    expect(guidance?.prompt).toContain("prefer a coordinator-style agent such as web_task_coordinator");
+    expect(guidance?.prompt).toContain("prefer mission_coordinator");
+    expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
     expect(guidance?.prompt).toContain("route it through a browser specialist");
     expect(guidance?.prompt).toContain("Do not stop after a browser snapshot");
     expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
+  });
+
+  it("treats hardware product recommendations as source-sensitive research", () => {
+    const guidance = buildDynamicTurnGuidance("I need product suggestions for a portable ESP32 audio recorder with microphones, battery, and USB-C charging module", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("hardware/product recommendations");
+    expect(guidance?.prompt).toContain("prefer mission_coordinator");
+    expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
   });
 
   it("adds mission-coordinator guidance for source-grounded papers and reports", () => {

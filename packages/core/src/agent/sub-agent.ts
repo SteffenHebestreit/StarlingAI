@@ -645,6 +645,7 @@ function buildInterruptedSubAgentOutput(params: {
   toolCount: number;
   iterations: number;
   artifacts: Record<string, unknown>[];
+  evidenceSnippets?: string[];
 }): string {
   const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
   const progressLines: string[] = [];
@@ -675,6 +676,14 @@ function buildInterruptedSubAgentOutput(params: {
     progressLines.push(`- Artifacts collected: ${params.artifacts.length}${artifactHints.length > 0 ? ` (${artifactHints.join(", ")})` : ""}`);
   }
 
+  const evidenceSnippets = (params.evidenceSnippets ?? []).filter(Boolean).slice(-4);
+  if (evidenceSnippets.length > 0) {
+    progressLines.push("Recovered evidence snippets from completed tools:");
+    for (const snippet of evidenceSnippets) {
+      progressLines.push(`- ${snippet}`);
+    }
+  }
+
   if (progressLines.length === 0) {
     return `Sub-agent '${params.agentName}' ${params.reason}`;
   }
@@ -691,7 +700,7 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
-  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create)\b/i.test(preview);
+  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create)\b/i.test(preview);
   if (!planningAction) return false;
 
   const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
@@ -1272,6 +1281,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     //     missing. Both flags fire at most once per run.
     let cumulativeTimeoutSignalCount = 0;
     let cumulativeUsefulEvidenceBytes = 0;
+    let recentEvidenceSnippets: string[] = [];
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
@@ -1399,7 +1409,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     };
 
     const recoverNoResponseAfterSubstantiveWork = (rawResult: string): { result: string; forcedOutcome: SubAgentOutcome | null } => {
-      if (rawResult !== "Sub-agent produced no final response.") {
+      const noFinalResponse = rawResult === "Sub-agent produced no final response.";
+      const planningOnlyResponse = looksLikePlanningOnlyResult(rawResult);
+      if (!noFinalResponse && !planningOnlyResponse) {
         return { result: rawResult, forcedOutcome: null };
       }
 
@@ -1414,16 +1426,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       const recovered = buildInterruptedSubAgentOutput({
         agentName: opts.agentName,
-        reason: "produced no final response after substantive work.",
+        reason: noFinalResponse
+          ? "produced no final response after substantive work."
+          : "returned an in-progress planning note after substantive work.",
         swarmState: opts.swarmState,
         toolNames,
         toolCount,
         iterations,
         artifacts,
+        evidenceSnippets: recentEvidenceSnippets,
       });
       log.warn(
-        { agentName: opts.agentName, toolCount, successfulToolCount, iterations },
-        "Sub-agent completed substantive work but produced no final narrative — returning partial progress summary",
+        { agentName: opts.agentName, toolCount, successfulToolCount, iterations, planningOnlyResponse },
+        "Sub-agent completed substantive work but produced no usable final narrative — returning partial progress summary",
       );
       return { result: recovered, forcedOutcome: "partial" };
     };
@@ -2588,6 +2603,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             "",
           );
           cumulativeUsefulEvidenceBytes += usefulPortion.length;
+          if (usefulPortion.length >= 180) {
+            const snippet = truncateToolAuditText(usefulPortion, 900);
+            if (snippet) {
+              recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
+            }
+          }
         }
 
         // E21: Track source domain diversity for research plateau detection
