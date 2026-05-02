@@ -151,6 +151,84 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("removes evidence-gathering tools after a large enough useful evidence result", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-sufficient-evidence-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        research_agent: {
+          description: "Research agent with web tools",
+          systemPrompt: "Research and answer from evidence.",
+          tools: ["web_fetch", "web_search"],
+          maxIterations: 4,
+          turnTimeoutMs: 5000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const fetchOutput = [
+      "Verified hardware evidence:",
+      ...Array.from({ length: 140 }, (_, index) => `Fact ${index + 1}: IM73A135V01 analog microphone source detail with ADC integration constraints and quality implications.`),
+    ].join("\n");
+
+    registerTool({
+      name: "web_fetch",
+      description: "Fetch a page.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: fetchOutput };
+      },
+    });
+    registerTool({
+      name: "web_search",
+      description: "Search the web.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "This should not be called after sufficient evidence." };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "fetch-1", name: "web_fetch", arguments: { url: "https://example.test/mic" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockImplementationOnce((_messages: unknown, tools: Array<{ name: string }>) => {
+        expect(tools.map((tool) => tool.name)).not.toContain("web_fetch");
+        expect(tools.map((tool) => tool.name)).not.toContain("web_search");
+        return Promise.resolve({
+          content: "Final answer from collected evidence.",
+          tool_calls: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "stop",
+        });
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "research_agent",
+        task: "Verify the microphone hardware design.",
+        parentSessionId: "parent-sufficient-evidence",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Final answer from collected evidence.");
+      expect(completeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      unregisterTool("web_fetch");
+      unregisterTool("web_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("synthesizes gathered evidence when timeout hits after tool work", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-synthesis-"));
     const configPath = join(tempDir, "starlingai.json");

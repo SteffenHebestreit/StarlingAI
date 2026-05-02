@@ -916,6 +916,72 @@ describe("runtime delegated-loop regressions", () => {
     ]));
   });
 
+  it("uses rich delegated evidence directly when the model tries another delegation after synthesis is required", async () => {
+    const richEvidence = [
+      "# Verified hardware guide",
+      "",
+      ...Array.from({ length: 16 }, (_, index) => `- Evidence item ${index + 1}: IM73A135V01 remains an analog differential microphone with confirmed source-backed design detail ${index + 1}.`),
+      "",
+      "Use the five-microphone circular ADC architecture for the quality-focused build.",
+    ].join("\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("hardware_1", {
+          task: "Research the microphone hardware design.",
+        });
+      }
+
+      return createDelegateToolCallStream("hardware_2", {
+        task: "Repeat the same hardware research again.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from researcher — TASK COMPLETED.",
+        "Observed evidence:",
+        richEvidence,
+      ].join("\n"),
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Create a source-backed hardware guide for the microphone recorder.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Verified hardware guide");
+    expect(result.response).toContain("Evidence item 16");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).not.toHaveBeenCalled();
+  });
+
   it("rejects tool-free continuation promises after an unfinished delegated server action and forces a retry delegation", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
@@ -2135,6 +2201,81 @@ describe("runtime delegated-loop regressions", () => {
     const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
     expect(assistantWithTools?.tool_calls).toHaveLength(1);
     expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
+  });
+
+  it("does not force fresh research for short follow-up decisions that can use prior delegated evidence", async () => {
+    streamMock.mockImplementation((messages: Array<{ role: string; content?: string | null }>) => {
+      const systemText = messages
+        .filter((message) => message.role === "system")
+        .map((message) => String(message.content ?? ""))
+        .join("\n");
+      expect(systemText).toContain("CONTINUATION FROM PRIOR EVIDENCE");
+      expect(systemText).not.toContain("You MUST use an orchestration tool");
+      return createTextStream("Ja, das ist jetzt eine konsistente Richtung: IM73A135V01 mit externem ADC, 5er-Kreisarray, steifes resin-gedrucktes Gehaeuse und leitfaehige Beschichtung als Shielding-Konzept.");
+    });
+
+    const priorEvidence = [
+      "Delegated result from researcher — TASK COMPLETED.",
+      "Observed evidence:",
+      "## Verified microphone evidence",
+      "- IM73A135V01 is an analog differential MEMS microphone, not I2S.",
+      "- SNR is 73 dB(A) at 2.75 V, making it attractive when maximum audio quality matters.",
+      "- Using it with an external ADC is the correct architecture if quality matters more than simplicity.",
+      "- A circular five-microphone array is appropriate for beamforming and spatial filtering.",
+      "- The ESP32-S3 remains a reasonable controller for buffering and OTA sync.",
+      "- Mechanical shielding and acoustic venting matter for transcription quality.",
+      "- Keep microphone analog routing quiet and separate from ESP32 RF/power noise.",
+      "- Electroplated housing can help shielding if isolated from microphone acoustic ports.",
+    ].join("\n");
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    session.addMessage({ role: "user", content: "Design a portable microphone recorder with exact source-backed component choices." });
+    session.addMessage({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: "prior_delegate",
+        type: "function",
+        function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "Research microphone architecture." }) },
+      }],
+    });
+    session.addMessage({
+      role: "tool",
+      tool_call_id: "prior_delegate",
+      content: priorEvidence,
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    });
+    session.addMessage({ role: "assistant", content: "Prior answer from delegated evidence." });
+
+    const result = await runTurn({
+      session,
+      userMessage: "ok, thx...we will use them with adc because giving the best quality is what it is all about. We will use the circle with 5 mics and resin-3d-print the housing and than electroplating it",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("5er-Kreisarray");
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "tool_free_research_answer_rejected" }),
+      expect.anything(),
+    );
+    expect(logAudit).toHaveBeenCalledWith(
+      "turn_guidance_applied",
+      expect.objectContaining({ reusedPriorDelegatedEvidence: true }),
+      expect.objectContaining({ severity: "info" }),
+    );
   });
 
   it("forces artifact-producing delegation for downloadable HTML requests even when earlier turns had tool history", async () => {
