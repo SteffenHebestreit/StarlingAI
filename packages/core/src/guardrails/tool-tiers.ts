@@ -276,6 +276,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  url_inspect: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "HEAD-probe a URL — returns status code, final URL after redirects, content-type, content-length, server header (no body fetched)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  text_diff: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Line-by-line unified diff between two text strings (no git required) — useful for comparing snippets, draft revisions, or expected vs actual",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  hash_compute: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Compute md5/sha1/sha256/sha512 hash of a UTF-8 string — useful for content fingerprints, dedup checks, integrity comparisons",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Tier 0/1: Agent data store ─────────────────────────────────────────
   agent_store_read: {

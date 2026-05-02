@@ -328,3 +328,253 @@ registerTool({
     };
   },
 });
+
+// ─── url_inspect ─────────────────────────────────────────────────────────────
+
+registerTool({
+  name: "url_inspect",
+  description:
+    "Tier-0 URL probe — HEAD-request a URL and return status code, final URL after redirects, content-type, content-length, server header. " +
+    "Body is never fetched, so this is cheap to run on a long list and safe to run on uncertain URLs (a 404 / DNS-fail / TLS-fail surfaces as a structured result, not as a long timeout). " +
+    "Use to verify that a citation is alive, check that an API endpoint is reachable, inspect redirect chains, or peek at a download's size before deciding whether to fetch.",
+  embeddingDescription:
+    "Probe a URL.  Check if a link is alive, fetch headers only, inspect redirect chain, get content type and size without downloading.  URL prüfen, Verfügbarkeit, Weiterleitungen, Header inspizieren.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Absolute URL to probe (http or https)." },
+      followRedirects: {
+        type: "boolean",
+        description: "Follow 30x redirects to the final destination (default true).  When false, the first 30x response is returned with the Location header in the metadata.",
+        default: true,
+      },
+      timeoutMs: {
+        type: "integer",
+        description: "Timeout in milliseconds (default 8 000, max 30 000).",
+        default: 8000,
+      },
+    },
+    required: ["url"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const url = String(args["url"] ?? "").trim();
+    if (!url) return { success: false, output: "", error: "url is required" };
+    let parsed: URL;
+    try { parsed = new URL(url); }
+    catch { return { success: false, output: "", error: `Invalid URL: '${url}'` }; }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { success: false, output: "", error: `Unsupported protocol '${parsed.protocol}' — only http(s) is allowed` };
+    }
+
+    const followRedirects = args["followRedirects"] !== false;
+    const timeoutMs = Math.min(30_000, Math.max(1_000, Number(args["timeoutMs"] ?? 8000)));
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    timer.unref?.();
+    try {
+      const res = await fetch(parsed.toString(), {
+        method: "HEAD",
+        redirect: followRedirects ? "follow" : "manual",
+        signal: ctrl.signal,
+      });
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => { headers[k] = v; });
+      const finalUrl = res.url || parsed.toString();
+      const redirected = finalUrl !== parsed.toString();
+      const lines = [
+        `${res.status} ${res.statusText || ""}`.trim(),
+        `final: ${finalUrl}${redirected ? " (redirected)" : ""}`,
+        ...(headers["content-type"] ? [`content-type: ${headers["content-type"]}`] : []),
+        ...(headers["content-length"] ? [`content-length: ${headers["content-length"]}`] : []),
+        ...(headers["server"] ? [`server: ${headers["server"]}`] : []),
+        ...(headers["last-modified"] ? [`last-modified: ${headers["last-modified"]}`] : []),
+        ...(!followRedirects && headers["location"] ? [`location: ${headers["location"]}`] : []),
+      ];
+      return {
+        success: res.status < 400,
+        output: lines.join("\n"),
+        metadata: {
+          status: res.status,
+          finalUrl,
+          redirected,
+          contentType: headers["content-type"] ?? null,
+          contentLength: headers["content-length"] ? Number(headers["content-length"]) : null,
+          server: headers["server"] ?? null,
+          headers,
+        },
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        output: "",
+        error: ctrl.signal.aborted ? `URL probe timed out after ${timeoutMs}ms` : `URL probe failed: ${msg}`,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+});
+
+// ─── text_diff ───────────────────────────────────────────────────────────────
+
+/**
+ * Tiny line-level diff using the longest-common-subsequence (LCS) idea.
+ * Not a full Myers diff — but for two snippets up to a few thousand lines
+ * the O(n*m) cost is irrelevant and the output is a recognizable unified
+ * diff.  Avoids pulling in a diff library for a tier-0 utility.
+ */
+function lineDiff(beforeLines: string[], afterLines: string[]): Array<{ kind: "ctx" | "del" | "add"; text: string; lineA?: number; lineB?: number }> {
+  const m = beforeLines.length;
+  const n = afterLines.length;
+  // LCS table
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (beforeLines[i] === afterLines[j]) lcs[i]![j] = lcs[i + 1]![j + 1]! + 1;
+      else lcs[i]![j] = Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
+    }
+  }
+  const out: Array<{ kind: "ctx" | "del" | "add"; text: string; lineA?: number; lineB?: number }> = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (beforeLines[i] === afterLines[j]) { out.push({ kind: "ctx", text: beforeLines[i]!, lineA: i + 1, lineB: j + 1 }); i++; j++; }
+    else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) { out.push({ kind: "del", text: beforeLines[i]!, lineA: i + 1 }); i++; }
+    else { out.push({ kind: "add", text: afterLines[j]!, lineB: j + 1 }); j++; }
+  }
+  while (i < m) { out.push({ kind: "del", text: beforeLines[i]!, lineA: i + 1 }); i++; }
+  while (j < n) { out.push({ kind: "add", text: afterLines[j]!, lineB: j + 1 }); j++; }
+  return out;
+}
+
+registerTool({
+  name: "text_diff",
+  description:
+    "Tier-0 line-by-line unified diff between two text strings.  No git or filesystem access required — pass `before` and `after` directly. " +
+    "Returns a unified-diff-style summary plus structured metadata (lines added / deleted / unchanged + the changed-line list). " +
+    "Use for comparing two drafts, expected-vs-actual output, two snippets pulled from different sources, or to give the LLM a precise structural picture of what changed.",
+  embeddingDescription:
+    "Compare two pieces of text.  Show what changed between two strings, line diff, before / after, draft comparison, expected vs actual.  Texte vergleichen, Unterschiede anzeigen, Zeilenvergleich.",
+  parameters: {
+    type: "object",
+    properties: {
+      before: { type: "string", description: "Original text (the 'a' side of the diff)." },
+      after: { type: "string", description: "Updated text (the 'b' side of the diff)." },
+      contextLines: {
+        type: "integer",
+        description: "Unchanged lines of context to keep around each change (default 3, max 20).",
+        default: 3,
+      },
+    },
+    required: ["before", "after"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const before = String(args["before"] ?? "");
+    const after = String(args["after"] ?? "");
+    const contextLines = Math.min(20, Math.max(0, Number(args["contextLines"] ?? 3)));
+
+    const beforeLines = before.split(/\r?\n/);
+    const afterLines = after.split(/\r?\n/);
+    const ops = lineDiff(beforeLines, afterLines);
+
+    let added = 0;
+    let deleted = 0;
+    for (const op of ops) {
+      if (op.kind === "add") added++;
+      else if (op.kind === "del") deleted++;
+    }
+
+    if (added === 0 && deleted === 0) {
+      return {
+        success: true,
+        output: "(no differences)",
+        metadata: { added: 0, deleted: 0, unchanged: ops.length, identical: true },
+      };
+    }
+
+    // Render with limited context — collapse runs of unchanged lines that
+    // are far from any change into a "@@ ... @@" marker.
+    const rendered: string[] = [];
+    for (let k = 0; k < ops.length; k++) {
+      const op = ops[k]!;
+      if (op.kind === "ctx") {
+        // determine distance to nearest change in either direction
+        const nextChange = ops.slice(k + 1).findIndex((o) => o.kind !== "ctx");
+        const prevChange = (() => {
+          for (let p = k - 1; p >= 0; p--) if (ops[p]!.kind !== "ctx") return k - p;
+          return Infinity;
+        })();
+        const distNext = nextChange < 0 ? Infinity : nextChange + 1;
+        if (Math.min(distNext, prevChange) <= contextLines) {
+          rendered.push(`  ${op.text}`);
+        } else if (rendered.length > 0 && rendered[rendered.length - 1] !== "@@") {
+          rendered.push("@@");
+        }
+        continue;
+      }
+      rendered.push(op.kind === "add" ? `+ ${op.text}` : `- ${op.text}`);
+    }
+
+    return {
+      success: true,
+      output: `+${added} -${deleted}\n${rendered.join("\n")}`,
+      metadata: {
+        added,
+        deleted,
+        unchanged: ops.length - added - deleted,
+        identical: false,
+        changedLines: ops.filter((o) => o.kind !== "ctx").map((o) => ({ kind: o.kind, line: o.lineA ?? o.lineB ?? 0, text: o.text })),
+      },
+    };
+  },
+});
+
+// ─── hash_compute ────────────────────────────────────────────────────────────
+
+import { createHash } from "node:crypto";
+
+registerTool({
+  name: "hash_compute",
+  description:
+    "Tier-0 cryptographic hash of a UTF-8 string — supports md5, sha1, sha256, sha512 (and any other algorithm node:crypto recognizes). " +
+    "Returns the hex digest plus optional first-N-character prefix (handy for short fingerprints).  Use for content fingerprints, dedup checks, or comparing two strings without leaking the content into logs.",
+  embeddingDescription:
+    "Hash a string.  Compute md5 / sha256 / fingerprint / digest of text.  String hashen, Prüfsumme berechnen, Hash erzeugen, sha256.",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "UTF-8 text to hash." },
+      algorithm: {
+        type: "string",
+        enum: ["md5", "sha1", "sha256", "sha512"],
+        description: "Hash algorithm.  Defaults to sha256.",
+        default: "sha256",
+      },
+      truncate: {
+        type: "integer",
+        description: "When set, return only the first N characters of the hex digest (default 0 = full digest).",
+        default: 0,
+      },
+    },
+    required: ["text"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const text = String(args["text"] ?? "");
+    const algorithm = String(args["algorithm"] ?? "sha256").toLowerCase();
+    const truncate = Math.max(0, Math.min(128, Number(args["truncate"] ?? 0)));
+
+    let digest: string;
+    try {
+      digest = createHash(algorithm).update(text, "utf8").digest("hex");
+    } catch (err) {
+      return { success: false, output: "", error: `Hash failed: ${(err as Error).message}` };
+    }
+    const out = truncate > 0 ? digest.slice(0, truncate) : digest;
+    return {
+      success: true,
+      output: out,
+      metadata: { algorithm, length: out.length, fullDigestLength: digest.length, truncated: truncate > 0 },
+    };
+  },
+});
