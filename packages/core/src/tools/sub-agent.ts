@@ -177,6 +177,37 @@ function looksLikeDurableMemoryTask(task: string): boolean {
   return hasMemoryVerb && hasMemoryDestination;
 }
 
+function looksLikeLiveSingleShotWebTask(task: string): boolean {
+  const normalized = task.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const liveLookup = /\b(news|headlines?|weather|forecast|live score|scores?|lottery|lotto|eurojackpot|stock quote|stock price|exchange rate|fx rate|breaking news|aktuelle nachrichten|schlagzeilen|wetter|gewinnzahlen|b[öo]rsen|aktienkurs)\b/i.test(normalized);
+  const browserWorkflow = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|login|sign[ -]?in|form|click|navigate|open\s+the\s+website|capture\s+a\s+page|prüf(?:e|en)?[\s,]+ob\s+ich\s+neue\s+nachrichten|pruef(?:e|en)?[\s,]+ob\s+ich\s+neue\s+nachrichten)\b|\b[a-z0-9-]+\.(?:com|de|org|net|io|ai)\b/i.test(normalized);
+
+  return liveLookup || browserWorkflow;
+}
+
+function resolveExplicitDelegationAgentOverride(request: DelegationRequest, ctx: ToolContext): string | null {
+  const requested = request.agentName?.trim();
+  if (requested !== "web_task_coordinator") return null;
+  if (looksLikeLiveSingleShotWebTask(request.routingQuery ?? request.task)) return null;
+
+  const task = request.routingQuery ?? request.task;
+  const signals = analyzeHeuristicRoutingQuery(task);
+  const looksProductVerification = /\b(datasheet|spec(?:s|ification)?|pricing|price|availability|distributors?|mouser|digikey|farnell|tme|component|components?|parts?|module|modules?|evaluation board|known issues?|reviews?|improvements?|product suggestions?|component recommendations?)\b/i.test(task);
+  const candidates = [
+    (signals.prefersPlanner || signals.looksSourceGroundedDocumentWorkflow || signals.looksMultiStageEvidenceWorkflow || looksProductVerification)
+      ? "mission_coordinator"
+      : null,
+    (signals.looksResearchTask || signals.looksSourceHeavy || looksProductVerification)
+      ? "researcher"
+      : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const validation = sanitizeDelegationAgentList(candidates, ctx);
+  return validation.valid.find((name) => name !== requested) ?? null;
+}
+
 function getPinnedAgentForTask(task: string): string | null {
   if (looksLikeDurableMemoryTask(task)) {
     return "productivity_agent";
@@ -726,7 +757,13 @@ export async function resolveAgentRouting(
     maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "sources", "web"]);
   }
   if (looksNewsTask) {
-    maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, ["web", "news", "research"]);
+    // Freshness/news queries are web_task_coordinator's primary scope —
+    // bump its heuristic score clearly above the routing floor so an
+    // operator's `skillMatchThreshold: 0.75` recognizes it as a strong
+    // catalog match.  researcher stays at 0.72 (the floor) so it shows up
+    // as a fallback candidate but doesn't bypass strict thresholds when
+    // it's the only candidate (in which case ephemeral spawn is preferred).
+    maybeAppendHeuristicCandidate("web_task_coordinator", 0.82, ["web", "news", "research"]);
     maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "news", "sources"]);
   }
   if (preferProjectPlannerInSearch) {
@@ -968,7 +1005,18 @@ function shouldPreferCatalogAgent(
   bestConfidence: "high" | "medium" | "low" | undefined,
   threshold: number,
 ): boolean {
-  if (bestConfidence === "high") return true;
+  // The operator's explicit `skillMatchThreshold` is the contract — even a
+  // "high"-confidence keyword match must clear it before we skip the
+  // ephemeral spawn.  Previously the fast-path returned true for ANY
+  // high-confidence candidate, which let TOOL_KEYWORD_RULES-induced score
+  // inflation (an agent with `web_search`/`web_fetch` automatically picks
+  // up "news"/"current"/"latest"/"updates" into its keyword pool, pushing
+  // its score to the 0.72 high-confidence floor) bypass thresholds > 0.72.
+  // Concretely: a stub agent with description "Finds web documentation."
+  // and one `web_search` tool was beating an explicit `0.75` threshold
+  // for queries like "today top headlines current news", which suppressed
+  // legitimate ephemeral-agent spawns.
+  void bestConfidence; // retained on the signature for callers that pass it
   return !shouldGenerateEphemeralAgent(bestScore, threshold);
 }
 
@@ -1361,7 +1409,7 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
-  const planningAction = /\b(try|attempt|start|check|verify|focus|click|type|open|inspect|retry|look for|use|switch|launch|list|attach|create|fetch|gather|retrieve)\b/i.test(preview);
+  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create)\b/i.test(preview);
   if (!planningAction) return false;
 
   const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
@@ -1467,6 +1515,8 @@ export function classifyDelegationResult(
   task: string,
   artifacts: Record<string, unknown>[] = [],
 ): DelegationClassification {
+  const planningOnly = looksLikePlanningOnlyResult(output);
+
   // ── Coordinator no-op ──────────────────────────────────────────────────
   // A coordinator that completed without calling any delegation/evidence tools
   // and returned a short or planning-only stub is treated as a no-op.
@@ -1480,9 +1530,13 @@ export function classifyDelegationResult(
       "swarm_delegate", "share_finding", "run_workflow",
     ]);
     const actuallyWorked = (stats.toolNames ?? []).some((n) => COORDINATOR_WORK_TOOLS.has(n));
-    if (!actuallyWorked && (output.trim().length < 80 || looksLikePlanningOnlyResult(output))) {
+    if (!actuallyWorked && (output.trim().length < 80 || planningOnly)) {
       return "coordinator_noop";
     }
+  }
+
+  if (planningOnly) {
+    return "failure";
   }
 
   // ── Partial acceptance ─────────────────────────────────────────────────
@@ -2086,6 +2140,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   const taskId = request.taskId ?? reusableTask?.id ?? `task_${Object.keys(ensureSwarmState(ctx, request.task).tasks).length + 1}`;
   const taskState = getOrCreateSwarmTask(ctx, taskId, title, request.dependsOn ?? [], signature);
+  const explicitAgentOverride = resolveExplicitDelegationAgentOverride(request, ctx);
   const pinnedAgentName = !request.agentName
     ? resolvePinnedDelegationAgent(request.routingQuery ?? request.task, ctx)
     : null;
@@ -2122,6 +2177,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   });
 
   let candidateQueue = uniqueNames([
+    explicitAgentOverride ?? "",
     request.agentName ?? "",
     pinnedAgentName ?? "",
     ...(request.fallbackAgents ?? []),
@@ -2147,6 +2203,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       confidence: "high",
       matchedTerms: ["memory", "productivity"],
       score: 0.9,
+    });
+  }
+
+  if (explicitAgentOverride) {
+    routingCandidateMap.set(explicitAgentOverride, {
+      confidence: "high",
+      matchedTerms: ["source-grounded", "research", "web-task-redirect"],
+      score: 0.86,
     });
   }
 
