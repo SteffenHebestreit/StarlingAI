@@ -814,8 +814,16 @@ function sanitizeUserFacingAssistantResponse(value: string, toolIterations: numb
 
 const EMPTY_ASSISTANT_RESPONSE_FALLBACK = "I wasn't able to generate a usable reply for that turn. Please try again.";
 
+function looksLikeGenericNoUsableReply(value: string): boolean {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized === EMPTY_ASSISTANT_RESPONSE_FALLBACK
+    || /^i wasn'?t able to generate a usable reply\b/i.test(normalized)
+    || /^please try again\.?$/i.test(normalized);
+}
+
 function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
   if (!raw.trim() || cleaned.length === 0) return true;
+  if (toolIterations > 0 && looksLikeGenericNoUsableReply(cleaned)) return true;
   if (toolIterations === 0) return false;
   if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
   return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
@@ -2335,7 +2343,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             "Do NOT answer directly from memory.",
             "You MUST call an orchestration tool now instead of writing a natural-language answer.",
             "For a simple web lookup, prefer delegate_to_agent with researcher.",
-            "For broader multi-step online research, prefer delegate_to_agent with mission_coordinator or web_task_coordinator.",
+            "For broader multi-step online research, hardware/product verification, component recommendations, or source-backed reports, prefer delegate_to_agent with mission_coordinator. Use web_task_coordinator only for live single-shot lookups or browser-heavy workflows.",
             "A tool-free answer before delegation is invalid for this turn.",
           ].join(" ");
           guardrailEvents.push({ type: "delegation_required", details: "tool_free_research_answer_rejected" });
@@ -3291,7 +3299,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
     : resolveEmptyAssistantResponseFallback("", "", session);
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
-  const finalMsg = await rewriteTerminalResponseIfNeeded(normalizedFinalMsg, iterationCount, session, provider, signal);
+  const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
+    ? resolveEmptyAssistantResponseFallback("", "", session)
+    : normalizedFinalMsg;
+  const finalMsg = await rewriteTerminalResponseIfNeeded(evidenceBackstopMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
   if (opts.onChunk) opts.onChunk(finalMsg);
 

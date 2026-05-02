@@ -130,6 +130,23 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("success");
   });
 
+  it("returns failure for in-progress planning stubs even after tool use", () => {
+    const r = classifyDelegationResult(
+      "Let me get the remaining critical datasheet pages for electrical specs and pricing details.",
+      "success",
+      {
+        toolCount: 17,
+        toolNames: ["search_workflows", "parallel_delegate", "web_search", "web_fetch"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      { tags: ["coordination"] } as never,
+      "web_task_coordinator",
+      "Research exact microphone specs, reviews, known issues, pricing, and availability.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   it("does NOT flag coordinator_noop when terminalState is undefined (test mocks)", () => {
     // terminalState undefined → coordinator guard skipped (requires terminalState === "completed")
     // looksLikeFailureResult("Let me look that up.") → false, so weak=false → success
