@@ -29,6 +29,17 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
   });
 
+  it("treats downloadable HTML artifact requests as artifact deliverables", () => {
+    const guidance = buildDynamicTurnGuidance("now generate a downloadable html page as a detailed how-to blog and generate artifacts we can see here", "orchestration_only");
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.artifactSensitive).toBe(true);
+    expect(guidance?.prompt).toContain("durable downloadable or viewable artifact");
+    expect(guidance?.prompt).toContain("prefer delegate_to_agent with agentName='content_writer'");
+    expect(guidance?.prompt).toContain("Do NOT paste a full HTML/SVG/document artifact as the main chat response");
+    expect(guidance?.prompt).not.toContain("generate_svg, write_file");
+  });
+
   it("adds mission-coordinator guidance for source-grounded papers and reports", () => {
     const guidance = buildDynamicTurnGuidance("Write a short paper comparing MCP, A2A, and AG-UI using official sources and the latest specifications.", "orchestration_only");
 

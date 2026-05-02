@@ -1914,6 +1914,14 @@ export const useGatewayStore = defineStore("gateway", () => {
         return;
       }
 
+      if (["routing", "synthesizing", "guardrail"].includes(status)) {
+        const message = String(data["message"] ?? "").trim();
+        if (message) {
+          updateStreamingStatus(message, { appendHistory: true });
+        }
+        return;
+      }
+
       if (status === "ok" || status === "blocked") {
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");

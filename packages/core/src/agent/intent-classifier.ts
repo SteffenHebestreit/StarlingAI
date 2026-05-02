@@ -39,6 +39,12 @@ export const PRODUCT_RECOMMENDATION_PATTERNS = [
   /\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b[\s\S]{0,120}\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b/,
 ];
 
+export const ARTIFACT_DELIVERABLE_PATTERNS = [
+  /\b(downloadable|download|artifact|artifacts|artefakt|artefakte|datei|file|html\s?page|html-seite|static\s+site|website|webseite|blog|how[- ]?to|anleitung|guide|svg|diagramm|grafik|grafiken)\b[\s\S]{0,140}\b(generate|create|build|make|write|render|export|save|erstell(?:e|en)?|generier(?:e|en)?|speicher(?:e|n)?|exportier(?:e|en)?)\b/,
+  /\b(generate|create|build|make|write|render|export|save|erstell(?:e|en)?|generier(?:e|en)?|speicher(?:e|n)?|exportier(?:e|en)?)\b[\s\S]{0,140}\b(downloadable|download|artifact|artifacts|artefakt|artefakte|datei|file|html\s?page|html-seite|static\s+site|website|webseite|blog|how[- ]?to|anleitung|guide|svg|diagramm|grafik|grafiken)\b/,
+  /\b(artifact|artifacts|artefakt|artefakte)\b[\s\S]{0,80}\b(see|view|visible|anzeigen|sehen|sichtbar|download|downloadable)\b/,
+];
+
 export const WEB_LOOKUP_HINT_TERMS = [
   "suche online", "such online", "suche im internet", "online suchen", "recherchiere online",
   "recherchiere im internet", "im internet suchen", "search online", "search the web",
@@ -220,6 +226,7 @@ export interface DynamicTurnGuidance {
   pentestMethodologySensitive?: boolean;
   swarmMaintenanceSensitive?: boolean;
   navigationSensitive?: boolean;
+  artifactSensitive?: boolean;
 }
 
 /**
@@ -253,6 +260,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
   const navigationSensitive = isNavigationRoutingRequest(userMessage);
+  const artifactSensitive = ARTIFACT_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(normalized));
   const localServerConfigReview = serverAccessSensitive
     && !sourceSensitiveByTerm
     && !WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
@@ -260,7 +268,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const freshnessSensitive = localServerConfigReview ? false : freshnessSensitiveByTerm;
   const sourceSensitive = localServerConfigReview ? false : sourceSensitiveByTerm;
 
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive };
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive };
   if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
@@ -273,6 +281,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (pentestMethodologySensitive) reasons.push("pentest-methodology");
   if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
   if (navigationSensitive) reasons.push("navigation-routing");
+  if (artifactSensitive) reasons.push("artifact-deliverable");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
@@ -340,6 +349,17 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
       "If the locations are ambiguous, ask one concise clarification question instead of guessing.",
       "For route answers, report the travel mode, route distance, estimated travel time, and the coordinates or resolved places used.",
       "If the user did not specify a mode, prefer driving time by default and say so clearly.",
+    );
+  }
+
+  if (artifactSensitive) {
+    promptParts.push(
+      "The user is asking for a durable downloadable or viewable artifact, not just inline text.",
+      delegateMode
+        ? "You MUST use an orchestration tool to route the artifact creation to a specialist. For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'. For standalone diagrams or SVGs, prefer image_generator when that is the exact deliverable."
+        : "Use a visible artifact-producing tool such as generate_document, generate_website, generate_svg, or export_workspace_artifact instead of pasting the full artifact source into chat. Only use write_file inside a delegated specialist that actually has write_file in its provided tool schema.",
+      "Do NOT paste a full HTML/SVG/document artifact as the main chat response. The chat response should be a concise summary plus the saved artifact path or download card details.",
+      "If the artifact depends on prior discussion context, pass the relevant context into the specialist task so it can build the file from the established design rather than restarting the conversation.",
     );
   }
 
@@ -414,6 +434,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     pentestMethodologySensitive,
     swarmMaintenanceSensitive,
     navigationSensitive,
+    artifactSensitive,
   };
 }
 

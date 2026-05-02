@@ -68,6 +68,11 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
   swarm_delegate: 3,
   create_ephemeral_agent: 1,
+  write_file: 3,
+  export_workspace_artifact: 3,
+  generate_document: 2,
+  generate_website: 2,
+  bundle_artifact_zip: 2,
 };
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
@@ -1284,6 +1289,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
+    let consecutiveBlockedToolIterations = 0;
+    const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
@@ -2346,6 +2353,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // Process tool calls — repair any mangled tool names first
       for (const tc of response.tool_calls) normalizeToolCall(tc);
 
+      if (response.tool_calls.length > 0 && response.content?.trim()) {
+        logAudit(
+          "sub_agent_assistant_text_with_tool_calls_suppressed",
+          {
+            agentName: opts.agentName,
+            contentChars: response.content.length,
+            toolNames: response.tool_calls.map((toolCall) => toolCall.name),
+            finishReason: response.finishReason,
+          },
+          { sessionId: subSessionId, severity: "warn" },
+        );
+        response = { ...response, content: null };
+      }
+
       history.push({
         role: "assistant",
         content: response.content,
@@ -2359,10 +2380,30 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       const toolResults: LLMMessage[] = [];
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
+      let executedToolThisIteration = false;
 
       for (const tc of response.tool_calls) {
         if (signal?.aborted) break;
         toolCount++;
+
+        if (tc.arguments && "_parse_error" in tc.arguments) {
+          const rawArgs = String((tc.arguments as Record<string, unknown>)["_raw"] ?? "");
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: { _raw: rawArgs.slice(0, 200) },
+            toolCallId: tc.id,
+            errorText: `Malformed JSON arguments produced for tool '${tc.name}'. Do not retry this call with a large inline payload; answer from existing evidence or use a smaller artifact-producing tool call.`,
+            skippedReason: "invalid_arguments",
+          });
+          toolResults.push({
+            role: "tool",
+            content: `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Do not retry this exact tool call; synthesize from existing evidence or use a smaller valid tool call.`,
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
 
         // Enforce tool allow-list
         if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
@@ -2505,6 +2546,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
+        executedToolThisIteration = true;
         emitSubAgentToolAudit({
           agentName: opts.agentName,
           tool: tc.name,
@@ -2701,6 +2743,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }, directOutcome === "success" ? "info" : "warn");
         log.info({ agentName: opts.agentName, tool: decisiveDirectRemoteToolName }, "Sub-agent completed via direct remote CLI shortcut");
         return withArtifacts({ output: stripHallucinatedToolTags(directResult), stats });
+      }
+
+      if (response.tool_calls.length > 0 && !executedToolThisIteration && toolResults.length > 0) {
+        consecutiveBlockedToolIterations += 1;
+        if (consecutiveBlockedToolIterations >= BLOCKED_TOOL_ITERATION_THRESHOLD) {
+          const lastTR = toolResults[toolResults.length - 1]!;
+          lastTR.content +=
+            "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
+            "No tools will be available on the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
+          tools = [];
+          if (effectiveToolNames) effectiveToolNames = [];
+          logAudit(
+            "sub_agent_tool_loop_detected",
+            {
+              agentName: opts.agentName,
+              reason: "all_tool_calls_blocked",
+              consecutiveBlockedIterations: consecutiveBlockedToolIterations,
+              iterations,
+              toolNames: response.tool_calls.map((toolCall) => toolCall.name),
+            },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+        }
+      } else {
+        consecutiveBlockedToolIterations = 0;
       }
 
       // Append a budget nudge to the last tool result when on the

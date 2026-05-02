@@ -131,6 +131,19 @@ function createToolCallStream(callId: string, toolName: string, args: Record<str
   })();
 }
 
+function createTextThenToolCallStream(text: string, callId: string, toolName: string, args: Record<string, unknown>) {
+  return (async function* () {
+    yield { type: "text_delta", content: text };
+    yield { type: "tool_call_start", toolCallId: callId, toolName };
+    yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
+    yield {
+      type: "done",
+      finishReason: "tool_calls",
+      usage: { promptTokens: 1, completionTokens: 4096, totalTokens: 4097 },
+    };
+  })();
+}
+
 function createMultiToolCallStream(calls: Array<{ id: string; toolName: string; args: Record<string, unknown> }>) {
   return (async function* () {
     for (const call of calls) {
@@ -174,6 +187,7 @@ afterEach(() => {
   delete process.env["SAI_CONFIG_PATH"];
   resetConfigForTests();
   unregisterTool("delegate_to_agent");
+  unregisterTool("create_ephemeral_agent");
   unregisterTool("search_agents");
   unregisterTool("search_workflows");
   unregisterTool("run_workflow");
@@ -785,6 +799,62 @@ describe("runtime delegated-loop regressions", () => {
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("does not leak mixed text/tool-call drafts and stops unavailable write_file loops", async () => {
+    streamMock
+      .mockImplementationOnce(() => createTextThenToolCallStream(
+        "This is a long provisional artifact draft that must not be streamed.",
+        "write_file_1",
+        "write_file",
+        { path: "artifacts/guide.md", content: "# Guide\nDraft" },
+      ))
+      .mockImplementationOnce(() => createTextThenToolCallStream(
+        "This is the repeated provisional artifact draft that must also stay hidden.",
+        "write_file_2",
+        "write_file",
+        { path: "artifacts/guide.md", content: "# Guide\nDraft" },
+      ));
+    completeMock.mockResolvedValueOnce({
+      content: "I could not create the file directly in this turn, so I am stopping the tool loop and reporting the available result.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const chunks: string[] = [];
+    const result = await runTurn({
+      session,
+      userMessage: "Research current hardware components and create a downloadable file with the answer.",
+      onChunk: (text) => chunks.push(text),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("stopping the tool loop");
+    expect(chunks).toEqual(["I could not create the file directly in this turn, so I am stopping the tool loop and reporting the available result."]);
+    expect(chunks.join("")).not.toContain("provisional artifact draft");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "assistant_text_suppressed", details: "tool_call_response" }),
+    ]));
+    expect(result.performance?.finishReason).toBe("all_tool_calls_blocked");
+    expect(logAudit).toHaveBeenCalledWith(
+      "assistant_text_with_tool_calls_suppressed",
+      expect.objectContaining({ toolNames: ["write_file"] }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_loop_detected",
+      expect.objectContaining({ reason: "all_tool_calls_blocked" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
   });
 
   it("forces synthesis when the model tries to delegate again after synthesis was already required", async () => {
@@ -1872,13 +1942,137 @@ describe("runtime delegated-loop regressions", () => {
     });
   });
 
+  it("falls back to a temporary research agent when search_agents returns no match on source-sensitive turns", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createMultiToolCallStream([
+          {
+            id: "search_no_match_1",
+            toolName: "search_agents",
+            args: { query: "hardware electronics embedded circuit design" },
+          },
+          {
+            id: "search_no_match_2",
+            toolName: "search_agents",
+            args: { query: "research component sourcing product recommendation" },
+          },
+        ]);
+      }
+      return createTextStream("I routed the research through the temporary specialist and am reporting the gathered evidence.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: 'No agents matched "hardware electronics embedded circuit design". Do not call search_agents again for this turn.',
+      metadata: {
+        query: "hardware electronics embedded circuit design",
+        minConfidence: "medium",
+        routingMode: "hybrid",
+        resultCount: 0,
+        weakCount: 0,
+        topResult: null,
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nThe fallback coordinator gathered component evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    const createEphemeralExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Ephemeral research specialist — TASK COMPLETED.\nObserved evidence:\nThe temporary specialist gathered component evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    registerTool({
+      name: "create_ephemeral_agent",
+      description: "Create and run a temporary specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: createEphemeralExecuteMock,
+    });
+
+    const statuses: string[] = [];
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Use current sources to recommend exact ESP32 MEMS microphone components and verify product choices.",
+      onStatus: (status) => statuses.push(status.message),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("temporary specialist");
+    expect(searchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(createEphemeralExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(createEphemeralExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "ephemeral_research_specialist",
+      task: "Use current sources to recommend exact ESP32 MEMS microphone components and verify product choices.",
+      tools: expect.arrayContaining(["web_search", "web_fetch"]),
+    });
+    expect(statuses).toEqual(expect.arrayContaining([
+      "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.",
+    ]));
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_call_recovered",
+      expect.objectContaining({
+        originalTool: "search_agents",
+        rewrittenTo: "create_ephemeral_agent",
+        reason: "search_agents_no_match_fallback",
+        recoveredAgentName: "ephemeral_research_specialist",
+      }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "agent_discovery_no_match_fallback" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
   it("forces specialist-agent orchestration for explicit online lookup requests instead of allowing direct web tool calls", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation((_messages, tools) => {
       llmCallCount += 1;
       const toolNames = tools.map((tool: { name: string }) => tool.name);
       expect(toolNames).toContain("delegate_to_agent");
-      expect(toolNames).toContain("search_agents");
+      if (llmCallCount === 1) {
+        expect(toolNames).toContain("search_agents");
+      } else {
+        expect(toolNames).not.toContain("search_agents");
+      }
+      expect(toolNames).not.toContain("list_agents");
       expect(toolNames).not.toContain("web_search");
       expect(toolNames).not.toContain("web_fetch");
 
@@ -1941,6 +2135,154 @@ describe("runtime delegated-loop regressions", () => {
     const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
     expect(assistantWithTools?.tool_calls).toHaveLength(1);
     expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
+  });
+
+  it("forces artifact-producing delegation for downloadable HTML requests even when earlier turns had tool history", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createTextStream("<!DOCTYPE html><html><body><h1>Portable Recorder How-To</h1></body></html>");
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("artifact_delegate_1", {
+          agentName: "content_writer",
+          task: "Create a downloadable HTML how-to blog page for the portable ESP32 recorder design from the prior discussion. Save/export it as an artifact and return the artifact path, not the full HTML source.",
+        });
+      }
+      return createTextStream("Die HTML-Anleitung wurde als Artefakt erstellt: artifacts/portable-recorder-how-to.html");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Artifact created: artifacts/portable-recorder-how-to.html",
+      metadata: {
+        agentName: "content_writer",
+        attemptedAgents: ["content_writer"],
+        artifacts: [
+          {
+            outputPath: "artifacts/portable-recorder-how-to.html",
+            artifactKind: "document",
+            sourceTool: "generate_document",
+          },
+        ],
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({ success: true, output: "content_writer" }),
+    });
+
+    const statuses: string[] = [];
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    session.addMessage({ role: "user", content: "Earlier source-sensitive request" });
+    session.addMessage({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: "old_search",
+        type: "function",
+        function: { name: "search_agents", arguments: JSON.stringify({ query: "old search" }) },
+      }],
+    });
+    session.addMessage({
+      role: "tool",
+      tool_call_id: "old_search",
+      content: "No agents matched the old search.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "now generate a downloadable html page as detailed instruction / how to do blog. If possible generate artifacts we can see here",
+      onStatus: (status) => statuses.push(status.message),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("artifacts/portable-recorder-how-to.html");
+    expect(result.response).not.toContain("<!DOCTYPE html>");
+    expect(llmCallCount).toBe(3);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({ agentName: "content_writer" });
+    expect(statuses).toEqual(expect.arrayContaining([
+      "Selecting the required specialist path before drafting the answer.",
+      "The draft skipped artifact creation, so I am retrying with the required specialist workflow.",
+    ]));
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "tool_free_artifact_answer_rejected" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("treats create_ephemeral_agent as a current-turn orchestration attempt for source-sensitive requests", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("ephemeral_hardware_1", "create_ephemeral_agent", {
+          agentName: "embedded_hardware_designer",
+          task: "Draft a hardware design guide from the gathered ESP32 microphone evidence.",
+        });
+      }
+      return createTextStream("I used the attempted hardware specialist path and am reporting the best available partial design now.");
+    });
+
+    const createEphemeralAgentMock = vi.fn(async () => ({
+      success: true,
+      output: "Created ephemeral:embedded_hardware_designer, but the sub-agent timed out before producing a full answer.",
+      metadata: {
+        agentName: "ephemeral:embedded_hardware_designer",
+        terminalState: "timeout",
+      },
+    }));
+
+    registerTool({
+      name: "create_ephemeral_agent",
+      description: "Create and run a temporary specialist agent.",
+      parameters: { type: "object", properties: {} },
+      execute: createEphemeralAgentMock,
+    });
+
+    const statuses: string[] = [];
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Use current sources to design a portable ESP32 MEMS microphone recorder and recommend exact components.",
+      onStatus: (status) => statuses.push(status.message),
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("best available partial design");
+    expect(llmCallCount).toBe(2);
+    expect(createEphemeralAgentMock).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual(expect.arrayContaining([
+      "Selecting the required specialist path before drafting the answer.",
+      "Reviewing completed tool results and preparing the final response.",
+    ]));
+    expect(logAudit).not.toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "tool_free_research_answer_rejected" }),
+      expect.anything(),
+    );
   });
 
   it("forces a workflow catalog check before delegation on workflow-shaped requests", async () => {

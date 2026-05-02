@@ -621,6 +621,9 @@ export class RpcConnection {
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
+          onStatus: (status) => {
+            this.sendEvent({ type: "status", data: { requestId, status: status.phase, message: status.message, iteration: status.iteration } });
+          },
           onToolCall: (toolCallId, name, args) => {
             this.sendEvent({ type: "agent.tool_start", data: { requestId, toolCallId, name, args } });
           },
