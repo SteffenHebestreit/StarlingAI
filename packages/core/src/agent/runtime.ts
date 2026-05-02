@@ -27,6 +27,7 @@ import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import {
   buildDynamicTurnGuidance,
+  type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
   WORKFLOW_HINT_TERMS,
   WORKFLOW_ACTION_TERMS,
@@ -62,6 +63,7 @@ export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   onChunk?: (text: string) => void;
+  onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
   onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
@@ -228,6 +230,7 @@ const ORCHESTRATION_LAUNCHER_TOOL_NAMES = new Set([
   "parallel_delegate",
   "run_task_graph",
   "run_workflow",
+  "create_ephemeral_agent",
 ]);
 const PERSISTED_SWARM_STATE_TOOL_NAMES = new Set([
   ...ORCHESTRATION_LAUNCHER_TOOL_NAMES,
@@ -428,6 +431,94 @@ function extractAgentRoutingSuggestionFromMetadata(
     query: query || undefined,
     fallbackAgents: fallbackAgents.length > 0 ? fallbackAgents : undefined,
   };
+}
+
+function searchAgentsReturnedNoMatch(metadata: Record<string, unknown> | undefined): boolean {
+  const resultCount = typeof metadata?.["resultCount"] === "number" ? metadata["resultCount"] : 0;
+  const weakCount = typeof metadata?.["weakCount"] === "number" ? metadata["weakCount"] : 0;
+  const topResult = typeof metadata?.["topResult"] === "string" ? metadata["topResult"].trim() : "";
+  return resultCount === 0 && weakCount === 0 && !topResult;
+}
+
+function chooseConfiguredAgent(candidates: readonly string[]): string | undefined {
+  const configuredAgents = getConfig().subAgents ?? {};
+  return candidates.find((name) => name in configuredAgents);
+}
+
+type RequiredResearchFallbackRoute = {
+  toolName: "delegate_to_agent" | "create_ephemeral_agent";
+  args: Record<string, unknown>;
+  label: string;
+};
+
+function buildRequiredResearchFallbackRoute(
+  userMessage: string,
+  guidance: DynamicTurnGuidance | null | undefined,
+  allowedToolNameSet: Set<string>,
+): RequiredResearchFallbackRoute | null {
+  const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
+    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
+    : ["mission_coordinator", "researcher"];
+  const selectedAgent = chooseConfiguredAgent(preferredAgents) ?? preferredAgents[0]!;
+  const fallbackAgents = preferredAgents.filter((agentName) => agentName !== selectedAgent && chooseConfiguredAgent([agentName]));
+
+  if (allowedToolNameSet.has("create_ephemeral_agent")) {
+    return {
+      toolName: "create_ephemeral_agent",
+      label: "ephemeral_research_specialist",
+      args: {
+        agentName: "ephemeral_research_specialist",
+        description: "Purpose-built specialist for source-grounded research and product/component verification.",
+        systemPrompt: [
+          "You are a source-grounded research specialist.",
+          "Use web_search and web_fetch to gather evidence before answering.",
+          "Return concise findings with source URLs and be explicit about uncertainty.",
+          "Do not invent product names, specifications, or artifact paths.",
+        ].join(" "),
+        tools: ["web_search", "web_fetch", "read_shared_facts", "share_finding"],
+        maxIterations: 5,
+        task: userMessage,
+      },
+    };
+  }
+
+  if (allowedToolNameSet.has("delegate_to_agent")) {
+    return {
+      toolName: "delegate_to_agent",
+      label: selectedAgent,
+      args: {
+        agentName: selectedAgent,
+        fallbackAgents,
+        task: userMessage,
+      },
+    };
+  }
+
+  return null;
+}
+
+function buildSearchAgentsNoMatchFallbackPrompt(route: RequiredResearchFallbackRoute): string {
+  if (route.toolName === "delegate_to_agent") {
+    const fallbackAgents = Array.isArray(route.args["fallbackAgents"]) ? route.args["fallbackAgents"].map(String).filter(Boolean) : [];
+    return [
+      "ROUTING FALLBACK: search_agents returned no usable specialist candidates for this source-sensitive request.",
+      "Do NOT call search_agents or list_agents again in this turn.",
+      `You MUST call delegate_to_agent now with agentName="${route.label}"${fallbackAgents.length ? ` and fallbackAgents=[${fallbackAgents.map((name) => `"${name}"`).join(",")}]` : ""} using the original user request as the task.`,
+      "A further discovery-only response is invalid; delegation must happen before any final answer.",
+    ].join(" ");
+  }
+
+  return [
+    "ROUTING FALLBACK: search_agents returned no usable specialist candidates for this source-sensitive request.",
+    "Do NOT call search_agents or list_agents again in this turn.",
+    "You MUST call create_ephemeral_agent now using the provided research-specialist shape and the original user request as the task.",
+    "A further discovery-only response is invalid; orchestration must happen before any final answer.",
+  ].join(" ");
+}
+
+function isExplicitAgentCatalogRequest(message: string): boolean {
+  return /\b(list|show|display|print|enumerate|inspect|browse|catalog|catalogue|katalog|liste|auflisten|anzeigen)\b[\s\S]{0,80}\b(agents?|sub[- ]?agents?|specialists?|spezialisten|agenten|catalog|catalogue|katalog)\b/i.test(message)
+    || /\b(agents?|sub[- ]?agents?|specialists?|spezialisten|agenten|catalog|catalogue|katalog)\b[\s\S]{0,80}\b(list|show|display|print|enumerate|inspect|browse|liste|auflisten|anzeigen)\b/i.test(message);
 }
 
 function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][]): WorkflowCatalogMatch[] {
@@ -1674,13 +1765,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
-    : ((detectedDynamicGuidance?.freshnessSensitive || detectedDynamicGuidance?.sourceSensitive)
+    : ((detectedDynamicGuidance?.freshnessSensitive || detectedDynamicGuidance?.sourceSensitive || detectedDynamicGuidance?.artifactSensitive)
         ? "orchestration_only"
         : undefined);
   const initialDynamicGuidance = effectiveToolMode
     ? (buildDynamicTurnGuidance(userMessage, effectiveToolMode) ?? detectedDynamicGuidance)
     : detectedDynamicGuidance;
-  const allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
+  let allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
+  const suppressAgentCatalogTool = Boolean(
+    (initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive || initialDynamicGuidance?.artifactSensitive)
+    && !isExplicitAgentCatalogRequest(userMessage),
+  );
+  if (suppressAgentCatalogTool) {
+    allowedToolNames = allowedToolNames.filter((toolName) => toolName !== "list_agents");
+  }
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
@@ -1763,6 +1861,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
+  const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
+    && Boolean(initialDynamicGuidance?.artifactSensitive);
   const requiresMaintenanceFollowUpDelegation = recentWorkflowAuthoringMaintenanceContext
     && (allowedToolNameSet.has("delegate_to_agent")
       || allowedToolNameSet.has("parallel_delegate")
@@ -1828,6 +1928,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
   let pendingSearchAgentSuggestion: { agentName: string; query?: string; fallbackAgents?: string[] } | undefined;
+  let searchAgentsNoMatchCount = 0;
+  let requiredResearchFallbackRoute: RequiredResearchFallbackRoute | null = null;
+  let searchAgentsNoMatchFallbackPrompt = "";
   const provider = opts.enableThinking !== undefined
     ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
     : getChatProvider();
@@ -1968,6 +2071,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
+      ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: searchAgentsNoMatchFallbackPrompt }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: maintenanceDelegationEnforcementPrompt }] : []),
       ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
       ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
@@ -2008,8 +2112,28 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const llmStartedAt = Date.now();
     llmCalls += 1;
     try {
-      const chunkSink = iterationCount === 0 ? opts.onChunk : undefined;
-      llmResponse = await collectStream(provider.stream(messages, tools, signal), chunkSink);
+      const suppressInitialInlineStreaming = iterationCount === 0 && (
+        requiresDelegatedResearch
+        || requiresArtifactDelegation
+        || workflowCatalogRequired
+        || requiresMaintenanceFollowUpDelegation
+      );
+      const chunkSink = iterationCount === 0 && !suppressInitialInlineStreaming ? opts.onChunk : undefined;
+      if (!chunkSink) {
+        opts.onStatus?.({
+          phase: suppressInitialInlineStreaming ? "routing" : "synthesizing",
+          message: suppressInitialInlineStreaming
+            ? "Selecting the required specialist path before drafting the answer."
+            : "Reviewing completed tool results and preparing the final response.",
+          iteration: iterationCount,
+        });
+      }
+      const activeTools = searchAgentsNoMatchFallbackPrompt
+        ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
+        : tools;
+      llmResponse = await collectStream(provider.stream(messages, activeTools, signal), chunkSink, {
+        deferTextUntilToolDecision: activeTools.length > 0,
+      });
       const llmDurationMs = Date.now() - llmStartedAt;
       llmTimeMs += llmDurationMs;
       if (firstModelResponseMs === undefined) {
@@ -2051,6 +2175,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+
+    if (llmResponse.tool_calls.length > 0 && llmResponse.content?.trim()) {
+      logAudit("assistant_text_with_tool_calls_suppressed", {
+        contentChars: llmResponse.content.length,
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        finishReason: llmResponse.finishReason,
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "assistant_text_suppressed", details: "tool_call_response" });
+      llmResponse = { ...llmResponse, content: null };
+    }
 
     const workflowCatalogToolRequested = llmResponse.tool_calls.some((toolCall) => isWorkflowCatalogToolName(toolCall.name));
     const runWorkflowRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "run_workflow");
@@ -2188,6 +2322,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       terminalFinishReason = "synthesis_required_tool_call_rejected";
       terminalSynthesisInstruction =
         "A previous orchestration result already required final synthesis, but the model attempted another tool call. Reject that tool call. Using ONLY the evidence already present in the tool results above, write the final user-facing answer now. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
+      opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
       log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
       break;
     }
@@ -2202,6 +2337,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       terminalFinishReason = "user_response_required_tool_call_rejected";
       terminalSynthesisInstruction =
         "A previous delegated result requires a user response, clarification, authorization, or approval, but the model attempted another tool call. Reject that tool call. Ask the user the required question in one concise message using only the evidence already present above. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
+      opts.onStatus?.({ phase: "synthesizing", message: "Stopping extra tool calls and preparing the required user-facing question.", iteration: iterationCount });
       log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after delegated results required a user response — forcing synthesis");
       break;
     }
@@ -2335,23 +2471,74 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
-      if (requiresDelegatedResearch && !session.getHistory().some((message) => message.role === "tool")) {
+      const currentTurnHasExecutableOrchestration = _turnDelegationCount > 0
+        || workflowRunCompletedThisTurn
+        || ((_turnToolCallCounts.get("run_workflow") ?? 0) > 0);
+
+      if (requiresArtifactDelegation && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           delegatedResearchEnforcementPrompt = [
-            "COMPLIANCE CORRECTION: This request requires specialist-agent orchestration.",
-            "Do NOT answer directly from memory.",
-            "You MUST call an orchestration tool now instead of writing a natural-language answer.",
-            "For a simple web lookup, prefer delegate_to_agent with researcher.",
-            "For broader multi-step online research, hardware/product verification, component recommendations, or source-backed reports, prefer delegate_to_agent with mission_coordinator. Use web_task_coordinator only for live single-shot lookups or browser-heavy workflows.",
-            "A tool-free answer before delegation is invalid for this turn.",
+            "COMPLIANCE CORRECTION: This request asks for a durable downloadable or viewable artifact.",
+            "Do NOT paste the full artifact source into chat.",
+            "You MUST call an orchestration tool now so a specialist can write/export the artifact file.",
+            "For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'.",
+            "Ask the specialist to save the file as an artifact and publish the artifact path/download details. The final chat answer should be only a concise summary and artifact reference.",
+            "A tool-free artifact dump is invalid for this turn.",
           ].join(" ");
+          guardrailEvents.push({ type: "delegation_required", details: "tool_free_artifact_answer_rejected" });
+          logAudit("guardrail_flagged", {
+            type: "tool_free_artifact_answer_rejected",
+            artifactSensitive: initialDynamicGuidance?.artifactSensitive ?? false,
+          }, { sessionId: session.id, severity: "warn" });
+          opts.onStatus?.({ phase: "guardrail", message: "The draft skipped artifact creation, so I am retrying with the required specialist workflow.", iteration: iterationCount });
+          continue;
+        }
+
+        return blocked(
+          "This request required artifact-producing delegation, but the model tried to answer without using an orchestration tool.",
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "missing_required_artifact_delegation",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
+
+      if (requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
+        if (!delegatedResearchRetryUsed) {
+          delegatedResearchRetryUsed = true;
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+          if (route) {
+            requiredResearchFallbackRoute = route;
+            searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
+          }
+          delegatedResearchEnforcementPrompt = route
+            ? buildSearchAgentsNoMatchFallbackPrompt(route)
+            : [
+                "COMPLIANCE CORRECTION: This request requires specialist-agent orchestration.",
+                "Do NOT answer directly from memory.",
+                "You MUST call an orchestration tool now instead of writing a natural-language answer.",
+                "For a simple web lookup, prefer delegate_to_agent with researcher.",
+                "For broader multi-step online research, hardware/product verification, component recommendations, or source-backed reports, prefer delegate_to_agent with mission_coordinator. Use web_task_coordinator only for live single-shot lookups or browser-heavy workflows.",
+                "A tool-free answer before delegation is invalid for this turn.",
+              ].join(" ");
           guardrailEvents.push({ type: "delegation_required", details: "tool_free_research_answer_rejected" });
           logAudit("guardrail_flagged", {
             type: "tool_free_research_answer_rejected",
             freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
             sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           }, { sessionId: session.id, severity: "warn" });
+          opts.onStatus?.({ phase: "guardrail", message: "The draft skipped required research orchestration, so I am retrying with a specialist agent.", iteration: iterationCount });
           continue;
         }
 
@@ -2539,13 +2726,29 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
+
+      if (requiredResearchFallbackRoute && (tc.name === "search_agents" || tc.name === "list_agents")) {
+        const originalTool = tc.name;
+        tc.name = requiredResearchFallbackRoute.toolName;
+        tc.arguments = { ...requiredResearchFallbackRoute.args };
+        logAudit("tool_call_recovered", {
+          originalTool,
+          rewrittenTo: requiredResearchFallbackRoute.toolName,
+          reason: "search_agents_no_match_fallback",
+          recoveredAgentName: requiredResearchFallbackRoute.label,
+          noMatchCount: searchAgentsNoMatchCount,
+        }, { sessionId: session.id, severity: "warn" });
+        guardrailEvents.push({ type: "tool_recovered", details: `${originalTool}:search_agents_no_match_fallback` });
+      }
+
       toolCallsRequested += 1;
       // F29: Count delegation and share_finding calls for the turn scorecard
       if (
         tc.name === "delegate_to_agent" ||
         tc.name === "parallel_delegate" ||
         tc.name === "run_task_graph" ||
-        tc.name === "swarm_delegate"
+        tc.name === "swarm_delegate" ||
+        tc.name === "create_ephemeral_agent"
       ) {
         _turnDelegationCount += 1;
       } else if (tc.name === "share_finding") {
@@ -2675,7 +2878,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           severity: "warn",
         });
         guardrailEvents.push({ type: "tool_blocked", details: `${tc.name}:not_in_turn_toolset` });
-        const unavailableMessage = `Error: Tool '${tc.name}' is not available in this turn. Use only the tools that were provided for this request. If this is a desktop-control task, delegate to computer_use_agent instead of calling direct computer_* or browser_* tools.`;
+        const unavailableMessage = tc.name === "write_file" || tc.name === "export_workspace_artifact"
+          ? `Error: Direct artifact tool '${tc.name}' is not available in this turn. Do not retry it directly. Use delegate_to_agent with content_writer or another artifact-capable specialist, or synthesize from existing evidence if no artifact tool is available.`
+          : `Error: Tool '${tc.name}' is not available in this turn. Use only the tools that were provided for this request. If this is a desktop-control task, delegate to computer_use_agent instead of calling direct computer_* or browser_* tools.`;
         if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, unavailableMessage);
         toolResultMessages.push({
           role: "tool",
@@ -2725,7 +2930,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sessionId: session.id, severity: "warn",
         });
         if (intervention) opts.onIntervention?.(intervention);
-        const parseErrorMessage = `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Please retry with valid JSON arguments.`;
+        const parseErrorMessage = `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Do not retry the same large inline payload; synthesize from existing evidence or use a smaller valid tool call.`;
         if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, parseErrorMessage);
         toolResultMessages.push({
           role: "tool",
@@ -2812,6 +3017,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         pendingSearchAgentSuggestion = tc.name === "search_agents"
           ? extractAgentRoutingSuggestionFromMetadata(cachedToolCall.metadata)
           : undefined;
+
+        if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(cachedToolCall.metadata)) {
+          searchAgentsNoMatchCount += 1;
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+          if (route) {
+            requiredResearchFallbackRoute = route;
+            searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
+            logAudit("guardrail_flagged", {
+              type: "agent_discovery_no_match_fallback",
+              noMatchCount: searchAgentsNoMatchCount,
+              fallbackTool: route.toolName,
+              fallbackAgent: route.label,
+              cachedResult: true,
+            }, { sessionId: session.id, severity: "warn" });
+            opts.onStatus?.({ phase: "guardrail", message: "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.", iteration: iterationCount });
+          }
+        }
         continue;
       }
 
@@ -2864,6 +3086,22 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       pendingSearchAgentSuggestion = tc.name === "search_agents"
         ? extractAgentRoutingSuggestionFromMetadata(result.metadata)
         : undefined;
+
+      if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(result.metadata)) {
+        searchAgentsNoMatchCount += 1;
+        const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+        if (route) {
+          requiredResearchFallbackRoute = route;
+          searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
+          logAudit("guardrail_flagged", {
+            type: "agent_discovery_no_match_fallback",
+            noMatchCount: searchAgentsNoMatchCount,
+            fallbackTool: route.toolName,
+            fallbackAgent: route.label,
+          }, { sessionId: session.id, severity: "warn" });
+          opts.onStatus?.({ phase: "guardrail", message: "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.", iteration: iterationCount });
+        }
+      }
 
       if (
         tc.name === "run_workflow"
@@ -3231,6 +3469,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           consecutiveBlockedIterations: _consecutiveFullyBlockedIterations,
           iterations: iterationCount,
         }, { sessionId: session.id, severity: "warn" });
+        terminalFinishReason = "all_tool_calls_blocked";
+        terminalSynthesisInstruction =
+          "The model repeatedly attempted tool calls that were blocked or unavailable. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the requested artifact could not be created because the direct file tool was unavailable, say that plainly and do not invent an artifact path.";
+        _forcedSynthesisFired = true;
         log.warn({ iterationCount, blocked: _consecutiveFullyBlockedIterations }, "All tool calls blocked for consecutive iterations — forcing synthesis");
         break;
       }
@@ -3292,6 +3534,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   }
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
+  opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
   const synthesized = await forceSynthesis(
     session, provider, signal, terminalSynthesisInstruction,
   );
@@ -3603,22 +3846,27 @@ function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly 
 
 /**
  * Consume a streaming LLM generator into a complete LLMResponse.
- * Fires onChunk for each text_delta so callers receive true token-by-token streaming.
+ * Optionally defers text until the response is known not to contain tool calls.
  */
 async function collectStream(
   generator: AsyncGenerator<StreamChunk>,
   onChunk?: (text: string) => void,
+  options: { deferTextUntilToolDecision?: boolean } = {},
 ): Promise<LLMResponse> {
   let content = "";
   const toolCallBuffers = new Map<string, { id: string; name: string; args: string }>();
   let finishReason = "stop";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let sawToolCall = false;
 
   for await (const chunk of generator) {
     if (chunk.type === "text_delta" && chunk.content) {
       content += chunk.content;
-      onChunk?.(chunk.content);
+      if (!options.deferTextUntilToolDecision) {
+        onChunk?.(chunk.content);
+      }
     } else if (chunk.type === "tool_call_start" && chunk.toolCallId && chunk.toolName) {
+      sawToolCall = true;
       toolCallBuffers.set(chunk.toolCallId, { id: chunk.toolCallId, name: chunk.toolName, args: "" });
     } else if (chunk.type === "tool_call_delta" && chunk.toolCallId && chunk.argumentsDelta) {
       const buf = toolCallBuffers.get(chunk.toolCallId);
@@ -3637,6 +3885,10 @@ async function collectStream(
       catch { return { _parse_error: true, _raw: buf.args } as Record<string, unknown>; }
     })(),
   }));
+
+  if (options.deferTextUntilToolDecision && onChunk && !sawToolCall && content) {
+    onChunk(content);
+  }
 
   return { content: content || null, tool_calls, usage, finishReason };
 }

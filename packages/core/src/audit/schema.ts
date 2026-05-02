@@ -60,6 +60,7 @@ export type AuditEventType =
   | "computer_session_stop"
   | "computer_session_emergency_stop"
   | "computer_heartbeat_lost"
+  | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement
   | "config_proposal_created"
@@ -93,6 +94,8 @@ export type AuditEventType =
   // Observability
   | "turn_scorecard"
   | "coverage_shortfall_resynthesis"
+  | "sub_agent_assistant_text_with_tool_calls_suppressed"
+  | "sub_agent_tool_loop_detected"
   | "sub_agent_synthesis_forced"
   | "hallucinated_truncation_bypass"
   | "trajectory_cache_hit"

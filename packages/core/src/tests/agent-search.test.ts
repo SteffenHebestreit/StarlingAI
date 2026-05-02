@@ -254,7 +254,8 @@ describe("search_agents tool", () => {
 
       expect(gated.success).toBe(true);
       expect(gated.output).toContain("No agents matched");
-      expect(gated.output).toContain("minConfidence=low");
+      expect(gated.output).toContain("Do not call search_agents again");
+      expect(gated.output).toContain("create_ephemeral_agent");
       expect(gated.output).toContain("Top weak candidates");
 
       const resolution = await resolveAgentRouting("login form automation", { minConfidence: "medium" });
