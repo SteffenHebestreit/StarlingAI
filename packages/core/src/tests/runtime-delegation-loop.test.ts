@@ -228,6 +228,7 @@ describe("runtime delegated-loop regressions", () => {
 
     expect(result.blocked).toBe(false);
     expect(result.response).toBe("synthesized");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(observedToolResults).toHaveLength(1);
@@ -235,6 +236,14 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.guardrailEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" }),
     ]));
+    expect(logAudit).toHaveBeenCalledWith(
+      "turn_scorecard",
+      expect.objectContaining({
+        forcedSynthesisFired: true,
+        finishReason: "synthesis_required_tool_call_rejected",
+      }),
+      expect.objectContaining({ severity: "warn" }),
+    );
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(1);
@@ -283,11 +292,20 @@ describe("runtime delegated-loop regressions", () => {
 
     expect(result.blocked).toBe(false);
     expect(result.response).toBe("synthesized");
+    expect(result.performance?.finishReason).toBe("user_response_required_tool_call_rejected");
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(result.guardrailEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" }),
     ]));
+    expect(logAudit).toHaveBeenCalledWith(
+      "turn_scorecard",
+      expect.objectContaining({
+        forcedSynthesisFired: true,
+        finishReason: "user_response_required_tool_call_rejected",
+      }),
+      expect.objectContaining({ severity: "warn" }),
+    );
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(1);
@@ -348,6 +366,52 @@ describe("runtime delegated-loop regressions", () => {
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).toHaveBeenCalledTimes(1);
     expect(session.getHistory().at(-1)?.content).toBe("synthesized");
+  });
+
+  it("emits a scorecard when the max-iteration terminal synthesis path returns", async () => {
+    const fresh = await loadFreshRuntimeForToolMode("hybrid");
+    streamMock.mockImplementation(() => createToolCallStream("web_1", "web_search", { query: "portable recorder mcu" }));
+
+    const webSearchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Observed evidence:\nESP32-P4 and STM32U5 are relevant MCU options.",
+    }));
+
+    fresh.registerTool({
+      name: "web_search",
+      description: "Search the web.",
+      parameters: { type: "object", properties: {} },
+      execute: webSearchExecuteMock,
+    });
+
+    const session = new fresh.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await fresh.runTurn({
+      session,
+      userMessage: "Research portable recorder MCU options.",
+      maxIterationsOverride: 1,
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toBe("synthesized");
+    expect(result.performance?.finishReason).toBe("max_tool_iterations");
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(webSearchExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(logAudit).toHaveBeenCalledWith(
+      "turn_scorecard",
+      expect.objectContaining({
+        forcedSynthesisFired: false,
+        finishReason: "max_tool_iterations",
+        finalAnswerLength: "synthesized".length,
+        toolIterations: 1,
+      }),
+      expect.objectContaining({ severity: "warn" }),
+    );
   });
 
   it("resynthesizes empty post-tool final responses into a direct answer", async () => {

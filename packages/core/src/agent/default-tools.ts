@@ -4,6 +4,8 @@ import { getConfig } from "../config/loader.js";
 export type MainAssistantToolMode = "hybrid" | "orchestration_only" | "delegate_only";
 
 export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
+  "memory_store",
+  "memory_search",
   "assistant_personality_view",
   "assistant_personality_update",
 ] as const;
@@ -13,7 +15,6 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "list_files",
   "export_workspace_artifact",
   "workspace_search",
-  "memory_search",
   "read_shared_facts",
   "session_status",
   "send_agent_message",

@@ -2,7 +2,7 @@
   "identicalLoop": {
     "agentName": "pentest_coordinator",
     "task": "Validate pentest authorization",
-    "delegatedOutput": "[pentest_coordinator]: ## Authorization Confirmed\n\nPlease confirm the authorization reference again before I proceed."
+    "delegatedOutput": "[pentest_coordinator]: ## Authorization Confirmed\n\nObserved evidence:\n- Ticket TICKET-1234 was present in the request.\n- Target scope was already approved for this run."
   },
   "delegateLimit": {
     "agentName": "pentest_coordinator",

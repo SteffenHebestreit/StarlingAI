@@ -142,11 +142,11 @@ describe("agent search helpers", () => {
     expect(embedMock).toHaveBeenCalledTimes(4);
   });
 
-  it("leans on semantic scores when embeddings are available", () => {
-    expect(computeHybridRoutingScore(0.9, 0.3, true)).toBeCloseTo(0.45, 5);
-    expect(computeHybridRoutingScore(0.8, 0, true)).toBeCloseTo(0.52, 5);
+  it("uses semantic scores only when embeddings are available", () => {
+    expect(computeHybridRoutingScore(0.9, 0.3, true)).toBe(0);
+    expect(computeHybridRoutingScore(0.8, 0, true)).toBe(0);
     expect(computeHybridRoutingScore(0.8, 0, false)).toBeCloseTo(0.8, 5);
-    expect(computeHybridRoutingScore(0.2, 0.9, true)).toBeCloseTo(0.725, 5);
+    expect(computeHybridRoutingScore(0.2, 0.9, true)).toBeCloseTo(0.9, 5);
   });
 
   it("retries embedding index build after initial model unavailability", async () => {
@@ -882,6 +882,72 @@ describe("search_agents tool", () => {
 
       expect(resolution.results[0]?.name).toBe("security_researcher");
       expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")?.confidence).not.toBe("medium");
+    } finally {
+      embeddingModule.resetEmbeddingSearchStateForTests();
+      vi.doUnmock("../providers/index.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("does not route agent-routing maintenance prompts to distance_specialist", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    const subAgents = {
+      prompt_optimizer: {
+        description: "Prompt and routing behavior specialist for improving StarlingAI agent selection, system prompts, and orchestration rules.",
+        capabilities: ["prompt analysis", "routing behavior fixes", "agent orchestration tuning"],
+        tags: ["prompt", "routing", "agents", "orchestration", "maintenance"],
+        tools: ["read_file", "workspace_search", "write_file"],
+        maxIterations: 6,
+      },
+      distance_specialist: {
+        description: "Navigation specialist for calculating route distance and travel time between places.",
+        capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
+        tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
+        tools: ["geocode_location", "route_distance_time"],
+        maxIterations: 4,
+      },
+    };
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      subAgents,
+    }), "utf8");
+
+    const provider = {
+      embed: vi.fn(async (texts: string[]) => {
+        const text = texts[0] ?? "";
+        if (text.startsWith("Agent:")) {
+          return [text.includes("prompt_optimizer") ? new Float32Array([0, 1]) : new Float32Array([1, 0])];
+        }
+
+        return [new Float32Array([0, 1])];
+      }),
+    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.doMock("../providers/index.js", () => ({
+      getEmbeddingProvider: () => provider,
+    }));
+    vi.resetModules();
+
+    const [embeddingModule, { resolveAgentRouting }] = await Promise.all([
+      import("../providers/embeddings.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    try {
+      await embeddingModule.buildAgentIndex(subAgents, provider, "lmstudio/qwen-embed");
+
+      const resolution = await resolveAgentRouting("fix agent routing; it chose the wrong agent even though this has nothing to do with calculating distance", { minConfidence: "medium" });
+
+      expect(resolution.results[0]?.name).toBe("prompt_optimizer");
+      expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")).toBeUndefined();
     } finally {
       embeddingModule.resetEmbeddingSearchStateForTests();
       vi.doUnmock("../providers/index.js");

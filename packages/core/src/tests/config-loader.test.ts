@@ -357,6 +357,58 @@ describe("config loader mutable overlay", () => {
     expect(qualitySupervisor?.systemPrompt).toContain("Do not recommend new research or fresh evidence gathering when the failure is missing review input rather than missing evidence");
   });
 
+  it("ships anti-hallucination prompt rules for evidence-bearing delegations", () => {
+    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
+    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
+
+    const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
+      agents?: { mainAssistant?: { customInstructions?: string } };
+    };
+    const workspaceRaw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string }>;
+    };
+
+    const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
+    const webTaskCoordinator = workspaceRaw.subAgents?.["web_task_coordinator"];
+
+    expect(mainAssistantInstructions).toContain("the retrieved evidence wins immediately");
+    expect(mainAssistantInstructions).toContain("every factual claim in your answer must be supported by that evidence");
+    expect(mainAssistantInstructions).toContain("Never name an official source, manufacturer, product page, URL, spec, quote, or numeric value unless it appears in the current evidence");
+    expect(mainAssistantInstructions).toContain("do not answer from memory first");
+
+    expect(webTaskCoordinator?.systemPrompt).toContain("delegate directly to researcher unless browser interaction is actually required");
+    expect(webTaskCoordinator?.systemPrompt).toContain("treat that evidence as authoritative for the turn");
+    expect(webTaskCoordinator?.systemPrompt).toContain("stop repeating the disproved assumption");
+    expect(webTaskCoordinator?.systemPrompt).toContain("synthesize immediately instead of performing more routing or discovery calls");
+  });
+
+  it("keeps main and desktop prompts access-method driven rather than app-script specific", () => {
+    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
+    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
+
+    const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
+      agents?: { mainAssistant?: { customInstructions?: string } };
+    };
+    const workspaceRaw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string }>;
+    };
+
+    const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
+    const computerUseAgent = workspaceRaw.subAgents?.["computer_use_agent"];
+    const computerUsePrompt = computerUseAgent?.systemPrompt ?? "";
+
+    expect(mainAssistantInstructions).toContain("SERVICE-FIRST ROUTING");
+    expect(mainAssistantInstructions).toContain("route by access method and evidence type instead");
+    expect(mainAssistantInstructions).not.toContain("LM STUDIO SHORTCUT");
+    expect(mainAssistantInstructions).not.toContain("1234/v1/models");
+
+    expect(computerUsePrompt).toContain("API-FIRST RULE FOR DIRECTLY QUERYABLE SERVICES");
+    expect(computerUsePrompt).toContain("GENERIC PANEL OR TEXT-ENTRY WORKFLOW");
+    expect(computerUsePrompt).not.toContain("VS CODE COPILOT CHAT WORKFLOW");
+    expect(computerUsePrompt).not.toContain("Visual Studio Code");
+    expect(computerUsePrompt).not.toContain("LM Studio");
+  });
+
   it("does not reload single-file config when unrelated runtime data files change", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-watch-"));
     const baseConfigPath = join(tempDir, "starlingai.json");

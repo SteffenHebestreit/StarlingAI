@@ -129,7 +129,7 @@ export const SWARM_MAINTENANCE_PATTERNS = [
 ];
 
 export const NAVIGATION_HINT_TERMS = [
-  "distance", "travel time", "driving time", "walking time", "route", "routing", "directions",
+  "distance", "travel time", "driving time", "walking time", "directions",
   "fahrzeit", "reisezeit", "wegzeit", "strecke", "entfernung", "route", "anfahrt", "fußweg",
 ];
 
@@ -138,6 +138,16 @@ export const NAVIGATION_PATTERNS = [
   /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
   /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
 ];
+
+export function isNavigationRoutingRequest(userMessage: string): boolean {
+  const normalized = userMessage.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const negatedNavigationMention = /\b(nothing to do with|not about|not related to|unrelated to|kein(?:e|en)?|nichts mit|hat nichts mit)\b[\s\S]{0,100}\b(distance|distances|travel time|route|routes|routing|navigation|entfernung|fahrzeit|reisezeit|route|routen?)\b/i.test(normalized);
+  if (negatedNavigationMention) return false;
+
+  return NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
 
 export const WORKFLOW_HINT_TERMS = [
   "catalog", "catalogue", "chain", "job", "jobs", "playbook", "playbooks",
@@ -232,8 +242,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
   const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
-  const navigationSensitive = NAVIGATION_HINT_TERMS.some((term) => normalized.includes(term))
-    || NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
+  const navigationSensitive = isNavigationRoutingRequest(userMessage);
   const localServerConfigReview = serverAccessSensitive
     && !sourceSensitiveByTerm
     && !WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
