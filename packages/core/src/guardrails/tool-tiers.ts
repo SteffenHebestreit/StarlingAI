@@ -257,6 +257,26 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresSandbox: false,
   },
 
+  // ─── Tier 0: Inline computation utilities ───────────────────────────────
+  datetime_arithmetic: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Date/time arithmetic — add or subtract durations, compute differences, format/parse without delegating",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  json_query: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Extract values from a JSON document via a dot/bracket path expression (jq-lite — no piping or transforms)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  regex_test: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Test a regex against sample text and return matches with capture groups",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+
   // ─── Tier 0/1: Agent data store ─────────────────────────────────────────
   agent_store_read: {
     tier: ToolTier.ZERO_READ_ONLY,

@@ -687,10 +687,15 @@ export async function graphBuildSimilarityLinks(newRecordIds?: string[]): Promis
     : "MATCH (m:MemoryRecord) WHERE m.embedding IS NOT NULL AND m.updatedAt > $cutoff";
 
   try {
+    // NOTE: explicit WITH clauses are required between MATCH/WHERE → CALL
+    // and CALL/YIELD → WHERE on MemGraph; Neo4j tolerates the chain
+    // implicitly but MemGraph rejects it as a parse error.
     const result = await runCypher(`
       ${matchClause}
+      WITH m
       CALL vector_search.search("${VECTOR_INDEX_NAME}", 10, m.embedding)
       YIELD node AS candidate, similarity
+      WITH m, candidate, similarity
       WHERE candidate.id <> m.id AND similarity > 0.82
       MERGE (m)-[s:SIMILAR_TO]->(candidate)
       SET s.similarity = similarity, s.method = 'embedding'

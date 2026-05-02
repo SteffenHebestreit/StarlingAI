@@ -1,0 +1,22 @@
+// Public Agent-to-Agent (A2A) protocol — Stage 12 / Open Interop.
+//
+// When `enabled` is true the gateway publishes:
+//   - GET  /.well-known/agent-card.json   (skill discovery)
+//   - POST /a2a/v1                        (JSON-RPC tasks/send, tasks/get)
+//
+// Inbound auth defaults to the regular gateway JWT.  Set
+// `inboundBearerToken` (or `$ENV_VAR`) when you want a shared token
+// instead — useful when peers are external services without a user.
+//
+// `peers[]` lists outbound A2A endpoints whose agent cards we pull at
+// startup; each advertised skill becomes a virtual sub-agent named
+// `a2a__<peerId>__<skillId>` reachable via delegate_to_agent.
+{
+  "a2a": {
+    "enabled": true,
+    "exposeAgents": [],
+    "peers": [],
+    "taskTimeoutMs": 600000,
+    "refreshIntervalMs": 900000
+  }
+}

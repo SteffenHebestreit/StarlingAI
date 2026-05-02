@@ -57,7 +57,7 @@ export async function initGraphSchema(): Promise<void> {
 
   for (const { name, cypher } of LABEL_INDEXES) {
     try {
-      await runCypher(cypher, {}, { write: true });
+      await runCypher(cypher, {}, { write: true, autoCommit: true });
       created++;
       log.debug({ name }, "Graph index created");
     } catch (err) {
@@ -72,7 +72,7 @@ export async function initGraphSchema(): Promise<void> {
   }
 
   try {
-    await runCypher(VECTOR_INDEX_CYPHER, {}, { write: true });
+    await runCypher(VECTOR_INDEX_CYPHER, {}, { write: true, autoCommit: true });
     created++;
     log.debug({ name: VECTOR_INDEX_NAME }, "Vector index created");
   } catch (err) {

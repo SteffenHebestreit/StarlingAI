@@ -94,6 +94,18 @@
         ],
         "autoStart": true
       }
+    },
+    "expose": {
+      "enabled": true,
+      "exposeTools": [],
+      "exposeAgents": [],
+      "exposeScenes": [],
+      "exposeJobs": [],
+      "allowTier2": false,
+      "http": {
+        "enabled": true,
+        "requireAuth": true
+      }
     }
   }
 }
