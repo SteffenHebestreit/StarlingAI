@@ -94,31 +94,6 @@
             </button>
           </Transition>
           <div ref="messagesEl" class="chat-message-scroll">
-            <details v-if="hasSidePanels" class="chat-mobile-panels lg:hidden" :open="gateway.isLoading">
-              <summary class="chat-mobile-panels__summary">
-                <span>Live Context</span>
-                <span class="chat-mobile-panels__meta">
-                  <span v-if="gateway.visibleSwarmState">Swarm</span>
-                  <span v-if="shellStore.hasEntries">Shell</span>
-                  <span v-if="computerStore.sessions.length > 0 || computerStore.loading || gateway.isLoading">Computer</span>
-                </span>
-              </summary>
-              <div class="chat-mobile-panels__body">
-                <SwarmStatusPanel
-                  v-if="gateway.visibleSwarmState"
-                  :state="gateway.visibleSwarmState"
-                  :active="gateway.isLoading"
-                  :runs="gateway.currentSessionSwarmRuns"
-                  :selected-run-id="gateway.selectedSwarmRunId"
-                  :show-archive-action="Boolean(gateway.currentSessionId)"
-                  @select-run="gateway.selectSwarmRun"
-                  @open-archive="openInSessions"
-                />
-                <ShellSessionPanel v-if="shellStore.hasEntries" />
-                <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
-              </div>
-            </details>
-
             <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
               <button
                 @click="loadOlderMessages"
@@ -149,29 +124,91 @@
             />
           </div>
         </section>
-
-        <aside class="chat-side-column hidden lg:flex">
-          <div class="chat-side-stack">
-            <SwarmStatusPanel
-              v-if="gateway.visibleSwarmState"
-              :state="gateway.visibleSwarmState"
-              :active="gateway.isLoading"
-              :runs="gateway.currentSessionSwarmRuns"
-              :selected-run-id="gateway.selectedSwarmRunId"
-              :show-archive-action="Boolean(gateway.currentSessionId)"
-              @select-run="gateway.selectSwarmRun"
-              @open-archive="openInSessions"
-            />
-            <ShellSessionPanel v-if="shellStore.hasEntries" />
-            <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
-            <div v-if="!hasSidePanels" class="chat-sidebar-placeholder">
-              <div class="chat-sidebar-placeholder__eyebrow">Live Context</div>
-              <p class="chat-sidebar-placeholder__copy">Swarm state, computer sessions, and live previews appear here during active delegation and desktop control.</p>
-            </div>
-          </div>
-        </aside>
       </div>
     </div>
+
+    <!-- Off-canvas side panel: Live Context + Artifacts -->
+    <SidePanel
+      v-model="sidePanelOpen"
+      :has-live-content="hasSidePanels"
+      :artifact-count="sessionArtifacts.length"
+    >
+      <!-- Live context slot: swarm, shell, computer sessions -->
+      <template #live>
+        <SwarmStatusPanel
+          v-if="gateway.visibleSwarmState"
+          :state="gateway.visibleSwarmState"
+          :active="gateway.isLoading"
+          :runs="gateway.currentSessionSwarmRuns"
+          :selected-run-id="gateway.selectedSwarmRunId"
+          :show-archive-action="Boolean(gateway.currentSessionId)"
+          @select-run="gateway.selectSwarmRun"
+          @open-archive="openInSessions"
+        />
+        <ShellSessionPanel v-if="shellStore.hasEntries" />
+        <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
+      </template>
+
+      <!-- Artifacts slot: previewable files produced by the agent -->
+      <template #artifacts>
+        <template v-if="sessionArtifacts.length > 0">
+          <!-- Artifact selector pills -->
+          <div class="panel-artifact-list" role="listbox" aria-label="Session artifacts">
+            <button
+              v-for="att in sessionArtifacts"
+              :key="att.filename"
+              role="option"
+              class="panel-artifact-pill"
+              :class="{ 'panel-artifact-pill--active': selectedPanelArtifact?.filename === att.filename }"
+              :aria-selected="selectedPanelArtifact?.filename === att.filename"
+              :title="att.title || att.filename"
+              @click="selectPanelArtifact(att)"
+            >
+              <span class="panel-artifact-pill__icon" aria-hidden="true">{{ panelArtifactIcon(att) }}</span>
+              <span class="panel-artifact-pill__name">{{ att.title || att.filename }}</span>
+            </button>
+          </div>
+
+          <!-- Preview area -->
+          <div class="panel-artifact-preview">
+            <div v-if="!selectedPanelArtifact" class="panel-artifact-preview__hint">
+              Select an artifact above to preview it.
+            </div>
+            <div v-else-if="panelArtifactLoading" class="panel-artifact-preview__loading" aria-live="polite">
+              Loading preview…
+            </div>
+            <div v-else-if="panelArtifactError" class="panel-artifact-preview__error" role="alert">
+              {{ panelArtifactError }}
+            </div>
+            <template v-else-if="panelArtifactPreview">
+              <iframe
+                v-if="panelArtifactPreview.kind === 'html' || panelArtifactPreview.kind === 'pdf'"
+                :src="panelArtifactPreview.url"
+                class="panel-artifact-frame"
+                :sandbox="panelArtifactPreview.kind === 'html' ? 'allow-scripts allow-same-origin allow-forms allow-popups' : undefined"
+                referrerpolicy="no-referrer"
+                title="Artifact preview"
+              />
+              <audio
+                v-else-if="panelArtifactPreview.kind === 'audio'"
+                :src="panelArtifactPreview.url"
+                controls
+                class="panel-artifact-audio"
+              />
+              <iframe
+                v-else-if="panelArtifactPreview.kind === 'website'"
+                :srcdoc="panelArtifactPreview.srcdoc"
+                class="panel-artifact-frame"
+                sandbox="allow-same-origin"
+                referrerpolicy="no-referrer"
+                title="Website preview"
+              />
+              <pre v-else class="panel-artifact-text">{{ panelArtifactPreview.text }}</pre>
+            </template>
+          </div>
+        </template>
+      </template>
+    </SidePanel>
 
     <!-- Human-in-the-loop approval banner -->
     <Transition name="approval">
@@ -845,6 +882,8 @@ import MessageBubble from "@/components/MessageBubble.vue";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
+import SidePanel from "@/components/SidePanel.vue";
+import type { ChatAttachment } from "@/stores/gateway";
 
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
@@ -1119,12 +1158,114 @@ const showOptionsDropdown = computed(() => (
 ));
 const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shellStore.hasEntries || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
 
+// ── Off-canvas side panel ───────────────────────────────────────────────
+const sidePanelOpen = ref(false);
+
+// Auto-open the panel when live content first becomes available
+watch(hasSidePanels, (nowHas, hadBefore) => {
+  if (nowHas && !hadBefore) sidePanelOpen.value = true;
+});
+
+// Aggregate previewable, non-image attachments from all messages in the session
+const sessionArtifacts = computed((): ChatAttachment[] => {
+  const seen = new Set<string>();
+  const results: ChatAttachment[] = [];
+  for (const msg of gateway.messages) {
+    for (const att of msg.attachments ?? []) {
+      if (att.previewMode === "image" || att.previewMode === "download") continue;
+      if (att.dataUrl?.startsWith("data:image/")) continue;
+      if (!att.relativePath && !att.externalUrl) continue;
+      if (seen.has(att.filename)) continue;
+      seen.add(att.filename);
+      results.push(att);
+    }
+  }
+  return results;
+});
+
+const selectedPanelArtifact = ref<ChatAttachment | null>(null);
+const panelArtifactLoading = ref(false);
+const panelArtifactError = ref<string | null>(null);
+
+interface PanelArtifactPreview {
+  kind: "html" | "pdf" | "audio" | "website" | "text";
+  url?: string;
+  srcdoc?: string;
+  text?: string;
+}
+
+const panelArtifactPreview = ref<PanelArtifactPreview | null>(null);
+let currentPanelObjectUrl: string | null = null;
+
+function revokePanelObjectUrl() {
+  if (currentPanelObjectUrl) {
+    URL.revokeObjectURL(currentPanelObjectUrl);
+    currentPanelObjectUrl = null;
+  }
+}
+
+function panelArtifactIcon(att: ChatAttachment): string {
+  switch (att.previewMode) {
+    case "html":    return "⟨/⟩";
+    case "pdf":     return "⊞";
+    case "audio":   return "♪";
+    case "website": return "⊕";
+    case "markdown":return "✎";
+    case "json":    return "{}";
+    case "mermaid": return "⬡";
+    default:        return "▤";
+  }
+}
+
+async function selectPanelArtifact(att: ChatAttachment): Promise<void> {
+  if (selectedPanelArtifact.value?.filename === att.filename) return;
+  selectedPanelArtifact.value = att;
+  panelArtifactLoading.value = true;
+  panelArtifactError.value = null;
+  panelArtifactPreview.value = null;
+  revokePanelObjectUrl();
+  try {
+    if (att.externalUrl) {
+      panelArtifactPreview.value = {
+        kind: att.previewMode === "pdf" ? "pdf" : att.previewMode === "audio" ? "audio" : "html",
+        url: att.externalUrl,
+      };
+      return;
+    }
+    if (!att.relativePath) {
+      panelArtifactError.value = "No file path available for this artifact.";
+      return;
+    }
+    const { blob } = await gateway.fetchWorkspaceArtifactBlob(att.relativePath, { disposition: "inline" });
+    if (att.previewMode === "website") {
+      panelArtifactPreview.value = { kind: "website", srcdoc: await blob.text() };
+      return;
+    }
+    if (att.previewMode === "html" || att.previewMode === "pdf" || att.previewMode === "audio") {
+      const url = URL.createObjectURL(blob);
+      currentPanelObjectUrl = url;
+      panelArtifactPreview.value = { kind: att.previewMode, url };
+      return;
+    }
+    panelArtifactPreview.value = { kind: "text", text: await blob.text() };
+  } catch (err) {
+    panelArtifactError.value = err instanceof Error ? err.message : "Failed to load artifact.";
+  } finally {
+    panelArtifactLoading.value = false;
+  }
+}
+// ────────────────────────────────────────────────────────────────────────
+
 watch(() => gateway.currentSessionId, () => {
   shellStore.reset();
   lastAutoSpokenAssistantId.value = null;
   stopSendAcknowledgementPlayback();
   stopProgressPlayback();
   stopReplySpeechPlayback({ resetPreview: true });
+  selectedPanelArtifact.value = null;
+  panelArtifactPreview.value = null;
+  panelArtifactError.value = null;
+  revokePanelObjectUrl();
 });
 const runningSceneJobs = computed(() => scenesStore.runningJobs.slice(0, 3));
 const VISIBLE_TAIL = 6;
@@ -2961,6 +3102,7 @@ watch(messagesEl, attachScrollListener);
 onBeforeUnmount(() => {
   if (scrollListenerEl) scrollListenerEl.removeEventListener("scroll", recomputeScrollPosition);
   scrollListenerEl = null;
+  revokePanelObjectUrl();
 });
 
 watch(() => gateway.messages.length, scrollToBottom);
@@ -3344,8 +3486,7 @@ onUnmounted(() => {
   gap: 1rem;
 }
 
-.chat-main-column,
-.chat-side-column {
+.chat-main-column {
   min-height: 0;
 }
 
@@ -3358,73 +3499,9 @@ onUnmounted(() => {
   gap: 1rem;
 }
 
-.chat-side-stack {
-  height: 100%;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  padding-right: 0.25rem;
-}
-
-.chat-sidebar-placeholder {
-  border-radius: 1.5rem;
-  border: 1px dashed rgba(125, 211, 252, 0.18);
-  background: linear-gradient(180deg, rgba(5, 15, 32, 0.72), rgba(7, 13, 24, 0.58));
-  padding: 1.25rem;
-  color: rgb(148 163 184);
-}
-
-.chat-sidebar-placeholder__eyebrow {
-  font-size: 0.68rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgb(125 211 252);
-  margin-bottom: 0.5rem;
-}
-
-.chat-sidebar-placeholder__copy {
-  font-size: 0.9rem;
-  line-height: 1.6;
-  margin: 0;
-}
-
-.chat-mobile-panels {
-  border-radius: 1.1rem;
-  border: 1px solid rgba(125, 211, 252, 0.16);
-  background: rgba(6, 12, 24, 0.76);
-  overflow: hidden;
-}
-
-.chat-mobile-panels__summary {
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.8rem 1rem;
-  cursor: pointer;
-  color: rgb(226 232 240);
-  font-size: 0.82rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .chat-mobile-panels__summary::-webkit-details-marker,
 .chat-dropdown__summary::-webkit-details-marker {
   display: none;
-}
-
-.chat-mobile-panels__meta {
-  display: flex;
-  gap: 0.4rem;
-  color: rgb(125 211 252);
-  font-size: 0.68rem;
-}
-
-.chat-mobile-panels__body {
-  display: grid;
-  gap: 0.85rem;
-  padding: 0 0.85rem 0.85rem;
 }
 
 .chat-history-collapsed {
@@ -3837,11 +3914,134 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-@media (min-width: 1024px) {
-  .chat-workspace {
-    grid-template-columns: minmax(0, 1fr) minmax(21rem, 28rem);
-  }
+/* ── Panel artifact viewer styles ──────────────────────────────────── */
+.panel-artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  max-height: 10rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(168, 85, 247, 0.2) transparent;
+}
 
+.panel-artifact-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(168, 85, 247, 0.15);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgb(148 163 184);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  overflow: hidden;
+}
+
+.panel-artifact-pill:hover {
+  background: rgba(88, 28, 135, 0.2);
+  border-color: rgba(168, 85, 247, 0.35);
+  color: rgb(216 180 254);
+}
+
+.panel-artifact-pill--active {
+  background: rgba(88, 28, 135, 0.38);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: rgb(233 213 255);
+}
+
+.panel-artifact-pill__icon {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.panel-artifact-pill__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.panel-artifact-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(168, 85, 247, 0.15);
+  overflow: hidden;
+  background: rgba(5, 5, 15, 0.6);
+}
+
+.panel-artifact-preview__hint {
+  padding: 2rem 1rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: rgb(71 85 105);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel-artifact-preview__loading {
+  padding: 2rem 1rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: rgb(148 163 184);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.panel-artifact-preview__error {
+  padding: 1rem;
+  font-size: 0.78rem;
+  color: rgb(252 165 165);
+  background: rgba(239, 68, 68, 0.08);
+  border-top: 1px solid rgba(239, 68, 68, 0.2);
+  flex: 1;
+}
+
+.panel-artifact-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+  min-height: 0;
+  display: block;
+}
+
+.panel-artifact-audio {
+  width: 100%;
+  padding: 1rem;
+}
+
+.panel-artifact-text {
+  flex: 1;
+  overflow: auto;
+  padding: 0.75rem;
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: rgb(148 163 184);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(168, 85, 247, 0.2) transparent;
+}
+
+@media (min-width: 1024px) {
   .chat-composer {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

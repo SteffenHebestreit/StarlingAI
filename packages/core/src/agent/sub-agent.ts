@@ -96,6 +96,13 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
   swarm_delegate: 6,
+  // When the I13 cascade-timeout fallback injects web_search / web_fetch into a
+  // coordinator that ran out of delegation options, the default cap of 6 is far
+  // too low for multi-topic research briefs. Allow coordinators up to 20 direct
+  // searches and 25 fetches so they can produce a meaningful synthesis instead of
+  // returning a partial answer after hitting the cap mid-task.
+  web_search: 20,
+  web_fetch: 25,
 };
 
 const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
