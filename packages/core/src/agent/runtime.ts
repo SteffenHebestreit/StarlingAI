@@ -477,6 +477,10 @@ function buildRequiredResearchFallbackRoute(
         ].join(" "),
         tools: ["web_search", "web_fetch", "read_shared_facts", "share_finding"],
         maxIterations: 5,
+        // Leaf sub-agents default to `subAgentTurnSloMs` (60 s), which is far
+        // too short for a research specialist doing 5 web_search iterations.
+        // Grant 5 minutes — the same budget as the configured researcher agent.
+        timeoutMs: 300_000,
         task: userMessage,
       },
     };
@@ -1214,13 +1218,30 @@ function buildPriorEvidenceFollowUpPrompt(evidence: { evidence: string; itemCoun
  * tool output exists but the synthesis call returns 50-100 chars of
  * apology, leaving the user with effectively no answer.
  */
+/**
+ * Terminal finish reasons that indicate the runtime is "giving up" after
+ * a tool/orchestration loop — there's no useful work left to do, but we
+ * still owe the user the evidence we already have.  Extends beyond the
+ * original `synthesis_required_tool_call_rejected` to cover:
+ *
+ *  - `all_tool_calls_blocked`: model kept retrying tools that hit
+ *    per-turn caps — operator-visible 73-char "I can't" replies.
+ *  - `max_tool_iterations`: hit the iteration cap; the previous fallback
+ *    message ("I've gathered partial results...") is technically truthful
+ *    but throws away the partial results.
+ */
+const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
+  "synthesis_required_tool_call_rejected",
+  "all_tool_calls_blocked",
+  "max_tool_iterations",
+]);
+
 function shouldBypassTerminalSynthesisWithEvidence(
   finishReason: string,
   evidence: { evidence: string; itemCount: number } | null,
 ): boolean {
   if (!evidence) return false;
-  const synthesisLooping = finishReason === "synthesis_required_tool_call_rejected";
-  if (!synthesisLooping) return false;
+  if (!EVIDENCE_BACKSTOP_GIVE_UP_REASONS.has(finishReason)) return false;
   // Threshold: anything materially structured (>= 4 items) OR >= 800 chars
   // is good enough to stand on its own as a backstop answer.  The previous
   // 4000-char / 12-item bar excluded most real-world delegated outputs and
@@ -3634,11 +3655,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : await forceSynthesis(
         session, provider, signal, terminalSynthesisInstruction,
       );
-  const fallbackMsg = terminalFinishReason === "max_tool_iterations"
-    ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
-    : (bypassTerminalSynthesis && terminalEvidenceBackstop
-        ? terminalEvidenceBackstop.evidence
-        : resolveEmptyAssistantResponseFallback("", "", session));
+  // When we have evidence in scope, prefer it over the generic
+  // "I've gathered partial results" message — that string was correct
+  // about what happened but threw away the partial results.  Only fall
+  // back to the static message when no usable evidence exists.
+  const fallbackMsg = (bypassTerminalSynthesis && terminalEvidenceBackstop)
+    ? terminalEvidenceBackstop.evidence
+    : terminalFinishReason === "max_tool_iterations"
+      ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
+      : resolveEmptyAssistantResponseFallback("", "", session);
   // Second-chance evidence backstop.  Even when the synthesis call ran,
   // it often comes back with an apologetic 50-200 char reply while
   // substantial structured evidence sits in the transcript — the exact
