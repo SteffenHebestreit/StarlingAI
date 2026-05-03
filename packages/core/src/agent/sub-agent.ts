@@ -2000,6 +2000,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             toolCount,
             iterations,
             artifacts,
+            evidenceSnippets: recentEvidenceSnippets,
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
@@ -2032,6 +2033,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           toolCount,
           iterations,
           artifacts,
+          evidenceSnippets: recentEvidenceSnippets,
         });
         const stats = buildStats("cancelled", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -2201,6 +2203,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             toolCount,
             iterations,
             artifacts,
+            evidenceSnippets: recentEvidenceSnippets,
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
@@ -2234,6 +2237,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             toolCount,
             iterations,
             artifacts,
+            evidenceSnippets: recentEvidenceSnippets,
           });
           const stats = buildStats("cancelled", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
