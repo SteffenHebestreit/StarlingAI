@@ -907,7 +907,17 @@ describe("runtime delegated-loop regressions", () => {
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toBe("synthesized");
+    // The mock synthesis returns the literal "synthesized" — a 12-char
+    // reply that the runtime now correctly recognizes as underpowered
+    // when substantial delegated evidence is available.  In that case
+    // the response is the evidence-backstop content rather than the
+    // synthesis fragment.  This is the fix for "all info gathered but
+    // no answer" turns: the user gets the actual evidence the agent
+    // collected, not a 50-100 char apology.  The guardrail still fires
+    // and synthesis is still attempted — only the FINAL response prefers
+    // evidence over a stub-length synthesis output.
+    expect(result.response).toContain("Delegated result from ephemeral:weather_chart_generator");
+    expect(result.response).toContain("specific, month-by-month average temperature data for last year (2025)");
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).toHaveBeenCalledTimes(1);

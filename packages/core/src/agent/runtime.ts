@@ -1204,12 +1204,53 @@ function buildPriorEvidenceFollowUpPrompt(evidence: { evidence: string; itemCoun
   ].join(" ");
 }
 
+/**
+ * Decide whether to skip the LLM synthesis call entirely and surface the
+ * delegated evidence verbatim.  Fires when either the model has been
+ * caught looping on rejected tool calls (`synthesis_required_tool_call_rejected`)
+ * or the runtime hit max iterations with substantial evidence already in
+ * the transcript.  The threshold deliberately accepts modest evidence
+ * payloads — operators repeatedly hit the failure mode where 1-2 KB of
+ * tool output exists but the synthesis call returns 50-100 chars of
+ * apology, leaving the user with effectively no answer.
+ */
 function shouldBypassTerminalSynthesisWithEvidence(
   finishReason: string,
   evidence: { evidence: string; itemCount: number } | null,
 ): boolean {
-  return finishReason === "synthesis_required_tool_call_rejected"
-    && Boolean(evidence && (evidence.evidence.length >= 4000 || evidence.itemCount >= 12));
+  if (!evidence) return false;
+  const synthesisLooping = finishReason === "synthesis_required_tool_call_rejected";
+  if (!synthesisLooping) return false;
+  // Threshold: anything materially structured (>= 4 items) OR >= 800 chars
+  // is good enough to stand on its own as a backstop answer.  The previous
+  // 4000-char / 12-item bar excluded most real-world delegated outputs and
+  // forced the runtime through a synthesis path that consistently produced
+  // empty / apologetic 50–100 char replies.
+  return evidence.itemCount >= 4 || evidence.evidence.length >= 800;
+}
+
+/**
+ * Catch the post-synthesis case the bypass missed: the synthesis call ran,
+ * but came back with a suspiciously short reply while substantial evidence
+ * is still sitting in the transcript.  In that situation the answer the
+ * user actually wants is the evidence — not whatever 50-100 char fragment
+ * the synthesis produced.
+ */
+function looksLikeUnderpoweredSynthesis(synthesized: string | null): boolean {
+  if (synthesized === null) return true;
+  const trimmed = synthesized.trim();
+  if (trimmed.length === 0) return true;
+  // 300 chars is roughly two paragraphs of substantive text — anything
+  // shorter for a turn that did real tool work is almost certainly an
+  // apology, an empty acknowledgement, or a refusal.
+  if (trimmed.length < 300) return true;
+  if (looksLikeGenericNoUsableReply(trimmed)) return true;
+  // Refusal / apology shapes that don't carry information.
+  if (/^(?:i\s+(?:am\s+)?(?:sorry|unable|can(?:not|'?t)|wasn'?t\s+able)|sorry,\s+i)\b/i.test(trimmed)
+    && trimmed.length < 600) {
+    return true;
+  }
+  return false;
 }
 
 async function enforceDelegateCoverage(
@@ -3598,9 +3639,31 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : (bypassTerminalSynthesis && terminalEvidenceBackstop
         ? terminalEvidenceBackstop.evidence
         : resolveEmptyAssistantResponseFallback("", "", session));
-  const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(synthesized ?? fallbackMsg, iterationCount) || fallbackMsg;
+  // Second-chance evidence backstop.  Even when the synthesis call ran,
+  // it often comes back with an apologetic 50-200 char reply while
+  // substantial structured evidence sits in the transcript — the exact
+  // "all the info, no answer" failure mode operators report.  When the
+  // synthesis is underpowered AND we have evidence available, prefer the
+  // evidence.  Strictly post-hoc — doesn't change cases where synthesis
+  // genuinely produced a real answer.
+  const useEvidenceOverSynthesis = !bypassTerminalSynthesis
+    && terminalEvidenceBackstop
+    && looksLikeUnderpoweredSynthesis(synthesized);
+  if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
+    logAudit("sub_agent_synthesis_forced", {
+      reason: "underpowered_synthesis_replaced_with_evidence",
+      finishReason: terminalFinishReason,
+      synthesizedLength: synthesized?.length ?? 0,
+      evidenceLength: terminalEvidenceBackstop.evidence.length,
+      evidenceItems: terminalEvidenceBackstop.itemCount,
+    }, { sessionId: session.id, severity: "warn" });
+  }
+  const finalCandidate = useEvidenceOverSynthesis && terminalEvidenceBackstop
+    ? terminalEvidenceBackstop.evidence
+    : (synthesized ?? fallbackMsg);
+  const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount) || fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
-    ? resolveEmptyAssistantResponseFallback("", "", session)
+    ? (terminalEvidenceBackstop?.evidence ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
   const finalMsg = await rewriteTerminalResponseIfNeeded(evidenceBackstopMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
