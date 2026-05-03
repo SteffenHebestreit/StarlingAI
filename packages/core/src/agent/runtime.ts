@@ -239,6 +239,7 @@ const PERSISTED_SWARM_STATE_TOOL_NAMES = new Set([
 const AGENT_DISCOVERY_TOOL_NAMES = new Set([
   "search_agents",
   "list_agents",
+  "search_tools",
   "search_workflows",
 ]);
 
@@ -1730,9 +1731,10 @@ export function buildModelVisibleToolResult(
   if (toolName === "list_agents") {
     const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
     return [
-      "Agent catalog listing only. No delegation has happened yet.",
-      "IMPORTANT: Treat this as discovery context, not as proof that any task was routed or executed.",
-      `Observed evidence:\n${evidence || "No agent catalog returned."}`,
+      "Agent search results only. No delegation has happened yet.",
+      "IMPORTANT: Treat this as candidate-selection guidance, not as proof that any task was routed or executed.",
+      "If this turn ends without a completed delegate_to_agent call, do NOT tell the user that work was routed to any suggested agent.",
+      `Observed evidence:\n${evidence || "No agent candidates returned."}`,
     ].join("\n");
   }
 
@@ -1889,7 +1891,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
   const approvedRunCandidateFollowUp = detectApprovedRunCandidateFollowUp(session.getHistory(), userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
-  // When autoApprove is set, wrap the approvalCallback to always return true.
+  // Register tool schema size on the session so the history trimmer accounts
+  // for the full actual prompt cost (system + tool schemas + history).
+  session.setToolSchemasChars(JSON.stringify(tools).length);
   const resolvedApprovalCallback = opts.autoApprove
     ? async (_toolName: string, _args: Record<string, unknown>) => true
     : opts.approvalCallback;
@@ -2312,6 +2316,57 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         lastSuppressedAssistantText = trimmedContent;
       }
       llmResponse = { ...llmResponse, content: null };
+    }
+
+    // ── Pre-emptive synthesis: every requested tool is already at its
+    // per-turn cap.  Without this guard the runtime invokes each tool,
+    // gets blocked with reason=per_turn_limit, accumulates blocked
+    // results, and only forces synthesis after FULLY_BLOCKED_ITERATION_THRESHOLD
+    // (= 2) consecutive zero-execution iterations — burning two LLM calls
+    // worth of latency and tokens for no gain.  When we can predict
+    // every call will be blocked, skip directly to the terminal synthesis
+    // path with the same finishReason the post-hoc detector would emit.
+    //
+    // Exclusion: orchestration launchers (delegate_to_agent and friends)
+    // have richer cap-hit handling further down in the per-tool-call loop
+    // — buildDelegationLoopResponse emits a "best grounded result collected
+    // so far" message with the harvested evidence plus an explicit "raise
+    // the limit / stop here" question to the user.  Pre-empting on those
+    // would replace that targeted UX with the generic evidence-backstop,
+    // which is strictly worse for the operator.
+    const ORCHESTRATION_LAUNCHER_PREEMPT_EXCLUSIONS = new Set([
+      "delegate_to_agent",
+      "parallel_delegate",
+      "swarm_delegate",
+      "run_task_graph",
+      "run_workflow",
+    ]);
+    if (
+      llmResponse.tool_calls.length > 0
+      && llmResponse.tool_calls.every((tc) => {
+        if (ORCHESTRATION_LAUNCHER_PREEMPT_EXCLUSIONS.has(tc.name)) return false;
+        const limit = getPerTurnToolCallLimit(tc.name);
+        if (!limit) return false;
+        const current = _turnToolCallCounts.get(tc.name) ?? 0;
+        return current >= limit;
+      })
+    ) {
+      const blockedNames = [...new Set(llmResponse.tool_calls.map((tc) => tc.name))];
+      logAudit("tool_loop_detected", {
+        reason: "all_tool_calls_capped_preempt",
+        blockedTools: blockedNames,
+        iterations: iterationCount,
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "synthesis_required", details: "preempt_all_capped" });
+      terminalFinishReason = "all_tool_calls_blocked";
+      terminalSynthesisInstruction =
+        "Every tool the model attempted in this iteration has already hit its per-turn cap. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. Do NOT invent missing information.";
+      _forcedSynthesisFired = true;
+      log.warn(
+        { iterationCount, blockedTools: blockedNames },
+        "Pre-emptive synthesis: all requested tools already at per-turn cap",
+      );
+      break;
     }
 
     const workflowCatalogToolRequested = llmResponse.tool_calls.some((toolCall) => isWorkflowCatalogToolName(toolCall.name));
