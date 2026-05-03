@@ -73,6 +73,7 @@ interface GatewayEvent {
 
 interface PendingApproval {
   resolve: (approved: boolean) => void;
+  reject: (err: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -386,7 +387,13 @@ export class RpcConnection {
         if (pending) {
           clearTimeout(pending.timeout);
           this.pendingApprovals.delete(approvalId);
-          pending.resolve(approved);
+          // Use reject when the user explicitly denies so the error message
+          // says "denied by user"; use resolve(true) for explicit approval.
+          if (approved) {
+            pending.resolve(true);
+          } else {
+            pending.reject(new Error(`Tool approval explicitly denied by user`));
+          }
         }
         return { ok: true };
       }
@@ -689,14 +696,16 @@ export class RpcConnection {
             const approvalId = randomUUID();
             this.sendEvent({ type: "agent.approval_needed", data: { requestId, toolName, args, approvalId } });
 
-            return new Promise<boolean>((resolve) => {
-              // Auto-deny after 60 s if the user does not respond
+            return new Promise<boolean>((resolve, reject) => {
+              // Reject after 60 s if the user does not respond — produces a
+              // distinguishable error rather than a silent false ("denied by user")
+              // so the tool-timeout intervention fires instead of approval_required.
               const timeout = setTimeout(() => {
                 this.pendingApprovals.delete(approvalId);
                 log.warn({ approvalId, toolName }, "Approval timed out — denying");
-                resolve(false);
+                reject(new Error(`Tool '${toolName}' approval timed out (no response within 60 s)`));
               }, 60_000);
-              this.pendingApprovals.set(approvalId, { resolve, timeout });
+              this.pendingApprovals.set(approvalId, { resolve, reject, timeout });
             });
           },
           inputCallback: async (question, choices, timeoutMs = 120_000) => {
