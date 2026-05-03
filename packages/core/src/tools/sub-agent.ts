@@ -3341,6 +3341,10 @@ registerTool({
         type: "number",
         description: "Max tool-call iterations before the agent is forced to stop (default: 5, max: 10)",
       },
+      timeoutMs: {
+        type: "number",
+        description: "Wall-clock timeout in milliseconds for the ephemeral agent run (minimum: 60000, maximum: 600000). Defaults to 60 s if omitted. Use 300000 for research tasks with multiple web_search iterations.",
+      },
       task: {
         type: "string",
         description: "The task or question for the ephemeral agent to complete",
@@ -3395,6 +3399,13 @@ registerTool({
       : {};
 
     const maxIter = Math.min(10, Math.max(1, Number(args["maxIterations"] ?? 5) || 5));
+    // Honour an explicit timeoutMs from the caller (min 60 s, max 10 min).
+    // The leaf-agent default of 60 s is far too short for research tasks with
+    // multiple web_search iterations — callers should pass 300000 for those.
+    const rawTimeoutMs = typeof args["timeoutMs"] === "number" ? args["timeoutMs"] : undefined;
+    const resolvedTimeoutMs = rawTimeoutMs !== undefined
+      ? Math.min(600_000, Math.max(60_000, rawTimeoutMs))
+      : undefined;
 
     const inlineConfig = {
       description: String(args["description"] ?? agentName),
@@ -3408,6 +3419,7 @@ registerTool({
         temperature: typeof modelOverride["temperature"] === "number" ? modelOverride["temperature"] : undefined,
         maxTokens: typeof modelOverride["maxTokens"] === "number" ? modelOverride["maxTokens"] : undefined,
       } : undefined,
+      ...(resolvedTimeoutMs !== undefined ? { turnTimeoutMs: resolvedTimeoutMs } : {}),
       // Ephemeral agents run in-process: the agent-worker container cannot reach
       // gateway-bound tools (web_search, Playwright, MCP). Disable containerization
       // so tool calls resolve through the live gateway runtime instead.
