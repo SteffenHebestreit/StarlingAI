@@ -56,6 +56,13 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "web_search",
   "web_fetch",
   "browser_navigate",
+  // Browser interaction tools require per-call approval; include them so they
+  // are stripped when synthesis is forced and cannot hit the approval gate
+  // after the agent already has sufficient evidence.
+  "browser_click",
+  "browser_type",
+  "browser_select_option",
+  "site_fill_credentials",
 ]);
 
 // Per-tool call caps enforced inside sub-agent runs.

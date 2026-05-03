@@ -59,4 +59,26 @@ describe("tool registry approval enforcement", () => {
     expect(result.error).toBe("Tool 'git_status' execution denied by user");
     expect(approvalCallback).toHaveBeenCalledWith("git_status", { path: "packages/core" });
   });
+
+  it("propagates a rejection from the approval callback (e.g. timeout) as the tool error", async () => {
+    // rpc.ts rejects the approval promise on timeout rather than resolving false,
+    // so the error message says "timed out" instead of "denied by user".
+    // The try-catch in registry.ts must propagate the rejection message directly.
+    const approvalCallback = vi.fn(() =>
+      Promise.reject(new Error("Tool 'http_request' approval timed out (no response within 60 s)")),
+    );
+    const { executeTool } = await import("../tools/registry.js");
+
+    const result = await executeTool("http_request", {
+      url: "https://example.com/healthz",
+    }, {
+      sessionId: "approval-timeout",
+      workspacePath: "/workspace",
+      approvalCallback,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("timed out");
+    expect(result.error).not.toContain("denied by user");
+  });
 });

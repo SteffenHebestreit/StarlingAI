@@ -408,7 +408,20 @@ export async function executeTool(
 
   if (requiresApproval) {
     if (context.approvalCallback) {
-      const approved = await context.approvalCallback(name, args);
+      let approved: boolean;
+      try {
+        approved = await context.approvalCallback(name, args);
+      } catch (err) {
+        // The approval callback may reject for two reasons:
+        //   1. Timeout (no user response within the window) — message includes "timed out"
+        //   2. Explicit user denial — message includes "denied by user"
+        // Propagate the rejection message directly so interventions.ts can classify it.
+        return {
+          success: false,
+          output: "",
+          error: err instanceof Error ? err.message : `Tool '${name}' approval failed`,
+        };
+      }
       if (!approved) {
         return { success: false, output: "", error: `Tool '${name}' execution denied by user` };
       }
