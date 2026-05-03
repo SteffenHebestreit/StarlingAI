@@ -8,7 +8,7 @@
  * Vector index uses MemGraph's vector search: CREATE VECTOR INDEX ... WITH CONFIG {...}
  */
 
-import { isNeo4jAvailable, runCypher } from "./neo4j.js";
+import { isGraphDbAvailable, runCypher } from "./neo4j.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("db:graph-schema");
@@ -47,7 +47,7 @@ const VECTOR_INDEX_CYPHER = `
  * index errors are caught and logged at DEBUG level.
  */
 export async function initGraphSchema(): Promise<void> {
-  if (!isNeo4jAvailable()) {
+  if (!isGraphDbAvailable()) {
     log.debug("MemGraph not available — skipping schema init");
     return;
   }

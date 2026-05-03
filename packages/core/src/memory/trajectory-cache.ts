@@ -22,7 +22,7 @@ const CACHE_FILE = ".starlingai/trajectory_cache.ndjson";
 const INVALIDATION_FILE = ".starlingai/trajectory_cache_invalidations.json";
 const INVALIDATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_CACHE_LINES = 5_000;
-const SIMILARITY_THRESHOLD = 0.86;
+const SIMILARITY_THRESHOLD = 0.82;
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;          // 24 h
 const FRESH_TTL_SECONDS = 30 * 60;                  // 30 min for freshness-sensitive
 

@@ -40,6 +40,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  search_tools: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Semantic search over registered tools — returns relevant tool names and descriptions for a task",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   list_federation_peers: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List configured federation peer instances and their advertised agent + tool surface",

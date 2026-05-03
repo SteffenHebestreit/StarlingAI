@@ -264,9 +264,36 @@ export async function formatScopedMemoryGuidance(
     graphL0Layer(opts.targetAgent, Math.round(maxChars * 0.35)),
   ]);
 
+  // Disk-based L0 fallback — when MemGraph is unavailable, inject decisions/preferences
+  // unconditionally from disk so they appear in every prompt regardless of query similarity.
+  let resolvedL0 = l0Section;
+  if (!resolvedL0) {
+    const l0Budget = Math.round(maxChars * 0.35);
+    const diskL0 = [
+      ...readDurableMemoryRecords("workspace", workspacePath),
+      ...readDurableMemoryRecords("user", workspacePath),
+    ]
+      .filter((r) => r.kind === "decision" || r.kind === "preference")
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, 5);
+    if (diskL0.length > 0) {
+      const l0Lines: string[] = [];
+      let l0Chars = "## Critical Memory".length + 1;
+      for (const r of diskL0) {
+        const line = `- [${r.kind}] ${truncate(singleLine(r.content), 220)}`;
+        if (l0Chars + line.length + 1 > l0Budget) break;
+        l0Lines.push(line);
+        l0Chars += line.length + 1;
+      }
+      if (l0Lines.length > 0) {
+        resolvedL0 = ["## Critical Memory", ...l0Lines].join("\n");
+      }
+    }
+  }
+
   const lines: string[] = [];
   // Budget remaining for ranked results after L0 consumes its share
-  let totalChars = "## Relevant Memory".length + 1 + (l0Section ? l0Section.length + 2 : 0);
+  let totalChars = "## Relevant Memory".length + 1 + (resolvedL0 ? resolvedL0.length + 2 : 0);
 
   for (const record of records) {
     const line = `- [${record.scope}/${record.kind}] ${truncate(record.subject, 120)}: ${truncate(singleLine(record.content), 220)}`;
@@ -276,7 +303,7 @@ export async function formatScopedMemoryGuidance(
   }
 
   const sections: string[] = [];
-  if (l0Section) sections.push(l0Section);
+  if (resolvedL0) sections.push(resolvedL0);
   if (lines.length > 0) sections.push(["## Relevant Memory", ...lines].join("\n"));
 
   return sections.join("\n\n");

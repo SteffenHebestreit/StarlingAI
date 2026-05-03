@@ -36,8 +36,9 @@ This tier model is also the hard boundary for self-improvement. The swarm may re
 
 | Tool | Description |
 |------|-------------|
-| `list_agents` | List all registered sub-agents and their capabilities |
-| `search_agents` | Score agents against a query using hybrid routing |
+| `list_agents` | Search registered sub-agents semantically — requires a query, returns top matches (no full catalog dump) |
+| `search_agents` | Score agents against a query using hybrid routing — returns the single best match |
+| `search_tools` | Semantic search over registered tools — find which tool handles a sub-task without loading all tool schemas |
 | `search_workflows` | Search reusable scenes and jobs in the workflow catalog |
 | `read_file` | Read a file from the workspace |
 | `list_files` | List files in a workspace directory |

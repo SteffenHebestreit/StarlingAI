@@ -32,7 +32,7 @@ import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStor
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
 import { loadPlugins, watchPluginsDirectory, stopPluginWatcher } from "./plugin/loader.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
-import { closeNeo4j } from "./db/neo4j.js";
+import { closeGraphDb } from "./db/neo4j.js";
 import { initGraphSchema } from "./db/graph-schema.js";
 import { startGraphJobs } from "./runtime/graph-jobs.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
@@ -330,7 +330,7 @@ export async function main() {
     stopPluginWatcher();
     stopCostAggregator();
     await shutdownEphemeralStore();
-    await closeNeo4j();
+    await closeGraphDb();
     stopAllCronJobs();
     stopAllReminders();
     stopAllTimers();
