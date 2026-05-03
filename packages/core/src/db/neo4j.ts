@@ -16,7 +16,7 @@ const log = childLogger("db:graph");
 let _driver: Driver | null = null;
 let _available = false;
 
-export function getNeo4jDriver(): Driver | null {
+export function getGraphDriver(): Driver | null {
   if (_driver) return _driver;
 
   const url = process.env["MEMGRAPH_URL"] ?? process.env["NEO4J_URL"];
@@ -41,42 +41,41 @@ export function getNeo4jDriver(): Driver | null {
   }
 }
 
-export function isNeo4jAvailable(): boolean {
+export function isGraphDbAvailable(): boolean {
   // Lazy-init: callers (initGraphSchema, /api/graph/*, the runtime status
   // probe) ask "is MemGraph available?" before any Cypher query.  Without
   // an eager driver attempt here, `_available` stays `false` forever — the
   // schema bootstrap short-circuits, no graph operation ever runs, and the
   // dashboard reports "MemGraph offline" even when MEMGRAPH_URL is wired.
-  if (!_driver) getNeo4jDriver();
+  if (!_driver) getGraphDriver();
   return _available && _driver !== null;
 }
 
 /**
- * Run a Cypher query. Returns null if Neo4j is unavailable.
+ * Run a Cypher query. Returns null if the graph DB (MemGraph) is unavailable.
  *
  * `opts.autoCommit` runs the query through `session.run()` directly,
  * bypassing the managed-transaction wrapper. Required for DDL on MemGraph
  * (CREATE INDEX, CREATE VECTOR INDEX, …) — MemGraph rejects index
  * manipulation inside multicommand transactions, which is what
- * `executeWrite`/`executeRead` opens. Plain Neo4j accepts both modes.
+ * `executeWrite`/`executeRead` opens.
  */
 export async function runCypher(
   cypher: string,
   params: Record<string, unknown> = {},
   opts: { write?: boolean; autoCommit?: boolean } = {},
 ): Promise<QueryResult | null> {
-  const driver = getNeo4jDriver();
+  const driver = getGraphDriver();
   if (!driver) return null;
 
   const session: Session = driver.session({
     defaultAccessMode: opts.write ? neo4j.session.WRITE : neo4j.session.READ,
   });
 
-  // Bolt sends JS numbers as floats by default.  MemGraph (and Neo4j)
-  // rejects float values for clauses that require integers — most commonly
-  // `LIMIT $n` ("Limit on number of returned elements must be an integer").
-  // Coerce any safe-integer parameter to a Bolt Integer here so call sites
-  // can keep using plain JS numbers without per-query wrapping.
+  // Bolt sends JS numbers as floats by default.  MemGraph rejects float values
+  // for clauses that require integers — most commonly `LIMIT $n` ("Limit on
+  // number of returned elements must be an integer").  Coerce any safe-integer
+  // parameter to a Bolt Integer here so call sites can use plain JS numbers.
   const coerced = coerceIntParams(params);
 
   try {
@@ -113,21 +112,21 @@ function coerceIntParams(params: Record<string, unknown>): Record<string, unknow
   return out;
 }
 
-/** Convert a Neo4j QueryResult to plain JS objects. */
+/** Convert a MemGraph/Bolt QueryResult to plain JS objects. */
 export function toPlainRecords(result: QueryResult): Record<string, unknown>[] {
   return result.records.map(record => {
     const obj: Record<string, unknown> = {};
     for (const key of record.keys) {
       const val = record.get(key);
-      obj[key as string] = convertNeo4jValue(val);
+      obj[key as string] = convertGraphValue(val);
     }
     return obj;
   });
 }
 
-function convertNeo4jValue(val: unknown): unknown {
+function convertGraphValue(val: unknown): unknown {
   if (val === null || val === undefined) return val;
-  // Neo4j integers (neo4j.Integer)
+  // Bolt Integer type (used by both MemGraph and Neo4j drivers)
   if (neo4j.isInt(val as Parameters<typeof neo4j.isInt>[0])) return (val as { toNumber(): number }).toNumber();
   // Node
   if (typeof val === "object" && val !== null && "labels" in val && "properties" in val) {
@@ -138,11 +137,11 @@ function convertNeo4jValue(val: unknown): unknown {
     return { _type: (val as { type: string }).type, ...(val as { properties: Record<string, unknown> }).properties };
   }
   // Array
-  if (Array.isArray(val)) return val.map(convertNeo4jValue);
+  if (Array.isArray(val)) return val.map(convertGraphValue);
   return val;
 }
 
-export async function closeNeo4j(): Promise<void> {
+export async function closeGraphDb(): Promise<void> {
   if (_driver) {
     await _driver.close();
     _driver = null;

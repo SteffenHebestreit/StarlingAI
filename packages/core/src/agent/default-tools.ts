@@ -73,6 +73,7 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "swarm_delegate",
   "list_agents",
   "search_agents",
+  "search_tools",
   "search_workflows",
   "run_workflow",
   "parallel_delegate",

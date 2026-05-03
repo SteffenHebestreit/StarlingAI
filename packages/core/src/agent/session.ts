@@ -108,6 +108,10 @@ export class AgentSession {
   private updatedAt: Date;
   private archivedAt?: Date;
   private endLogged = false;
+  /** Serialised byte length of the tool schemas sent to the LLM for the current turn.
+   *  Updated by the runtime each turn before the LLM loop starts so
+   *  maybeTrimHistory accounts for the full actual prompt size. */
+  private toolSchemasChars = 0;
 
   constructor(opts: AgentSessionOptions & {
     createdAt?: Date;
@@ -324,6 +328,12 @@ export class AgentSession {
     return this.turnCount;
   }
 
+  /** Call once per turn, after tool definitions are resolved, so the history
+   *  trimmer accounts for the full prompt size (system + tools + history). */
+  setToolSchemasChars(chars: number): void {
+    this.toolSchemasChars = Math.max(0, chars);
+  }
+
   reset(): void {
     this.history = [];
     this.turnCount = 0;
@@ -501,12 +511,12 @@ export class AgentSession {
   private maybeTrimHistory(): void {
     const config = getConfig();
     const maxTokenEstimate = config.agents.defaults.model.contextWindow * 0.75;
-    if (estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory()) <= maxTokenEstimate || this.history.length <= 6) return;
+    if (estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) <= maxTokenEstimate || this.history.length <= 6) return;
 
     const minKeep = 6; // always keep at least the last 6 messages
     let trimmed = false;
 
-    while (this.history.length > minKeep && estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory()) > maxTokenEstimate) {
+    while (this.history.length > minKeep && estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) > maxTokenEstimate) {
       const maxDrop = this.history.length - minKeep;
       let safeCut = 0;
 
@@ -540,13 +550,14 @@ export class AgentSession {
   }
 }
 
-function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage[]): number {
+function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage[], toolSchemasChars = 0): number {
   const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
+  const toolSchemaTokens = Math.ceil(toolSchemasChars / 4);
   const historyTokens = history.reduce((sum, message) => {
     const contentLength = typeof message.content === "string" ? message.content.length : 0;
     return sum + Math.ceil(contentLength / 4);
   }, 0);
-  return systemPromptTokens + historyTokens;
+  return systemPromptTokens + toolSchemaTokens + historyTokens;
 }
 
 function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState | undefined {
@@ -822,7 +833,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
 
   const subAgentEntries = Object.entries(config.subAgents ?? {});
   const agentDiscoverySection = subAgentEntries.length > 0
-    ? `## Agent Discovery\n${subAgentEntries.length} specialist sub-agents are configured. Prefer search_agents for discovery and routing instead of relying on a static catalog in the prompt. search_agents uses semantic ranking plus runtime history, so it can surface the best match even when agent names are non-obvious. Use list_agents only when the user explicitly asks for the full catalog or when you need to inspect every configured agent.`
+    ? `## Agent Discovery\n${subAgentEntries.length} specialist sub-agents are configured. Prefer search_agents for discovery and routing instead of relying on a static catalog in the prompt. search_agents uses semantic ranking plus runtime history, so it can surface the best match even when agent names are non-obvious. Use list_agents(query) when you need to browse several candidates simultaneously — it also requires a query and searches semantically.`
     : "## Agent Discovery\nNo specialist agents are configured. Use the direct tools available to you.";
   const customInstructionsSection = customInstructions
     ? `\n\n## Main Assistant Custom Instructions\n${customInstructions}`
@@ -908,7 +919,7 @@ ${personalityGuidance}
 - Maximum 1 create_ephemeral_agent call per turn, and only when existing agents are clearly insufficient.
 - Simple questions that don't need external data must be answered directly — do NOT delegate.
 - Once you have enough information from delegations, STOP calling tools and write your final answer.
-- Do NOT call list_agents every turn — prefer search_agents for routing. Call list_agents only when the user explicitly wants the full catalog or when you must inspect every configured agent.
+- Do NOT call list_agents every turn — prefer search_agents for routing. Call list_agents(query) when you need to browse several candidates at once — it requires a query and searches semantically.
 - Do NOT call search_workflows repeatedly for the same request. One discovery pass is enough before choosing run_workflow or agent orchestration.
 - Call get_swarm_state when you need to inspect current swarm progress instead of re-planning from scratch.
 - When unsure which agent handles a task, prefer delegate_to_agent(task: "...") without agentName first. The runtime uses autonomous bidding plus semantic routing to choose the specialist. Use search_agents only when you need to inspect or justify the candidate set explicitly.

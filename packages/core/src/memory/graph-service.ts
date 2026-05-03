@@ -31,7 +31,7 @@
  *   (Agent)-[:RETRIEVED {ts, sessionId, rank, wasUseful}]->(MemoryRecord)
  */
 
-import { isNeo4jAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
+import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
@@ -66,7 +66,7 @@ export async function upsertMemoryToGraph(
   agentName?: string,
   sessionId?: string,
 ): Promise<void> {
-  if (!isNeo4jAvailable()) return;
+  if (!isGraphDbAvailable()) return;
 
   // Derive domain (wing) and topic (room) from existing MemoryRecord fields
   const domain = record.ownerType === "agent"
@@ -139,7 +139,7 @@ export async function upsertMemoryToGraph(
 }
 
 async function computeAndStoreEmbedding(id: string, content: string): Promise<void> {
-  if (!isNeo4jAvailable()) return;
+  if (!isGraphDbAvailable()) return;
 
   try {
     const embeddingModel = getConfig().agents.defaults.model.embeddingModel;
@@ -172,7 +172,7 @@ export async function graphL0Layer(
   domain?: string,
   maxChars = 600,
 ): Promise<string> {
-  if (!isNeo4jAvailable()) return "";
+  if (!isGraphDbAvailable()) return "";
 
   try {
     const result = await runCypher(`
@@ -228,7 +228,7 @@ export async function graphL0Layer(
  */
 export async function graphRerank(candidateIds: string[]): Promise<Map<string, number>> {
   const scores = new Map<string, number>();
-  if (!isNeo4jAvailable() || candidateIds.length === 0) return scores;
+  if (!isGraphDbAvailable() || candidateIds.length === 0) return scores;
 
   try {
     const result = await runCypher(`
@@ -288,7 +288,7 @@ export async function graphTrackRetrieval(
   sessionId: string,
   rank: number,
 ): Promise<void> {
-  if (!isNeo4jAvailable()) return;
+  if (!isGraphDbAvailable()) return;
 
   try {
     await runCypher(`
@@ -328,7 +328,7 @@ export async function graphPromoteFact(
   agentName: string,
   sessionId: string,
 ): Promise<void> {
-  if (!isNeo4jAvailable()) return;
+  if (!isGraphDbAvailable()) return;
 
   // Stable ID: same agent + same key always resolves to the same node
   const id = `fact:${agentName}:${key.toLowerCase().replace(/\s+/g, "_").slice(0, 60)}`;
@@ -393,7 +393,7 @@ export async function graphPromoteFact(
  * Results are returned for human review — this function never deletes anything.
  */
 export async function graphDetectOutliers(): Promise<GraphOutlier[]> {
-  if (!isNeo4jAvailable()) return [];
+  if (!isGraphDbAvailable()) return [];
 
   try {
     const result = await runCypher(`
@@ -471,7 +471,7 @@ export async function graphMarkSessionRetrievalsUseful(
   sessionId: string,
   opts: { boost?: number } = {},
 ): Promise<number> {
-  if (!isNeo4jAvailable() || !sessionId) return 0;
+  if (!isGraphDbAvailable() || !sessionId) return 0;
   const boost = Math.max(0.001, Math.min(0.2, opts.boost ?? 0.05));
 
   try {
@@ -512,7 +512,7 @@ export async function graphMarkSessionRetrievalsUnhelpful(
   sessionId: string,
   opts: { penalty?: number; floor?: number } = {},
 ): Promise<number> {
-  if (!isNeo4jAvailable() || !sessionId) return 0;
+  if (!isGraphDbAvailable() || !sessionId) return 0;
   const penalty = Math.max(0.001, Math.min(0.2, opts.penalty ?? 0.03));
   const floor = Math.max(0, Math.min(0.5, opts.floor ?? 0.05));
 
@@ -562,7 +562,7 @@ export async function graphDecayUnusedMemories(opts: {
   decay?: number;
   floor?: number;
 } = {}): Promise<number> {
-  if (!isNeo4jAvailable()) return 0;
+  if (!isGraphDbAvailable()) return 0;
   const staleDays = Math.max(1, opts.staleDays ?? 14);
   const minRetrievals = Math.max(1, opts.minRetrievalsForDecay ?? 3);
   const decay = Math.max(0.001, Math.min(0.2, opts.decay ?? 0.02));
@@ -621,7 +621,7 @@ export async function graphDecayUnusedMemories(opts: {
  * Returns the number of nodes updated.
  */
 export async function graphUpdateCentrality(): Promise<number> {
-  if (!isNeo4jAvailable()) return 0;
+  if (!isGraphDbAvailable()) return 0;
 
   try {
     const result = await runCypher(`
@@ -649,7 +649,7 @@ export async function graphUpdateCentrality(): Promise<number> {
  * Returns the number of nodes updated.
  */
 export async function graphUpdateCommunities(): Promise<number> {
-  if (!isNeo4jAvailable()) return 0;
+  if (!isGraphDbAvailable()) return 0;
 
   try {
     const result = await runCypher(`
@@ -680,7 +680,7 @@ export async function graphUpdateCommunities(): Promise<number> {
  * Returns the number of SIMILAR_TO edges created.
  */
 export async function graphBuildSimilarityLinks(newRecordIds?: string[]): Promise<number> {
-  if (!isNeo4jAvailable()) return 0;
+  if (!isGraphDbAvailable()) return 0;
 
   const matchClause = newRecordIds && newRecordIds.length > 0
     ? "MATCH (m:MemoryRecord) WHERE m.id IN $ids AND m.embedding IS NOT NULL"
@@ -688,7 +688,7 @@ export async function graphBuildSimilarityLinks(newRecordIds?: string[]): Promis
 
   try {
     // NOTE: explicit WITH clauses are required between MATCH/WHERE → CALL
-    // and CALL/YIELD → WHERE on MemGraph; Neo4j tolerates the chain
+    // and CALL/YIELD → WHERE on MemGraph (Neo4j tolerates both, MemGraph requires the split form)
     // implicitly but MemGraph rejects it as a parse error.
     const result = await runCypher(`
       ${matchClause}

@@ -13,7 +13,7 @@
  */
 
 import { registerTool, type ToolResult } from "./registry.js";
-import { isNeo4jAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
+import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 
 const NOT_AVAILABLE: ToolResult = {
   success: false,
@@ -49,7 +49,7 @@ registerTool({
     required: ["label", "name"],
   },
   async execute(args): Promise<ToolResult> {
-    if (!isNeo4jAvailable()) return NOT_AVAILABLE;
+    if (!isGraphDbAvailable()) return NOT_AVAILABLE;
 
     const label = String(args["label"] ?? "").replace(/[^a-zA-Z0-9_]/g, "");
     const name = String(args["name"] ?? "").trim().slice(0, 500);
@@ -111,7 +111,7 @@ registerTool({
     required: ["fromLabel", "fromName", "relationship", "toLabel", "toName"],
   },
   async execute(args): Promise<ToolResult> {
-    if (!isNeo4jAvailable()) return NOT_AVAILABLE;
+    if (!isGraphDbAvailable()) return NOT_AVAILABLE;
 
     const fromLabel = String(args["fromLabel"] ?? "").replace(/[^a-zA-Z0-9_]/g, "");
     const fromName = String(args["fromName"] ?? "").trim().slice(0, 500);
@@ -169,7 +169,7 @@ registerTool({
     required: ["cypher"],
   },
   async execute(args): Promise<ToolResult> {
-    if (!isNeo4jAvailable()) return NOT_AVAILABLE;
+    if (!isGraphDbAvailable()) return NOT_AVAILABLE;
 
     const cypher = String(args["cypher"] ?? "").trim();
     const params = typeof args["params"] === "object" && args["params"] ? args["params"] as Record<string, unknown> : {};
@@ -228,7 +228,7 @@ registerTool({
     required: ["fromLabel", "fromName", "toLabel", "toName"],
   },
   async execute(args): Promise<ToolResult> {
-    if (!isNeo4jAvailable()) return NOT_AVAILABLE;
+    if (!isGraphDbAvailable()) return NOT_AVAILABLE;
 
     const fromLabel = String(args["fromLabel"] ?? "").replace(/[^a-zA-Z0-9_]/g, "");
     const fromName = String(args["fromName"] ?? "").trim();
@@ -279,7 +279,7 @@ registerTool({
     required: ["label", "name"],
   },
   async execute(args): Promise<ToolResult> {
-    if (!isNeo4jAvailable()) return NOT_AVAILABLE;
+    if (!isGraphDbAvailable()) return NOT_AVAILABLE;
 
     const label = String(args["label"] ?? "").replace(/[^a-zA-Z0-9_]/g, "");
     const name = String(args["name"] ?? "").trim();

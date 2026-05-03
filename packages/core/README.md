@@ -27,7 +27,7 @@ The source tree under `src/` is organized by concern. Each directory owns a runt
 | `channels/` | Messaging adapters (Slack, Telegram, Discord, WhatsApp, Email, webchat), registry, dead-letter queue, health checks |
 | `config/` | Zod schemas for every config section, loader (merges `config/` + `workspace/` + runtime overrides), hot-reload watcher |
 | `credentials/` | Encrypted credential store (site logins, MCP secrets, webhook tokens); env-var reference resolution; no path into model context |
-| `db/` | Postgres, Neo4j, and graph-schema bootstrap; helpers for durable memory and audit persistence |
+| `db/` | Postgres, MemGraph, and graph-schema bootstrap; helpers for durable memory and audit persistence |
 | `gateway/` | Hono app, REST routes, WebSocket RPC dispatcher, JWT auth, session export, CORS and reverse-proxy config |
 | `guardrails/` | Four-layer enforcement: input scanner → tool-tier check → output scanner → final redactor |
 | `mcp/` | Model Context Protocol client registry: stdio, Docker container, and HTTP transports; tool bridging |

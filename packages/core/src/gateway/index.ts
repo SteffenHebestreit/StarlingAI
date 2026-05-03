@@ -2816,8 +2816,8 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const { isNeo4jAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
-      if (!isNeo4jAvailable()) return c.json({ available: false, labels: [] });
+      const { isGraphDbAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
+      if (!isGraphDbAvailable()) return c.json({ available: false, labels: [] });
       const result = await runCypher(`
         MATCH (n)
         UNWIND labels(n) AS label
@@ -2835,8 +2835,8 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const { isNeo4jAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
-      if (!isNeo4jAvailable()) {
+      const { isGraphDbAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
+      if (!isGraphDbAvailable()) {
         return c.json({ available: false, nodes: [], edges: [], note: "MemGraph is offline. Set MEMGRAPH_URL and start the memgraph service to enable the knowledge-graph view." });
       }
       const labelFilter = (c.req.query("label") ?? "").trim();

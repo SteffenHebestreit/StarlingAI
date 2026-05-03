@@ -133,6 +133,7 @@ const MAIL_READ_ONLY_TOOLS = new Set<string>([
 const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "list_agents",
   "search_agents",
+  "search_tools",
   "search_workflows",
   "delegate_to_agent",
   "swarm_delegate",
@@ -165,6 +166,7 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "list_files",
   "list_agents",
   "search_agents",
+  "search_tools",
   "search_workflows",
   "extract_file_content",
   "spreadsheet_read",
@@ -337,7 +339,7 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
     guidance.push("If the request looks like a recurring packet, paper, review, or other reusable flow, call search_workflows before inventing a new plan.");
   }
   if (availableTools.includes("list_agents")) {
-    guidance.push("Call list_agents when you need the full delegate catalog with descriptions and tool access.");
+    guidance.push("Call list_agents(query) — not list_agents() — when you need to browse several agent candidates at once. It requires a task description and searches semantically, same as search_agents but returns up to 10 candidates.");
   }
   if (availableTools.includes("delegate_to_agent")) {
     guidance.push("Sub-agent names are not tools. Invoke another specialist only through delegate_to_agent or swarm_delegate.");
@@ -383,7 +385,7 @@ function buildSubAgentAgentDiscoveryGuidance(agentName: string, allowedAgents: s
   });
 
   if (catalogNames.length > 24) {
-    catalogLines.push(`- ${catalogNames.length - 24} more configured agents are available; use list_agents or search_agents to inspect them.`);
+    catalogLines.push(`- ${catalogNames.length - 24} more configured agents are available; use list_agents(query) or search_agents(query) to discover them semantically.`);
   }
 
   return [...header, ...catalogLines].join("\n");
@@ -2664,16 +2666,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // I13: Useful-evidence accumulator. Sum non-boilerplate bytes from
         // successful tool results so the post-tool guard can decide whether
         // the agent already has enough material to answer. Strip the
-        // timeout-summary stanzas so we don't double-count them as
-        // "evidence" — they are negative signal, already counted above.
+        // timeout-summary boilerplate (the "Sub-agent X timed out" header
+        // + "Partial progress before interruption" stanza) so it doesn't
+        // count as "evidence" — those bytes are negative signal already
+        // counted above.  CRITICAL: stop the strip at "Recovered evidence
+        // snippets from completed tools:" so the grandchild's harvested
+        // tool outputs (added by sub-agent.ts:buildInterruptedSubAgentOutput)
+        // propagate up to the grandparent's recentEvidenceSnippets buffer.
+        // Without this, a timed-out delegation cascade discarded all the
+        // grandchild's web_search / web_fetch evidence at the parent level.
         if (
           result.success
           && !/^(All candidate agents failed|Tool '[^']+' has been called|Tool '[^']+' is)/i.test(resultContent)
         ) {
-          const usefulPortion = resultContent.replace(
-            /Sub-agent '[^']+' timed out after \d+ms[\s\S]{0,400}?(?=\n\n|$)/g,
-            "",
-          );
+          const usefulPortion = resultContent
+            // Strip timeout boilerplate but stop before any recovered-snippets header.
+            .replace(
+              /Sub-agent '[^']+' timed out after \d+ms\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+              "",
+            )
+            // Same for cancelled-stanza boilerplate.
+            .replace(
+              /Sub-agent '[^']+' was cancelled\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+              "",
+            )
+            // Single-line timeout markers without a partial-progress block.
+            .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "");
           cumulativeUsefulEvidenceBytes += usefulPortion.length;
           if (usefulPortion.length >= 180) {
             const snippet = truncateToolAuditText(usefulPortion, 900);
