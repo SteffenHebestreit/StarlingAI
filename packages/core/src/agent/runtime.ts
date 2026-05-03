@@ -2032,6 +2032,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let approvedRunCandidateEnforcementPrompt = "";
   let workflowSearchMatches: WorkflowCatalogMatch[] = [];
   let workflowRunCompletedThisTurn = false;
+  // Track the most recent assistant text content that we suppressed because
+  // the model emitted it alongside (rejected-or-not) tool calls.  When the
+  // turn ends in a give-up state (synthesis loop, all tool calls blocked,
+  // max iterations) AND the synthesis call itself comes back empty / short,
+  // the suppressed text is still the closest thing we have to a real
+  // answer the model wrote — better than the 73-char apology that
+  // operators have been reporting.
+  let lastSuppressedAssistantText: string | null = null;
   let pendingSearchAgentSuggestion: { agentName: string; query?: string; fallbackAgents?: string[] } | undefined;
   let searchAgentsNoMatchCount = 0;
   let requiredResearchFallbackRoute: RequiredResearchFallbackRoute | null = null;
@@ -2296,6 +2304,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         finishReason: llmResponse.finishReason,
       }, { sessionId: session.id, severity: "warn" });
       guardrailEvents.push({ type: "assistant_text_suppressed", details: "tool_call_response" });
+      // Keep the text in scope for the terminal-exit evidence backstop.
+      // Only retain meaningfully-long content (>= 200 chars) — anything
+      // shorter is almost certainly narration like "I'll call X next".
+      const trimmedContent = llmResponse.content.trim();
+      if (trimmedContent.length >= 200) {
+        lastSuppressedAssistantText = trimmedContent;
+      }
       llmResponse = { ...llmResponse, content: null };
     }
 
@@ -3674,6 +3689,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
     && terminalEvidenceBackstop
     && looksLikeUnderpoweredSynthesis(synthesized);
+  // Last-resort: the runtime suppresses the model's text when it's
+  // emitted alongside tool calls (correct in the common case — that text
+  // is usually narration like "I'll call X next").  But after several
+  // iterations of suppression the most recent suppressed content is
+  // typically the closest thing to a real answer the model produced.
+  // When BOTH the synthesis call AND the evidence backstop are unavailable
+  // (or when synthesis is underpowered AND no delegate evidence exists),
+  // surface that suppressed text as the response.
+  const useSuppressedTextOverSynthesis = !bypassTerminalSynthesis
+    && !useEvidenceOverSynthesis
+    && lastSuppressedAssistantText !== null
+    && lastSuppressedAssistantText.length >= 200
+    && looksLikeUnderpoweredSynthesis(synthesized);
   if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
     logAudit("sub_agent_synthesis_forced", {
       reason: "underpowered_synthesis_replaced_with_evidence",
@@ -3682,10 +3710,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       evidenceLength: terminalEvidenceBackstop.evidence.length,
       evidenceItems: terminalEvidenceBackstop.itemCount,
     }, { sessionId: session.id, severity: "warn" });
+  } else if (useSuppressedTextOverSynthesis && lastSuppressedAssistantText !== null) {
+    logAudit("sub_agent_synthesis_forced", {
+      reason: "underpowered_synthesis_replaced_with_suppressed_text",
+      finishReason: terminalFinishReason,
+      synthesizedLength: synthesized?.length ?? 0,
+      suppressedTextLength: lastSuppressedAssistantText.length,
+    }, { sessionId: session.id, severity: "warn" });
   }
   const finalCandidate = useEvidenceOverSynthesis && terminalEvidenceBackstop
     ? terminalEvidenceBackstop.evidence
-    : (synthesized ?? fallbackMsg);
+    : useSuppressedTextOverSynthesis && lastSuppressedAssistantText !== null
+      ? lastSuppressedAssistantText
+      : (synthesized ?? fallbackMsg);
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount) || fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? (terminalEvidenceBackstop?.evidence ?? resolveEmptyAssistantResponseFallback("", "", session))
