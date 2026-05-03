@@ -276,6 +276,79 @@ export function _clearToolEmbeddingCacheForTests(): void {
 }
 
 /**
+ * Semantic tool search — returns the top-N most relevant tool handlers for
+ * a natural-language task description, using the cached per-tool embeddings
+ * that `warmToolEmbeddings` pre-computes.  The shared path so callers
+ * (the `search_tools` tool, future tool-routing logic, dashboard surfaces)
+ * don't re-implement the same cosine-similarity walk and don't accidentally
+ * re-embed the same tool text via the short-TTL query cache.
+ *
+ * Returns scored results so callers can apply a relevance threshold or
+ * surface the score to operators.  Falls back to keyword matching when
+ * the embedding provider is unavailable so unit tests + offline operators
+ * still get useful output.
+ */
+export async function searchToolsByEmbedding(
+  query: string,
+  topN = 8,
+  handlers?: ToolHandler[],
+): Promise<{ name: string; description: string; score: number; mode: "embedding" | "keyword" | "empty" }[]> {
+  const candidates = handlers ?? [..._registry.values()];
+  if (candidates.length === 0 || !query.trim()) return [];
+
+  if (isEmbeddingAvailable()) {
+    const queryVec = await computeQueryEmbedding(query);
+    if (queryVec) {
+      const scored = await Promise.all(
+        candidates.map(async (handler) => {
+          const vec = await _getToolEmbedding(handler);
+          if (!vec) return null;
+          const sim = cosineSimilarity(queryVec, vec);
+          const costAdj = HINT_WEIGHT[handler.costHint ?? "medium"];
+          const latAdj = HINT_WEIGHT[handler.latencyHint ?? "medium"];
+          return {
+            name: handler.name,
+            description: handler.description,
+            score: sim + costAdj + latAdj,
+            mode: "embedding" as const,
+          };
+        }),
+      );
+      const ranked = scored
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topN);
+      if (ranked.length > 0) return ranked;
+    }
+  }
+
+  // Keyword fallback — token-overlap with description + embeddingDescription.
+  const q = query.toLowerCase().trim();
+  const queryTokens = q.split(/\s+/).filter((t) => t.length > 2);
+  const ranked = candidates
+    .map((handler) => {
+      const text = `${handler.name} ${handler.description} ${handler.embeddingDescription ?? ""}`.toLowerCase();
+      let score = 0;
+      if (text.includes(q)) score = 1;
+      else if (queryTokens.length > 0) {
+        const hits = queryTokens.filter((token) => text.includes(token)).length;
+        score = hits / queryTokens.length;
+      }
+      return {
+        name: handler.name,
+        description: handler.description,
+        score,
+        mode: "keyword" as const,
+      };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN);
+
+  return ranked;
+}
+
+/**
  * Pre-warm embeddings for the given tools (or every registered tool when
  * `toolNames` is omitted).  Used at gateway startup after MCP / plugin /
  * dynamic-tool loaders complete so the first `rerankToolsForTask` call in a

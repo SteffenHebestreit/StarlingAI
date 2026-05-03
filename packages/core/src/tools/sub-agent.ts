@@ -5,10 +5,10 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, getAllTools, rerankToolsForTask, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -977,6 +977,7 @@ function formatRoutingCandidate(candidate: AgentRoutingCandidate): string {
 const GRANTABLE_TOOLS = new Set([
   "read_file", "list_files", "write_file", "edit_file", "create_dir", "delete_file",
   "memory_search", "memory_store", "record_lesson",
+  "share_finding", "read_shared_facts",
   "parallel_delegate",
   "workspace_search",
   "web_search", "web_fetch",
@@ -3452,62 +3453,86 @@ registerTool({
 });
 
 // ─── list_agents ──────────────────────────────────────────────────────────────
+// IMPORTANT: list_agents now requires a query and routes through the same
+// semantic + keyword engine as search_agents. It never dumps the full catalog.
+// This prevents context bloat when the agent registry is large (56+ agents
+// → 70 KB of text → LLM prefill timeout). Use search_agents when you only
+// want the top match; use list_agents when you want up to 10 candidates for
+// manual selection. Both tools require a query.
 
 registerTool({
   name: "list_agents",
-  description: "List all available specialized sub-agents with their descriptions and allowed tools. Call this first to discover which agents are available before delegating.",
+  description: "Search available sub-agents by semantic capability match and return up to 10 candidates — use this when you need to browse several candidates before choosing. Requires a natural-language query describing the task. NEVER dumps the full catalog. Prefer search_agents when you only need the single best match.",
   parameters: {
     type: "object",
-    properties: {},
+    properties: {
+      query: {
+        type: "string",
+        description: "Natural-language description of the task or capability you need. Required — the tool does semantic search, not a flat dump.",
+      },
+    },
+    required: ["query"],
   },
-  async execute(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const config = getConfig();
-    const promotedAgents = readPromotedAgents(config.workspacePath);
-    const promotedEntries = Object.entries(promotedAgents).filter(
-      ([name]) => !config.subAgents[name],
-    );
-    let entries = [...Object.entries(config.subAgents), ...promotedEntries];
-
-    // Filter to scene's allowed agents if a scope is set
-    if (ctx.allowedAgents) {
-      entries = entries.filter(([name]) => ctx.allowedAgents!.includes(name));
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const raw = String(args["query"] ?? "").trim();
+    if (!raw) {
+      return {
+        success: false,
+        output: "",
+        error: "query is required. Describe the task or capability you need — list_agents searches semantically, it does not dump the full catalog. Use search_agents for a single best-match lookup.",
+      };
     }
 
-    if (entries.length === 0) {
+    // Route through the same semantic+keyword engine as search_agents but
+    // return up to 10 candidates and use "low" as minimum confidence so
+    // browse-mode callers see the full competitive set.
+    const resolution = await resolveAgentRouting(raw, {
+      minConfidence: "low",
+      excludeAgents: ctx.currentAgentName ? [ctx.currentAgentName] : undefined,
+      allowedAgents: ctx.allowedAgents,
+    });
+
+    const allCandidates = [
+      ...resolution.results,
+      ...resolution.weakCandidates,
+    ].slice(0, 10);
+
+    if (allCandidates.length === 0) {
       const scopeNote = ctx.allowedAgents
         ? ` (this scene restricts delegation to: ${ctx.allowedAgents.join(", ")})`
         : "";
       return {
         success: true,
-        output: `No sub-agents are configured${scopeNote}. Add them under \`subAgents\` in starlingai.json.`,
+        output: `No agents matched "${raw}"${scopeNote}. Use create_ephemeral_agent to build a purpose-built specialist for this task.`,
+        metadata: {
+          query: raw,
+          resultCount: 0,
+          routingMode: resolution.mode,
+        },
       };
     }
 
-    const promotedNames = new Set(Object.keys(promotedAgents).filter(name => !config.subAgents[name]));
-    const lines = entries.map(([name, cfg]) => {
-      const model = cfg.model?.primary ?? config.agents.defaults.model.primary;
-      const toolList = cfg.tools ? cfg.tools.join(", ") : "all tools";
-      const capabilities = cfg.capabilities && cfg.capabilities.length > 0
-        ? `\n  Capabilities: ${cfg.capabilities.join(", ")}`
-        : "";
-      const tags = cfg.tags && cfg.tags.length > 0
-        ? `\n  Tags: ${cfg.tags.join(", ")}`
-        : "";
-      const domainNote = cfg.domain ? `\n  Domain: ${cfg.domain}` : "";
-      const promotedNote = promotedNames.has(name) ? " (auto-promoted)" : "";
-      const circuitStatus = isCircuitOpen(name, config.workspacePath)
-        ? `\n  ⚠ CIRCUIT OPEN — too many recent failures, excluded from auto-routing`
-        : "";
-      const costProfile = computeAgentCostProfile(name, config.workspacePath);
-      const costNote = costProfile ? formatCostProfile(costProfile) : "";
-      return `**${name}**${promotedNote} (${model})\n  ${cfg.description}${capabilities}${tags}${domainNote}${circuitStatus}${costNote}\n  Tools: ${toolList}`;
-    });
+    const circuitNote = resolution.trippedAgents.length > 0
+      ? `\n\n⚠ Circuit-open agents excluded from results: ${resolution.trippedAgents.join(", ")}`
+      : "";
 
-    const ephemeralNote = `\n\n---\nIf no agent above fits the task, use **create_ephemeral_agent** to design a purpose-built single-use agent on the fly.`;
+    const topCandidate = allCandidates[0];
+    const topIsStrong = topCandidate &&
+      (topCandidate.confidence === "high" ||
+        (topCandidate.confidence === "medium" && topCandidate.score >= 0.5));
+    const nextActionLine = topIsStrong
+      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topCandidate.name}", task="<your task>") NOW.`
+      : `ℹ Review the candidates below and pick the most relevant, or use create_ephemeral_agent if none fit.`;
 
     return {
       success: true,
-      output: `Available sub-agents (${entries.length}):\n\n${lines.join("\n\n")}${ephemeralNote}`,
+      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${allCandidates.length} result(s)]:\n\n${allCandidates.map(formatRoutingCandidate).join("\n\n")}${circuitNote}`,
+      metadata: {
+        query: raw,
+        resultCount: allCandidates.length,
+        routingMode: resolution.mode,
+        topResult: allCandidates[0]?.name ?? null,
+      },
     };
   },
 });
@@ -3656,6 +3681,70 @@ registerTool({
         topResultScore: topAgent.score,
         suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
       },
+    };
+  },
+});
+
+// ─── search_tools ────────────────────────────────────────────────────────────
+// Semantic search over the registered tool catalog. Keeps sub-agent context
+// small: instead of printing the full tool list (which can exceed 50 KB when
+// MCP surfaces are loaded), an agent can discover which tools are available
+// for a specific sub-task without blowing up its context window.
+
+registerTool({
+  name: "search_tools",
+  description: "Search available tools by semantic similarity to a task description. Returns the top-matching tool names and descriptions. Use this to discover which tools are available for a sub-task instead of relying on the static tool list in the system prompt.",
+  embeddingDescription: "find tools, discover capabilities, what tools can do X, which tool handles Y, tool catalog search, tool discovery",
+  costHint: "low" as const,
+  latencyHint: "low" as const,
+  parameters: {
+    type: "object" as const,
+    properties: {
+      query: {
+        type: "string",
+        description: "Natural-language description of what you want to do. The tool returns the most semantically similar registered tools.",
+      },
+      topN: {
+        type: "number",
+        description: "Maximum number of results to return. Defaults to 8.",
+      },
+    },
+    required: ["query"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = String(args["query"] ?? "").trim();
+    if (!query) {
+      return { success: false, output: "", error: "query is required" };
+    }
+    const topN = Math.min(20, Math.max(1, Number(args["topN"] ?? 8)));
+
+    const handlers = getAllTools();
+    if (handlers.length === 0) {
+      return { success: true, output: "No tools are available in this context." };
+    }
+
+    // Single shared semantic-search path — uses the long-lived per-tool
+    // embedding cache that warmToolEmbeddings populates, with a keyword
+    // fallback when the embedding provider is unavailable.  Avoids the
+    // earlier double-walk pattern (rerankToolsForTask + per-tool
+    // computeQueryEmbedding) which re-embedded each tool's text via the
+    // short-TTL query cache instead of the proper tool cache.
+    const ranked = await searchToolsByEmbedding(query, topN, handlers);
+
+    if (ranked.length === 0) {
+      return {
+        success: true,
+        output: `No tools matched "${query}". Check that the required tools are in your tool list for this run.`,
+        metadata: { query, resultCount: 0 },
+      };
+    }
+
+    const mode = ranked[0]?.mode ?? "empty";
+    const lines = ranked.map((r) => `- **${r.name}**: ${r.description}`);
+    return {
+      success: true,
+      output: `Tools matching "${query}" (${ranked.length} result${ranked.length === 1 ? "" : "s"}, ${mode} mode):\n\n${lines.join("\n")}`,
+      metadata: { query, resultCount: ranked.length, mode, topResult: ranked[0]?.name ?? null },
     };
   },
 });
