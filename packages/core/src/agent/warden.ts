@@ -301,7 +301,12 @@ export function startWarden(): void {
     }
 
     // ── Blocked tool accumulation (escape attempts) ──────────────────────────
-    if (event.type === "sub_agent_tool_blocked" && event.sessionId) {
+    // "evidence_cap_enforced" blocks are normal synthesis enforcement — the
+    // agent's evidence-gathering tools were stripped once sufficient evidence
+    // was collected. Do NOT count these toward the escape-attempt threshold;
+    // they are false positives and would pollute the circuit-breaker log.
+    if (event.type === "sub_agent_tool_blocked" && event.sessionId
+        && event.data["reason"] !== "evidence_cap_enforced") {
       const agentName = String(event.data["agentName"] ?? "unknown");
       const existing = _blockedAttempts.get(event.sessionId);
       _blockedAttempts.set(event.sessionId, {

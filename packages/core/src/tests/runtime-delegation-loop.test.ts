@@ -992,6 +992,140 @@ describe("runtime delegated-loop regressions", () => {
     expect(completeMock).not.toHaveBeenCalled();
   });
 
+  it("surfaces extracted evidence instead of raw timeout scaffolding when a partial delegation is forced to synthesize", async () => {
+    const extractedEvidence = Array.from(
+      { length: 6 },
+      (_, index) => `- Verified hardware finding ${index + 1}: the coordinator recovered source-backed snippet ${index + 1} with concrete wiring and component guidance for the portable recorder.`,
+    ).join("\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("hardware_partial_1", {
+          agentName: "mission_coordinator",
+          task: "Research the portable recorder hardware design.",
+        });
+      }
+
+      return createDelegateToolCallStream("hardware_partial_2", {
+        agentName: "mission_coordinator",
+        task: "Retry the same hardware design mission again.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' timed out after 480000ms",
+        "Partial progress before interruption:",
+        `- parallel_1 [completed] Hardware slice via researcher | ${extractedEvidence}`,
+        "- task_1 [running] Final synthesis via mission_coordinator",
+        "- Tool calls executed: 4 (search_agents, search_workflows, parallel_delegate, read_shared_facts)",
+        "- Iterations completed: 3",
+        "Recovered evidence snippets from completed tools:",
+        "- search_agents: No agents matched \"hardware electronics component research MEMS microphone ESP32 circuit design\".",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Design a source-backed portable recorder around an ESP32 and microphone array.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Verified hardware finding 6");
+    expect(result.response).not.toContain("Sub-agent 'mission_coordinator' timed out");
+    expect(result.response).not.toContain("Tool calls executed:");
+    expect(result.response).not.toContain("Iterations completed:");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).not.toHaveBeenCalled();
+  });
+
+  it("uses short single-line partial delegated evidence instead of the generic fallback after synthesis-required rejection", async () => {
+    const shortPartialEvidence = "Verified hardware direction: keep IM73A135V01 as an unverified candidate until the official datasheet confirms the vendor and interface; plan local SD buffering plus ESP32-S3 OTA sync instead of assuming direct 5-mic capture.";
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("hardware_partial_inline_1", {
+          agentName: "mission_coordinator",
+          task: "Research the portable recorder hardware design.",
+        });
+      }
+
+      return createDelegateToolCallStream("hardware_partial_inline_2", {
+        agentName: "mission_coordinator",
+        task: "Retry the same hardware design mission again.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' produced no final response after substantive work.",
+        `Partial progress before interruption: - parallel_1 [partial] ${shortPartialEvidence}`,
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Design a source-backed portable recorder around an ESP32 and microphone array.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("IM73A135V01 as an unverified candidate");
+    expect(result.response).toContain("ESP32-S3 OTA sync");
+    expect(result.response).not.toContain("I wasn't able to generate a usable reply for that turn");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects tool-free continuation promises after an unfinished delegated server action and forces a retry delegation", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
@@ -2018,7 +2152,7 @@ describe("runtime delegated-loop regressions", () => {
     });
   });
 
-  it("falls back to a temporary research agent when search_agents returns no match on source-sensitive turns", async () => {
+  it("falls back to a configured research path when search_agents returns no match on source-sensitive turns", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -2108,14 +2242,13 @@ describe("runtime delegated-loop regressions", () => {
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("temporary specialist");
+    expect(result.response).toContain("gathered evidence");
     expect(searchExecuteMock).toHaveBeenCalledTimes(1);
-    expect(createEphemeralExecuteMock).toHaveBeenCalledTimes(1);
-    expect(delegateExecuteMock).not.toHaveBeenCalled();
-    expect(createEphemeralExecuteMock.mock.calls[0]?.[0]).toMatchObject({
-      agentName: "ephemeral_research_specialist",
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(createEphemeralExecuteMock).not.toHaveBeenCalled();
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "mission_coordinator",
       task: "Use current sources to recommend exact ESP32 MEMS microphone components and verify product choices.",
-      tools: expect.arrayContaining(["web_search", "web_fetch"]),
     });
     expect(statuses).toEqual(expect.arrayContaining([
       "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.",
@@ -2124,9 +2257,9 @@ describe("runtime delegated-loop regressions", () => {
       "tool_call_recovered",
       expect.objectContaining({
         originalTool: "search_agents",
-        rewrittenTo: "create_ephemeral_agent",
+        rewrittenTo: "delegate_to_agent",
         reason: "search_agents_no_match_fallback",
-        recoveredAgentName: "ephemeral_research_specialist",
+        recoveredAgentName: "mission_coordinator",
       }),
       expect.objectContaining({ severity: "warn" }),
     );
@@ -2211,6 +2344,76 @@ describe("runtime delegated-loop regressions", () => {
     const assistantWithTools = session.getHistory().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
     expect(assistantWithTools?.tool_calls).toHaveLength(1);
     expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
+  });
+
+  it("sanitizes speculative source-sensitive delegate tasks before execution", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("candidate_guard_1", {
+          agentName: "mission_coordinator",
+          task: [
+            "Erstelle einen Hardware-Design-Leitfaden.",
+            "",
+            "1. IM73A135V01 (InvenSense/TDK):",
+            "- Spezifikationen: Interface (I2S/PDM), SNR, THD",
+            "- Ist das fuer Transcription geeignet?",
+            "",
+            "2. Alternativen:",
+            "- TDK InvenSense IM46279",
+            "- Infineon ICS-43434",
+          ].join("\n"),
+          fallbackAgents: ["researcher"],
+        });
+      }
+
+      return createTextStream("Die Kandidaten wurden als unverified candidates an die Recherche uebergeben.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nIM73A135V01 remains an unverified candidate until an official source confirms the manufacturer and interface.",
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: [
+        "Ich moechte ein portables Aufnahmegeraet bauen und die Teile mit aktuellen Quellen verifizieren.",
+        "Maybe I should go with the IM73A135V01 - opinion? Bitte recherchiere und verifiziere die Wahl.",
+        "Was brauche ich sonst noch und wie verbinde ich das mit einem ESP32?",
+      ].join("\n"),
+    });
+
+    const delegatedArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(String(delegatedArgs["task"])).toContain("VERIFICATION REQUIRED:");
+    expect(String(delegatedArgs["task"])).toContain("IM73A135V01 (candidate identifier; verify manufacturer/interface/specs from official source first)");
+    expect(String(delegatedArgs["task"])).toContain("Interface (verify from official source first)");
+    expect(String(delegatedArgs["task"])).not.toContain("InvenSense/TDK");
+    expect(result.response).toContain("unverified candidate");
   });
 
   it("does not force fresh research for short follow-up decisions that can use prior delegated evidence", async () => {

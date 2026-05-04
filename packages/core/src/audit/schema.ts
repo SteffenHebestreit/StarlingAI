@@ -38,6 +38,7 @@ export type AuditEventType =
   | "scene_job_failed"
   | "scene_job_cancelled"
   | "ephemeral_agent_rejected"
+  | "ephemeral_model_override_rejected"
   | "approval_requested"
   | "approval_resolved"
   | "warden_alert"

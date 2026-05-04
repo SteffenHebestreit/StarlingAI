@@ -1331,6 +1331,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let sufficiencyToolsStripped = false;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
+    // Track tools stripped by the evidence-cap mechanism so that blocked
+    // calls to those tools are classified as "evidence_cap_enforced" rather
+    // than "not_in_agent_tools", preventing false-positive warden alerts.
+    const evidenceCapStrippedTools = new Set<string>();
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
@@ -2452,14 +2456,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // Enforce tool allow-list
         if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
           log.warn({ agentName: opts.agentName, tool: tc.name }, "Sub-agent attempted disallowed tool");
+          // Distinguish between tools stripped by the evidence-cap mechanism
+          // (normal synthesis enforcement, not a security event) and tools
+          // genuinely absent from the agent's configured tool set.
+          const blockReason = evidenceCapStrippedTools.has(tc.name)
+            ? "evidence_cap_enforced"
+            : "not_in_agent_tools";
           logAudit(
             "sub_agent_tool_blocked",
-            { agentName: opts.agentName, tool: tc.name, reason: "not_in_agent_tools" },
+            { agentName: opts.agentName, tool: tc.name, reason: blockReason },
             { sessionId: subSessionId, severity: "warn" }
           );
           toolResults.push({
             role: "tool",
-            content: `Tool '${tc.name}' is not in this agent's allowed tool set.`,
+            content: evidenceCapStrippedTools.has(tc.name)
+              ? `Tool '${tc.name}' has been disabled — you have gathered enough evidence. Write your final answer now.`
+              : `Tool '${tc.name}' is not in this agent's allowed tool set.`,
             tool_call_id: tc.id,
           });
           continue;
@@ -2955,6 +2967,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const strippedToolNames = tools
           .filter((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
           .map((tool) => tool.name);
+        for (const name of strippedToolNames) evidenceCapStrippedTools.add(name);
         tools = tools.filter((tool) => !EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name));
         if (effectiveToolNames) {
           effectiveToolNames = effectiveToolNames.filter((name) => !EVIDENCE_GATHERING_TOOL_NAMES.has(name));
