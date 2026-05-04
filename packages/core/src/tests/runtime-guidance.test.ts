@@ -98,16 +98,59 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("agentName='ops_triage'");
   });
 
-  it("does not force web research for pasted local WireGuard server configs", () => {
-    const guidance = buildDynamicTurnGuidance(`folgendes szenario:\n\nroot@ubuntu:~# cat /etc/wireguard/wg0.conf\n[Interface]\nPrivateKey = test\nAddress = 10.10.0.1/24\nListenPort = 51820\nPostUp = iptables -t nat -A PREROUTING -p udp --dport 51821 -j DNAT --to-destination 10.10.0.2:51821\n\n[Peer]\nPublicKey = test\nAllowedIPs = 10.10.0.2/32\n\npfsense\nWGTUNNEL 10.10.0.2\nWas muss ich anpassen? Was muss ich für einen neuen peer konfigurieren`);
+  it("biases toward direct synthesis for pasted WireGuard configs with tutorial requests", () => {
+    // Reproduction of debug session 7b90ea2c (May 2026): user pastes the
+    // complete V-Server WireGuard config plus pfSense settings and asks
+    // for a tutorial covering current state and required changes.  The
+    // previous behavior pushed for a shell_agent delegation to inspect
+    // the live system; that delegation crashed at the container layer
+    // and the user got the generic "I wasn't able to generate a usable
+    // reply" placeholder instead of the tutorial they could have had
+    // from the inline content alone.
+    const guidance = buildDynamicTurnGuidance(`folgendes szenario:\n\nroot@ubuntu:~# cat /etc/wireguard/wg0.conf\n[Interface]\nPrivateKey = test\nAddress = 10.10.0.1/24\nListenPort = 51820\nPostUp = iptables -t nat -A PREROUTING -p udp --dport 51821 -j DNAT --to-destination 10.10.0.2:51821\n\n[Peer]\nPublicKey = test\nAllowedIPs = 10.10.0.2/32\n\npfsense\nWGTUNNEL 10.10.0.2\nWas muss ich anpassen? Was muss ich für einen neuen peer konfigurieren --> Erstelle mir ein Tutorial was jede einzelheit im detail erklärt`);
 
     expect(guidance).not.toBeNull();
+    // Both server-access and inline-analytical fire; inline-analytical
+    // takes precedence in the guidance text.
     expect(guidance?.serverAccessSensitive).toBe(true);
+    expect(guidance?.inlineAnalyticalContent).toBe(true);
     expect(guidance?.sourceSensitive).toBe(false);
     expect(guidance?.freshnessSensitive).toBe(false);
-    expect(guidance?.prompt).toContain("headless server");
-    expect(guidance?.prompt).toContain("agentName='shell_agent'");
+    // Inline-analytical guidance instructs the model to answer from the
+    // pasted content rather than delegating to fetch live state.
+    expect(guidance?.prompt).toContain("pasted substantial technical content");
+    expect(guidance?.prompt).toContain("Answer directly from the inline content");
+    expect(guidance?.prompt).toContain("Do NOT delegate to shell_agent");
+    // Server-access "delegate to shell_agent" guidance is suppressed
+    // when inline-analytical fires, since the user pasted the state.
+    expect(guidance?.prompt).not.toContain("agentName='shell_agent'");
     expect(guidance?.prompt).not.toContain("A tool-free answer is invalid");
+  });
+
+  it("does NOT fire inline-analytical when the user explicitly asks for verification", () => {
+    // Verification requests (verify/validate/spec) are genuinely source-
+    // sensitive — the user wants the model to check inline content
+    // against external truth.  Inline-analytical must defer.
+    const guidance = buildDynamicTurnGuidance(`Here is my nginx config:\n\nserver {\n  listen 443 ssl;\n  ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;\n  location /api {\n    proxy_pass http://upstream;\n  }\n}\n\nVerify this matches the current nginx documentation and the latest TLS best practices. Cite official sources.`);
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+    expect(guidance?.inlineAnalyticalContent).toBe(false);
+  });
+
+  it("fires inline-analytical for pasted code with explanation request", () => {
+    const guidance = buildDynamicTurnGuidance(`Hier ist mein Python-Skript:\n\n\`\`\`python\ndef process(items):\n    result = []\n    for item in items:\n        if item.value > threshold:\n            result.append(transform(item))\n    return sorted(result, key=lambda x: x.priority)\n\nclass Processor:\n    def __init__(self, config):\n        self.config = config\n\`\`\`\n\nWas macht dieser Code und wie kann ich ihn verbessern?`);
+
+    expect(guidance).not.toBeNull();
+    expect(guidance?.inlineAnalyticalContent).toBe(true);
+    expect(guidance?.prompt).toContain("pasted substantial technical content");
+    expect(guidance?.prompt).toContain("Answer directly from the inline content");
+  });
+
+  it("does NOT fire inline-analytical for short snippets without analytical request", () => {
+    // Short snippet (< 400 chars) — likely a quoted identifier, not pasted state.
+    const guidance = buildDynamicTurnGuidance(`The error was: TypeError: cannot read property 'foo' of undefined`);
+    expect(guidance?.inlineAnalyticalContent ?? false).toBe(false);
   });
 
   it("routes mail drafting and sending requests to mail_agent", () => {

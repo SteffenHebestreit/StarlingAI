@@ -113,6 +113,62 @@ export const LOCAL_SERVER_CONFIG_PATTERNS = [
   /\bwireguard\b/,
 ];
 
+// ── Inline-content analytical detection ──────────────────────────────────────
+// When a user pastes substantial technical content inline (configs, code,
+// command output) AND asks for explanation/tutorial/analysis of THAT content,
+// the right path is direct synthesis — NOT delegating to a specialist to fetch
+// or inspect live data the user already provided.  The classic failure mode
+// (debug session 7b90ea2c, May 2026) was: user pastes a complete WireGuard
+// config plus pfSense settings and asks for a tutorial; runtime delegates to
+// shell_agent to inspect the live system; the container crashes; user sees a
+// generic "please try again" placeholder instead of the tutorial that could
+// have been written from the inline content alone.
+
+/** Patterns that indicate the user pasted technical state inline. */
+export const INLINE_TECHNICAL_CONTENT_PATTERNS = [
+  /```[\s\S]{40,}?```/,                              // fenced code block with content
+  /(?:^|\n)\s*(?:root|admin|user)?@?[\w.-]*[:#$>]\s+\S/, // shell prompt + command
+  /(?:^|\n)\s*\[[\w-]+\][^\n]*\n[^\n]*=\s*\S/,        // INI-style section + key=value
+  /\b(?:postup|postdown|allowedips|listenport|publickey|privatekey|persistentkeepalive)\s*=/i, // WireGuard
+  /\b(?:server\s*\{|location\s+[/\w]+\s*\{|upstream\s+\w+\s*\{)/i,  // nginx blocks
+  /\b(?:\[Service\]|\[Install\]|\[Unit\])\s*\n[\w]+=/,            // systemd unit
+  /\b(?:apiVersion|kind|metadata|spec):\s*\S/,                    // k8s YAML
+  /(?:^|\n)\s*\w[\w-]*\s*=\s*\S+(?:\n\s*\w[\w-]*\s*=\s*\S+){4,}/, // 5+ key=value lines
+];
+
+/** Patterns that indicate the user wants explanation, analysis, modification,
+ *  or tutorial-style guidance about the content they provided. */
+export const ANALYTICAL_REQUEST_PATTERNS = [
+  /\b(explain|analyze|analyse|review|walk(?:\s+me)?\s+through|tutorial|how\s+(?:does|do)|what\s+(?:does|do)|what\s+should|what\s+must|why\s+(?:does|do)|fix\s+(?:this|the))\b/i,
+  /\berkl[äa]r/i,                          // erklären, erklärt, erkläre
+  /\banalysier/i,                          // analysiere, analysieren
+  /\btutorial\b/i,
+  /\banleitung\b/i,
+  /\bwie\s+funktioniert\b/i,
+  /\bwas\s+(?:macht|tut|bedeutet|bewirkt)\b/i,
+  /\bwas\s+muss\s+ich\s+(?:anpassen|[äa]ndern|machen|tun|konfigurieren|hinzuf[üu]gen)\b/i,
+  /\bwas\s+(?:soll|sollte)\s+ich\b/i,
+  /\bwie\s+(?:kann|soll|muss)\s+ich\b/i,
+  /\b(?:erstell|erzeug|generier)(?:e|en|t)?\s+(?:mir|uns)?\s*(?:ein|einen|eine)?\s*(?:tutorial|anleitung|guide|how[- ]?to)\b/i,
+];
+
+/** Detect substantial pasted technical content. Each pattern is strict
+ *  enough on its own (a fenced code block requires 40+ chars of body, a
+ *  multi-line key=value block requires 5+ pairs, etc.) that any match
+ *  represents real pasted state.  A small message-length floor of 200
+ *  chars filters out single-line "the error was: foo=bar" cases that
+ *  the user is just describing rather than pasting wholesale. */
+export function hasSubstantialInlineTechnicalContent(message: string): boolean {
+  if (message.length < 200) return false;
+  return INLINE_TECHNICAL_CONTENT_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/** Detect that the request is for explanation / analysis / tutorial /
+ *  modification of provided content (vs. fetching new external state). */
+export function looksLikeAnalyticalRequest(message: string): boolean {
+  return ANALYTICAL_REQUEST_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 export const PENTEST_HINT_TERMS = [
   "pentest", "pentesting", "penetration test", "penetration testing", "security test", "security assessment", "vulnerability", "vuln", "scan",
   "nmap", "nikto", "sqlmap", "exploit", "cve", "audit", "hardening",
@@ -227,6 +283,10 @@ export interface DynamicTurnGuidance {
   swarmMaintenanceSensitive?: boolean;
   navigationSensitive?: boolean;
   artifactSensitive?: boolean;
+  /** User pasted substantial technical content inline AND asked for
+   *  explanation/analysis/tutorial — runtime should bias toward direct
+   *  synthesis rather than delegating to fetch live state. */
+  inlineAnalyticalContent?: boolean;
 }
 
 /**
@@ -261,14 +321,29 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
   const navigationSensitive = isNavigationRoutingRequest(userMessage);
   const artifactSensitive = ARTIFACT_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(normalized));
+  // ── Inline-content analytical detection ──────────────────────────────────
+  // Use the original userMessage (case-preserving) for the technical-content
+  // patterns since some matchers (`[Interface]`, `[Service]`, fenced code
+  // blocks) depend on case / leading delimiters that survive the lowercase
+  // normalization but are clearer to reason about against the raw text.
+  const inlineAnalyticalContent =
+    hasSubstantialInlineTechnicalContent(userMessage)
+    && looksLikeAnalyticalRequest(userMessage)
+    // Don't fire when the user explicitly asked for verification / source
+    // checks — those genuinely need delegation to fetch external truth.
+    && !sourceSensitiveByTerm
+    && !WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
   const localServerConfigReview = serverAccessSensitive
     && !sourceSensitiveByTerm
     && !WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
     && localServerConfigEvidence;
-  const freshnessSensitive = localServerConfigReview ? false : freshnessSensitiveByTerm;
-  const sourceSensitive = localServerConfigReview ? false : sourceSensitiveByTerm;
+  // Either review path overrides freshness/source sensitivity — the user
+  // already pasted the state, we don't need to fetch fresh sources.
+  const inlineReview = localServerConfigReview || inlineAnalyticalContent;
+  const freshnessSensitive = inlineReview ? false : freshnessSensitiveByTerm;
+  const sourceSensitive = inlineReview ? false : sourceSensitiveByTerm;
 
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive };
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent };
   if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
@@ -282,6 +357,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
   if (navigationSensitive) reasons.push("navigation-routing");
   if (artifactSensitive) reasons.push("artifact-deliverable");
+  if (inlineAnalyticalContent) reasons.push("inline-analytical-content");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
@@ -305,7 +381,26 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     );
   }
 
-  if (serverAccessSensitive && !pentestSensitive) {
+  if (inlineAnalyticalContent) {
+    // Fires BEFORE the server/computer access blocks so the "answer
+    // directly from inline content" guidance reaches the model first.
+    // Common case: user pastes a complete config + asks for a tutorial /
+    // walkthrough / "what should I change" — the wrong path is to
+    // delegate to a sub-agent that re-fetches the same state from a
+    // live system.  Direct synthesis from the inline content is the
+    // right answer.
+    promptParts.push(
+      "The user has pasted substantial technical content (configuration, code, command output, structured state) directly into their message.",
+      "Their request is to explain, analyze, modify, or produce a tutorial / walkthrough about THAT inline content — NOT to inspect a remote system or fetch external state.",
+      "Answer directly from the inline content using your knowledge of the relevant technology. Treat the pasted content as the authoritative current state for this turn.",
+      "Do NOT delegate to shell_agent, ops_triage, browser_agent, computer_use_agent, or any specialist that would fetch the same state the user already provided.",
+      "Do NOT delegate to researcher / web_task_coordinator / mission_coordinator to look up the underlying technology unless the user explicitly asked for source citations, official documentation, or external verification.",
+      "Code execution or file inspection tools are still OK if you need to validate a draft snippet or run a small computation, but the goal is direct synthesis from the inline content.",
+      "If the user explicitly switches focus mid-turn to live state ('but is the iptables rule actually loaded right now?', 'check if the service is running'), THEN delegation is appropriate. Until then, write the answer.",
+    );
+  }
+
+  if (serverAccessSensitive && !pentestSensitive && !inlineAnalyticalContent) {
     promptParts.push(
       "The user is asking for access to a headless server, SSH host, VM, or container runtime, not for remote desktop control.",
       "Requests involving SSH, Docker, containers, systemd, journalctl, kubectl, logs, or server status are infrastructure tasks, not computer-use tasks.",
@@ -435,6 +530,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     swarmMaintenanceSensitive,
     navigationSensitive,
     artifactSensitive,
+    inlineAnalyticalContent,
   };
 }
 
