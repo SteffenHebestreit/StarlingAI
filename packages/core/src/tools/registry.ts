@@ -516,8 +516,28 @@ export async function executeTool(
       ...(context.currentAgentName ? { "starlingai.agent.name": context.currentAgentName } : {}),
     },
     async (span) => {
-      // Per-tool timeout enforcement
+      // Per-tool timeout enforcement.
+      //
+      // Wrap handler.execute in try/catch so a thrown exception (e.g.
+      // run_workflow → resolveStep → getScene returning null → throw)
+      // becomes a normal ToolResult failure instead of bubbling out of
+      // the executor.  Without this catch the runtime's per-iteration
+      // dispatch in agent/runtime.ts would re-throw, the turn would die
+      // silently, and the audit pipeline would never log
+      // tool_call_failed (audit session 5b7a67ba, May 2026).
       let result: ToolResult;
+      const runHandler = async (): Promise<ToolResult> => {
+        try {
+          return await handler.execute(args, context);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return {
+            success: false,
+            output: "",
+            error: `Tool '${name}' threw an exception: ${message}`,
+          };
+        }
+      };
       if (handler.timeoutMs && handler.timeoutMs > 0) {
         const timeoutPromise = new Promise<ToolResult>((resolve) => {
           const timer = setTimeout(() => {
@@ -525,9 +545,9 @@ export async function executeTool(
           }, handler.timeoutMs!);
           timer.unref();
         });
-        result = await Promise.race([handler.execute(args, context), timeoutPromise]);
+        result = await Promise.race([runHandler(), timeoutPromise]);
       } else {
-        result = await handler.execute(args, context);
+        result = await runHandler();
       }
       span.setAttribute("starlingai.tool.success", result.success);
       if (!result.success && result.error) {

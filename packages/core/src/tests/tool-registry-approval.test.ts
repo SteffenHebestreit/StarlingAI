@@ -81,4 +81,45 @@ describe("tool registry approval enforcement", () => {
     expect(result.error).toContain("timed out");
     expect(result.error).not.toContain("denied by user");
   });
+
+  // Regression: audit session 5b7a67ba (May 2026).  run_workflow called
+  // resolveJobSteps which threw "Job step references unknown scene: X" when
+  // the scene was missing.  executeTool didn't catch handler exceptions —
+  // the throw propagated out of the tool dispatcher in agent/runtime.ts,
+  // the turn died silently, and the audit pipeline never logged
+  // tool_call_failed (only the leading tool_call_requested).  Now the
+  // executor catches all handler throws and returns a normal failure
+  // ToolResult so the runtime can react and the audit can record it.
+  it("catches handler exceptions and returns a failure ToolResult", async () => {
+    const { executeTool, registerTool, unregisterTool, getTool } = await import("../tools/registry.js");
+
+    // Use an allow-listed tool name so registerTool's tier check passes.
+    // share_finding is tier 0 and safe to overwrite for the duration of
+    // this test — the original handler is restored in finally.
+    const toolName = "share_finding";
+    const original = getTool(toolName);
+    registerTool({
+      name: toolName,
+      description: "Test override that throws synchronously to verify executeTool catches it.",
+      parameters: {},
+      async execute() {
+        throw new Error("simulated handler failure");
+      },
+    });
+    try {
+      const result = await executeTool(toolName, {}, {
+        sessionId: "exec-catch",
+        workspacePath: "/workspace",
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("threw an exception");
+      expect(result.error).toContain("simulated handler failure");
+    } finally {
+      if (original) {
+        registerTool(original);
+      } else {
+        unregisterTool(toolName);
+      }
+    }
+  });
 });

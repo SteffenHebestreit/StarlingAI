@@ -1221,6 +1221,36 @@ registerTool({
       };
     }
 
+    // Pre-validate that every scene referenced by the resolved job actually
+    // exists.  resolveJobSteps throws "Job step references unknown scene: X"
+    // when a scene is missing — without this guard, the throw bubbles up the
+    // tool dispatcher and (until the executeTool try/catch was added) killed
+    // the turn silently with no tool_call_failed event.  Surface the missing
+    // names directly so the user knows which scenes to add to scenes: {}.
+    if (job) {
+      const missingScenes = job.steps
+        .map((step) => step.scene)
+        .filter((sceneName, index, arr) => arr.indexOf(sceneName) === index)
+        .filter((sceneName) => !getScene(sceneName));
+      if (missingScenes.length > 0) {
+        return {
+          success: false,
+          output: "",
+          error:
+            `Workflow '${job.name}' [job] references ${missingScenes.length === 1 ? "a scene" : "scenes"} that ${missingScenes.length === 1 ? "is" : "are"} not defined in the current config: ${missingScenes.map((s) => `'${s}'`).join(", ")}. `
+            + "Add the missing scene(s) to your starlingai.json under `scenes: { ... }`, or remove the job from your config. "
+            + "Without the underlying scene definitions, the job cannot resolve its steps to executable tasks.",
+          metadata: {
+            workflowName: job.name,
+            workflowType: "job",
+            blocked: true,
+            missingScenes,
+            stepCount: job.steps.length,
+          },
+        };
+      }
+    }
+
     if (scene) {
       const result = await runSceneInline(scene, params, workflowContext, ctx);
       const output = `Workflow ${scene.name} [scene] ${result.blocked ? "blocked" : "completed"}${result.bootstrapAgent ? ` via ${result.bootstrapAgent} bootstrap` : ""}.\n\n${result.response}`;
