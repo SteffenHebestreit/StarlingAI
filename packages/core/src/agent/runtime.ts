@@ -463,6 +463,18 @@ function buildRequiredResearchFallbackRoute(
   const selectedAgent = chooseConfiguredAgent(preferredAgents) ?? preferredAgents[0]!;
   const fallbackAgents = preferredAgents.filter((agentName) => agentName !== selectedAgent && chooseConfiguredAgent([agentName]));
 
+  if (allowedToolNameSet.has("delegate_to_agent")) {
+    return {
+      toolName: "delegate_to_agent",
+      label: selectedAgent,
+      args: {
+        agentName: selectedAgent,
+        fallbackAgents,
+        task: userMessage,
+      },
+    };
+  }
+
   if (allowedToolNameSet.has("create_ephemeral_agent")) {
     return {
       toolName: "create_ephemeral_agent",
@@ -482,18 +494,6 @@ function buildRequiredResearchFallbackRoute(
         // too short for a research specialist doing 5 web_search iterations.
         // Grant 5 minutes — the same budget as the configured researcher agent.
         timeoutMs: 300_000,
-        task: userMessage,
-      },
-    };
-  }
-
-  if (allowedToolNameSet.has("delegate_to_agent")) {
-    return {
-      toolName: "delegate_to_agent",
-      label: selectedAgent,
-      args: {
-        agentName: selectedAgent,
-        fallbackAgents,
         task: userMessage,
       },
     };
@@ -1207,6 +1207,108 @@ function countStructuredItems(text: string): number {
   return Math.max(tableRows, numbered, boldNumbered, bullets, headings);
 }
 
+function stripInterruptedSubAgentBoilerplate(text: string): string {
+  return text
+    .replace(
+      /Sub-agent '[^']+' timed out after \d+ms\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      "",
+    )
+    .replace(
+      /Sub-agent '[^']+' produced no final response after substantive work\.\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      "",
+    )
+    .replace(
+      /Sub-agent '[^']+' was cancelled\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      "",
+    )
+    .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "")
+    .replace(/Sub-agent '[^']+' produced no final response after substantive work\.\n?/g, "")
+    .replace(/Sub-agent '[^']+' was cancelled\n?/g, "")
+    .trim();
+}
+
+function looksLikeOrchestrationOnlyEvidence(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(trimmed)) {
+    return true;
+  }
+  if (/^(?:task_\d+\s+\[running\]|parallel_\d+\s+\[(?:running|pending)\])/i.test(trimmed)) {
+    return true;
+  }
+  if (/^(?:Sub-agent '[^']+'|Delegated result from)/i.test(trimmed) && trimmed.length < 220) {
+    return true;
+  }
+  return false;
+}
+
+function stripDelegationProgressPrefix(text: string): string {
+  return text.replace(/^(?:parallel|task)_\d+\s+\[[^\]]+\]\s*/i, "").trim();
+}
+
+function collectInterruptedDelegationSnippets(text: string): string[] {
+  const cleaned = stripPresentationFormatting(text);
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  const pushSnippet = (candidate: string) => {
+    const normalized = stripInterruptedSubAgentBoilerplate(candidate)
+      .replace(/^IMPORTANT:\s.*$/gim, "")
+      .trim();
+    if (!normalized || normalized.length < 80 || looksLikeOrchestrationOnlyEvidence(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    snippets.push(normalized);
+  };
+
+  const progressMatch = /Partial progress before interruption:\s*([\s\S]*?)(?=\nRecovered evidence snippets from completed tools:|$)/i.exec(cleaned);
+  if (progressMatch?.[1]) {
+    for (const rawLine of progressMatch[1].split("\n")) {
+      const line = rawLine.trim();
+      if (!line.startsWith("- ")) continue;
+      const body = line.slice(2).trim();
+      if (!body || /^(?:Tool calls executed:|Iterations completed:)/i.test(body)) continue;
+      if (/\[(?:running|pending)\]/i.test(body)) continue;
+      const normalizedBody = stripDelegationProgressPrefix(body);
+      const candidate = normalizedBody.includes(" | ")
+        ? normalizedBody.split(/\s+\|\s+/).slice(1).join(" | ")
+        : normalizedBody;
+      pushSnippet(candidate);
+    }
+  }
+
+  const recoveredMatch = /Recovered evidence snippets from completed tools:\s*\n([\s\S]+)$/i.exec(cleaned);
+  if (recoveredMatch?.[1]) {
+    for (const rawLine of recoveredMatch[1].split("\n")) {
+      const line = rawLine.trim();
+      if (!line.startsWith("- ")) continue;
+      const body = line.slice(2).trim();
+      const candidate = body.includes(":") ? body.split(/:\s+/, 2)[1] ?? "" : body;
+      pushSnippet(candidate);
+    }
+  }
+
+  return snippets;
+}
+
+function extractUsefulInterruptedDelegationEvidence(text: string): string | null {
+  if (!/Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(text)) {
+    return null;
+  }
+  const snippets = collectInterruptedDelegationSnippets(text);
+  if (snippets.length > 0) return snippets.join("\n\n");
+
+  const fallback = stripInterruptedSubAgentBoilerplate(stripPresentationFormatting(text))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^(?:Tool calls executed:|Iterations completed:|Recovered evidence snippets from completed tools:)/i.test(line))
+    .filter((line) => !looksLikeOrchestrationOnlyEvidence(line))
+    .join("\n");
+
+  return fallback.length >= 120 ? fallback : null;
+}
+
 function measureEvidenceCoverage(
   text: string,
   evidence: { evidence: string; itemCount: number },
@@ -1236,10 +1338,21 @@ function findRecentDelegateEvidence(
     if (!isDelegate) continue;
 
     const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
-    const evidence = evidenceMatch
+    const rawEvidence = evidenceMatch
       ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
       : content.trim();
-    if (!evidence || evidence.length < 400) continue;
+    const evidence = extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence;
+    const delegationOutcome = typeof meta["delegationOutcome"] === "string"
+      ? String(meta["delegationOutcome"]).toLowerCase()
+      : "";
+    const terminalState = typeof meta["terminalState"] === "string"
+      ? String(meta["terminalState"]).toLowerCase()
+      : "";
+    const partialLike = delegationOutcome === "partial"
+      || terminalState === "timeout"
+      || /(?:TASK COMPLETED \(PARTIAL|PARTIAL PROGRESS|Partial progress before interruption:)/i.test(content);
+    const minimumEvidenceChars = partialLike ? 120 : 400;
+    if (!evidence || evidence.length < minimumEvidenceChars) continue;
 
     const itemCount = countStructuredItems(evidence);
     const score = evidence.length + (itemCount * 200);
@@ -1506,6 +1619,10 @@ function truncatePlainText(value: string, maxChars: number): string {
   return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function stripAgentPrefix(value: string): string {
   return value.replace(/^\[[^\]]+\]:\s*/i, "").trim();
 }
@@ -1523,6 +1640,118 @@ function stripPresentationFormatting(value: string): string {
     .replace(/__(.*?)__/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .trim();
+}
+
+const CANDIDATE_IDENTIFIER_RE = /\b[A-Z]{2,}\d[A-Z0-9-]{2,}\b/g;
+const SPECULATIVE_CANDIDATE_CLAIM_RE = /\b(?:tdk(?:\s+invensense)?|invensense|stmicroelectronics|stmicro|infineon|xensiv|knowles|memsic|i2s|pdm|tdm|pcm|analog|digital|datasheet|omnidirectional|omnidirektional)\b/i;
+const VERIFICATION_REQUIRED_PREAMBLE = "VERIFICATION REQUIRED: Preserve every named part number, product, vendor, protocol, or interface as an unverified candidate until an official source confirms it. Do NOT assume manufacturer, interface, or specs from the identifier alone. If upstream text contains such assumptions, treat them as unverified and correct them from current evidence first.";
+
+function collectCandidateIdentifiers(text: string): string[] {
+  const matches = text.match(CANDIDATE_IDENTIFIER_RE) ?? [];
+  return [...new Set(matches.map((match) => match.trim()).filter(Boolean))];
+}
+
+function neutralizeSpeculativeCandidateClaims(text: string): string {
+  let sanitized = text;
+  for (const candidate of collectCandidateIdentifiers(text)) {
+    const escapedCandidate = escapeRegExp(candidate);
+
+    sanitized = sanitized.replace(
+      new RegExp(`${escapedCandidate}\\s*\\(([^\\n)]{1,120})\\)`, "gi"),
+      (full, inner: string) => SPECULATIVE_CANDIDATE_CLAIM_RE.test(inner)
+        ? `${candidate} (candidate identifier; verify manufacturer/interface/specs from official source first)`
+        : full,
+    );
+
+    sanitized = sanitized.replace(
+      new RegExp(`\\b(?:TDK(?:\\s+InvenSense)?|InvenSense|STMicroelectronics|STMicro|Infineon|XENSIV|Knowles|MEMSIC)\\s+${escapedCandidate}\\b`, "gi"),
+      `${candidate} (candidate identifier; verify manufacturer/product class from official source first)`,
+    );
+
+    sanitized = sanitized.replace(
+      new RegExp(`${escapedCandidate}\\s+von\\s+[^\\n.,;:]{2,80}`, "gi"),
+      `${candidate} (candidate identifier; verify manufacturer from official source first)`,
+    );
+  }
+
+  sanitized = sanitized.replace(
+    /\bInterface\s*\(([^)]*\b(?:I2S|PDM|TDM|PCM)\b[^)]*)\)/gi,
+    "Interface (verify from official source first)",
+  );
+
+  return sanitized;
+}
+
+function addVerificationPreamble(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith(VERIFICATION_REQUIRED_PREAMBLE)) return trimmed;
+  return `${VERIFICATION_REQUIRED_PREAMBLE}\n\n${trimmed}`;
+}
+
+function sanitizeDelegationTextForSourceSensitiveTurn(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+
+  const hasCandidateIdentifiers = collectCandidateIdentifiers(trimmed).length > 0;
+  const hasSpeculativeInterfaceClaim = /\bInterface\s*\(([^)]*\b(?:I2S|PDM|TDM|PCM)\b[^)]*)\)/i.test(trimmed);
+  if (!hasCandidateIdentifiers && !hasSpeculativeInterfaceClaim) {
+    return text;
+  }
+
+  return addVerificationPreamble(neutralizeSpeculativeCandidateClaims(trimmed));
+}
+
+function sanitizeDelegationLikeToolArgs(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  guidance: DynamicTurnGuidance | null | undefined,
+): Record<string, unknown> | undefined {
+  void guidance;
+  if (!args) {
+    return args;
+  }
+
+  if (toolName === "delegate_to_agent" || toolName === "swarm_delegate") {
+    let changed = false;
+    const nextArgs: Record<string, unknown> = { ...args };
+
+    for (const key of ["task", "context"] as const) {
+      if (typeof nextArgs[key] !== "string") continue;
+      const sanitized = sanitizeDelegationTextForSourceSensitiveTurn(String(nextArgs[key]));
+      if (sanitized !== nextArgs[key]) {
+        nextArgs[key] = sanitized;
+        changed = true;
+      }
+    }
+
+    return changed ? nextArgs : args;
+  }
+
+  if (toolName === "parallel_delegate" && Array.isArray(args["tasks"])) {
+    let changed = false;
+    const nextTasks = args["tasks"].map((rawTask) => {
+      if (!rawTask || typeof rawTask !== "object") return rawTask;
+      const nextTask = { ...(rawTask as Record<string, unknown>) };
+      let taskChanged = false;
+
+      for (const key of ["task", "context"] as const) {
+        if (typeof nextTask[key] !== "string") continue;
+        const sanitized = sanitizeDelegationTextForSourceSensitiveTurn(String(nextTask[key]));
+        if (sanitized !== nextTask[key]) {
+          nextTask[key] = sanitized;
+          taskChanged = true;
+        }
+      }
+
+      if (taskChanged) changed = true;
+      return taskChanged ? nextTask : rawTask;
+    });
+
+    return changed ? { ...args, tasks: nextTasks } : args;
+  }
+
+  return args;
 }
 
 function looksLikeDelegatedFailureEvidence(value: string): boolean {
@@ -1662,7 +1891,8 @@ export function buildModelVisibleToolResult(
       return parts.join("\n");
     }
 
-    const evidence = truncatePlainText(cleaned, 1600);
+    const partialEvidence = extractUsefulInterruptedDelegationEvidence(cleaned);
+    const evidence = truncatePlainText(partialEvidence ?? cleaned, 1600);
     if (delegationFailed) {
       const parts = [
         `Delegated result from ${agentName} — TASK FAILED.`,
@@ -2990,6 +3220,21 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           noMatchCount: searchAgentsNoMatchCount,
         }, { sessionId: session.id, severity: "warn" });
         guardrailEvents.push({ type: "tool_recovered", details: `${originalTool}:search_agents_no_match_fallback` });
+      }
+
+      const originalDelegationArgs = stableSerialize(tc.arguments ?? {});
+      const sanitizedDelegationArgs = sanitizeDelegationLikeToolArgs(tc.name, tc.arguments, initialDynamicGuidance);
+      if (sanitizedDelegationArgs) {
+        const sanitizedSignature = stableSerialize(sanitizedDelegationArgs);
+        if (sanitizedSignature !== originalDelegationArgs) {
+          tc.arguments = sanitizedDelegationArgs;
+          logAudit("tool_call_recovered", {
+            originalTool: tc.name,
+            rewrittenTo: tc.name,
+            reason: "source_sensitive_candidate_sanitized",
+          }, { sessionId: session.id, severity: "warn" });
+          guardrailEvents.push({ type: "tool_recovered", details: `${tc.name}:source_sensitive_candidate_sanitized` });
+        }
       }
 
       toolCallsRequested += 1;

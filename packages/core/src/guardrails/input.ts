@@ -26,7 +26,7 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp; severity: "low"
   { name: "zero_width_chars", pattern: /[\u200B-\u200D\u2060\uFEFF\u00AD]/, severity: "medium" },
   { name: "invisible_unicode", pattern: /[\u202A-\u202E\u2066-\u2069]/, severity: "medium" }, // bidirectional overrides
   // Base64 hidden instructions
-  { name: "base64_payload", pattern: /\b(?:[A-Za-z0-9+/]{40,}={0,2})\b/, severity: "low" }, // long b64 blobs
+  { name: "base64_payload", pattern: /\b(?:[A-Za-z0-9+/]{40,}={0,2})\b/, severity: "medium" }, // long b64 blobs
   // Credential/secret extraction — flexible pattern to handle "Show me all API keys"
   { name: "extract_credentials", pattern: /(print|show|output|reveal|expose|list|give me|tell me)\b.{0,30}(api[\s_-]?key|secret|password|token|credential)/i, severity: "high" },
   // Tool misuse attempts

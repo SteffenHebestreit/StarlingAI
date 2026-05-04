@@ -103,7 +103,7 @@ export async function handleAguiStream(
   try {
     let textStarted = false;
 
-    await runTurn({
+    const turnResult = await runTurn({
       session,
       userMessage: message,
       signal: abortController.signal,
@@ -131,6 +131,15 @@ export async function handleAguiStream(
 
     cleanupTimeout();
     if (timedOut) return;
+
+    // If the turn was blocked and no text was streamed (blocked turns suppress
+    // initial streaming), surface the blocked reason as an assistant message so
+    // the user is not left with a silent empty response.
+    if (turnResult.blocked && !textStarted && turnResult.response) {
+      sseEvent(res, { type: "TEXT_MESSAGE_STARTED", messageId, role: "assistant" });
+      sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: turnResult.response });
+      textStarted = true;
+    }
 
     if (textStarted) {
       sseEvent(res, { type: "TEXT_MESSAGE_ENDED", messageId });
