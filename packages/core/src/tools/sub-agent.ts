@@ -7,6 +7,7 @@
 
 import { registerTool, getAllTools, rerankToolsForTask, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { looksLikeContainerLevelFailure } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
@@ -1568,6 +1569,9 @@ export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
   if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
+    return true;
+  }
+  if (looksLikeContainerLevelFailure(preview)) {
     return true;
   }
   if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {

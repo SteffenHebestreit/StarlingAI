@@ -1111,7 +1111,75 @@ function resolveEmptyAssistantResponseFallback(
     }
   }
 
+  // Diagnostic fallback: when the model produced no usable text AND the
+  // most recent tool result is a failed delegation, the generic "please
+  // try again" placeholder is unhelpful — the user gets no signal about
+  // WHY their request couldn't be answered.  Surface a short diagnostic
+  // that names the failed agent and the failure reason instead, so they
+  // can decide whether to retry, rephrase, or ask for a different path.
+  // Common case: a containerized sub-agent crashed (Docker daemon down,
+  // image missing, OOM) and the model couldn't recover synthesis on its
+  // own (typical when the request needed live evidence the user couldn't
+  // provide inline).
+  const recentFailedDelegation = findRecentFailedDelegation(history);
+  if (recentFailedDelegation) {
+    logAudit(
+      "guardrail_flagged",
+      {
+        type: "empty_response_failed_delegation_diagnostic",
+        agentName: recentFailedDelegation.agentName,
+        reason: recentFailedDelegation.reason.slice(0, 200),
+      },
+      { sessionId: session.id, channel: session.channel, severity: "warn" },
+    );
+    return recentFailedDelegation.message;
+  }
+
   return EMPTY_ASSISTANT_RESPONSE_FALLBACK;
+}
+
+/**
+ * Walk recent history for a failed delegation tool result.  Returns a
+ * short user-facing diagnostic message naming the agent and reason —
+ * better UX than the generic empty-response placeholder when the model
+ * produced no recoverable text and we already know one specific thing
+ * went wrong.  Returns null when the recent transcript shows successful
+ * delegations or no delegations at all (in those cases the placeholder
+ * remains correct).
+ */
+function findRecentFailedDelegation(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+): { agentName: string; reason: string; message: string } | null {
+  const recent = [...history].reverse().slice(0, 8);
+  for (const message of recent) {
+    if (message.role !== "tool") continue;
+    const content = String(message.content ?? "");
+    const meta = message.metadata ?? {};
+    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
+    if (!isDelegate) continue;
+    // Only fire on visible-failure shape — the runtime's
+    // buildModelVisibleToolResult rewrites the heading to "TASK FAILED"
+    // when the underlying output looked like a failure.  Reading that
+    // marker keeps us aligned with what the model itself saw.
+    if (!/TASK FAILED\b/i.test(content)) {
+      // Successful delegation in scope — don't fire a failure diagnostic.
+      return null;
+    }
+    const agentName = typeof meta["agentName"] === "string" && meta["agentName"]
+      ? meta["agentName"]
+      : (content.match(/Delegated result from\s+([^\s—]+)/)?.[1] ?? "a specialist agent");
+    const evidenceMatch = /Observed evidence:\s*([\s\S]+?)(?:\n\n|$)/.exec(content);
+    const reason = evidenceMatch ? evidenceMatch[1]!.trim().slice(0, 280) : "";
+    const reasonHint = reason ? ` Reason: ${reason}` : "";
+    return {
+      agentName,
+      reason,
+      message:
+        `I delegated this task to ${agentName} but the attempt failed before producing an answer.${reasonHint} `
+        + `Try the request again, or rephrase it so it can be answered without that specialist.`,
+    };
+  }
+  return null;
 }
 
 function looksLikeDelegateMetadata(meta: Record<string, unknown> | undefined): boolean {
