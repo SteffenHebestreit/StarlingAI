@@ -554,6 +554,72 @@ function computeGpuAffinityAdjustment(
   return 0;
 }
 
+/** Shared stop-word set for query shortening — covers the most common
+ *  English + German fillers that don't carry routing signal. Kept small so
+ *  legitimate domain words (research, build, audio) survive. */
+const ROUTING_QUERY_STOP_WORDS = new Set<string>([
+  "a", "an", "and", "or", "the", "of", "for", "with", "to", "in", "on", "at",
+  "by", "from", "as", "is", "are", "be", "this", "that", "these", "those",
+  "der", "die", "das", "den", "dem", "ein", "eine", "einen", "einer", "eines",
+  "und", "oder", "für", "fuer", "mit", "von", "in", "auf", "zu", "im", "am",
+]);
+
+/** Generic verbs/nouns that don't narrow the embedding — drop when shortening. */
+const ROUTING_QUERY_FILLER = new Set<string>([
+  "task", "tasks", "help", "do", "make", "get", "show", "find", "use", "using",
+  "via", "etc",
+]);
+
+/** Count meaningful content words in a routing query.  Used to detect
+ *  over-specified queries that fragment the embedding similarity. */
+function countRoutingQueryContentTokens(query: string): number {
+  return query
+    .toLowerCase()
+    .split(/[\s,;:]+/)
+    .filter((token) => token.length >= 3 && !ROUTING_QUERY_STOP_WORDS.has(token) && !ROUTING_QUERY_FILLER.has(token))
+    .length;
+}
+
+/**
+ * Shorten an over-specified routing query by keeping only the leading
+ * distinctive content tokens.  Triggered after a long query returns 0
+ * results — the embedding fragments across too many concepts and matches
+ * nothing, but the same terms in a tighter slice often hit a real agent.
+ *
+ * Example (audit session 0a93078b, May 2026):
+ *   Original: "hardware engineering circuit design PCB layout component
+ *              selection MEMS microphone ESP32 audio recording" (12 content
+ *              tokens, 0 results)
+ *   Shortened: "hardware engineering circuit design PCB" (5 tokens) —
+ *              still 0 here, but "hardware research" or "audio research"
+ *              would hit `researcher`.  In practice we keep the leading
+ *              5 distinctive tokens since they tend to capture the user's
+ *              primary domain.
+ *
+ * Returns null when the query is already short enough that shortening
+ * wouldn't change behavior.
+ */
+export function shortenOverspecifiedRoutingQuery(query: string): string | null {
+  const tokens = query.split(/\s+/).filter(Boolean);
+  if (tokens.length <= 6) return null;
+
+  const distinctive: string[] = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower.length < 3) continue;
+    if (ROUTING_QUERY_STOP_WORDS.has(lower)) continue;
+    if (ROUTING_QUERY_FILLER.has(lower)) continue;
+    distinctive.push(token);
+    if (distinctive.length >= 5) break;
+  }
+
+  if (distinctive.length === 0) return null;
+  const shortened = distinctive.join(" ");
+  // Don't return a "shortened" query that's actually the same as the input.
+  if (shortened === query.trim()) return null;
+  return shortened;
+}
+
 export async function resolveAgentRouting(
   query: string,
   opts?: {
@@ -3775,15 +3841,79 @@ registerTool({
       : "";
 
     if (resolution.results.length === 0 && resolution.weakCandidates.length === 0) {
+      // Auto-retry with a shortened query when the original was over-specified.
+      // Common failure shape (audit session 0a93078b, May 2026): a coordinator
+      // emits a 9-12 noun query like "hardware engineering circuit design PCB
+      // layout component selection MEMS microphone ESP32 audio recording".
+      // The embedding fragments across too many concepts and matches nothing,
+      // even though `researcher` or `mission_coordinator` would hit on the
+      // first 4-5 distinctive terms.  When this happens, retry once with a
+      // shortened query before declaring the routing a complete failure.
+      const shortened = countRoutingQueryContentTokens(raw) > 7
+        ? shortenOverspecifiedRoutingQuery(raw)
+        : null;
+      if (shortened) {
+        const retryResolutionRaw = await resolveAgentRouting(shortened, {
+          minConfidence,
+          allowedAgents: ctx.allowedAgents,
+        });
+        const retryResolution = currentAgentName
+          ? {
+              ...retryResolutionRaw,
+              results: retryResolutionRaw.results.filter((candidate) => candidate.name !== currentAgentName),
+              weakCandidates: retryResolutionRaw.weakCandidates.filter((candidate) => candidate.name !== currentAgentName),
+            }
+          : retryResolutionRaw;
+        if (retryResolution.results.length > 0) {
+          logAudit("agent_routing_evaluated", {
+            query: shortened,
+            originalQuery: raw,
+            retryAfterEmpty: true,
+            minConfidence,
+            mode: retryResolution.mode,
+            resultCount: retryResolution.results.length,
+            weakCount: retryResolution.weakCandidates.length,
+            gated: retryResolution.gated,
+            topResult: retryResolution.results[0]?.name ?? null,
+          }, { sessionId: ctx.sessionId, channel: "agent-routing" });
+          const topAgent = retryResolution.results[0]!;
+          const topResultIsStrong = topAgent.confidence === "high"
+            || (topAgent.confidence === "medium" && topAgent.score >= 0.5);
+          const nextActionLine = topResultIsStrong
+            ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+            : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
+          return {
+            success: true,
+            output: `${nextActionLine}\n\n⚠ Original query "${raw}" matched no agents (over-specified). Auto-retried with shortened query "${shortened}" and found ${retryResolution.results.length} match(es):\n\n${retryResolution.results.map(formatRoutingCandidate).join("\n\n")}${circuitNote}${selfExclusionNote}`,
+            metadata: {
+              query: raw,
+              shortenedQuery: shortened,
+              retryAfterEmpty: true,
+              minConfidence,
+              routingMode: retryResolution.mode,
+              resultCount: retryResolution.results.length,
+              weakCount: retryResolution.weakCandidates.length,
+              topResult: topAgent.name,
+              topResultConfidence: topAgent.confidence,
+              topResultScore: topAgent.score,
+              suggestedFallbackAgents: retryResolution.results.slice(1, 4).map((candidate) => candidate.name),
+            },
+          };
+        }
+      }
+
       // Complete routing failure — auto-record a capability gap for self-improvement pipeline
       recordCapabilityGap({
         description: `No agent found for routing query: "${raw}"`,
         exampleInput: raw,
         sessionId: ctx.sessionId,
       }).catch(() => { /* self-improvement may be disabled */ });
+      const shortenedNote = shortened
+        ? ` (also tried shortened query "${shortened}" — also 0 matches)`
+        : "";
       return {
         success: true,
-        output: `No agents matched "${raw}". Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}`,
+        output: `No agents matched "${raw}"${shortenedNote}. Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}`,
         metadata: {
           query: raw,
           minConfidence,
@@ -3791,6 +3921,7 @@ registerTool({
           resultCount: 0,
           weakCount: 0,
           topResult: null,
+          ...(shortened ? { shortenedQueryAttempted: shortened } : {}),
         },
       };
     }

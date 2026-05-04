@@ -10,7 +10,7 @@ import {
   scoreAgentKeywordMatch,
   searchByEmbedding,
 } from "../providers/embeddings.js";
-import { computeHybridRoutingScore, isCircuitOpen } from "../tools/sub-agent.js";
+import { computeHybridRoutingScore, isCircuitOpen, shortenOverspecifiedRoutingQuery } from "../tools/sub-agent.js";
 import type { OutcomeEntry } from "../agent/outcomes.js";
 
 describe("agent search helpers", () => {
@@ -1376,5 +1376,45 @@ describe("circuit breaker", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("shortenOverspecifiedRoutingQuery", () => {
+  // Regression: audit session 0a93078b (May 2026).  Coordinator emitted
+  // a 13-word query that fragmented the embedding similarity and matched
+  // no agents, then fell into an ephemeral-spawn cascade.  The shortener
+  // must keep the leading distinctive tokens so an auto-retry can hit
+  // the real specialists.
+  it("shortens an over-specified hardware engineering query to its leading distinctive tokens", () => {
+    const result = shortenOverspecifiedRoutingQuery(
+      "hardware engineering circuit design PCB layout component selection MEMS microphone ESP32 audio recording",
+    );
+    expect(result).not.toBeNull();
+    expect(result!.split(/\s+/).length).toBeLessThanOrEqual(5);
+    expect(result).toContain("hardware");
+  });
+
+  it("returns null for already-short queries that wouldn't benefit", () => {
+    expect(shortenOverspecifiedRoutingQuery("research news")).toBeNull();
+    expect(shortenOverspecifiedRoutingQuery("draft an investor memo")).toBeNull();
+  });
+
+  it("strips stop-words and filler when picking the leading tokens", () => {
+    // "task help find a hardware engineer for the audio recording device" —
+    // stop words ("a", "for", "the") and filler ("task", "help", "find") drop out.
+    const result = shortenOverspecifiedRoutingQuery(
+      "task help find a hardware engineer for the audio recording device specialist",
+    );
+    expect(result).not.toBeNull();
+    const tokens = result!.split(/\s+/);
+    expect(tokens.length).toBeLessThanOrEqual(5);
+    expect(tokens).not.toContain("a");
+    expect(tokens).not.toContain("for");
+    expect(tokens).not.toContain("the");
+    expect(tokens).not.toContain("task");
+  });
+
+  it("returns null when the query has only stop-words and filler", () => {
+    expect(shortenOverspecifiedRoutingQuery("the and or of for with to a an is")).toBeNull();
   });
 });
