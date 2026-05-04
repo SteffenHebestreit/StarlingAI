@@ -87,6 +87,73 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: audit session 0a93078b (May 2026).  Coordinator timed out
+  // after its only tool calls were search_agents → 0 results, list_agents
+  // → 0 results, create_ephemeral_agent → spawn errored.  The "Recovered
+  // evidence snippets" section contained only failure stubs.  Previously
+  // classified as `partial`, masking the failure and skipping the warden
+  // escalation.  Must now be `failure` so the failed-delegation diagnostic
+  // can surface and the runtime can fall back to direct synthesis.
+  it("demotes partial-with-only-failure-stubs to failure", () => {
+    const interruptedOutput = [
+      "Sub-agent 'mission_coordinator' timed out after 480000ms",
+      "Partial progress before interruption:",
+      "- task_1 [running] Erstelle einen Hardware-Bau-Leitfaden ... via mission_coordinator",
+      "- Tool calls executed: 4 (search_agents, create_ephemeral_agent, list_agents)",
+      "- Iterations completed: 4",
+      "Recovered evidence snippets from completed tools:",
+      "- search_agents: No agents matched \"hardware engineering circuit design PCB\"",
+      "- list_agents: No agents matched \"hardware engineering circuit design PCB\"",
+      "- create_ephemeral_agent: [ephemeral:hardware_audio_engineer]: Sub-agent error: Error: OpenAI-compatible request failed (model: qwen3.6-35b-a3b): Request timed out.",
+    ].join("\n");
+
+    const r = classifyDelegationResult(
+      interruptedOutput,
+      "partial",
+      {
+        toolCount: 4,
+        toolNames: ["search_agents", "create_ephemeral_agent", "list_agents"],
+        terminalState: "timeout",
+        outcome: "partial" as const,
+      },
+      { tags: ["coordination"] } as never,
+      "mission_coordinator",
+      "Erstelle einen Hardware-Bau-Leitfaden",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  // Counter-test: a real partial result with substantive recovered evidence
+  // (e.g. a research agent that timed out mid-pass with real web_fetch
+  // payloads) must STAY `partial` so the partial-acceptance path still
+  // works.  Demotion fires only when every snippet is a known failure shape.
+  it("keeps partial when recovered evidence has any substantive snippet", () => {
+    const interruptedOutput = [
+      "Sub-agent 'researcher' timed out after 240000ms",
+      "Partial progress before interruption:",
+      "- Tool calls executed: 3 (web_search, web_fetch, share_finding)",
+      "- Iterations completed: 3",
+      "Recovered evidence snippets from completed tools:",
+      "- web_search: Top result: TDK IM73A135V01 datasheet — 4-MEMS array, IÂ²S, -26 dBFS sensitivity, 64 dB SNR, omnidirectional",
+      "- web_fetch: ESP32-S3-WROOM-1 module specification — Dual-core Xtensa LX7, WiFi 4, BLE 5, hardware audio codecs via I2S0/I2S1",
+    ].join("\n");
+
+    const r = classifyDelegationResult(
+      interruptedOutput,
+      "partial",
+      {
+        toolCount: 3,
+        toolNames: ["web_search", "web_fetch", "share_finding"],
+        terminalState: "timeout",
+        outcome: "partial" as const,
+      },
+      undefined,
+      "researcher",
+      "research MEMS microphones for ESP32",
+    );
+    expect(r).toBe<DelegationClassification>("partial");
+  });
+
   it("returns failure for timed-out non-partial result", () => {
     const r = classifyDelegationResult(
       "I was trying to fetch the page but it took too long.",

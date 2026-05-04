@@ -141,6 +141,88 @@ describe("create_ephemeral_agent policy", () => {
     expect(result.error).toContain("parallel_delegate");
   }, 15000);
 
+  // Regression: audit session 0a93078b (May 2026).  Coordinator created
+  // hardware_audio_engineer with description="MEMS microphone arrays, ESP32
+  // audio systems, PCB layout, power management, and component selection"
+  // and tools=[workspace_search, read_file, list_files] — no web access.
+  // The agent then looped 6 iterations of "No workspace files contain ..."
+  // before timing out.  The validator must reject this combination at spawn
+  // time so the coordinator gets immediate feedback to retry with the right
+  // tools instead of burning 4+ minutes on a doomed run.
+  it("rejects research-shaped ephemeral agents that lack web/browser tools", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const createEphemeralAgent = getTool("create_ephemeral_agent");
+    expect(createEphemeralAgent).toBeTruthy();
+
+    const result = await createEphemeralAgent!.execute({
+      agentName: "hardware_audio_engineer",
+      description: "Hardware engineering specialist for portable audio recording devices — MEMS microphone arrays, ESP32 audio systems, PCB layout, and component selection.",
+      systemPrompt: "You are a senior hardware engineer. Component Sourcing: Specific part numbers from DigiKey/Mouser/Adafruit with pricing and availability. RULES: Always provide SPECIFIC part numbers, not generic descriptions.",
+      tools: ["workspace_search", "read_file", "list_files"],
+      task: "Erstelle einen Hardware-Bau-Leitfaden mit konkreten Teile-Namen und Part-Numbers.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("external research");
+    expect(result.error).toContain("web_search");
+  }, 15000);
+
+  it("accepts research-shaped ephemeral agents that include web_search", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const createEphemeralAgent = getTool("create_ephemeral_agent");
+    expect(createEphemeralAgent).toBeTruthy();
+
+    const result = await createEphemeralAgent!.execute({
+      agentName: "hardware_audio_engineer",
+      description: "Hardware engineering specialist for portable audio recording devices — MEMS microphones, ESP32 audio, PCB, components.",
+      systemPrompt: "You are a senior hardware engineer. Component Sourcing: Specific part numbers from DigiKey/Mouser with pricing and availability.",
+      tools: ["web_search", "web_fetch", "read_file"],
+      task: "Erstelle einen Hardware-Bau-Leitfaden mit konkreten Teile-Namen.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+  }, 15000);
+
+  it("accepts non-research ephemeral agents without web tools", async () => {
+    // The validator must NOT fire on agents whose description is pure
+    // analysis / writing / refactoring — only when the spec explicitly
+    // mentions external sourcing / datasheets / current availability.
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const createEphemeralAgent = getTool("create_ephemeral_agent");
+    expect(createEphemeralAgent).toBeTruthy();
+
+    const result = await createEphemeralAgent!.execute({
+      agentName: "investor_memo_writer",
+      description: "Writes focused investor memos from inline context.",
+      systemPrompt: "Write a concise investor memo grounded in the provided task.",
+      tools: ["read_file", "write_file"],
+      task: "Draft an investor memo summarizing the attached pitch deck.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+  }, 15000);
+
   it("generates and starts an ephemeral agent when the best skill match is below threshold", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ephemeral-threshold-"));
     const configPath = join(tempDir, "starlingai.json");
