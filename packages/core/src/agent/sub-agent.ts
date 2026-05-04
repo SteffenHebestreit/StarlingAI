@@ -20,6 +20,7 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { withSpan } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
+import { looksLikeContainerLevelFailure } from "./container-failure.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
@@ -746,6 +747,9 @@ function looksLikeFailureResult(result: string): boolean {
   if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
     return true;
   }
+  if (looksLikeContainerLevelFailure(preview)) {
+    return true;
+  }
   if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
     return true;
   }
@@ -1101,6 +1105,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       } finally {
         releaseSlot(opts.agentName);
       }
+      // Detect container-level failures (spawn errors, non-zero exits, container
+      // crashes, timeouts) that the runner reports as a failure-prefixed string
+      // in containerRun.output rather than throwing. Without this, the metadata
+      // would claim outcome=success while the visible output reads "container
+      // error: unknown", and the rest of the orchestration pipeline (retry
+      // cascade, score-keeping, audit telemetry) would treat the call as
+      // successful and never fall back to a different agent.
+      const containerFailed = looksLikeContainerLevelFailure(containerRun.output);
       const stats: SubAgentExecutionStats = {
         agentName: opts.agentName,
         sessionId: subSessionId,
@@ -1113,8 +1125,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
         model: modelConfig.primary ?? "",
         capabilities: agentCfg.capabilities ?? [],
-        outcome: "success",
-        terminalState: "completed",
+        outcome: containerFailed ? "failure" : "success",
+        terminalState: containerFailed ? "error" : "completed",
         containerColdStartMs: containerRun.metrics.containerColdStartMs,
         containerBootstrapMs: containerRun.metrics.containerBootstrapMs,
         containerRuntimeMs: containerRun.metrics.containerRuntimeMs,

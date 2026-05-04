@@ -55,6 +55,38 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: the container-runner returns the literal string
+  // "Sub-agent '<name>' container error: <reason>" for spawn / runtime
+  // failures.  The previous regex `\b(...|error:|...)\b` failed to match this
+  // because the trailing `\b` after `:` (non-word) followed by a space
+  // (non-word) never fires.  Combined with the containerized sub-agent path
+  // hardcoding outcome="success" / terminalState="completed", a container
+  // crash was being classified as a successful delegation, swallowing the
+  // failure and skipping retry / forced-synthesis.
+  it("returns failure when output reports container-level error despite success metadata", () => {
+    const r = classifyDelegationResult(
+      "Sub-agent 'shell_agent' container error: unknown",
+      "success",
+      { ...noToolStats, terminalState: "completed" },
+      undefined,
+      "shell_agent",
+      "run a quick check",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  it("returns failure when output reports container exit code", () => {
+    const r = classifyDelegationResult(
+      "Sub-agent 'coder' exited with code 137. Output: ",
+      "success",
+      { ...noToolStats, terminalState: "completed" },
+      undefined,
+      "coder",
+      "task",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   it("returns failure for timed-out non-partial result", () => {
     const r = classifyDelegationResult(
       "I was trying to fetch the page but it took too long.",
