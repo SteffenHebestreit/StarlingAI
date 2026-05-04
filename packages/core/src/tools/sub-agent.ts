@@ -1011,7 +1011,58 @@ const EXECUTION_TOOL_FAMILIES = {
   ]),
 };
 
-function validateEphemeralToolSelection(tools: string[], opts?: { allowZeroTools?: boolean }): string[] {
+/** Tool names that satisfy "external research" intent — i.e. the agent can
+ *  reach the open internet for datasheets, prices, supplier inventory, news,
+ *  documentation, or product specs.  Used by the tool-fit validator below. */
+const RESEARCH_CAPABLE_TOOL_NAMES = new Set<string>([
+  "web_search",
+  "web_fetch",
+  "mcp__playwright__browser_navigate",
+  "mcp__playwright__browser_click",
+  "mcp__playwright__browser_type",
+  "mcp__playwright__browser_snapshot",
+  "mcp__playwright__browser_screenshot",
+]);
+
+/** Patterns that indicate an ephemeral agent needs external research access
+ *  (datasheets, supplier inventory, current product availability, citations).
+ *  Matched against the agent's description + systemPrompt + task — case-
+ *  insensitive substring/regex against the joined text. */
+const EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS: RegExp[] = [
+  /\b(?:datasheet|datasheets)\b/i,
+  /\b(?:digikey|mouser|adafruit|aliexpress|sparkfun|tindie|seeed|farnell|conrad|reichelt)\b/i,
+  /\b(?:part\s+number|part\s+numbers|part\s+#|part-?numbers?)\b/i,
+  /\bcomponent\s+(?:sourcing|selection|recommendations?|suggestions?)\b/i,
+  /\b(?:product|hardware|component)\s+(?:recommendations?|suggestions?|comparisons?)\b/i,
+  /\b(?:pricing|price\s+(?:comparison|check)|availability|stock\s+level|supplier|suppliers)\b/i,
+  /\b(?:current|latest|aktuell|aktuelle)\s+(?:product|version|release|spec|news)/i,
+  /\b(?:cite|citations?|official\s+(?:source|documentation|spec|datasheet))\b/i,
+  /\bspecific\s+part\s+numbers?\b/i,
+  /\b(?:Mouser|DigiKey|Adafruit)\s+with\s+(?:pricing|availability)\b/i,
+];
+
+function looksLikeExternalResearchAgent(
+  description: string,
+  systemPrompt: string,
+  task: string,
+): boolean {
+  const haystack = `${description}\n${systemPrompt}\n${task}`;
+  return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
+interface EphemeralToolSelectionContext {
+  /** When provided, the validator checks tool-fit against the agent's stated
+   *  intent: a research-shaped agent must include at least one
+   *  RESEARCH_CAPABLE_TOOL_NAMES tool, otherwise reject with a clear error. */
+  description?: string;
+  systemPrompt?: string;
+  task?: string;
+}
+
+function validateEphemeralToolSelection(
+  tools: string[],
+  opts?: { allowZeroTools?: boolean } & EphemeralToolSelectionContext,
+): string[] {
   const issues: string[] = [];
 
   if (tools.length === 0 && !opts?.allowZeroTools) {
@@ -1040,6 +1091,30 @@ function validateEphemeralToolSelection(tools: string[], opts?: { allowZeroTools
 
   if (tools.includes("parallel_delegate") && privilegedTools.length > 1) {
     issues.push("Ephemeral coordinator agents using parallel_delegate cannot also hold additional execution-heavy tools.");
+  }
+
+  // ── Tool-fit validation ────────────────────────────────────────────────
+  // When the spec describes an external-research agent (datasheets, supplier
+  // sourcing, part numbers, product recommendations, price/availability) but
+  // the granted tools cover none of web_search, web_fetch, or browser tools,
+  // reject the spawn.  The classic failure mode (audit session 0a93078b,
+  // May 2026) is a coordinator that creates `hardware_audio_engineer` with
+  // tools=[workspace_search, read_file, list_files] and then watches it loop
+  // 6 iterations of "No workspace files contain ..." before timing out.
+  if (opts?.description !== undefined || opts?.systemPrompt !== undefined || opts?.task !== undefined) {
+    const description = opts?.description ?? "";
+    const systemPrompt = opts?.systemPrompt ?? "";
+    const task = opts?.task ?? "";
+    const isResearchAgent = looksLikeExternalResearchAgent(description, systemPrompt, task);
+    const hasResearchTools = tools.some((toolName) => RESEARCH_CAPABLE_TOOL_NAMES.has(toolName));
+    if (isResearchAgent && !hasResearchTools) {
+      issues.push(
+        "This ephemeral agent's description, system prompt, or task indicates it needs external research access "
+        + "(datasheets, supplier sourcing, product/part recommendations, pricing, or current availability), "
+        + "but the granted tool list contains none of web_search, web_fetch, or browser_* tools. "
+        + "Re-spawn with at least one of those tools, or remove the research-shaped requirements from the spec.",
+      );
+    }
   }
 
   return issues;
@@ -1641,6 +1716,61 @@ function shouldAcceptPartialDelegation(
   return stats.toolCount > 0 || stats.toolNames.some((toolName) => toolName.startsWith("computer_"));
 }
 
+/**
+ * Detect when a "partial" timeout/cancel output contains nothing but failed
+ * tool stubs in its recovered-evidence section.  The classic failure mode
+ * (audit session 0a93078b, May 2026) is a coordinator that times out after
+ * its only tool calls were search_agents → 0 results, list_agents → 0
+ * results, create_ephemeral_agent → spawn that itself errored.  The
+ * `buildInterruptedSubAgentOutput` formatter produces a "Partial progress
+ * before interruption" block whose Recovered evidence snippets list reads:
+ *
+ *   - search_agents: No agents matched ...
+ *   - list_agents: No agents matched ...
+ *   - create_ephemeral_agent: Sub-agent error: ...
+ *
+ * The classifier was treating that as `partial` (because outcome=partial and
+ * the output is non-empty), letting the runtime persist it as evidence and
+ * skip the failure-handling cascade.  Demote those to `failure` so the
+ * failed-delegation diagnostic and warden escalation can fire.
+ */
+export function looksLikeOnlyFailureStubs(output: string): boolean {
+  if (!output) return false;
+  const text = output.trim();
+  // Must be the shape `buildInterruptedSubAgentOutput` produces — header
+  // line + "Partial progress before interruption" block.
+  if (!/Partial progress before interruption:/i.test(text)) return false;
+  // Extract the recovered-evidence section if present.
+  const evidenceMatch = /Recovered evidence snippets from completed tools:\s*\n([\s\S]+)$/.exec(text);
+  if (!evidenceMatch) {
+    // No recovered snippets at all — the only content is the timeout/cancel
+    // header plus the swarm-progress lines.  That's effectively no evidence.
+    return true;
+  }
+  const snippets = evidenceMatch[1]!
+    .split(/\n(?=- )/)
+    .map((line) => line.replace(/^\s*-\s*/, "").trim())
+    .filter(Boolean);
+  if (snippets.length === 0) return true;
+  // Patterns that mark a snippet as "failure stub only — no usable evidence".
+  const FAILURE_STUB_PATTERNS: RegExp[] = [
+    /^[\w_]+:\s*No agents matched\b/i,
+    /^[\w_]+:\s*No workspace files contain\b/i,
+    /^[\w_]+:\s*No (?:results|matches|files|content|entries) found\b/i,
+    /^[\w_]+:\s*Sub-agent error:/i,
+    /^[\w_]+:\s*Tool '[^']+' has been called \d+ times this run/i,
+    /^[\w_]+:\s*\[ephemeral:[^\]]+\]:\s*Sub-agent error:/i,
+    /Request timed out\.?$/i,
+    /container error:/i,
+    /failed to spawn/i,
+  ];
+  // Every recovered snippet must match a failure-stub pattern for the output
+  // to qualify as "only failure stubs". Even one substantive snippet (e.g. a
+  // real web_search hit, a read_file payload, a workspace_search snippet
+  // with content) is enough to keep this as a real partial result.
+  return snippets.every((snippet) => FAILURE_STUB_PATTERNS.some((pattern) => pattern.test(snippet)));
+}
+
 /** Consolidated classification of a completed sub-agent delegation. */
 export type DelegationClassification =
   | "success"               // usable, complete answer
@@ -1708,7 +1838,13 @@ export function classifyDelegationResult(
     const hasPartialContent =
       delegationOutcome === "partial"
       || (stats?.outcome === "partial" && delegationOutcome !== "success");
-    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output)) {
+    // Demote partial-with-only-failure-stubs to failure: the recovered-
+    // evidence section contains nothing but "No X matched" / "Sub-agent
+    // error:" / per-tool-cap stubs, so there's nothing to synthesize from.
+    // Letting this through as `partial` skips the failure-handling cascade
+    // (failed-delegation diagnostic, warden escalation) and surfaces stubs
+    // to the model as if they were real evidence.
+    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output) && !looksLikeOnlyFailureStubs(output)) {
       return "partial";
     }
     return looksLikeInfrastructureFailure(output) ? "infrastructure_failure" : "failure";
@@ -3335,7 +3471,7 @@ registerTool({
       },
       model: {
         type: "object",
-        description: "Optional model override. Example: { \"primary\": \"lmstudio/qwen3.5-9b\", \"temperature\": 0.1 }",
+        description: "Optional model override. primary MUST be an exact configured model identifier (e.g. \"lmstudio/qwen3.6-35b-a3b\" or \"lmstudio/qwen3.5-9b\") — do NOT invent model names. Omit model entirely to use the system default.",
         properties: {
           primary: { type: "string" },
           temperature: { type: "number" },
@@ -3380,7 +3516,12 @@ registerTool({
       ctx; // used for sessionId below
     }
 
-    const policyIssues = validateEphemeralToolSelection(tools);
+    const description = String(args["description"] ?? "").trim();
+    const policyIssues = validateEphemeralToolSelection(tools, {
+      description,
+      systemPrompt,
+      task,
+    });
     if (policyIssues.length > 0) {
       logAudit("ephemeral_agent_rejected", {
         agentName,
@@ -3402,6 +3543,30 @@ registerTool({
     const modelOverride = args["model"] && typeof args["model"] === "object"
       ? args["model"] as Record<string, unknown>
       : {};
+
+    // Validate model.primary against configured models — reject hallucinated identifiers.
+    // The LLM may invent model names from training knowledge (e.g. "qwen/qwen3.5-235b-a22b").
+    // If the primary doesn't match a configured model, strip it and fall back to default.
+    if (modelOverride["primary"] && typeof modelOverride["primary"] === "string") {
+      const requestedPrimary = modelOverride["primary"].trim();
+      const cfg = getConfig();
+      const configuredModels = new Set<string>();
+      configuredModels.add(cfg.agents.defaults.model.primary);
+      if (cfg.agents.defaults.model.fallback) configuredModels.add(cfg.agents.defaults.model.fallback);
+      for (const agentCfg of Object.values(cfg.subAgents)) {
+        if (agentCfg.model?.primary) configuredModels.add(agentCfg.model.primary);
+        if (agentCfg.model?.fallback) configuredModels.add(agentCfg.model.fallback);
+      }
+      if (!configuredModels.has(requestedPrimary)) {
+        logAudit("ephemeral_model_override_rejected", {
+          agentName,
+          requestedPrimary,
+          reason: "not_a_configured_model",
+          configuredModels: [...configuredModels],
+        }, { sessionId: ctx.sessionId, severity: "warn", channel: "agent-factory" });
+        delete modelOverride["primary"];
+      }
+    }
 
     const maxIter = Math.min(10, Math.max(1, Number(args["maxIterations"] ?? 5) || 5));
     // Honour an explicit timeoutMs from the caller (min 60 s, max 10 min).
