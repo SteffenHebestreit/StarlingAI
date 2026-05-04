@@ -34,7 +34,7 @@ describe("memory tools", () => {
       sessionId: "sub:parent-session:productivity_agent:1",
       workspacePath,
     });
-    await writeSharedFact("sub:parent-session", "active_focus", "Optimize retrieval precision in this session.");
+    await writeSharedFact("parent-session", "active_focus", "Optimize retrieval precision in this session.");
 
     const result = await executeTool("memory_search", {
       query: "retrieval precision",
@@ -83,7 +83,7 @@ describe("memory tools", () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-tools-"));
     dirs.push(workspacePath);
 
-    await writeSharedFact("sub:parent-session", "meeting_notes", "Summarize and keep only the action items.");
+    await writeSharedFact("parent-session", "meeting_notes", "Summarize and keep only the action items.");
 
     const { executeTool } = await import("../tools/registry.js");
     const promoteResult = await executeTool("memory_promote", {
@@ -107,6 +107,48 @@ describe("memory tools", () => {
 
     expect(searchResult.success).toBe(true);
     expect(searchResult.output).toContain("[workspace/fact]");
+  });
+
+  // Regression: audit session b4fba9c4 (May 2026).  In a 2-level swarm
+  // (main → mission_coordinator → researcher), share_finding from the
+  // researcher silently wrote to bucket `sub:sub` while the main assistant
+  // looked under the root UUID, and the IM73A135V01 manufacturer correction
+  // never reached synthesis.  The fix derives all sub/sub-sub session IDs
+  // back to the same root bucket so cross-agent fact propagation works at
+  // any depth.
+  it("propagates share_finding facts from a 2-level nested sub-agent to the root session bucket", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+
+    // Researcher running 2 levels deep — under mission_coordinator inside
+    // the user's b4fba9c4 turn.
+    const nestedSessionId =
+      "sub:sub:b4fba9c4-ab15-4ae3-a0b6-f39b9df5d317:mission_coordinator:1777925176190:researcher:1777925221848";
+
+    await executeTool("share_finding", {
+      key: "im73a135v01_manufacturer_correction",
+      value: "IM73A135V01 is an Infineon XENSIV analog MEMS microphone, not InvenSense digital I2S.",
+      claim: "IM73A135V01 manufacturer correction.",
+      sourceTitle: "Infineon IM73A135 Datasheet v01_00-EN",
+      sourceUrl: "https://www.infineon.com/dgdl/Infineon-IM73A135-DataSheet-v01_00-EN.pdf",
+      publisher: "Infineon Technologies AG",
+      evidenceType: "primary",
+      accuracyScore: 0.95,
+      trustworthinessScore: 0.98,
+    }, {
+      sessionId: nestedSessionId,
+      workspacePath: "/workspace",
+    });
+
+    // The fact must land under the ROOT bucket (b4fba9c4-...), not under
+    // `sub:sub` or any other intermediate scope.  The main assistant runs
+    // under that root and reads from there.
+    const rootFacts = await readAllFacts("b4fba9c4-ab15-4ae3-a0b6-f39b9df5d317");
+    expect(rootFacts["im73a135v01_manufacturer_correction"]).toContain("Infineon XENSIV");
+
+    // Negative checks: the broken old derivation would have written under
+    // `sub:sub`.  Make sure we don't double-write or leak there.
+    const subSubFacts = await readAllFacts("sub:sub");
+    expect(subSubFacts["im73a135v01_manufacturer_correction"]).toBeUndefined();
   });
 
   it("stores source metadata and validation scores through share_finding", async () => {
@@ -134,7 +176,7 @@ describe("memory tools", () => {
 
     expect(result.success).toBe(true);
 
-    const facts = await readAllFacts("sub:parent-session");
+    const facts = await readAllFacts("parent-session");
     expect(facts["mcp_origin_fact"]).toContain("Anthropic introduced the Model Context Protocol.");
     expect(facts["mcp_origin_fact"]).toContain("source_title: Introducing the Model Context Protocol");
     expect(facts["mcp_origin_fact"]).toContain("source_url: https://www.anthropic.com/news/model-context-protocol");
@@ -167,7 +209,7 @@ describe("memory tools", () => {
 
     expect(result.success).toBe(true);
 
-    const facts = await readAllFacts("sub:parent-session");
+    const facts = await readAllFacts("parent-session");
     expect(facts["mcp_origin_validated"]).toContain("record_type: evidence");
     expect(facts["mcp_origin_validated"]).toContain("source_title: Introducing the Model Context Protocol");
     expect(facts["mcp_origin_validated"]).toContain("validation_status: validated");
@@ -222,7 +264,7 @@ describe("memory tools", () => {
       validationStatus: "validated",
     });
 
-    const facts = await readAllFacts("sub:parent-session");
+    const facts = await readAllFacts("parent-session");
     expect(facts["validated_evidence_ledger_path"]).toBe("artifacts/reports/mcp-validation-ledger.json");
     expect(facts["validated_evidence_ledger_format"]).toBe("json");
   });

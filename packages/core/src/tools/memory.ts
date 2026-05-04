@@ -89,9 +89,34 @@ type EvidenceEntry = {
 const EVIDENCE_LEDGER_FORMATS = new Set<EvidenceLedgerFormat>(["json", "markdown"]);
 const EVIDENCE_VALIDATION_STATUSES = new Set(["unverified", "tentative", "validated", "disputed"]);
 
+/**
+ * Resolve a sessionId (root, sub, or sub-sub) to the *root* orchestrator
+ * session ID where shared facts and partial results live.  All agents in
+ * one user-facing turn must derive to the same shared bucket — otherwise
+ * share_finding from a sub-sub agent (e.g. researcher running inside
+ * mission_coordinator's parallel_delegate) writes to a bucket the main
+ * assistant never reads.
+ *
+ * Sub-session format produced by `runSubAgentWithStatsInner`:
+ *   `sub:${parentSessionId}:${agentName}:${timestamp}`
+ *
+ * To find the root we strip the `sub:` prefix and the trailing
+ * `:agentName:timestamp` suffix, then recurse.  The previous slice(0, 2)
+ * approach silently collapsed `sub:sub:<root>:...` to `sub:sub`, breaking
+ * cross-agent memory propagation in any 2+ level swarm
+ * (audit session b4fba9c4, May 2026).
+ */
 function deriveSharedSessionId(sessionId: string): string {
-  const parts = sessionId.split(":");
-  return parts.length >= 2 ? parts.slice(0, 2).join(":") : sessionId;
+  let current = sessionId;
+  while (current.startsWith("sub:")) {
+    const inner = current.slice("sub:".length);
+    const lastColon = inner.lastIndexOf(":");
+    if (lastColon === -1) return inner;
+    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
+    if (secondLastColon === -1) return inner;
+    current = inner.slice(0, secondLastColon);
+  }
+  return current;
 }
 
 function deriveAgentName(sessionId: string): string {

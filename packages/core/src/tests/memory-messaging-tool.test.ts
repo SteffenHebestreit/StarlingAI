@@ -56,9 +56,9 @@ describe("send_agent_message tool", () => {
       expect(result.success).toBe(true);
       expect(result.output).toContain("2 agents");
 
-      const browserMessages = await swarmMemory.consumeAgentMessages("sub:parent-session", "browser_agent");
-      const visionMessages = await swarmMemory.consumeAgentMessages("sub:parent-session", "vision_browser_analyst");
-      const coderMessages = await swarmMemory.consumeAgentMessages("sub:parent-session", "coder");
+      const browserMessages = await swarmMemory.consumeAgentMessages("parent-session", "browser_agent");
+      const visionMessages = await swarmMemory.consumeAgentMessages("parent-session", "vision_browser_analyst");
+      const coderMessages = await swarmMemory.consumeAgentMessages("parent-session", "coder");
 
       expect(browserMessages).toHaveLength(1);
       expect(visionMessages).toHaveLength(1);
