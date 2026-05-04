@@ -881,6 +881,33 @@
           "default": "markdown brief with actions, decisions, and open risks"
         }
       }
+    },
+    "deep_research": {
+      "description": "Build a source-backed research dossier or design guide on a topic, with optional Mermaid visualizations. Used by the deep_research_packet and research_visual_digest jobs.",
+      "task": "Run mission_coordinator. Phase 1 — researcher gathers authoritative sources and publishes structured share_finding records (topic, source title, URL, exact facts, caveats). Phase 2 — evidence_analyst reconciles the ledger and resolves conflicts. Phase 3 — paper_author drafts the dossier per the requested deliverable shape, then quality_supervisor runs one acceptance pass. Persist the final dossier with generate_document so it survives chat truncation.",
+      "allowedAgents": ["mission_coordinator", "researcher", "evidence_analyst", "paper_author", "quality_supervisor", "summarizer", "qa_guard"],
+      "params": {
+        "deliverable": {
+          "description": "Preferred output shape (dossier, design guide, comparison memo, etc.)",
+          "default": "source-backed dossier with Mermaid diagrams where useful"
+        },
+        "audience": {
+          "description": "Intended audience for the dossier",
+          "default": "decision maker"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable evidence available and call out publication dates"
+        },
+        "includeVisuals": {
+          "description": "Whether to include Mermaid diagrams ('yes' or 'no')",
+          "default": "yes"
+        },
+        "visualFocus": {
+          "description": "Hint for what the visual should clarify",
+          "default": "choose the clearest Mermaid visual structure for the topic"
+        }
+      }
     }
   },
 

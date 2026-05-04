@@ -293,6 +293,69 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  // Regression: audit session 5b7a67ba (May 2026).  The deep_research_packet
+  // job referenced a `deep_research` scene that wasn't defined in the user's
+  // starlingai.json.  resolveJobSteps threw "Job step references unknown
+  // scene: deep_research"; executeTool didn't catch it; the turn died
+  // silently.  Now run_workflow validates referenced scenes BEFORE calling
+  // resolveJobSteps and returns a clear error naming the missing scenes.
+  it("run_workflow returns a clear error when a job references a scene that is not defined", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      // NOTE: no `scenes` section at all — the job below references a scene
+      // that simply isn't defined anywhere.
+      jobs: {
+        deep_research_packet: {
+          description: "Run a deep-research dossier workflow.",
+          params: {
+            topic: { description: "Research topic", default: "the requested topic" },
+          },
+          steps: [
+            { scene: "deep_research", label: "Build dossier" },
+          ],
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "deep_research_packet",
+          workflowType: "job",
+          params: { topic: "portable MEMS microphone array" },
+        },
+        {
+          sessionId: "workflow-missing-scene",
+          workspacePath: "/workspace",
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("deep_research_packet");
+      expect(result.error).toContain("'deep_research'");
+      expect(result.error).toContain("not defined");
+      expect(result.metadata?.["missingScenes"]).toEqual(["deep_research"]);
+      expect(result.metadata?.["blocked"]).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow preserves the original user request when coordinator-first scenes are invoked without params", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
