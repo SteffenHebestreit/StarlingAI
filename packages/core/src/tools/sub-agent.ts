@@ -7,7 +7,7 @@
 
 import { registerTool, getAllTools, rerankToolsForTask, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
-import { looksLikeContainerLevelFailure } from "../agent/container-failure.js";
+import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
@@ -1713,6 +1713,13 @@ export function looksLikeFailureResult(result: string): boolean {
     return true;
   }
   if (looksLikeContainerLevelFailure(preview)) {
+    return true;
+  }
+  // Detect when the sub-agent emitted only LLM template special tokens
+  // (e.g. `<|mask_end|>`, `<|im_end|>`).  Apply to the FULL result, not
+  // the preview, so that a 12-char template-only output is caught even
+  // when the preview happens to be padded.
+  if (looksLikeModelTemplateArtifact(result)) {
     return true;
   }
   if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {
