@@ -20,7 +20,7 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { withSpan } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
-import { looksLikeContainerLevelFailure } from "./container-failure.js";
+import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "./container-failure.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
@@ -750,6 +750,9 @@ function looksLikeFailureResult(result: string): boolean {
   if (looksLikeContainerLevelFailure(preview)) {
     return true;
   }
+  if (looksLikeModelTemplateArtifact(result)) {
+    return true;
+  }
   if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
     return true;
   }
@@ -1112,7 +1115,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // error: unknown", and the rest of the orchestration pipeline (retry
       // cascade, score-keeping, audit telemetry) would treat the call as
       // successful and never fall back to a different agent.
-      const containerFailed = looksLikeContainerLevelFailure(containerRun.output);
+      //
+      // Also demote when the container's output is just LLM template special
+      // tokens (e.g. `<|mask_end|>`) — Qwen variants under forced synthesis
+      // sometimes emit a stray template token instead of real content, and
+      // the runtime previously classified that 12-char garbage as success
+      // (audit session cb90e56a, May 2026).
+      const containerFailed = looksLikeContainerLevelFailure(containerRun.output)
+        || looksLikeModelTemplateArtifact(containerRun.output);
       const stats: SubAgentExecutionStats = {
         agentName: opts.agentName,
         sessionId: subSessionId,

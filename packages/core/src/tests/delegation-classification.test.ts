@@ -87,6 +87,57 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: audit session cb90e56a (May 2026).  mission_coordinator
+  // synthesized at soft deadline and emitted only the literal Qwen template
+  // token `<|mask_end|>` (12 chars) as its output.  Runtime classified that
+  // as outcome="success", terminalState="completed"; the main assistant saw
+  // "TASK COMPLETED" with effectively empty evidence and fabricated 11k
+  // chars from training memory — getting the IM73A135V01 manufacturer and
+  // interface wrong (claimed TDK-InvenSense I²S digital, actually Infineon
+  // XENSIV analog).  Must now classify as failure so the failed-delegation
+  // diagnostic fires and the model doesn't rationalize fabrication.
+  it("returns failure when output is only LLM template special tokens", () => {
+    const r = classifyDelegationResult(
+      "<|mask_end|>",
+      "success",
+      {
+        toolCount: 6,
+        toolNames: ["search_workflows", "search_agents", "parallel_delegate", "web_search"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      { tags: ["coordination"] } as never,
+      "mission_coordinator",
+      "Erstelle einen Hardware-Design-Guide",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  it("returns failure for whitespace-padded template-only output", () => {
+    const r = classifyDelegationResult(
+      "  <|im_end|>\n<|endoftext|>  ",
+      "success",
+      { ...noToolStats, terminalState: "completed" },
+      undefined,
+      "researcher",
+      "research",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  it("does NOT flag legitimate output that mentions a template token in context", () => {
+    // "the model emitted `<|im_end|>` early" is real content — must stay.
+    const r = classifyDelegationResult(
+      "Findings: the model emitted `<|im_end|>` token early in iteration 3, suggesting a stop-token misconfiguration.",
+      "success",
+      { ...baseStats, terminalState: "completed" },
+      undefined,
+      "researcher",
+      "research a stop token issue",
+    );
+    expect(r).toBe<DelegationClassification>("success");
+  });
+
   // Regression: audit session 0a93078b (May 2026).  Coordinator timed out
   // after its only tool calls were search_agents → 0 results, list_agents
   // → 0 results, create_ephemeral_agent → spawn errored.  The "Recovered

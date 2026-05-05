@@ -28,3 +28,38 @@ export function looksLikeContainerLevelFailure(value: string): boolean {
     || /Sub-agent '[^']+' timed out after\b/i.test(preview)
   );
 }
+
+/**
+ * Detect when a sub-agent's output consists ENTIRELY of LLM template
+ * special tokens (e.g. `<|mask_end|>`, `<|im_end|>`, `<|endoftext|>`,
+ * `<|eot_id|>`).  Some local models — especially Qwen variants under
+ * forced synthesis at a soft deadline — emit a stray template token as
+ * the whole "synthesis" instead of real content.  The runtime previously
+ * classified this as `outcome: "success"` because the string was
+ * non-empty, then the main assistant saw "TASK COMPLETED" with empty
+ * evidence and rationalized fabricating an answer from training memory
+ * (audit session cb90e56a, May 2026 — claimed IM73A135V01 is a
+ * TDK-InvenSense I²S digital MEMS when it's actually an Infineon
+ * XENSIV analog mic, as the previous session's researcher correctly
+ * established from the official datasheet).
+ *
+ * Returns true when removing every `<|...|>` template token leaves
+ * nothing but whitespace.  Real outputs that mention template tokens
+ * inside a larger answer (e.g. "the model emitted `<|im_end|>` early")
+ * still contain substantive text after stripping, so they pass through
+ * as normal content.
+ */
+export function looksLikeModelTemplateArtifact(value: string): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  // Cap inspection size — beyond a few KB the chance of "all template
+  // tokens" is vanishingly small and not worth the regex pass.
+  if (trimmed.length > 2_000) return false;
+  const stripped = trimmed
+    .replace(/<\|[a-z][a-z0-9_-]{1,40}\|>/gi, "")
+    // Some templates use bare `<|...>` or `</|...|>` variants — strip those too.
+    .replace(/<\/?\|?[a-z][a-z0-9_-]{1,40}\|?>/gi, "")
+    .trim();
+  return stripped.length === 0;
+}
