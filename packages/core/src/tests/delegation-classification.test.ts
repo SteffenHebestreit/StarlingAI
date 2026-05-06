@@ -87,15 +87,11 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
-  // Regression: audit session cb90e56a (May 2026).  mission_coordinator
-  // synthesized at soft deadline and emitted only the literal Qwen template
-  // token `<|mask_end|>` (12 chars) as its output.  Runtime classified that
-  // as outcome="success", terminalState="completed"; the main assistant saw
-  // "TASK COMPLETED" with effectively empty evidence and fabricated 11k
-  // chars from training memory — getting the IM73A135V01 manufacturer and
-  // interface wrong (claimed TDK-InvenSense I²S digital, actually Infineon
-  // XENSIV analog).  Must now classify as failure so the failed-delegation
-  // diagnostic fires and the model doesn't rationalize fabrication.
+  // Regression: a coordinator synthesized at soft deadline and emitted only
+  // a literal model template token as its output. Runtime classified that as
+  // outcome="success", terminalState="completed"; the main assistant saw
+  // "TASK COMPLETED" with effectively empty evidence and fabricated a full
+  // answer from training memory. Template-only output must classify as failure.
   it("returns failure when output is only LLM template special tokens", () => {
     const r = classifyDelegationResult(
       "<|mask_end|>",
@@ -108,7 +104,7 @@ describe("classifyDelegationResult — D14", () => {
       },
       { tags: ["coordination"] } as never,
       "mission_coordinator",
-      "Erstelle einen Hardware-Design-Guide",
+      "Create a sourced design guide",
     );
     expect(r).toBe<DelegationClassification>("failure");
   });
@@ -185,8 +181,8 @@ describe("classifyDelegationResult — D14", () => {
       "- Tool calls executed: 3 (web_search, web_fetch, share_finding)",
       "- Iterations completed: 3",
       "Recovered evidence snippets from completed tools:",
-      "- web_search: Top result: TDK IM73A135V01 datasheet — 4-MEMS array, IÂ²S, -26 dBFS sensitivity, 64 dB SNR, omnidirectional",
-      "- web_fetch: ESP32-S3-WROOM-1 module specification — Dual-core Xtensa LX7, WiFi 4, BLE 5, hardware audio codecs via I2S0/I2S1",
+      "- web_search: Top result: official component datasheet with concrete electrical specifications and application notes",
+      "- web_fetch: Module specification with processor, wireless capability, memory size, and supported peripheral buses",
     ].join("\n");
 
     const r = classifyDelegationResult(

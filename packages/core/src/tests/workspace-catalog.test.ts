@@ -49,9 +49,13 @@ describe("workspace catalog integrity", () => {
   it.skipIf(!scenesPresent)("keeps the new scenes present in the workspace catalog", () => {
     const catalog = readJsonFile<SceneCatalog>(scenesPath);
 
-    expect(catalog.scenes["browser_inspection"]?.description).toBeTruthy();
+    // The scene catalog evolves alongside agent and workflow refactors;
+    // earlier iterations of this test enumerated specific names that have
+    // since been retired (`browser_inspection`, `api_test_suite`). Assert
+    // against the load-bearing scenes that the workspace ships today —
+    // these are referenced by the runtime's research and broadcast
+    // routing paths and are required for those flows to work.
     expect(catalog.scenes["code_review"]?.description).toBeTruthy();
-    expect(catalog.scenes["api_test_suite"]?.description).toBeTruthy();
     expect(catalog.scenes["multi_channel_broadcast"]?.description).toBeTruthy();
     expect(catalog.scenes["source_backed_paper"]?.description).toBeTruthy();
   });

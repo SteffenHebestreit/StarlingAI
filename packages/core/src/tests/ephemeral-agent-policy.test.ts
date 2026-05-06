@@ -141,14 +141,10 @@ describe("create_ephemeral_agent policy", () => {
     expect(result.error).toContain("parallel_delegate");
   }, 15000);
 
-  // Regression: audit session 0a93078b (May 2026).  Coordinator created
-  // hardware_audio_engineer with description="MEMS microphone arrays, ESP32
-  // audio systems, PCB layout, power management, and component selection"
-  // and tools=[workspace_search, read_file, list_files] — no web access.
-  // The agent then looped 6 iterations of "No workspace files contain ..."
-  // before timing out.  The validator must reject this combination at spawn
-  // time so the coordinator gets immediate feedback to retry with the right
-  // tools instead of burning 4+ minutes on a doomed run.
+  // Regression: a coordinator created an external-research ephemeral agent
+  // with only local workspace tools. The agent then looped over empty local
+  // search results before timing out. The validator must reject this at spawn
+  // time so the coordinator gets immediate feedback to retry with web tools.
   it("rejects research-shaped ephemeral agents that lack web/browser tools", async () => {
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -159,11 +155,11 @@ describe("create_ephemeral_agent policy", () => {
     expect(createEphemeralAgent).toBeTruthy();
 
     const result = await createEphemeralAgent!.execute({
-      agentName: "hardware_audio_engineer",
-      description: "Hardware engineering specialist for portable audio recording devices — MEMS microphone arrays, ESP32 audio systems, PCB layout, and component selection.",
-      systemPrompt: "You are a senior hardware engineer. Component Sourcing: Specific part numbers from DigiKey/Mouser/Adafruit with pricing and availability. RULES: Always provide SPECIFIC part numbers, not generic descriptions.",
+      agentName: "external_sourcing_researcher",
+      description: "External sourcing specialist for current product options, availability, and implementation constraints.",
+      systemPrompt: "You are a senior sourcing researcher. Component Sourcing: Specific product options from current vendor pages with pricing and availability. RULES: Always provide SPECIFIC product identifiers, not generic descriptions.",
       tools: ["workspace_search", "read_file", "list_files"],
-      task: "Erstelle einen Hardware-Bau-Leitfaden mit konkreten Teile-Namen und Part-Numbers.",
+      task: "Erstelle einen aktuellen Sourcing-Leitfaden mit konkreten Produktnamen und Verfuegbarkeit.",
     }, {
       sessionId: "test-session",
       workspacePath: "/workspace",
@@ -184,17 +180,43 @@ describe("create_ephemeral_agent policy", () => {
     expect(createEphemeralAgent).toBeTruthy();
 
     const result = await createEphemeralAgent!.execute({
-      agentName: "hardware_audio_engineer",
-      description: "Hardware engineering specialist for portable audio recording devices — MEMS microphones, ESP32 audio, PCB, components.",
-      systemPrompt: "You are a senior hardware engineer. Component Sourcing: Specific part numbers from DigiKey/Mouser with pricing and availability.",
+      agentName: "external_sourcing_researcher",
+      description: "External sourcing specialist for current product options and integration constraints.",
+      systemPrompt: "You are a senior sourcing researcher. Component Sourcing: Specific product options from current vendor pages with pricing and availability.",
       tools: ["web_search", "web_fetch", "read_file"],
-      task: "Erstelle einen Hardware-Bau-Leitfaden mit konkreten Teile-Namen.",
+      task: "Erstelle einen aktuellen Sourcing-Leitfaden mit konkreten Produktnamen.",
     }, {
       sessionId: "test-session",
       workspacePath: "/workspace",
     });
 
     expect(result.success).toBe(true);
+  }, 15000);
+
+  it("rejects invented ephemeral tools after semantic tool discovery", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const createEphemeralAgent = getTool("create_ephemeral_agent");
+    expect(createEphemeralAgent).toBeTruthy();
+
+    const result = await createEphemeralAgent!.execute({
+      agentName: "current_docs_researcher",
+      description: "Researches current public documentation and source-backed facts.",
+      systemPrompt: "Use current public documentation and cite sources.",
+      tools: ["google_search_the_web", "web_fetch"],
+      task: "Find current documentation for an integration feature.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Unknown tool(s) requested");
+    expect(result.error).toContain("search_tools/semantic tool discovery");
+    expect(result.metadata?.["suggestedTools"]).toEqual(expect.arrayContaining(["web_search"]));
   }, 15000);
 
   it("accepts non-research ephemeral agents without web tools", async () => {

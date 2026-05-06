@@ -1,0 +1,364 @@
+{
+  "scenes": {
+    "apply_jobs": {
+      "description": "Run a browser-assisted application workflow for one approved freelance lead.",
+      "task": "Use web_task_coordinator to review one approved lead, gather any missing context, and delegate browser submission steps only when stored credentials exist for the target site and secure credential fill has been approved.",
+      "webhookKey": "$SCENE_APPLY_JOBS_KEY",
+      "allowedAgents": [
+        "web_task_coordinator",
+        "browser_agent",
+        "researcher",
+        "summarizer"
+      ],
+      "humanInLoopSteps": [
+        "site_fill_credentials",
+        "mcp__playwright__browser_navigate"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "minRating": {
+          "description": "Minimum lead rating to accept",
+          "default": "0.7"
+        }
+      }
+    },
+    "source_backed_paper": {
+      "description": "Produce a paper or report grounded in official sources and verified citations.",
+      "task": "Use document_intake first when the input includes attached reports or files, researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "allowedAgents": [
+        "document_intake",
+        "evidence_analyst",
+        "paper_author",
+        "source_verifier",
+        "researcher",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "outputStyle": {
+          "description": "Requested style or citation format",
+          "default": "technical report with inline references"
+        }
+      }
+    },
+    "verified_research_brief": {
+      "description": "Produce a concise fact-checked research brief with named sources and explicit unresolved uncertainties.",
+      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery and authoritative references, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
+      "allowedAgents": [
+        "document_intake",
+        "researcher",
+        "evidence_analyst",
+        "source_verifier",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Intended audience for the brief",
+          "default": "technical stakeholder"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable sources available and call out publication dates"
+        }
+      }
+    },
+    "meeting_briefing_packet": {
+      "description": "Produce a concise meeting brief or handoff packet from attached material, prior findings, and project context.",
+      "task": "Use document_intake first when source material includes files or long notes, data_analyst for tabular attachments, evidence_analyst to reconcile the evidence ledger, policy_compliance_reviewer when approvals or constraints matter, and meeting_briefing_agent to produce the final brief or handoff packet. Use qa_guard when the packet needs an explicit verification pass.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "evidence_analyst",
+        "policy_compliance_reviewer",
+        "meeting_briefing_agent",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Target audience for the packet",
+          "default": "project stakeholders"
+        },
+        "outputFormat": {
+          "description": "Preferred delivery format",
+          "default": "markdown brief with actions, decisions, and open risks"
+        }
+      }
+    },
+    "deep_research": {
+      "description": "Build a source-backed research dossier or design guide on a topic, with optional Mermaid visualizations. Used by the deep_research_packet and research_visual_digest jobs.",
+      "task": "Run mission_coordinator. Phase 1 - researcher gathers authoritative sources and publishes structured share_finding records (topic, source title, URL, exact facts, caveats). Phase 2 - evidence_analyst reconciles the ledger and resolves conflicts. Phase 3 - paper_author drafts the dossier per the requested deliverable shape, then quality_supervisor runs one acceptance pass. Persist the final dossier with generate_document so it survives chat truncation.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "deliverable": {
+          "description": "Preferred output shape (dossier, design guide, comparison memo, etc.)",
+          "default": "source-backed dossier with Mermaid diagrams where useful"
+        },
+        "audience": {
+          "description": "Intended audience for the dossier",
+          "default": "decision maker"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable evidence available and call out publication dates"
+        },
+        "includeVisuals": {
+          "description": "Whether to include Mermaid diagrams ('yes' or 'no')",
+          "default": "yes"
+        },
+        "visualFocus": {
+          "description": "Hint for what the visual should clarify",
+          "default": "choose the clearest Mermaid visual structure for the topic"
+        }
+      }
+    },
+    "multi_channel_broadcast": {
+      "description": "Deliver a prepared summary, report link, or status update to one or more configured communication channels.",
+      "task": "Use notification_agent to send the prepared summary or artifact reference to the requested channels. Read shared findings first so the notification reuses the confirmed message, artifact path, or report summary instead of inventing new wording.",
+      "allowedAgents": [
+        "notification_agent",
+        "summarizer"
+      ],
+      "params": {
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "tone": {
+          "description": "Delivery tone or urgency",
+          "default": "informational"
+        }
+      }
+    },
+    "security_audit": {
+      "description": "Produce a current security risk digest from authoritative advisories, CVEs, and supporting evidence.",
+      "task": "Use researcher to gather current advisories, CVEs, and official remediation guidance for the requested target scope. Use evidence_analyst to reconcile overlaps and rank the concrete risks, then summarizer to produce the final markdown risk report with remediation priorities. Use quality_supervisor or qa_guard for one acceptance pass when severity ranking or scope coverage looks uncertain.",
+      "allowedAgents": [
+        "researcher",
+        "evidence_analyst",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "target": {
+          "description": "Software stack, service, or dependency set to review",
+          "default": "configured platform stack"
+        },
+        "auditScope": {
+          "description": "What to inspect within the target",
+          "default": "dependencies"
+        },
+        "severityThreshold": {
+          "description": "Minimum severity to include",
+          "default": "medium"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown with risk table and remediation plan"
+        }
+      }
+    },
+    "release_notes_draft": {
+      "description": "Draft release notes from repository history for a version or ref range.",
+      "task": "Use git_developer to inspect the requested ref range, collect the relevant commits and notable changes, then use content_writer to turn that evidence into audience-appropriate release notes. Use quality_supervisor for one completeness pass before finalizing.",
+      "allowedAgents": [
+        "git_developer",
+        "content_writer",
+        "quality_supervisor",
+        "summarizer"
+      ],
+      "params": {
+        "version": {
+          "description": "Release version label",
+          "default": "next"
+        },
+        "targetRef": {
+          "description": "Git ref range to summarize",
+          "default": "HEAD~20..HEAD"
+        },
+        "audience": {
+          "description": "Intended audience for the notes",
+          "default": "internal team"
+        },
+        "broadcast": {
+          "description": "Whether a follow-up broadcast is planned",
+          "default": "no"
+        }
+      }
+    },
+    "incident_response": {
+      "description": "Triage a live or recent incident, collect root-cause evidence, and produce a structured internal incident summary.",
+      "task": "Use ops_triage for service-health diagnosis and immediate remediation guidance, log_analyst for timeline reconstruction and correlation across logs, then meeting_briefing_agent or summarizer to structure the incident findings for downstream reporting. Keep observed symptoms, root-cause evidence, remediation steps, and open risks separate.",
+      "allowedAgents": [
+        "ops_triage",
+        "log_analyst",
+        "meeting_briefing_agent",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "incident": {
+          "description": "Description of the incident or outage",
+          "default": "investigate the reported service incident"
+        },
+        "severity": {
+          "description": "Incident severity hint",
+          "default": "high"
+        },
+        "affectedService": {
+          "description": "Impacted service or component",
+          "default": "discover from logs"
+        }
+      }
+    },
+    "competitive_analysis": {
+      "description": "Research and compare multiple competitors or products into a decision-oriented comparison brief.",
+      "task": "Use mission_coordinator to partition the competitor research when needed, researcher to collect current evidence, evidence_analyst to reconcile comparison dimensions, and paper_author to draft the final comparison brief. Use quality_supervisor for one pass to ensure the comparison answers the requested dimensions without unsupported claims.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
+        "summarizer"
+      ],
+      "params": {
+        "competitors": {
+          "description": "Comma-separated competitor names or products",
+          "default": ""
+        },
+        "dimensions": {
+          "description": "Comparison dimensions",
+          "default": "pricing, features, market-position"
+        },
+        "deliverable": {
+          "description": "Preferred output shape",
+          "default": "competitive intelligence brief with comparison table and key differentiators"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "product and strategy stakeholders"
+        }
+      }
+    },
+    "data_pipeline_review": {
+      "description": "Inspect files or databases for schema quality, completeness, anomalies, and actionable data-quality issues.",
+      "task": "Use document_intake first for attached files, data_analyst for tabular files and exported reports, sql_specialist for live database/schema inspection when a database source is provided, and evidence_analyst or summarizer to merge the findings into the requested quality report. Use qa_guard for one verification pass when the output must map cleanly to explicit validation rules.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "sql_specialist",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "dataSource": {
+          "description": "File path, database, or dataset description",
+          "default": "attached files or configured database"
+        },
+        "validationRules": {
+          "description": "Rules or checks to apply",
+          "default": "null rates, type consistency, referential integrity, value distributions"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown data quality report with issue table"
+        }
+      }
+    },
+    "code_review": {
+      "description": "Perform a structured review of recent code changes and produce a merge-readiness report.",
+      "task": "Use diff_reviewer to inspect the requested change set, code_analyst when a suspicious hunk needs deeper code-at-rest context, and qa_guard for one verification-oriented pass on missing tests or risky follow-ups. Produce a concise review report with concrete risks, missing tests, and a merge-readiness verdict.",
+      "allowedAgents": [
+        "diff_reviewer",
+        "code_analyst",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "targetRef": {
+          "description": "Git ref range to review",
+          "default": "HEAD~10..HEAD"
+        },
+        "focusAreas": {
+          "description": "Review focus areas",
+          "default": "all"
+        }
+      }
+    },
+    "onboarding_packet": {
+      "description": "Build a structured onboarding packet for a topic, project, or new team member.",
+      "task": "Use document_intake first when source material or existing docs are provided, meeting_briefing_agent to structure the packet, and content_writer to polish the final onboarding guide for the requested audience and language. Use qa_guard when the packet needs an explicit completeness check.",
+      "allowedAgents": [
+        "document_intake",
+        "meeting_briefing_agent",
+        "content_writer",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "topic": {
+          "description": "What the packet covers",
+          "default": ""
+        },
+        "audience": {
+          "description": "Who the packet is for",
+          "default": "new team member with intermediate technical background"
+        },
+        "outputLanguage": {
+          "description": "Language for the final packet",
+          "default": "English"
+        },
+        "outputFormat": {
+          "description": "Preferred delivery format",
+          "default": "structured Markdown with sections and a quick-reference table"
+        }
+      }
+    },
+    "content_creation": {
+      "description": "Research and draft audience-ready content such as blog posts, newsletters, product copy, or documentation.",
+      "task": "When research is required, use researcher to gather current source material first, then content_writer to produce the requested content in the right tone and format. Use quality_supervisor for one acceptance pass so the draft stays aligned with the audience, tone, and evidence base.",
+      "allowedAgents": [
+        "researcher",
+        "content_writer",
+        "quality_supervisor",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "contentType": {
+          "description": "Requested content type",
+          "default": "blog-post"
+        },
+        "topic": {
+          "description": "Topic or key message",
+          "default": ""
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "general technical audience"
+        },
+        "tone": {
+          "description": "Tone or voice guidance",
+          "default": "professional and engaging"
+        },
+        "requiresResearch": {
+          "description": "Whether research should happen before drafting",
+          "default": "yes"
+        }
+      }
+    }
+  }
+}

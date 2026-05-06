@@ -37,11 +37,7 @@ export function looksLikeContainerLevelFailure(value: string): boolean {
  * the whole "synthesis" instead of real content.  The runtime previously
  * classified this as `outcome: "success"` because the string was
  * non-empty, then the main assistant saw "TASK COMPLETED" with empty
- * evidence and rationalized fabricating an answer from training memory
- * (audit session cb90e56a, May 2026 — claimed IM73A135V01 is a
- * TDK-InvenSense I²S digital MEMS when it's actually an Infineon
- * XENSIV analog mic, as the previous session's researcher correctly
- * established from the official datasheet).
+ * evidence and rationalized fabricating an answer from training memory.
  *
  * Returns true when removing every `<|...|>` template token leaves
  * nothing but whitespace.  Real outputs that mention template tokens
@@ -62,4 +58,45 @@ export function looksLikeModelTemplateArtifact(value: string): boolean {
     .replace(/<\/?\|?[a-z][a-z0-9_-]{1,40}\|?>/gi, "")
     .trim();
   return stripped.length === 0;
+}
+
+/**
+ * Detect when a sub-agent "synthesis" or evidence blob is just a
+ * regurgitated upstream LLM/provider/HTTP error rather than real content.
+ *
+ * Detection covers:
+ *  - The sub-agent error prefix (`Sub-agent error: ...`) on its own.
+ *  - Bare provider/HTTP exception prefixes (`Error: OpenAI-compatible
+ *    request failed`, `ECONNREFUSED`, `ETIMEDOUT`).
+ *  - Raw HTML error pages that leaked through as content
+ *    (`<!DOCTYPE html>...<title>Error</title>`).
+ *  - Synthesis output that quotes the upstream error verbatim with
+ *    a 4xx/5xx status code.
+ */
+export function looksLikeProviderErrorEcho(value: string): boolean {
+  if (!value) return false;
+  const preview = value.slice(0, 800).trim();
+  if (!preview) return false;
+
+  if (/^Sub-agent error:\s*(?:Error:\s*)?(?:OpenAI[- ]compatible|HTTP|Anthropic|Provider|LM\s*Studio|llama\.cpp|ECONNREFUSED|ETIMEDOUT|fetch failed|Request failed)/i.test(preview)) {
+    return true;
+  }
+
+  if (/^(?:Error|Exception):\s*(?:OpenAI[- ]compatible|HTTP|fetch failed|connect|ECONNREFUSED|ETIMEDOUT|Request failed)/i.test(preview)) {
+    return true;
+  }
+
+  if (/^<!DOCTYPE\s+html/i.test(preview)) {
+    return true;
+  }
+
+  if (/<html[^>]*>[\s\S]{0,300}<title>\s*Error\s*<\/title>/i.test(preview)) {
+    return true;
+  }
+
+  if (/OpenAI[- ]compatible request failed[^]{0,120}\b[45]\d{2}\b/i.test(preview)) {
+    return true;
+  }
+
+  return false;
 }

@@ -12,6 +12,7 @@ import { getConfig } from "../config/loader.js";
 import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
+import { childLogger } from "../logger.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { readPromotedAgents, promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
@@ -23,6 +24,8 @@ import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutp
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
+
+const log = childLogger("tool:sub-agent");
 import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
@@ -3582,14 +3585,48 @@ registerTool({
 
     // Validate and filter tool list
     const requestedTools = Array.isArray(args["tools"]) ? args["tools"].map(String) : [];
+    const description = String(args["description"] ?? "").trim();
+    const toolSearchQuery = [task, description, systemPrompt].filter(Boolean).join("\n");
+    let semanticToolMatches: string[] = [];
+    try {
+      const grantableHandlers = getAllTools().filter((handler) => GRANTABLE_TOOLS.has(handler.name));
+      const rankedTools = await searchToolsByEmbedding(toolSearchQuery, 10, grantableHandlers);
+      semanticToolMatches = rankedTools.map((match) => match.name).filter(Boolean).slice(0, 8);
+      logAudit("agent_routing_evaluated", {
+        query: toolSearchQuery.slice(0, 500),
+        mode: rankedTools[0]?.mode ?? "empty",
+        resultCount: semanticToolMatches.length,
+        topResult: semanticToolMatches[0] ?? null,
+        surface: "ephemeral_tool_selection",
+      }, { sessionId: ctx.sessionId, severity: "info", channel: "tool-routing" });
+    } catch (err) {
+      log.debug({ err, agentName }, "Ephemeral semantic tool search failed — falling back to grantable-tool validation");
+    }
+    const toolSignals = analyzeHeuristicRoutingQuery(toolSearchQuery);
+    if (toolSignals.looksFresh || toolSignals.looksSourceHeavy || toolSignals.looksResearchTask || toolSignals.looksExternalData) {
+      semanticToolMatches = ["web_search", "web_fetch", ...semanticToolMatches]
+        .filter((toolName) => GRANTABLE_TOOLS.has(toolName))
+        .filter((toolName, index, list) => list.indexOf(toolName) === index)
+        .slice(0, 8);
+    }
     const tools = requestedTools.filter(t => GRANTABLE_TOOLS.has(t));
     const rejected = requestedTools.filter(t => !GRANTABLE_TOOLS.has(t));
     if (rejected.length > 0) {
-      // Non-fatal: log and proceed with the valid subset
-      ctx; // used for sessionId below
+      logAudit("ephemeral_agent_rejected", {
+        agentName,
+        requestedTools,
+        rejectedTools: rejected,
+        suggestedTools: semanticToolMatches,
+        reason: "unknown_tools_rejected_after_semantic_tool_search",
+      }, { sessionId: ctx.sessionId, severity: "warn", channel: "agent-factory" });
+      return {
+        success: false,
+        output: "",
+        error: `Unknown tool(s) requested: ${rejected.join(", ")}. Use search_tools/semantic tool discovery and choose only existing tools. Suggested tools for this task: ${semanticToolMatches.join(", ") || "none"}.`,
+        metadata: { agentName, rejectedTools: rejected, suggestedTools: semanticToolMatches },
+      };
     }
 
-    const description = String(args["description"] ?? "").trim();
     const policyIssues = validateEphemeralToolSelection(tools, {
       description,
       systemPrompt,

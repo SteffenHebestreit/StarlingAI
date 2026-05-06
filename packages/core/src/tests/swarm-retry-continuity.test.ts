@@ -171,19 +171,19 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 
     // Simulate turn 1: inject a persisted swarm state with a completed task directly into history
     const prevSwarmState: SwarmState = {
-      objective: "search for MEMS microphones",
+      objective: "search for service endpoint integration patterns",
       startedAt: new Date(Date.now() - 600_000).toISOString(),
       updatedAt: new Date(Date.now() - 60_000).toISOString(),
       tasks: {
         task_1: {
           id: "task_1",
-          title: "Search for MEMS mic arrays",
+          title: "Search for endpoint integration patterns",
           status: "completed",
           dependsOn: [],
-          signature: "search for mems mic arrays::search for flat mems microphone arrays for esp32::",
+          signature: "search for endpoint integration patterns::search for offline service endpoint patterns::",
           selectedAgent: "researcher",
           attempts: [],
-          output: "Found: TDK IM73A130, Infineon IM69D130, ReSpeaker 6-Mic Array",
+          output: "Found: centralized endpoint config, bounded local queue, explicit sync worker",
         },
         task_2: {
           id: "task_2",
@@ -198,12 +198,12 @@ describe("H1.1: swarm state seeding on retry turns", () => {
     };
     // Inject a fake prior assistant message with swarm state metadata
     (session as any).history = [
-      { role: "user", content: "search for mics", timestamp: new Date(Date.now() - 700_000).toISOString() },
+      { role: "user", content: "search for endpoint patterns", timestamp: new Date(Date.now() - 700_000).toISOString() },
       { role: "assistant", content: "Found some results.", timestamp: new Date(Date.now() - 600_000).toISOString(), metadata: { swarmState: prevSwarmState } },
     ];
 
     // Turn 2: user says "try again" — the LLM calls delegate_to_agent
-    streamMock.mockImplementationOnce(() => makeToolStream("c1", "delegate_to_agent", { task: "search for MEMS mic modules" }));
+    streamMock.mockImplementationOnce(() => makeToolStream("c1", "delegate_to_agent", { task: "search for service endpoint modules" }));
     streamMock.mockImplementationOnce(() => makeTextStream("Here are the results from the prior research."));
 
     const result = await runTurn({ session, userMessage: "try again", autoApprove: true });
@@ -215,7 +215,7 @@ describe("H1.1: swarm state seeding on retry turns", () => {
     // completed task_1 from previous turn must be present in the new swarm state
     expect(capturedSwarmState!.tasks["task_1"]).toBeDefined();
     expect(capturedSwarmState!.tasks["task_1"]!.status).toBe("completed");
-    expect(capturedSwarmState!.tasks["task_1"]!.output).toContain("TDK IM73A130");
+    expect(capturedSwarmState!.tasks["task_1"]!.output).toContain("centralized endpoint config");
 
     // failed task_2 must NOT be carried into the new turn (so it can be retried)
     expect(capturedSwarmState!.tasks["task_2"]).toBeUndefined();
@@ -300,30 +300,30 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 
     const session = new AgentSession({ sessionId: "sess-h1-direct", channel: "test", workspacePath: ws });
     const prevSwarmState: SwarmState = {
-      objective: "search for MEMS microphones",
+      objective: "search for service endpoint integration patterns",
       startedAt: new Date(Date.now() - 600_000).toISOString(),
       updatedAt: new Date(Date.now() - 60_000).toISOString(),
       tasks: {
         task_1: {
           id: "task_1",
-          title: "Search for MEMS mic arrays",
+          title: "Search for endpoint integration patterns",
           status: "completed",
           dependsOn: [],
-          signature: "search for mems mic arrays::search for flat mems microphone arrays for esp32::",
+          signature: "search for endpoint integration patterns::search for offline service endpoint patterns::",
           selectedAgent: "researcher",
           attempts: [],
-          output: "Found: TDK IM73A130, Infineon IM69D130, ReSpeaker 6-Mic Array",
+          output: "Found: centralized endpoint config, bounded local queue, explicit sync worker",
         },
       },
     };
     (session as unknown as { history: Array<Record<string, unknown>> }).history = [
-      { role: "user", content: "search for mics", timestamp: new Date(Date.now() - 700_000).toISOString() },
+      { role: "user", content: "search for endpoint patterns", timestamp: new Date(Date.now() - 700_000).toISOString() },
       { role: "assistant", content: "Found some results.", timestamp: new Date(Date.now() - 600_000).toISOString(), metadata: { swarmState: prevSwarmState } },
     ];
 
     streamMock.mockImplementationOnce(() => makeTextStream("Direct answer without delegation."));
 
-    const result = await runTurn({ session, userMessage: "what power rail should I use?", autoApprove: true });
+    const result = await runTurn({ session, userMessage: "what retry policy should I use?", autoApprove: true });
 
     expect(result.swarmState).toBeUndefined();
     const transcript = session.toTranscript();
@@ -361,9 +361,9 @@ describe("H1.2: architect-spawned ephemeral agents always run in-process", () =>
     // Architect LLM returns a spec with web_search (a gateway-bound tool)
     completeMock.mockResolvedValue({
       content: JSON.stringify({
-        agentName: "mems_mic_researcher",
-        description: "Researches MEMS microphone modules",
-        systemPrompt: "Find MEMS mic arrays. Call share_finding when done.",
+        agentName: "service_endpoint_researcher",
+        description: "Researches service endpoint integration patterns",
+        systemPrompt: "Find endpoint integration patterns. Call share_finding when done.",
         tools: ["web_search", "web_fetch"],
         maxIterations: 3,
       }),
@@ -381,14 +381,14 @@ describe("H1.2: architect-spawned ephemeral agents always run in-process", () =>
     expect(delegate).toBeDefined();
 
     const swarmState: SwarmState = {
-      objective: "Find MEMS mics for ESP32",
+      objective: "Find endpoint integration patterns",
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       tasks: {},
     };
 
     await delegate!.execute({
-      task: "Find the best flat MEMS microphone arrays for ESP32 I2S recording",
+      task: "Find the best offline-capable service endpoint integration patterns",
     }, {
       sessionId: "sess-h1-ephemeral",
       workspacePath: ws,

@@ -16,15 +16,18 @@ vi.mock("../providers/lmstudio.js", () => ({
 
 describe("sub-agent turn timeouts", () => {
   afterEach(async () => {
+    vi.useRealTimers();
     delete process.env["SAI_CONFIG_PATH"];
     completeMock.mockReset();
     vi.resetModules();
 
     const configLoader = await import("../config/loader.js");
     configLoader.resetConfigForTests();
+    const swarmMemory = await import("../swarm/memory.js");
+    await swarmMemory.resetSharedMemoryForTests();
   });
 
-  it("aborts long-running sub-agent LLM calls using per-agent turnTimeoutMs", async () => {
+  it("lets the current sub-agent LLM call finish after per-agent turnTimeoutMs elapses", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -42,8 +45,14 @@ describe("sub-agent turn timeouts", () => {
 
     process.env["SAI_CONFIG_PATH"] = configPath;
 
-    completeMock.mockImplementation((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+    completeMock.mockImplementation((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
       signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      setTimeout(() => resolve({
+        content: "Finished the current LLM run after the deadline.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      }), 1100);
     }));
 
     try {
@@ -55,7 +64,7 @@ describe("sub-agent turn timeouts", () => {
         workspacePath: "/workspace",
       });
 
-      expect(result.output).toContain("timed out after 1000ms");
+      expect(result.output).toContain("Finished the current LLM run after the deadline.");
       expect(completeMock).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -87,6 +96,7 @@ describe("sub-agent turn timeouts", () => {
       description: "Populate swarm progress for timeout testing",
       parameters: { type: "object", properties: {} },
       async execute(_args, context) {
+        await new Promise((resolve) => setTimeout(resolve, 1100));
         const startedAt = new Date().toISOString();
         context.swarmState = {
           objective: "Build ETF chart",
@@ -127,26 +137,423 @@ describe("sub-agent turn timeouts", () => {
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
         finishReason: "tool_calls",
       })
-      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      }));
+      .mockResolvedValueOnce({
+        content: "Final answer from partial progress: Fetch monthly ETF figures were collected.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
 
     try {
       const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
       const result = await runSubAgentWithStats({
         agentName: "coordinator_agent",
         task: "Coordinate an ETF chart build.",
-        parentSessionId: "parent-progress",
+        parentSessionId: "parent-progress-timeout",
         workspacePath: tempDir,
       });
 
-      expect(result.output).toContain("timed out after 1000ms");
-      expect(result.output).toContain("Partial progress before interruption");
-      expect(result.stats.outcome).toBe("partial");
-      expect(result.output).toContain("fetch [completed] Fetch monthly ETF figures via researcher");
-      expect(result.output).toContain("Tool calls executed: 1 (get_swarm_state)");
+      expect(result.output).toContain("Final answer from partial progress");
+      expect(result.output).toContain("Fetch monthly ETF figures");
+      expect(result.stats.terminalState).toBe("completed");
+      expect(completeMock).toHaveBeenCalledTimes(2);
     } finally {
       unregisterTool("get_swarm_state");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("injects shared findings before the sub-agent starts iterating", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-shared-facts-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        reader_agent: {
+          description: "Shared facts reader",
+          systemPrompt: "Use existing shared facts before doing new work.",
+          tools: [],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { writeSharedFact } = await import("../swarm/memory.js");
+    await writeSharedFact("parent-shared-facts", "verified_endpoint", "Gateway endpoint is http://internal-gateway:8787.");
+
+    completeMock.mockImplementationOnce((messages: Array<{ role: string; content?: string }>) => {
+      const prompt = messages.map((message) => message.content ?? "").join("\n");
+      expect(prompt).toContain("Shared findings snapshot");
+      expect(prompt).toContain("verified_endpoint");
+      expect(prompt).toContain("http://internal-gateway:8787");
+      return Promise.resolve({
+        content: "Used the shared endpoint finding.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "reader_agent",
+        task: "Summarize the verified endpoint.",
+        parentSessionId: "parent-shared-facts",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Used the shared endpoint finding.");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("recovers usable snippets from mixed interrupted parallel output before returning a partial coordinator summary", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mixed-interrupted-evidence-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        coordinator_agent: {
+          description: "Coordinator that delegates in parallel",
+          systemPrompt: "Coordinate the task and use tools.",
+          tools: ["parallel_delegate"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "parallel_delegate",
+      description: "Run multiple delegated slices.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: [
+            "**[researcher_a]** (failed): All candidate agents failed for task 'slice A'. Sub-agent error: Error: OpenAI-compatible request failed (model: qwen3.6-35b-a3b): Request timed out.",
+            "",
+            "---",
+            "",
+            "**[researcher_b]**:",
+            "Sub-agent 'researcher_b' timed out after 300000ms",
+            "Partial progress before interruption:",
+            "- parallel_1 [completed] Verified sync slice via researcher_b | Verified endpoint: http://internal-gateway:8787. Sync worker drains a local retry queue before OTA upload and preserves failed batches for later retry.",
+            "Recovered evidence snippets from completed tools:",
+            "- web_search: Verified endpoint: http://internal-gateway:8787. Sync worker drains a local retry queue before OTA upload and preserves failed batches for later retry.",
+          ].join("\n"),
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "parallel-mixed-1",
+          name: "parallel_delegate",
+          arguments: { tasks: [{ task: "Inspect the sync design." }, { task: "Inspect the retry behavior." }] },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "I'll continue by delegating another slice now.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coordinator_agent",
+        task: "Coordinate the integration review.",
+        parentSessionId: "parent-mixed-interrupted-evidence",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Recovered evidence snippets from completed tools");
+      expect(result.output).toContain("http://internal-gateway:8787");
+      expect(result.output).toContain("local retry queue");
+      expect(result.output).not.toContain("All candidate agents failed");
+      expect(result.stats.outcome).toBe("partial");
+    } finally {
+      unregisterTool("parallel_delegate");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("preserves all source-sensitive parallel delegation slices while anchoring them to the parent task", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        source_sensitive_coordinator: {
+          description: "Source-sensitive coordinator",
+          systemPrompt: "Coordinate source-sensitive research.",
+          tools: ["parallel_delegate"],
+          maxIterations: 2,
+        },
+        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/sub-agent.js");
+
+    const childPrompts: string[] = [];
+    let callIndex = 0;
+    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return Promise.resolve({
+          content: "",
+          tool_calls: [{
+            id: "parallel-1",
+            name: "parallel_delegate",
+            arguments: {
+              tasks: [
+                { agentName: "researcher_a", task: "Verify the VendorX ZX-9000 USB-C interface.", context: "VendorX is already confirmed." },
+                { agentName: "researcher_b", task: "Find ST ZX-9000 pricing and supplier data." },
+                { agentName: "researcher_c", task: "Prepare layout advice assuming I2S output." },
+              ],
+            },
+          }],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        });
+      }
+
+      const prompt = messages.map((message) => message.content ?? "").join("\n");
+      if (prompt.includes("SOURCE-SENSITIVE DELEGATION SLICE")) {
+        childPrompts.push(prompt);
+      }
+
+      return Promise.resolve({
+        content: "Observed evidence: source-backed placeholder finding.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "source_sensitive_coordinator",
+        task: parentTask,
+        parentSessionId: "parent-source-sensitive-parallel",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Observed evidence");
+      expect(childPrompts).toHaveLength(3);
+      expect(new Set(childPrompts).size).toBe(3);
+      expect(childPrompts.join("\n")).toContain(parentTask);
+      expect(childPrompts.join("\n")).toContain("SLICE 1/3");
+      expect(childPrompts.join("\n")).toContain("SLICE 2/3");
+      expect(childPrompts.join("\n")).toContain("SLICE 3/3");
+      expect(childPrompts.join("\n")).toContain("Coordinator focus for this slice");
+      expect(childPrompts.join("\n")).toContain("manufacturer and product identity verification");
+      expect(childPrompts.join("\n")).toContain("supplier, pricing, and availability verification");
+      expect(childPrompts.join("\n")).toContain("array topology and layout planning");
+      expect(childPrompts.join("\n")).not.toContain("VendorX is already confirmed");
+      expect(childPrompts.join("\n")).not.toContain("ST ZX-9000");
+      expect(childPrompts.join("\n")).not.toContain("assuming I2S");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("caps source-sensitive parallel delegation fan-out at three slices before dispatch", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-cap-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        source_sensitive_coordinator: {
+          description: "Source-sensitive coordinator",
+          systemPrompt: "Coordinate source-sensitive research.",
+          tools: ["parallel_delegate"],
+          maxIterations: 2,
+        },
+        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_d: { description: "Researcher D", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/sub-agent.js");
+
+    const childPrompts: string[] = [];
+    let callIndex = 0;
+    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return Promise.resolve({
+          content: "",
+          tool_calls: [{
+            id: "parallel-cap-1",
+            name: "parallel_delegate",
+            arguments: {
+              tasks: [
+                { agentName: "researcher_a", task: "Verify vendor identity from current sources." },
+                { agentName: "researcher_b", task: "Verify interface evidence from current sources." },
+                { agentName: "researcher_c", task: "Verify package and analog front-end evidence from current sources." },
+                { agentName: "researcher_d", task: "Verify battery and charging BOM evidence from current sources." },
+              ],
+            },
+          }],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        });
+      }
+
+      const prompt = messages.map((message) => message.content ?? "").join("\n");
+      if (prompt.includes("SOURCE-SENSITIVE DELEGATION SLICE")) {
+        childPrompts.push(prompt);
+      }
+
+      return Promise.resolve({
+        content: "Observed evidence: source-backed placeholder finding.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "source_sensitive_coordinator",
+        task: parentTask,
+        parentSessionId: "parent-source-sensitive-parallel-cap",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Observed evidence");
+      expect(childPrompts).toHaveLength(3);
+      expect(childPrompts.join("\n")).toContain("SLICE 1/3");
+      expect(childPrompts.join("\n")).toContain("SLICE 2/3");
+      expect(childPrompts.join("\n")).toContain("SLICE 3/3");
+      expect(childPrompts.join("\n")).not.toContain("SLICE 4/4");
+      expect(childPrompts.join("\n")).not.toContain("researcher_d");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("adds default research fallbacks before the first source-sensitive delegation escapes the coordinator", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-fallback-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        source_sensitive_coordinator: {
+          description: "Source-sensitive coordinator",
+          systemPrompt: "Coordinate source-sensitive research.",
+          tools: ["delegate_to_agent"],
+          maxIterations: 2,
+        },
+        researcher: {
+          description: "Researcher",
+          systemPrompt: "Research from sources.",
+          tools: [],
+          maxIterations: 1,
+        },
+        mission_coordinator: {
+          description: "Fallback mission coordinator",
+          systemPrompt: "Coordinate fallback research.",
+          tools: [],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/sub-agent.js");
+
+    let callIndex = 0;
+    completeMock.mockImplementation(() => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return Promise.resolve({
+          content: "",
+          tool_calls: [{
+            id: "delegate-1",
+            name: "delegate_to_agent",
+            arguments: {
+              agentName: "researcher",
+              task: "Research the ST ZX-9000 from VendorX as an I2S-only product and prepare recommendations.",
+              context: "VendorX and I2S are already established facts.",
+            },
+          }],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        });
+      }
+
+      return Promise.resolve({
+        content: "Observed evidence: source-backed placeholder finding.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "source_sensitive_coordinator",
+        task: parentTask,
+        parentSessionId: "parent-source-sensitive-fallback",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Observed evidence");
+
+      const delegateStartEvent = auditEvents.find(
+        (event) => event.type === "sub_agent_tool_call"
+          && event.data.tool === "delegate_to_agent"
+          && event.data.phase === "start",
+      );
+      expect(delegateStartEvent).toBeDefined();
+      expect(delegateStartEvent?.data.args).toMatchObject({
+        agentName: "researcher",
+        fallbackAgents: ["mission_coordinator"],
+      });
+      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).toContain("SOURCE-SENSITIVE DELEGATION");
+      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).toContain(parentTask);
+      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).not.toContain("VendorX");
+      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).not.toContain("I2S-only");
+    } finally {
+      unsubscribe();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 10000);
@@ -172,8 +579,8 @@ describe("sub-agent turn timeouts", () => {
 
     const { registerTool, unregisterTool } = await import("../tools/registry.js");
     const fetchOutput = [
-      "Verified hardware evidence:",
-      ...Array.from({ length: 140 }, (_, index) => `Fact ${index + 1}: IM73A135V01 analog microphone source detail with ADC integration constraints and quality implications.`),
+      "Verified source evidence:",
+      ...Array.from({ length: 140 }, (_, index) => `Fact ${index + 1}: source-backed implementation detail with integration constraints and quality implications.`),
     ].join("\n");
 
     registerTool({
@@ -221,6 +628,9 @@ describe("sub-agent turn timeouts", () => {
       });
 
       expect(result.output).toContain("Final answer from collected evidence.");
+      const { readAllFacts } = await import("../swarm/memory.js");
+      const facts = await readAllFacts("parent-sufficient-evidence");
+      expect(Object.values(facts).join("\n")).toContain("Verified source evidence");
       expect(completeMock).toHaveBeenCalledTimes(2);
     } finally {
       unregisterTool("web_fetch");
@@ -246,6 +656,7 @@ describe("sub-agent turn timeouts", () => {
     }), "utf8");
 
     process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.useFakeTimers();
     vi.resetModules();
 
     const { registerTool, unregisterTool } = await import("../tools/registry.js");
@@ -274,8 +685,20 @@ describe("sub-agent turn timeouts", () => {
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
         finishReason: "tool_calls",
       })
-      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
         signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        setTimeout(() => resolve({
+          content: "",
+          tool_calls: [
+            {
+              id: "extra-1",
+              name: "get_swarm_state",
+              arguments: {},
+            },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        }), 1100);
       }))
       .mockResolvedValueOnce({
         content: "MCP is an open protocol that standardizes how AI applications connect to external tools and data sources. Source: https://modelcontextprotocol.io/",
@@ -286,12 +709,14 @@ describe("sub-agent turn timeouts", () => {
 
     try {
       const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
+      const resultPromise = runSubAgentWithStats({
         agentName: "research_agent",
         task: "Summarize MCP.",
         parentSessionId: "parent-timeout-synthesis",
         workspacePath: tempDir,
       });
+      await vi.advanceTimersByTimeAsync(1100);
+      const result = await resultPromise;
 
       expect(result.output).toContain("MCP is an open protocol");
       expect(result.output).not.toContain("timed out after 1000ms");
@@ -299,6 +724,7 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.outcome).toBe("success");
       expect(completeMock).toHaveBeenCalledTimes(3);
     } finally {
+      vi.useRealTimers();
       unregisterTool("get_swarm_state");
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -380,6 +806,97 @@ describe("sub-agent turn timeouts", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  it("returns partial recovered evidence when final synthesis times out after successful research tools", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-final-timeout-partial-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research the topic and return grounded evidence.",
+          tools: ["web_search", "share_finding"],
+          maxIterations: 3,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "web_search",
+      description: "Return grounded microphone evidence",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "Official microphone evidence: Infineon IM73A135V01 uses analog differential output rather than I2S. Datasheet source confirms 73 dB(A) SNR, 124 dB AOP, and 2.3-3.3 V supply.",
+        };
+      },
+    });
+    registerTool({
+      name: "share_finding",
+      description: "Publish a finding to shared memory",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "Finding published to shared session memory: 'im73a135v01_critical_specs' = \"Infineon IM73A135V01: Analog differential output MEMS microphone (NOT I2S/digital). SNR 73 dB(A), AOP 124 dB.\"",
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "search-1",
+            name: "web_search",
+            arguments: { query: "IM73A135V01 datasheet" },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "share-1",
+            name: "share_finding",
+            arguments: { key: "im73a135v01_critical_specs", value: "Infineon IM73A135V01 analog mic" },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockRejectedValueOnce(new Error("OpenAI-compatible request failed (model: qwen3.6-35b-a3b): Request timed out."));
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "researcher",
+        task: "Verify IM73A135V01 microphone evidence.",
+        parentSessionId: "parent-final-timeout-partial",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("timed out while finalizing the answer after substantive work");
+      expect(result.output).toContain("Recovered evidence snippets from completed tools");
+      expect(result.output).toContain("analog differential output");
+      expect(result.stats.terminalState).toBe("timeout");
+      expect(result.stats.outcome).toBe("partial");
+      expect(completeMock).toHaveBeenCalledTimes(3);
+    } finally {
+      unregisterTool("web_search");
+      unregisterTool("share_finding");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 
   it("treats a synthesized max-iteration result as successful when a deliverable artifact was already produced", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-max-iter-artifact-"));
@@ -543,7 +1060,7 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("passes an adaptive timeout-derived signal when the agent has enough recent duration history", async () => {
+  it("records an adaptive timeout budget without creating an internal abort signal", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-adaptive-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -590,6 +1107,12 @@ describe("sub-agent turn timeouts", () => {
       finishReason: "stop",
     });
 
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
     try {
       const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
       const result = await runSubAgentWithStats({
@@ -602,8 +1125,14 @@ describe("sub-agent turn timeouts", () => {
       expect(result.output).toBe("done");
       expect(completeMock).toHaveBeenCalledTimes(1);
       const passedSignal = completeMock.mock.calls[0]?.[2] as AbortSignal | undefined;
-      expect(passedSignal).toBeDefined();
+      expect(passedSignal).toBeUndefined();
+      const startEvent = auditEvents.find(
+        (event) => event.type === "sub_agent_started" && event.data.agentName === "adaptive_agent",
+      );
+      expect(startEvent).toBeDefined();
+      expect(startEvent!.data.timeoutMs).toBeGreaterThan(60_000);
     } finally {
+      unsubscribe();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -876,6 +1405,122 @@ describe("sub-agent turn timeouts", () => {
       expect(systemMessage).toContain("- coder: Coding specialist");
       expect(systemMessage).not.toContain("browser_agent");
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rewrites source-sensitive discovery retries to delegate_to_agent after a no-match result", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-no-match-fallback-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        mission_coordinator: {
+          description: "Mission coordinator",
+          systemPrompt: "Coordinate source-sensitive work.",
+          tools: ["search_agents", "search_workflows", "delegate_to_agent"],
+          maxIterations: 3,
+        },
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research from sources.",
+          tools: ["read_file"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: 'No agents matched "electronics hardware component selection circuit design embedded systems". Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task.',
+      metadata: { query: "electronics hardware component selection circuit design embedded systems", resultCount: 0 },
+    }));
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: 'No workflows matched "hardware design electronics BOM circuit layout component selection" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.',
+      metadata: { workflowMatches: [] },
+    }));
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from researcher — TASK COMPLETED.\nObserved evidence:\nGrounded component evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Mock search_agents",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    registerTool({
+      name: "search_workflows",
+      description: "Mock search_workflows",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Mock delegate_to_agent",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "search-1",
+            name: "search_agents",
+            arguments: { query: "electronics hardware component selection circuit design embedded systems" },
+          },
+          {
+            id: "workflow-1",
+            name: "search_workflows",
+            arguments: { query: "hardware design electronics BOM circuit layout component selection" },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "Grounded component evidence.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Use current sources to verify the exact microphone component choice and recommend a grounded PCB layout.",
+        parentSessionId: "parent-no-match-fallback",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Grounded component evidence");
+      expect(searchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(searchWorkflowsMock).not.toHaveBeenCalled();
+      expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+      expect(result.stats.toolNames).toEqual(["search_agents", "delegate_to_agent"]);
+      const delegateArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(delegateArgs["agentName"]).toBe("researcher");
+      expect(String(delegateArgs["task"])).toContain("Use current sources to verify the exact microphone component choice");
+      expect(completeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      unregisterTool("search_agents");
+      unregisterTool("search_workflows");
+      unregisterTool("delegate_to_agent");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
