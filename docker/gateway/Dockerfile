@@ -52,7 +52,7 @@ ENV LOG_LEVEL=info
 FROM runtime-base AS runtime
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -sf http://localhost:8765/healthz || exit 1
+    CMD curl -sf http://127.0.0.1:8765/healthz || exit 1
 
 EXPOSE 8765
 CMD ["node", "packages/core/dist/index.js"]

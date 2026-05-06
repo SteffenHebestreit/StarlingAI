@@ -18,6 +18,7 @@ import { classifyToolIntervention, type InterventionNotice } from "./interventio
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
+import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
@@ -25,15 +26,18 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
+import { readAllFacts } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
   type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
+  PRODUCT_RECOMMENDATION_PATTERNS,
   WORKFLOW_HINT_TERMS,
   WORKFLOW_ACTION_TERMS,
   WORKFLOW_DELIVERABLE_HINT_TERMS,
   WORKFLOW_REQUEST_PATTERNS,
 } from "./intent-classifier.js";
+import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
 
 const log = childLogger("agent:runtime");
 
@@ -159,6 +163,369 @@ function stableSerialize(value: unknown): string {
     return `{${entries.join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+async function formatSharedFactsForFinalSynthesis(sessionId: string, maxChars = 4_000): Promise<string> {
+  try {
+    const facts = await readAllFacts(sessionId);
+    const entries = Object.entries(facts)
+      .filter(([, value]) => value.trim().length > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (entries.length === 0) return "";
+
+    const lines: string[] = [];
+    let usedChars = 0;
+    for (const [key, value] of entries) {
+      const line = `- ${key}: ${value.replace(/\s+/g, " ").trim()}`;
+      if (usedChars + line.length > maxChars && lines.length > 0) break;
+      lines.push(line.length > maxChars ? `${line.slice(0, maxChars - 3)}...` : line);
+      usedChars += line.length;
+      if (lines.length >= 20) break;
+    }
+
+    return [
+      "[SHARED FINDINGS AVAILABLE] Use these shared findings when producing the final answer. Do not duplicate work or answer from training data when a shared finding covers the fact.",
+      ...lines,
+    ].join("\n");
+  } catch (err) {
+    log.debug({ err, sessionId }, "Failed to load shared findings for final synthesis");
+    return "";
+  }
+}
+
+async function hasSharedFactsForFinalSynthesis(sessionId: string): Promise<boolean> {
+  try {
+    const facts = await readAllFacts(sessionId);
+    return Object.values(facts).some((value) => value.trim().length >= 80);
+  } catch (err) {
+    log.debug({ err, sessionId }, "Failed to check shared findings for final synthesis");
+    return false;
+  }
+}
+
+async function getSharedFactsEvidenceForFinalSynthesis(
+  sessionId: string,
+  maxChars = 4_000,
+): Promise<{ evidence: string; itemCount: number } | null> {
+  try {
+    const facts = await readAllFacts(sessionId);
+    const entries = Object.entries(facts)
+      .filter(([, value]) => value.trim().length > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (entries.length === 0) return null;
+
+    const lines: string[] = [];
+    let usedChars = 0;
+    for (const [key, value] of entries) {
+      const line = `- ${key}: ${value.replace(/\s+/g, " ").trim()}`;
+      if (usedChars + line.length > maxChars && lines.length > 0) break;
+      lines.push(line.length > maxChars ? `${line.slice(0, maxChars - 3)}...` : line);
+      usedChars += line.length;
+      if (lines.length >= 20) break;
+    }
+
+    const evidence = lines.join("\n").trim();
+    if (!evidence) return null;
+
+    const itemCount = countStructuredItems(evidence);
+    if (itemCount < 1 && evidence.length < 80) return null;
+
+    return { evidence, itemCount };
+  } catch (err) {
+    log.debug({ err, sessionId }, "Failed to build shared-findings evidence for final synthesis");
+    return null;
+  }
+}
+
+function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
+  const lines = evidence
+    .split("\n")
+    .map((rawLine) => rawLine.trim())
+    .filter(Boolean)
+    .map((rawLine) => {
+      let line = rawLine
+        .replace(/^-\s+auto_[a-z0-9_]+:\s*/i, "- ")
+        .replace(/\s*###\s*Page state\b[\s\S]*$/i, "")
+        .replace(/\s*Page Snapshot:\s*[\s\S]*$/i, "")
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (line.length > 900) line = `${line.slice(0, 897)}...`;
+      return line;
+    })
+    .filter((line) => line.length > 0);
+  return lines.join("\n").trim() || evidence.trim();
+}
+
+function formatSourceSensitiveEvidenceBackstop(evidence: string): string {
+  const compactEvidence = compactSourceSensitiveEvidenceForDisplay(evidence);
+  return [
+    "Die bisher belastbare Evidenz aus diesem Lauf:",
+    compactEvidence,
+    "Alle übrigen angefragten Aussagen bleiben unverifiziert oder unvollständig, bis eine erfolgreiche Quellenrecherche vorliegt.",
+  ].join("\n\n");
+}
+
+function sourceSensitiveEvidenceTokens(evidence: string): string[] {
+  const stopwords = new Set([
+    "about", "after", "agent", "available", "before", "completed", "content", "current", "evidence", "fetch", "finding", "from", "generic", "matched", "observed", "official", "output", "partial", "progress", "research", "result", "source", "state", "strongly", "task", "title", "tools", "url", "with",
+    "alle", "aus", "bisher", "bleiben", "diesem", "diese", "evidenz", "lauf", "quelle", "quellen", "recherche", "unvollstaendig", "unverifiziert", "wurde",
+  ]);
+  const tokens = new Set<string>();
+  for (const match of evidence.matchAll(/[A-Za-z0-9][A-Za-z0-9._/-]{3,}/g)) {
+    const token = match[0]!.toLowerCase();
+    if (stopwords.has(token)) continue;
+    if (/^https?:\/\//i.test(token)) {
+      try {
+        tokens.add(new URL(match[0]!).hostname.replace(/^www\./i, "").toLowerCase());
+      } catch {
+        tokens.add(token.slice(0, 80));
+      }
+      continue;
+    }
+    if (/^[a-z]{1,2}\d+$/i.test(token)) continue;
+    tokens.add(token.slice(0, 80));
+  }
+  return [...tokens].slice(0, 80);
+}
+
+function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string): boolean {
+  const normalizedDraft = sourceSensitiveDraft.toLowerCase();
+  if (normalizedDraft.length < 120) return false;
+  const anchors = sourceSensitiveEvidenceTokens(evidence);
+  if (anchors.length === 0) return false;
+  let hits = 0;
+  for (const anchor of anchors) {
+    if (normalizedDraft.includes(anchor)) hits += 1;
+    if (hits >= Math.min(3, anchors.length)) return true;
+  }
+  return false;
+}
+
+async function synthesizeSourceSensitiveEvidenceBackstop(
+  session: AgentSession,
+  provider: ChatProvider,
+  signal: AbortSignal,
+  evidence: string,
+): Promise<string | null> {
+  const instruction = [
+    "SOURCE-SENSITIVE RECOVERY SYNTHESIS:",
+    "The prior delegation failed or timed out, but the evidence below was recovered. Answer the user in German using ONLY this recovered evidence and shared findings.",
+    "Do not invent missing manufacturer, interface, protocol, pricing, layout, BOM, or product claims. If a requested section is not supported by the evidence, mark it as unverifiziert/unvollstaendig.",
+    "Do not dump raw page snapshots or tool traces. Convert supported evidence into a concise useful partial answer with: 1) Verifiziert, 2) Noch nicht belegt, 3) Naechster sinnvoller Recherche-Schritt.",
+    "Recovered evidence:",
+    evidence.trim(),
+  ].join("\n");
+  const synthesized = await forceSynthesis(session, provider, signal, instruction);
+  if (!synthesized) return null;
+  const cleaned = stripPresentationFormatting(synthesized).trim();
+  if (!looksEvidenceAnchored(cleaned, evidence)) return null;
+  if (/\b(VendorX|I2S-only)\b/i.test(cleaned) && !/\b(VendorX|I2S-only)\b/i.test(evidence)) return null;
+  return cleaned;
+}
+
+function looksLikeWeakRecoveryEvidence(evidence: string): boolean {
+  const trimmed = evidence.trim();
+  if (!trimmed) return true;
+  if (/^Sub-agent '[^']+' timed out/i.test(trimmed)) return true;
+  if (/Partial progress before interruption:/i.test(trimmed)) return true;
+  if (/^Recovered evidence snippets from completed tools:/im.test(trimmed)) return true;
+  if (/^(?:-\s*)?(?:search_agents|search_workflows)\s+\[partial\]/im.test(trimmed)) return true;
+  if (/No (?:agents|workflows) matched/i.test(trimmed)) return true;
+  if (looksLikeDelegationTaskEcho(trimmed)) return true;
+  return false;
+}
+
+function chooseBetterRecoveryEvidence(
+  delegateEvidence: { evidence: string; itemCount: number } | null,
+  sharedFactsEvidence: { evidence: string; itemCount: number } | null,
+  options?: { preferHigherScore?: boolean },
+): { evidence: string; itemCount: number } | null {
+  if (!delegateEvidence) return sharedFactsEvidence;
+  if (!sharedFactsEvidence) return delegateEvidence;
+  if (looksLikeWeakRecoveryEvidence(delegateEvidence.evidence)) {
+    return sharedFactsEvidence;
+  }
+
+  if (options?.preferHigherScore === false) {
+    return delegateEvidence;
+  }
+
+  const delegateScore = delegateEvidence.evidence.length + (delegateEvidence.itemCount * 200);
+  const sharedScore = sharedFactsEvidence.evidence.length + (sharedFactsEvidence.itemCount * 200);
+  return sharedScore > delegateScore ? sharedFactsEvidence : delegateEvidence;
+}
+
+function defaultResearchFallbackAgentsFor(agentName: string | undefined, guidance: DynamicTurnGuidance | null | undefined): string[] {
+  const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
+    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
+    : ["mission_coordinator", "researcher"];
+  return preferredAgents
+    .filter((candidate) => candidate !== agentName)
+    .filter((candidate) => chooseConfiguredAgent([candidate]) === candidate);
+}
+
+function withDefaultResearchFallbackAgents(
+  args: Record<string, unknown>,
+  guidance: DynamicTurnGuidance | null | undefined,
+): Record<string, unknown> {
+  const agentName = typeof args["agentName"] === "string" ? String(args["agentName"]).trim() : undefined;
+  if (!agentName) return args;
+  const existingFallbacks = Array.isArray(args["fallbackAgents"])
+    ? args["fallbackAgents"].map(String).filter(Boolean)
+    : [];
+  if (existingFallbacks.length > 0) return args;
+  const fallbackAgents = defaultResearchFallbackAgentsFor(agentName, guidance);
+  return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
+}
+
+function stripUntrustedDelegationContext(args: Record<string, unknown>): Record<string, unknown> {
+  if (!("context" in args)) return args;
+  const nextArgs = { ...args };
+  delete nextArgs["context"];
+  return nextArgs;
+}
+
+function looksLikeTransparentIncompleteReport(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return /\b(partial|incomplete|failed|failure|blocked|timed out|timeout|could not|unable|unverified|missing evidence|attempted)\b/.test(normalized);
+}
+
+function isBroadSourceSensitiveAdvisoryRequest(userMessage: string): boolean {
+  const normalized = userMessage.trim().toLowerCase();
+  if (!normalized) return false;
+
+  let signals = 0;
+  if (PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))) signals += 1;
+  if (/\b(layout|wiring|schematic|verdrahtung|schaltplan|connect(?:ion)?|put all of it together|zusammenbauen|zusammenstecken)\b/i.test(normalized)) signals += 1;
+  if (/\b(what else do i need|what do i need|bom|bill of materials|parts list|st[üu]ckliste|bauteilliste|battery|usb-c|charger|charging module|buttons?)\b/i.test(normalized)) signals += 1;
+  if (/\b(improvement|improvements|improve|best quality|quality for transcription|transcription quality|verbesser(?:ung|ungen|e|n)?|beste qualit[äa]t)\b/i.test(normalized)) signals += 1;
+  if ((normalized.match(/\n/g) ?? []).length >= 4) signals += 1;
+
+  return signals >= 2;
+}
+
+function hasRecentSourceSensitivePartialDelegation(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+): boolean {
+  const recent = [...history].reverse().slice(0, 12);
+
+  for (const message of recent) {
+    if (message.role !== "tool") continue;
+    const content = String(message.content ?? "");
+    const meta = message.metadata ?? {};
+    if (!DELEGATE_TOOL_RESULT_RE.test(content) && !looksLikeDelegateMetadata(meta)) continue;
+
+    const delegationOutcome = typeof meta["delegationOutcome"] === "string"
+      ? String(meta["delegationOutcome"]).toLowerCase()
+      : "";
+    const terminalState = typeof meta["terminalState"] === "string"
+      ? String(meta["terminalState"]).toLowerCase()
+      : "";
+
+    if (delegationOutcome === "failure") return true;
+    if (delegationOutcome === "partial" && (terminalState === "timeout" || terminalState === "max_iterations" || terminalState === "cancelled" || !terminalState)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasRecentSparseSourceSensitiveMemoryReuse(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+  userMessage: string,
+): boolean {
+  if (!isBroadSourceSensitiveAdvisoryRequest(userMessage)) return false;
+
+  const recent = [...history].reverse().slice(0, 12);
+
+  for (const message of recent) {
+    if (message.role !== "tool") continue;
+    const content = String(message.content ?? "");
+    const meta = message.metadata ?? {};
+    if (!DELEGATE_TOOL_RESULT_RE.test(content) && !looksLikeDelegateMetadata(meta)) continue;
+
+    const reusedFromSessionMemory = meta["reusedFromSessionMemory"] === true;
+    const factCount = typeof meta["factCount"] === "number" ? Number(meta["factCount"]) : 0;
+    const partialCount = typeof meta["partialCount"] === "number" ? Number(meta["partialCount"]) : 0;
+    if (reusedFromSessionMemory && factCount > 0 && factCount <= 3 && partialCount === 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function enforceSourceSensitiveOriginalRequestOnToolCall(
+  toolCall: LLMResponse["tool_calls"][number],
+  userMessage: string,
+  guidance: DynamicTurnGuidance | null | undefined,
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): void {
+  if (!guidance?.sourceSensitive) return;
+  const originalArgs = toolCall.arguments ?? {};
+  let nextArgs: Record<string, unknown> | null = null;
+
+  if (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate" || toolCall.name === "create_ephemeral_agent") {
+    const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
+    const focus = deriveSourceSensitiveDelegationFocus(originalTask, userMessage);
+    nextArgs = withDefaultResearchFallbackAgents(
+      stripUntrustedDelegationContext({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) }),
+      guidance,
+    );
+  } else if (toolCall.name === "parallel_delegate") {
+    const rawTasks = Array.isArray(originalArgs["tasks"])
+      ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
+      : [];
+    if (rawTasks.length > 0) {
+      nextArgs = {
+        ...originalArgs,
+        tasks: rawTasks.map((taskSpec, index) => withDefaultResearchFallbackAgents(
+          stripUntrustedDelegationContext({
+            ...taskSpec,
+            task: buildSourceSensitiveOriginalRequestTask(
+              userMessage,
+              `SLICE ${index + 1}/${rawTasks.length}`,
+              deriveSourceSensitiveDelegationFocus(typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "", userMessage),
+            ),
+          }),
+          guidance,
+        )),
+      };
+    }
+  } else if (toolCall.name === "run_task_graph") {
+    const rawNodes = Array.isArray(originalArgs["nodes"])
+      ? originalArgs["nodes"].filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+      : [];
+    if (rawNodes.length > 0) {
+      nextArgs = {
+        ...originalArgs,
+        objective: userMessage,
+        nodes: rawNodes.map((node, index) => withDefaultResearchFallbackAgents(
+          stripUntrustedDelegationContext({
+            ...node,
+            task: buildSourceSensitiveOriginalRequestTask(
+              userMessage,
+              `GRAPH NODE ${index + 1}/${rawNodes.length}`,
+              deriveSourceSensitiveDelegationFocus(typeof node["task"] === "string" ? String(node["task"]) : "", userMessage),
+            ),
+          }),
+          guidance,
+        )),
+      };
+    }
+  }
+
+  if (!nextArgs || stableSerialize(nextArgs) === stableSerialize(originalArgs)) return;
+  toolCall.arguments = nextArgs;
+  guardrailEvents.push({ type: "delegation_required", details: `${toolCall.name}:source_sensitive_original_request_enforced` });
+  logAudit("tool_call_recovered", {
+    originalTool: toolCall.name,
+    rewrittenTo: toolCall.name,
+    reason: "source_sensitive_original_request_enforced",
+  }, { sessionId, severity: "info" });
 }
 
 function collapseDuplicateToolCallsInResponse(
@@ -519,6 +886,36 @@ function buildSearchAgentsNoMatchFallbackPrompt(route: RequiredResearchFallbackR
     "You MUST call create_ephemeral_agent now using the provided research-specialist shape and the original user request as the task.",
     "A further discovery-only response is invalid; orchestration must happen before any final answer.",
   ].join(" ");
+}
+
+function enforceRequiredResearchFallbackRouteOnToolCall(
+  toolCall: LLMResponse["tool_calls"][number],
+  route: RequiredResearchFallbackRoute,
+  sessionId: string,
+  guardrailEvents: Array<{ type: string; details: string }>,
+): void {
+  const discoveryRetryTools = new Set(["search_agents", "list_agents", "search_workflows"]);
+  const shouldRewriteDiscoveryRetry = discoveryRetryTools.has(toolCall.name);
+  const shouldEnforceCanonicalRouteArgs = toolCall.name === route.toolName;
+  if (!shouldRewriteDiscoveryRetry && !shouldEnforceCanonicalRouteArgs) return;
+
+  const originalTool = toolCall.name;
+  const originalArgs = toolCall.arguments ?? {};
+  const routeArgs = { ...route.args };
+  const changed = originalTool !== route.toolName || stableSerialize(originalArgs) !== stableSerialize(routeArgs);
+  if (!changed) return;
+
+  toolCall.name = route.toolName;
+  toolCall.arguments = routeArgs;
+  guardrailEvents.push({ type: "delegation_required", details: "required_research_original_task_enforced" });
+  logAudit("tool_call_recovered", {
+    originalTool,
+    rewrittenTo: route.toolName,
+    reason: shouldRewriteDiscoveryRetry
+      ? "required_research_discovery_retry_rewritten"
+      : "required_research_original_task_enforced",
+    recoveredAgentName: route.label,
+  }, { sessionId, severity: shouldRewriteDiscoveryRetry ? "warn" : "info" });
 }
 
 function isExplicitAgentCatalogRequest(message: string): boolean {
@@ -1028,7 +1425,18 @@ async function rewriteTerminalResponseIfNeeded(
   );
 
   const cleaned = sanitizeUserFacingAssistantResponse(rewritten ?? "", 0);
-  return cleaned || response;
+  if (!cleaned) return response;
+  // When the original is substantive (> 300 chars), only replace it with
+  // the rewrite if the rewrite is itself substantive relative to the
+  // original.  The common failure mode: delegated-evidence text that
+  // incidentally contains "I will …" / "ich werde …" triggers a rewrite
+  // call, but forceSynthesis returns a short apology (≤ 100–200 chars)
+  // because the model has nothing new to add.  In that situation the
+  // original evidence is far more useful than the stub.
+  if (response.length > 300 && cleaned.length < Math.max(200, Math.ceil(response.length * 0.25))) {
+    return response;
+  }
+  return cleaned;
 }
 
 async function finalizeUserFacingAssistantResponse(
@@ -1209,41 +1617,121 @@ function countStructuredItems(text: string): number {
 
 function stripInterruptedSubAgentBoilerplate(text: string): string {
   return text
+    // The reason text is sometimes extended with a tail clause such as
+    //   "timed out after Nms after finishing the current operation"
+    //   "timed out after Nms before starting another tool run"
+    // (see sub-agent.ts hard-deadline branches). The original alternation
+    // required `\d+ms` to be followed directly by whitespace + "Partial
+    // progress before interruption:", which fails for the extended form
+    // and leaves the scaffold prefix in the surfaced evidence. Allow any
+    // non-newline tail between the duration and the partial-progress
+    // header so both shapes get stripped cleanly.
     .replace(
-      /Sub-agent '[^']+' timed out after \d+ms\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      /Sub-agent '[^']+' timed out after \d+ms[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
       "",
     )
     .replace(
-      /Sub-agent '[^']+' produced no final response after substantive work\.\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      /Sub-agent '[^']+' produced no final response after substantive work\.[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
       "",
     )
     .replace(
-      /Sub-agent '[^']+' was cancelled\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+      /Sub-agent '[^']+' was cancelled[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
       "",
     )
-    .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "")
-    .replace(/Sub-agent '[^']+' produced no final response after substantive work\.\n?/g, "")
-    .replace(/Sub-agent '[^']+' was cancelled\n?/g, "")
+    // Also strip a bare "Partial progress before interruption:" stanza
+    // that may appear after the extended-reason text was already matched
+    // by an earlier regex but the partial-progress block still trails.
+    .replace(
+      /Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
+      "",
+    )
+    .replace(/Sub-agent '[^']+' timed out after \d+ms[^\n]*\n?/g, "")
+    .replace(/Sub-agent '[^']+' produced no final response after substantive work\.[^\n]*\n?/g, "")
+    .replace(/Sub-agent '[^']+' was cancelled[^\n]*\n?/g, "")
     .trim();
 }
+
+// Matches an interrupted sub-agent's terminal-reason line — including the
+// extended forms ("after finishing the current operation", "before starting
+// another tool run") that are tacked onto the duration. This is the first
+// line of `buildInterruptedSubAgentOutput` (sub-agent.ts) before the
+// `Sub-agent '...' ` prefix is stripped by upstream sanitizers.
+const INTERRUPTED_REASON_LINE_RE = /^(?:after finishing the current operation|before starting another tool run|timed out after \d+ms|produced no final response after substantive work|was cancelled)\b/i;
+
+// A bullet-prefixed scaffold line that `buildInterruptedSubAgentOutput`
+// produces ("- Tool calls executed: N (...)", "- Iterations completed: N",
+// "- Artifacts collected: N (...)"). The pre-existing check matched these
+// only at start-of-string without a leading dash; orchestration scaffolds
+// always have the dash, so the match consistently failed and the scaffold
+// got surfaced as if it were real evidence.
+const SCAFFOLD_LIST_LINE_RE = /^(?:[-*]\s+)?(?:Tool calls executed:|Iterations completed:|Artifacts collected:)/i;
 
 function looksLikeOrchestrationOnlyEvidence(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
+  if (looksLikeDelegationTaskEcho(trimmed)) return true;
+  if (/Partial progress before interruption:/i.test(trimmed)) {
+    return true;
+  }
+  if (/^Recovered evidence snippets from completed tools:/i.test(trimmed)) {
+    return true;
+  }
+  // Whole-string check: every non-empty line is a scaffold line. This
+  // catches the residue left after `stripInterruptedSubAgentBoilerplate`
+  // failed (or only partially matched) the extended-reason prefix and
+  // we're left with a few lines like:
+  //   "after finishing the current operation"
+  //   "- Tool calls executed: 5 (...)"
+  //   "- Iterations completed: 4"
+  // None of which carry actual evidence for the user.
+  const lines = trimmed.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  if (lines.length > 0 && lines.every((line) =>
+    INTERRUPTED_REASON_LINE_RE.test(line)
+    || SCAFFOLD_LIST_LINE_RE.test(line)
+    || /^Partial progress before interruption:?$/i.test(line)
+    || /^Recovered evidence snippets from completed tools:?$/i.test(line),
+  )) {
+    return true;
+  }
   if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(trimmed)) {
     return true;
   }
   if (/^(?:task_\d+\s+\[running\]|parallel_\d+\s+\[(?:running|pending)\])/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:Sub-agent '[^']+'|Delegated result from)/i.test(trimmed) && trimmed.length < 220) {
+  if (/^Sub-agent '[^']+'/i.test(trimmed)) {
+    return true;
+  }
+  if (/^Delegated result from/i.test(trimmed) && trimmed.length < 220) {
+    return true;
+  }
+  // Workflow discovery results — coordinator planning steps, not research findings.
+  if (/^Workflow matches for\s+["']?/i.test(trimmed)) {
+    return true;
+  }
+  // Workflow config/reference errors — not usable research evidence.
+  if (/^Workflow\s+["']?[^"']+["']?\s+\[[^\]]+\]\s+references\s+a\s+scene/i.test(trimmed)) {
+    return true;
+  }
+  if (/^(?:Without the underlying scene|Add the missing scene|or remove the job)/i.test(trimmed)) {
     return true;
   }
   return false;
 }
 
+function looksLikeDelegationTaskEcho(text: string): boolean {
+  const normalized = collapseWhitespace(stripPresentationFormatting(text));
+  if (!normalized) return false;
+  return /\bSOURCE-SENSITIVE DELEGATION(?:\s+(?:SLICE|GRAPH NODE))?\b/i.test(normalized)
+    || /\b(?:Original user request|Parent task):\b/i.test(normalized)
+    || /\bvia\s+[a-z0-9_:-]+\s+SOURCE-SENSITIVE DELEGATION\b/i.test(normalized);
+}
+
 function stripDelegationProgressPrefix(text: string): string {
-  return text.replace(/^(?:parallel|task)_\d+\s+\[[^\]]+\]\s*/i, "").trim();
+  return text
+    .replace(/^(?:parallel|task)_\d+\s+\[[^\]]+\]\s*/i, "")
+    .replace(/^[a-z_]+\s+\[[^\]]+\]\s*/i, "")
+    .trim();
 }
 
 function collectInterruptedDelegationSnippets(text: string): string[] {
@@ -1256,6 +1744,7 @@ function collectInterruptedDelegationSnippets(text: string): string[] {
       .replace(/^IMPORTANT:\s.*$/gim, "")
       .trim();
     if (!normalized || normalized.length < 80 || looksLikeOrchestrationOnlyEvidence(normalized)) return;
+    if (looksLikeProviderErrorEcho(normalized)) return;
     if (seen.has(normalized)) return;
     seen.add(normalized);
     snippets.push(normalized);
@@ -1269,6 +1758,7 @@ function collectInterruptedDelegationSnippets(text: string): string[] {
       const body = line.slice(2).trim();
       if (!body || /^(?:Tool calls executed:|Iterations completed:)/i.test(body)) continue;
       if (/\[(?:running|pending)\]/i.test(body)) continue;
+      if (/^(?:parallel|task)_\d+\s+\[[^\]]+\]/i.test(body) && !body.includes(" | ")) continue;
       const normalizedBody = stripDelegationProgressPrefix(body);
       const candidate = normalizedBody.includes(" | ")
         ? normalizedBody.split(/\s+\|\s+/).slice(1).join(" | ")
@@ -1306,7 +1796,14 @@ function extractUsefulInterruptedDelegationEvidence(text: string): string | null
     .filter((line) => !looksLikeOrchestrationOnlyEvidence(line))
     .join("\n");
 
-  return fallback.length >= 120 ? fallback : null;
+  if (fallback.length < 120) return null;
+  if (looksLikeProviderErrorEcho(fallback)) return null;
+  return fallback;
+}
+
+function looksLikeInterruptedDelegationWithoutUsableEvidence(text: string): boolean {
+  return /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(text)
+    && !extractUsefulInterruptedDelegationEvidence(text);
 }
 
 function measureEvidenceCoverage(
@@ -1353,6 +1850,18 @@ function findRecentDelegateEvidence(
       || /(?:TASK COMPLETED \(PARTIAL|PARTIAL PROGRESS|Partial progress before interruption:)/i.test(content);
     const minimumEvidenceChars = partialLike ? 120 : 400;
     if (!evidence || evidence.length < minimumEvidenceChars) continue;
+    // Reject evidence that is just a regurgitated provider/HTTP/HTML error
+    // — surfacing an LM Studio 500 page or an "OpenAI-compatible request
+    // failed" string as the final answer is worse than the generic
+    // "no usable evidence" fallback.
+    if (looksLikeProviderErrorEcho(evidence)) continue;
+    // Reject evidence whose every non-empty line is interrupted-sub-agent
+    // scaffolding ("after finishing the current operation", "- Tool calls
+    // executed: N", "- Iterations completed: N"). Without this, the
+    // empty-response evidence backstop dumps the scaffold to the user as
+    // if it were real findings. A 161-char scaffold is technically above
+    // the partial-like 120-char minimum but is zero-information.
+    if (looksLikeOrchestrationOnlyEvidence(evidence)) continue;
 
     const itemCount = countStructuredItems(evidence);
     const score = evidence.length + (itemCount * 200);
@@ -1642,123 +2151,12 @@ function stripPresentationFormatting(value: string): string {
     .trim();
 }
 
-const CANDIDATE_IDENTIFIER_RE = /\b[A-Z]{2,}\d[A-Z0-9-]{2,}\b/g;
-const SPECULATIVE_CANDIDATE_CLAIM_RE = /\b(?:tdk(?:\s+invensense)?|invensense|stmicroelectronics|stmicro|infineon|xensiv|knowles|memsic|i2s|pdm|tdm|pcm|analog|digital|datasheet|omnidirectional|omnidirektional)\b/i;
-const VERIFICATION_REQUIRED_PREAMBLE = "VERIFICATION REQUIRED: Preserve every named part number, product, vendor, protocol, or interface as an unverified candidate until an official source confirms it. Do NOT assume manufacturer, interface, or specs from the identifier alone. If upstream text contains such assumptions, treat them as unverified and correct them from current evidence first.";
-
-function collectCandidateIdentifiers(text: string): string[] {
-  const matches = text.match(CANDIDATE_IDENTIFIER_RE) ?? [];
-  return [...new Set(matches.map((match) => match.trim()).filter(Boolean))];
-}
-
-function neutralizeSpeculativeCandidateClaims(text: string): string {
-  let sanitized = text;
-  for (const candidate of collectCandidateIdentifiers(text)) {
-    const escapedCandidate = escapeRegExp(candidate);
-
-    sanitized = sanitized.replace(
-      new RegExp(`${escapedCandidate}\\s*\\(([^\\n)]{1,120})\\)`, "gi"),
-      (full, inner: string) => SPECULATIVE_CANDIDATE_CLAIM_RE.test(inner)
-        ? `${candidate} (candidate identifier; verify manufacturer/interface/specs from official source first)`
-        : full,
-    );
-
-    sanitized = sanitized.replace(
-      new RegExp(`\\b(?:TDK(?:\\s+InvenSense)?|InvenSense|STMicroelectronics|STMicro|Infineon|XENSIV|Knowles|MEMSIC)\\s+${escapedCandidate}\\b`, "gi"),
-      `${candidate} (candidate identifier; verify manufacturer/product class from official source first)`,
-    );
-
-    sanitized = sanitized.replace(
-      new RegExp(`${escapedCandidate}\\s+von\\s+[^\\n.,;:]{2,80}`, "gi"),
-      `${candidate} (candidate identifier; verify manufacturer from official source first)`,
-    );
-  }
-
-  sanitized = sanitized.replace(
-    /\bInterface\s*\(([^)]*\b(?:I2S|PDM|TDM|PCM)\b[^)]*)\)/gi,
-    "Interface (verify from official source first)",
-  );
-
-  return sanitized;
-}
-
-function addVerificationPreamble(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) return trimmed;
-  if (trimmed.startsWith(VERIFICATION_REQUIRED_PREAMBLE)) return trimmed;
-  return `${VERIFICATION_REQUIRED_PREAMBLE}\n\n${trimmed}`;
-}
-
-function sanitizeDelegationTextForSourceSensitiveTurn(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) return text;
-
-  const hasCandidateIdentifiers = collectCandidateIdentifiers(trimmed).length > 0;
-  const hasSpeculativeInterfaceClaim = /\bInterface\s*\(([^)]*\b(?:I2S|PDM|TDM|PCM)\b[^)]*)\)/i.test(trimmed);
-  if (!hasCandidateIdentifiers && !hasSpeculativeInterfaceClaim) {
-    return text;
-  }
-
-  return addVerificationPreamble(neutralizeSpeculativeCandidateClaims(trimmed));
-}
-
-function sanitizeDelegationLikeToolArgs(
-  toolName: string,
-  args: Record<string, unknown> | undefined,
-  guidance: DynamicTurnGuidance | null | undefined,
-): Record<string, unknown> | undefined {
-  void guidance;
-  if (!args) {
-    return args;
-  }
-
-  if (toolName === "delegate_to_agent" || toolName === "swarm_delegate") {
-    let changed = false;
-    const nextArgs: Record<string, unknown> = { ...args };
-
-    for (const key of ["task", "context"] as const) {
-      if (typeof nextArgs[key] !== "string") continue;
-      const sanitized = sanitizeDelegationTextForSourceSensitiveTurn(String(nextArgs[key]));
-      if (sanitized !== nextArgs[key]) {
-        nextArgs[key] = sanitized;
-        changed = true;
-      }
-    }
-
-    return changed ? nextArgs : args;
-  }
-
-  if (toolName === "parallel_delegate" && Array.isArray(args["tasks"])) {
-    let changed = false;
-    const nextTasks = args["tasks"].map((rawTask) => {
-      if (!rawTask || typeof rawTask !== "object") return rawTask;
-      const nextTask = { ...(rawTask as Record<string, unknown>) };
-      let taskChanged = false;
-
-      for (const key of ["task", "context"] as const) {
-        if (typeof nextTask[key] !== "string") continue;
-        const sanitized = sanitizeDelegationTextForSourceSensitiveTurn(String(nextTask[key]));
-        if (sanitized !== nextTask[key]) {
-          nextTask[key] = sanitized;
-          taskChanged = true;
-        }
-      }
-
-      if (taskChanged) changed = true;
-      return taskChanged ? nextTask : rawTask;
-    });
-
-    return changed ? { ...args, tasks: nextTasks } : args;
-  }
-
-  return args;
-}
-
 function looksLikeDelegatedFailureEvidence(value: string): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
   if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
   if (/<\|channel\>\w+/i.test(preview)) return true;
+  if (looksLikeProviderErrorEcho(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
     || /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview)
@@ -1795,17 +2193,28 @@ export function classifyPostOrchestrationDisposition(
   for (const message of orchestrationResults) {
     const text = typeof message.content === "string" ? message.content : "";
     const metadata = message.metadata ?? {};
+    const agentName = typeof metadata["agentName"] === "string"
+      ? String(metadata["agentName"])
+      : (text.match(/^Delegated result from\s+([^\s—]+)/m)?.[1] ?? "");
     const terminalState = typeof metadata["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
     const delegationSucceeded = metadata["delegationSucceeded"] !== false;
     const delegationOutcome = typeof metadata["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
     const delegationPartial = delegationOutcome === "partial";
+    const interruptedPartialWithoutUsableEvidence = agentName !== "computer_use_agent"
+      && delegationPartial
+      && looksLikeInterruptedDelegationWithoutUsableEvidence(text);
 
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
     }
 
+    if (/^Delegated result from .+ — TASK FAILED\./m.test(text)) {
+      return "failure";
+    }
+
     if (
-      !delegationSucceeded
+      interruptedPartialWithoutUsableEvidence
+      || !delegationSucceeded
       || delegationOutcome === "failure"
       || (!delegationPartial && terminalState && terminalState !== "completed")
       || (!delegationPartial && looksLikeDelegatedFailureEvidence(text))
@@ -1844,8 +2253,23 @@ export function buildModelVisibleToolResult(
       : undefined;
     const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
     const delegationOutcome = typeof metadata?.["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
-    const delegationPartial = delegationOutcome === "partial";
+    const partialHasNoUsableEvidence = agentName !== "computer_use_agent"
+      && delegationOutcome === "partial"
+      && looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned);
+    // A "partial" outcome whose surfaced content is just a regurgitated
+    // provider/HTTP error (e.g. LM Studio HTTP 500 HTML page that the
+    // soft-deadline synthesis quoted back) is not a useful partial — the
+    // model has no real evidence to relay.  Treat it as an outright
+    // failure so the parent assistant gets a clear failure signal and
+    // can ask the user to retry instead of trying to synthesize an
+    // answer from an HTML error page.
+    const partialIsProviderErrorEcho = delegationOutcome === "partial" && looksLikeProviderErrorEcho(cleaned);
+    const delegationPartial = delegationOutcome === "partial"
+      && !partialIsProviderErrorEcho
+      && !partialHasNoUsableEvidence;
     const delegationFailed = delegationOutcome === "failure"
+      || partialIsProviderErrorEcho
+      || partialHasNoUsableEvidence
       || (!delegationPartial && (
         metadata?.["delegationSucceeded"] === false
         || /^error:/i.test(cleaned)
@@ -1908,10 +2332,10 @@ export function buildModelVisibleToolResult(
       const terminalState = typeof metadata?.["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
       const timedOut = terminalState === "timeout";
       const importantNote = timedOut
-        ? "IMPORTANT: The specialist timed out with partial evidence. Use the evidence below to synthesize a final answer now. Do NOT delegate again for this task in this turn."
+        ? "IMPORTANT: The specialist timed out. Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. Do NOT delegate again for this task in this turn."
         : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
       const parts = [
-        `Delegated result from ${agentName} — TASK COMPLETED (PARTIAL${timedOut ? ", TIMEOUT" : ""}).`,
+        `Delegated result from ${agentName} — PARTIAL PROGRESS${timedOut ? " (TIMEOUT)" : ""}.`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
         routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
         importantNote,
@@ -2598,6 +3022,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    const sourceSensitiveOriginalRequestEnforcementActive = Boolean(
+      initialDynamicGuidance?.sourceSensitive
+      && (!findRecentDelegateEvidence(session.getHistory()) || _consecutiveDelegationFailures > 0),
+    );
+    if (sourceSensitiveOriginalRequestEnforcementActive) {
+      for (const tc of llmResponse.tool_calls) {
+        enforceSourceSensitiveOriginalRequestOnToolCall(tc, userMessage, initialDynamicGuidance, session.id, guardrailEvents);
+      }
+    }
+    if (requiredResearchFallbackRoute) {
+      for (const tc of llmResponse.tool_calls) {
+        enforceRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, session.id, guardrailEvents);
+      }
+    }
 
     if (llmResponse.tool_calls.length > 0 && llmResponse.content?.trim()) {
       logAudit("assistant_text_with_tool_calls_suppressed", {
@@ -3049,6 +3487,47 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         : iterationCount;
       let finalResponse = await finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
 
+      if (
+        initialDynamicGuidance?.sourceSensitive
+        && currentTurnHasExecutableOrchestration
+        && (
+          _forcedSynthesisFired
+          || _consecutiveDelegationFailures > 0
+          || hasRecentSourceSensitivePartialDelegation(session.getHistory())
+          || hasRecentSparseSourceSensitiveMemoryReuse(session.getHistory(), userMessage)
+        )
+      ) {
+        const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+        const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+        const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence);
+        if (recoveryEvidence) {
+          const finalResponseAnchored = looksEvidenceAnchored(stripPresentationFormatting(finalResponse), recoveryEvidence.evidence);
+          const finalResponseTransparent = looksLikeTransparentIncompleteReport(finalResponse);
+          if (!finalResponseAnchored || !finalResponseTransparent) {
+            finalResponse = await synthesizeSourceSensitiveEvidenceBackstop(session, provider, signal, recoveryEvidence.evidence)
+              ?? formatSourceSensitiveEvidenceBackstop(recoveryEvidence.evidence);
+            logAudit("guardrail_flagged", {
+              type: "source_sensitive_failed_delegation_evidence_backstop",
+              evidenceLength: recoveryEvidence.evidence.length,
+              evidenceItems: recoveryEvidence.itemCount,
+              originalLength: rawResponse.length,
+              finalResponseAnchored,
+              finalResponseTransparent,
+            }, { sessionId: session.id, severity: "warn" });
+          }
+        } else if (!looksLikeTransparentIncompleteReport(finalResponse)) {
+          finalResponse = [
+            "Die Recherche ist in diesem Lauf fehlgeschlagen, bevor belastbare Quellen- oder Tool-Evidenz vorlag.",
+            "Ich kann die angefragten Produkt-, Hersteller-, Schnittstellen-, Preis- und Layout-Aussagen deshalb nicht verifizieren, ohne Fakten zu erfinden.",
+            "Bitte starte die Recherche erneut oder reduziere den Umfang auf einen kleineren Teilbereich, damit ein Spezialist echte Quellen sammeln kann.",
+          ].join("\n\n");
+          logAudit("guardrail_flagged", {
+            type: "source_sensitive_final_answer_without_evidence_blocked",
+            originalLength: rawResponse.length,
+          }, { sessionId: session.id, severity: "warn" });
+        }
+      }
+
       if (!outputScan.safe && outputScan.redacted) {
         finalResponse = outputScan.redacted;
         guardrailEvents.push({ type: "output_redacted", details: (outputScan.detectedTypes ?? []).join(", ") });
@@ -3220,21 +3699,6 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           noMatchCount: searchAgentsNoMatchCount,
         }, { sessionId: session.id, severity: "warn" });
         guardrailEvents.push({ type: "tool_recovered", details: `${originalTool}:search_agents_no_match_fallback` });
-      }
-
-      const originalDelegationArgs = stableSerialize(tc.arguments ?? {});
-      const sanitizedDelegationArgs = sanitizeDelegationLikeToolArgs(tc.name, tc.arguments, initialDynamicGuidance);
-      if (sanitizedDelegationArgs) {
-        const sanitizedSignature = stableSerialize(sanitizedDelegationArgs);
-        if (sanitizedSignature !== originalDelegationArgs) {
-          tc.arguments = sanitizedDelegationArgs;
-          logAudit("tool_call_recovered", {
-            originalTool: tc.name,
-            rewrittenTo: tc.name,
-            reason: "source_sensitive_candidate_sanitized",
-          }, { sessionId: session.id, severity: "warn" });
-          guardrailEvents.push({ type: "tool_recovered", details: `${tc.name}:source_sensitive_candidate_sanitized` });
-        }
       }
 
       toolCallsRequested += 1;
@@ -4031,7 +4495,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
-  const terminalEvidenceBackstop = findRecentDelegateEvidence(session.getHistory());
+  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+  const terminalSharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+  const terminalEvidenceBackstop = chooseBetterRecoveryEvidence(
+    terminalDelegateEvidence,
+    terminalSharedFactsEvidence,
+    { preferHigherScore: false },
+  );
   const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
   const synthesized = bypassTerminalSynthesis
     ? null
@@ -4156,13 +4626,15 @@ async function forceSynthesis(
   try {
     // Don't attempt synthesis if already aborted and we have nothing
     if (signal.aborted && session.getHistory().length < 3) return null;
+    const sharedFindingsPrompt = await formatSharedFactsForFinalSynthesis(session.id);
 
     // Inject a synthesize-now user message (not stored in permanent history)
     const messages: LLMMessage[] = [
       { role: "system", content: session.getSystemPrompt() },
       { role: "system", content: buildTemporalContextPrompt() },
+      ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
       ...session.getCollapsedHistory(),
-      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction}` },
+      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.` },
     ];
 
     // Use a fresh 60s timeout — independent of the (possibly already aborted) turn signal

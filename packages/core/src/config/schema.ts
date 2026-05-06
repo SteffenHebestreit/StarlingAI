@@ -92,7 +92,7 @@ export const RateLimitSchema = z.object({
 
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
-  customInstructions: z.string().trim().min(1).max(6000).optional(),
+  customInstructions: z.string().trim().min(1).max(16000).optional(),
 });
 
 export const EphemeralGenerationSchema = z.object({

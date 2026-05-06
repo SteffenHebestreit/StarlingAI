@@ -479,26 +479,26 @@ describe("runtime delegated-loop regressions", () => {
 
   it("falls back to delegated evidence when both the final draft and forced synthesis are empty", async () => {
     const delegatedEvidence = [
-      "## Recherche-Ergebnis: Ultra-flache Mikrofon-Arrays für ESP32",
+      "## Recherche-Ergebnis: Robuste Edge-Service-Integration",
       "",
-      "### Keine fertige ultra-flache 5-Mic-I2S-Lösung",
-      "Es gibt kein fertiges Breakout-Board, das gleichzeitig sehr flach, 5 Mikrofone stark und direkt für ESP32-I2S optimiert ist.",
+      "### Kein fertiger One-Click-Adapter",
+      "Es gibt keinen fertigen Adapter, der gleichzeitig Offline-Pufferung, klare Sync-Zustaende und zentralisierte Gateway-Konfiguration abdeckt.",
       "",
-      "### Beste Custom-PCB-Kandidaten",
-      "| Mikrofon | Schnittstelle | Dicke | SNR | Hinweis |",
-      "|----------|--------------|-------|-----|---------|",
-      "| Infineon ICS-43434 | I2S | 1.0mm | 67dB | Standard Philips I2S, kein Timing-Hack nötig |",
-      "| Knowles SPH0645LM4H | I2S | 1.0mm | 64dB | Non-Standard, ESP32 Workaround nötig |",
-      "| Infineon IM73A130/131 | PDM | 0.85mm | 66dB | Dünnste Option, PDM über ESP32 lesbar |",
+      "### Beste Integrationskandidaten",
+      "| Baustein | Rolle | Vorteil | Hinweis |",
+      "|----------|------|---------|---------|",
+      "| Gateway-Config | Endpoint-Quelle | Zentral | Kein Duplikat in Clients |",
+      "| Local Queue | Offline-Puffer | Robust | Bounded retries noetig |",
+      "| Sync Worker | Uebertragung | Explizit | Status sichtbar halten |",
       "",
-      "### PDM-zu-I2S/TDM-Option",
-      "- TLV320ADCX360: 4 Kanäle, 5x5mm WQFN, I2S/TDM, 24-bit, Low-Power.",
-      "- Empfehlung: Custom PCB mit 4 bis 5 Mics und Record-/Sync-Button statt fertigem HAT-Board.",
+      "### Queue-zu-Sync-Option",
+      "- Bounded Sync Queue: 4 Prioritaetsklassen, Retry-Budget, Low-Power-Modus.",
+      "- Empfehlung: lokaler Puffer mit Record-/Sync-Button statt dauerhaftem Polling.",
       "",
       "### Fazit",
-      "1. ICS-43434 ist die beste Standard-I2S-Option für ein flaches ESP32-Design.",
-      "2. IM73A130 ist die dünnste Option, wenn PDM im Layout akzeptabel ist.",
-      "3. Für dein Projekt ist ein Custom-Array mit lokalem Record/On-Button und getrenntem Sync-Button die realistischste Bauform.",
+      "1. Zentralisierte Gateway-Konfiguration ist die robusteste Basis fuer das Deployment.",
+      "2. Eine lokale Queue ist die realistischste Option bei intermittierender Verbindung.",
+      "3. Fuer dein Projekt ist ein expliziter Sync-Modus mit getrenntem Record- und Sync-Status die klarste Bauform.",
     ].join("\n");
 
     let llmCallCount = 0;
@@ -507,7 +507,7 @@ describe("runtime delegated-loop regressions", () => {
       if (llmCallCount === 1) {
         return createDelegateToolCallStream("call_empty_backstop", {
           agentName: "researcher",
-          task: "Find ultra-flat microphone arrays for an ESP32 recorder.",
+          task: "Find robust edge-service integration patterns for an offline-capable recorder.",
         });
       }
 
@@ -545,27 +545,30 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Find ultra-flat microphone arrays for an ESP32 recorder.",
+      userMessage: "Find robust edge-service integration patterns for an offline-capable recorder.",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("## Recherche-Ergebnis: Ultra-flache Mikrofon-Arrays für ESP32");
-    expect(result.response).toContain("ICS-43434");
+    expect(result.response).toContain("## Recherche-Ergebnis: Robuste Edge-Service-Integration");
+    expect(result.response).toContain("Gateway-Config");
     expect(result.response).not.toContain("I wasn't able to generate a usable reply for that turn");
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).toHaveBeenCalledTimes(1);
-    expect(session.getHistory().at(-1)?.content).toContain("TLV320ADCX360");
+    expect(session.getHistory().at(-1)?.content).toContain("Bounded Sync Queue");
   });
 
   it("falls back to rich delegated evidence when resynthesis is still too short", async () => {
     const detailedEvidence = [
-      "1. ESP32-P4: Includes a dual-core RISC-V application subsystem plus dedicated low-power control logic for richer local audio pipelines and UI orchestration. Current vendor and ecosystem writeups position it as the strongest forward-looking Espressif option when local DSP, display work, and more ambitious coordination logic need to live on the same portable recorder board without immediately offloading everything to a host computer.",
-      "2. STM32U5: Remains attractive for ultra-low-power capture workloads when long battery runtime matters more than aggressive on-device inference throughput. In the portable-recorder context it keeps surfacing as the conservative choice for long unattended capture, sleep-heavy duty cycles, and carefully budgeted power rails, even though it does not bring the same integrated Wi-Fi-first developer story as ESP32-class parts.",
-      "3. RP2350: Adds stronger general-purpose compute than older RP2040 boards but still depends heavily on external audio front-end choices for serious multi-mic capture. The practical takeaway from recent examples is that it can absolutely record audio, but the path from proof-of-concept I2S capture to a polished OTA recorder still involves more integration work, more board bring-up effort, and more custom software than the ESP32-S3 baseline most builders already know.",
-      "4. nRF5340: Best fit when BLE-centric audio transport matters, but Wi-Fi-first OTA streaming still favors ESP-class parts unless a companion radio is acceptable. That makes it attractive for low-power earbuds, BLE microphones, or split architectures, but less compelling when the goal is one self-contained card-sized recorder that should capture, buffer, and push audio over Wi-Fi without bolting on extra network silicon or a second controller.",
-      "5. ReSpeaker-style flat microphone arrays remain the main off-the-shelf option; most credit-card-form-factor builds still require custom PCB work for exact geometry and enclosure constraints. The market still offers voice-assistant-oriented modules and Raspberry Pi accessories, but not a turnkey 4-5 microphone flat recorder reference board with the exact thickness, button layout, battery path, and ESP32 integration this project needs.",
-      "6. A practical 2026 stack still pairs Wi-Fi-first ESP32-class silicon with a custom array PCB when OTA audio streaming matters more than turnkey module reuse. That conclusion survives the latest part comparisons because the integration burden, radio story, software examples, and developer throughput still matter just as much as raw MCU capability when the end goal is a portable transcription recorder rather than a lab-only audio demo board.",
+      "1. Centralized endpoint configuration remains the strongest current fit when the deployment needs one authoritative runtime source and minimal client-side drift.",
+      "2. A bounded local queue remains attractive when long offline windows matter more than immediate server-side processing.",
+      "3. An explicit sync worker adds useful control but still depends on careful retry budgets, observability, and clear status transitions for a polished field deployment.",
+      "4. Push-based delivery is best when connectivity is reliable, but offline-first capture still favors local buffering unless a companion transport is acceptable.",
+      "5. Off-the-shelf workflow modules remain useful for prototypes; exact product constraints still usually require a small custom integration layer.",
+      "6. A practical 2026 stack still pairs centralized configuration with a bounded local queue when reliability matters more than turnkey module reuse.",
+      "7. Verification should happen before drafting the final recommendation: inspect the active endpoint source, inspect retry limits, inspect sync state transitions, and only then summarize what is actually supported by evidence.",
+      "8. Shared findings should be read before launching another research wave so the coordinator can reuse endpoint, queue, and sync-worker facts that are already known instead of delegating the same lookup again.",
+      "9. The final response should be grounded in shared findings and delegated evidence: include confirmed endpoint ownership, offline behavior, retry policy, and unknowns rather than relying on model memory about generic edge deployments.",
     ].join("\n\n");
 
     let llmCallCount = 0;
@@ -574,29 +577,18 @@ describe("runtime delegated-loop regressions", () => {
       if (llmCallCount === 1) {
         return createDelegateToolCallStream("coverage_delegate_1", {
           agentName: "web_task_coordinator",
-          task: "Research the best 2026 MCU options for portable recording.",
+          task: "Research the best 2026 runtime options for offline-capable service integration.",
         });
       }
 
       return createTextStream([
-        "1. ESP32-P4 is strong for audio.",
-        "2. STM32U5 is efficient.",
-        "3. RP2350 is capable.",
-        "4. nRF5340 is useful for BLE.",
-        "5. Flat mic arrays still need custom PCB work.",
-        "6. ESP32-class Wi-Fi remains practical.",
+        "1. Centralized config is useful.",
+        "2. Local queues help.",
       ].join("\n"));
     });
 
     completeMock.mockResolvedValueOnce({
-      content: [
-        "1. ESP32-P4 remains a strong option.",
-        "2. STM32U5 is low power.",
-        "3. RP2350 is newer.",
-        "4. nRF5340 targets BLE audio.",
-        "5. Custom PCB arrays are still common.",
-        "6. Wi-Fi-first ESP32-class parts remain practical.",
-      ].join("\n"),
+      content: "Short synthesis.",
       tool_calls: [],
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       finishReason: "stop",
@@ -627,7 +619,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Which MCU options are best in 2026 for portable recording?",
+      userMessage: "Which runtime options are best in 2026 for offline-capable service integration?",
     });
 
     expect(result.blocked).toBe(false);
@@ -928,24 +920,24 @@ describe("runtime delegated-loop regressions", () => {
 
   it("uses rich delegated evidence directly when the model tries another delegation after synthesis is required", async () => {
     const richEvidence = [
-      "# Verified hardware guide",
+      "# Verified integration guide",
       "",
-      ...Array.from({ length: 16 }, (_, index) => `- Evidence item ${index + 1}: IM73A135V01 remains an analog differential microphone with confirmed source-backed design detail ${index + 1}.`),
+      ...Array.from({ length: 16 }, (_, index) => `- Evidence item ${index + 1}: The inspected integration keeps the confirmed endpoint, credential scope, and retry behavior aligned with source-backed detail ${index + 1}.`),
       "",
-      "Use the five-microphone circular ADC architecture for the quality-focused build.",
+      "Use the centralized configuration path for the quality-focused build.",
     ].join("\n");
 
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
       if (llmCallCount === 1) {
-        return createDelegateToolCallStream("hardware_1", {
-          task: "Research the microphone hardware design.",
+        return createDelegateToolCallStream("integration_1", {
+          task: "Research the service integration design.",
         });
       }
 
-      return createDelegateToolCallStream("hardware_2", {
-        task: "Repeat the same hardware research again.",
+      return createDelegateToolCallStream("integration_2", {
+        task: "Repeat the same integration research again.",
       });
     });
 
@@ -980,11 +972,11 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Create a source-backed hardware guide for the microphone recorder.",
+      userMessage: "Create a source-backed integration guide for the service deployment.",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("Verified hardware guide");
+    expect(result.response).toContain("Verified integration guide");
     expect(result.response).toContain("Evidence item 16");
     expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
     expect(streamMock).toHaveBeenCalledTimes(2);
@@ -995,22 +987,22 @@ describe("runtime delegated-loop regressions", () => {
   it("surfaces extracted evidence instead of raw timeout scaffolding when a partial delegation is forced to synthesize", async () => {
     const extractedEvidence = Array.from(
       { length: 6 },
-      (_, index) => `- Verified hardware finding ${index + 1}: the coordinator recovered source-backed snippet ${index + 1} with concrete wiring and component guidance for the portable recorder.`,
+      (_, index) => `- Verified integration finding ${index + 1}: the coordinator recovered source-backed snippet ${index + 1} with concrete endpoint and retry guidance for the deployment.`,
     ).join("\n");
 
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
       if (llmCallCount === 1) {
-        return createDelegateToolCallStream("hardware_partial_1", {
+        return createDelegateToolCallStream("integration_partial_1", {
           agentName: "mission_coordinator",
-          task: "Research the portable recorder hardware design.",
+          task: "Research the portable service integration design.",
         });
       }
 
-      return createDelegateToolCallStream("hardware_partial_2", {
+      return createDelegateToolCallStream("integration_partial_2", {
         agentName: "mission_coordinator",
-        task: "Retry the same hardware design mission again.",
+        task: "Retry the same integration design mission again.",
       });
     });
 
@@ -1019,12 +1011,12 @@ describe("runtime delegated-loop regressions", () => {
       output: [
         "Sub-agent 'mission_coordinator' timed out after 480000ms",
         "Partial progress before interruption:",
-        `- parallel_1 [completed] Hardware slice via researcher | ${extractedEvidence}`,
+        `- parallel_1 [completed] Integration slice via researcher | ${extractedEvidence}`,
         "- task_1 [running] Final synthesis via mission_coordinator",
         "- Tool calls executed: 4 (search_agents, search_workflows, parallel_delegate, read_shared_facts)",
         "- Iterations completed: 3",
         "Recovered evidence snippets from completed tools:",
-        "- search_agents: No agents matched \"hardware electronics component research MEMS microphone ESP32 circuit design\".",
+        "- search_agents: No agents matched \"service integration endpoint retry configuration deployment\".",
       ].join("\n"),
       metadata: {
         agentName: "mission_coordinator",
@@ -1050,11 +1042,11 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Design a source-backed portable recorder around an ESP32 and microphone array.",
+      userMessage: "Design a source-backed portable service integration.",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("Verified hardware finding 6");
+    expect(result.response).toContain("Verified integration finding 6");
     expect(result.response).not.toContain("Sub-agent 'mission_coordinator' timed out");
     expect(result.response).not.toContain("Tool calls executed:");
     expect(result.response).not.toContain("Iterations completed:");
@@ -1065,21 +1057,21 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("uses short single-line partial delegated evidence instead of the generic fallback after synthesis-required rejection", async () => {
-    const shortPartialEvidence = "Verified hardware direction: keep IM73A135V01 as an unverified candidate until the official datasheet confirms the vendor and interface; plan local SD buffering plus ESP32-S3 OTA sync instead of assuming direct 5-mic capture.";
+    const shortPartialEvidence = "Verified implementation direction: keep the external endpoint as an unverified candidate until the inspected deployment confirms it; plan local buffering plus explicit sync rather than assuming continuous connectivity.";
 
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
       if (llmCallCount === 1) {
-        return createDelegateToolCallStream("hardware_partial_inline_1", {
+        return createDelegateToolCallStream("integration_partial_inline_1", {
           agentName: "mission_coordinator",
-          task: "Research the portable recorder hardware design.",
+          task: "Research the portable integration design.",
         });
       }
 
-      return createDelegateToolCallStream("hardware_partial_inline_2", {
+      return createDelegateToolCallStream("integration_partial_inline_2", {
         agentName: "mission_coordinator",
-        task: "Retry the same hardware design mission again.",
+        task: "Retry the same integration design mission again.",
       });
     });
 
@@ -1087,7 +1079,7 @@ describe("runtime delegated-loop regressions", () => {
       success: true,
       output: [
         "Sub-agent 'mission_coordinator' produced no final response after substantive work.",
-        `Partial progress before interruption: - parallel_1 [partial] ${shortPartialEvidence}`,
+        `Partial progress before interruption: - parallel_1 [partial] Integration research | ${shortPartialEvidence}`,
       ].join("\n"),
       metadata: {
         agentName: "mission_coordinator",
@@ -1113,16 +1105,256 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Design a source-backed portable recorder around an ESP32 and microphone array.",
+      userMessage: "Design a source-backed portable service integration.",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("IM73A135V01 as an unverified candidate");
-    expect(result.response).toContain("ESP32-S3 OTA sync");
+    expect(result.response).toContain("external endpoint as an unverified candidate");
+    expect(result.response).toContain("explicit sync");
     expect(result.response).not.toContain("I wasn't able to generate a usable reply for that turn");
     expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses shared findings as the generic terminal backstop when delegated progress is only status chatter", async () => {
+    const sessionId = "sess-generic-shared-fact-backstop";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact } = await import("../swarm/memory.js");
+
+    await writeSharedFact(
+      sessionId,
+      "verified_sync_endpoint",
+      "Verified endpoint: http://internal-gateway:8787. Sync worker keeps a local retry queue before OTA upload so failed batches can be retried without losing captured audio.",
+    );
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_generic_shared_fact_1", {
+          agentName: "mission_coordinator",
+          task: "Inspect the deployment integration behavior.",
+        });
+      }
+
+      return createDelegateToolCallStream("delegate_generic_shared_fact_2", {
+        agentName: "mission_coordinator",
+        task: "Retry the same deployment integration investigation.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' timed out after 480000ms",
+        "Partial progress before interruption:",
+        "- search_workflows [partial] No workflows matched \"deployment integration retry architecture\" strongly enough.",
+        "- search_agents [partial] No agents matched \"deployment integration endpoint ownership\".",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({
+      session,
+      userMessage: "Summarize the deployment integration and retry behavior.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("http://internal-gateway:8787");
+    expect(result.response).toContain("local retry queue");
+    expect(result.response).not.toContain("No workflows matched");
+    expect(result.response).not.toContain("No agents matched");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(streamMock.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(delegateExecuteMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(delegateExecuteMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses shared findings instead of source-sensitive delegation scaffolding in generic terminal recovery", async () => {
+    const sessionId = "sess-generic-source-echo-backstop";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact } = await import("../swarm/memory.js");
+
+    await writeSharedFact(
+      sessionId,
+      "verified_microphone_identity",
+      "Verified evidence so far: IM73A135V01 is an Infineon analog MEMS microphone candidate. Interface, array topology, ESP32 wiring, and the remaining BOM still need current-source verification.",
+    );
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_source_echo_1", {
+          agentName: "mission_coordinator",
+          task: "Research the portable recorder hardware design.",
+        });
+      }
+
+      return createDelegateToolCallStream("delegate_source_echo_2", {
+        agentName: "mission_coordinator",
+        task: "Retry the same portable recorder hardware design mission.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' produced no final response after substantive work.",
+        "Partial progress before interruption:",
+        "- parallel_delegate [partial] **[researcher]**: ich möchte ein sehr portables, batterie powered aufnahmegerät bauen via mission_coordinator SOURCE-SENSITIVE DELEGATION SLICE 1/4",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "completed",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({
+      session,
+      userMessage: "Verify the recorder hardware design and microphone choice with current evidence.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Infineon analog MEMS microphone candidate");
+    expect(result.response).toContain("still need current-source verification");
+    expect(result.response).not.toContain("SOURCE-SENSITIVE DELEGATION SLICE");
+    expect(result.response).not.toContain("ich möchte ein sehr portables");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(streamMock.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(delegateExecuteMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(delegateExecuteMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves substantive delegated evidence over an underpowered rewrite when evidence contains future-action phrasing", async () => {
+    const coordinatorSynthesis = [
+      "## Verified integration notes",
+      "",
+      "The delegated run collected concrete evidence from inspected service configuration and runtime logs.",
+      "I will now summarize the confirmed operational details:",
+      "",
+      "- **Service**: gateway",
+      "- **Observed status**: healthy",
+      "- **Configured endpoint**: http://internal-gateway:8787",
+      "- **Required follow-up**: update the client to use the configured endpoint value exactly as observed.",
+      "- **Risk**: using a stale host value causes all dependent requests to fail before authentication.",
+      "",
+      "**Design implication**: keep endpoint configuration centralized and do not duplicate it in callers.",
+      "Ich werde die Ergebnisse als finales Resultat übergeben.",
+    ].join("\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("coordinator_1", {
+          agentName: "mission_coordinator",
+          task: "Verify the service integration settings from inspected runtime evidence.",
+        });
+      }
+      // Model tries to delegate again after [SYNTHESIS REQUIRED] is injected
+      return createDelegateToolCallStream("coordinator_2", {
+        agentName: "mission_coordinator",
+        task: "Retry the same verification again.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: coordinatorSynthesis,
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    // The default completeMock returns "synthesized" (12 chars) — an underpowered stub.
+    // The fix ensures rewriteTerminalResponseIfNeeded falls back to the original evidence
+    // rather than using this stub as the final answer.
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Check the service integration settings and summarize the confirmed endpoint.",
+    });
+
+    expect(result.blocked).toBe(false);
+    // The delegated evidence (which contains the real answer) must be surfaced,
+    // NOT the "synthesized" (12-char) stub returned by the default completeMock.
+    expect(result.response).toContain("gateway");
+    expect(result.response).toContain("http://internal-gateway:8787");
+    expect(result.response).not.toContain("synthesized");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    // forceSynthesis is called because the evidence contains future-action
+    // phrasing, but the underpowered rewrite is discarded.
     expect(completeMock).toHaveBeenCalledTimes(1);
   });
 
@@ -2270,6 +2502,647 @@ describe("runtime delegated-loop regressions", () => {
     );
   });
 
+  it("enforces the original user request when a fallback delegate call adds unsupported source-sensitive claims", async () => {
+    const userMessage = "Use current sources to compare exact ZX-9000 recorder battery options and verify product choices.";
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("search_no_match", "search_agents", { query: "portable recorder battery component sourcing" });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_claims", {
+          agentName: "mission_coordinator",
+          fallbackAgents: ["researcher"],
+          task: "Research the ZX-9000 as a VendorX USB-C-only recorder with 5000mAh requirements and recommend compatible batteries.",
+        });
+      }
+      return createTextStream("The fallback coordinator gathered verified battery evidence.");
+    });
+
+    const searchExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: 'No agents matched "portable recorder battery component sourcing". Do not call search_agents again for this turn.',
+      metadata: {
+        query: "portable recorder battery component sourcing",
+        minConfidence: "medium",
+        routingMode: "hybrid",
+        resultCount: 0,
+        weakCount: 0,
+        topResult: null,
+      },
+    }));
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nVerified battery evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Search available specialist agents.",
+      parameters: { type: "object", properties: {} },
+      execute: searchExecuteMock,
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
+      agentName: "mission_coordinator",
+      fallbackAgents: [],
+      task: userMessage,
+    });
+    const historyText = session.getHistory()
+      .map((message) => JSON.stringify(message))
+      .join("\n");
+    expect(historyText).not.toContain("VendorX USB-C-only");
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_call_recovered",
+      expect.objectContaining({
+        originalTool: "delegate_to_agent",
+        rewrittenTo: "delegate_to_agent",
+        reason: "required_research_original_task_enforced",
+        recoveredAgentName: "mission_coordinator",
+      }),
+      expect.objectContaining({ severity: "info" }),
+    );
+  });
+
+  it("enforces the original user request before the first source-sensitive delegation is executed", async () => {
+    const userMessage = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_unsafe", {
+          agentName: "researcher",
+          task: "Research the ST ZX-9000 from VendorX as an I2S-only product and prepare recommendations.",
+          context: "VendorX and I2S are already established facts.",
+        });
+      }
+      return createTextStream("The specialist gathered verified evidence.");
+    });
+
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from researcher — TASK COMPLETED.\nObserved evidence:\nVerified product evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    const delegatedArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(delegatedArgs["agentName"]).toBe("researcher");
+    expect(String(delegatedArgs["task"])).toContain("SOURCE-SENSITIVE DELEGATION");
+    expect(String(delegatedArgs["task"])).toContain(userMessage);
+    expect(String(delegatedArgs["task"])).not.toContain("ST ZX-9000");
+    expect(String(delegatedArgs["task"])).not.toContain("VendorX");
+    expect(String(delegatedArgs["task"])).not.toContain("I2S-only");
+    expect(delegatedArgs).not.toHaveProperty("context");
+    const historyText = session.getHistory().map((message) => JSON.stringify(message)).join("\n");
+    expect(historyText).not.toContain("VendorX and I2S are already established facts");
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_call_recovered",
+      expect.objectContaining({
+        originalTool: "delegate_to_agent",
+        rewrittenTo: "delegate_to_agent",
+        reason: "source_sensitive_original_request_enforced",
+      }),
+      expect.objectContaining({ severity: "info" }),
+    );
+  });
+
+  it("keeps source-sensitive parallel slices distinct while stripping unsupported assumptions", async () => {
+    const userMessage = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending battery, charging, and layout decisions.";
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("parallel_source_sensitive", "parallel_delegate", {
+          tasks: [
+            { agentName: "researcher", task: "Verify the VendorX ZX-9000 USB-C interface." },
+            { agentName: "researcher", task: "Find ST ZX-9000 pricing and supplier data." },
+            { agentName: "researcher", task: "Prepare layout advice assuming I2S output and credit-card placement." },
+          ],
+        });
+      }
+
+      return createTextStream("Parallel grounded research launched once per distinct slice.");
+    });
+
+    const parallelExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nParallel slices launched.",
+      metadata: {
+        taskCount: Array.isArray(args["tasks"]) ? args["tasks"].length : 0,
+      },
+    }));
+
+    registerTool({
+      name: "parallel_delegate",
+      description: "Run tasks in parallel.",
+      parameters: { type: "object", properties: {} },
+      execute: parallelExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("distinct slice");
+    expect(parallelExecuteMock).toHaveBeenCalledTimes(1);
+
+    const parallelArgs = parallelExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const taskSpecs = Array.isArray(parallelArgs["tasks"])
+      ? parallelArgs["tasks"] as Array<Record<string, unknown>>
+      : [];
+    const taskTexts = taskSpecs.map((taskSpec) => String(taskSpec["task"] ?? ""));
+
+    expect(taskTexts).toHaveLength(3);
+    expect(new Set(taskTexts).size).toBe(3);
+    expect(taskTexts.join("\n")).toContain(userMessage);
+    expect(taskTexts.join("\n")).toContain("Coordinator focus for this slice");
+    expect(taskTexts.join("\n")).toContain("manufacturer and product identity verification");
+    expect(taskTexts.join("\n")).toContain("supplier, pricing, and availability verification");
+    expect(taskTexts.join("\n")).toContain("array topology and layout planning");
+    expect(taskTexts.join("\n")).not.toContain("VendorX");
+    expect(taskTexts.join("\n")).not.toContain("ST ZX-9000");
+    expect(taskTexts.join("\n")).not.toContain("assuming I2S");
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_call_recovered",
+      expect.objectContaining({
+        originalTool: "parallel_delegate",
+        rewrittenTo: "parallel_delegate",
+        reason: "source_sensitive_original_request_enforced",
+      }),
+      expect.objectContaining({ severity: "info" }),
+    );
+  });
+
+  it("keeps source-sensitive swarm retries on the original request after a failed delegation", async () => {
+    const userMessage = "Use current sources to verify the exact IM73A135V01 manufacturer and interface before recommending an ESP32 audio design.";
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_failed_first", {
+          agentName: "mission_coordinator",
+          task: "Research IM73A135V01 evidence.",
+        });
+      }
+      if (llmCallCount === 2) {
+        return createToolCallStream("swarm_retry_unsafe", "swarm_delegate", {
+          task: "Verify that IM73A135V01 is an ST MEMS I2S/PDM omnidirectional microphone, then recommend ESP32 wiring.",
+          routingQuery: "hardware design microphone array ESP32 BOM",
+        });
+      }
+      return createTextStream("ST MEMS I2S/PDM is verified and the complete design is ready.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: false,
+      output: "",
+      error: "Coordinator timed out before collecting usable evidence.",
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: false,
+      },
+    }));
+    const swarmExecuteMock = vi.fn(async (_args: Record<string, unknown>) => ({
+      success: false,
+      output: "",
+      error: "Architect-designed agent could not complete the task.",
+      metadata: {
+        agentName: "ephemeral:hardware_design_researcher",
+        delegationSucceeded: false,
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    registerTool({
+      name: "swarm_delegate",
+      description: "Delegate through autonomous swarm routing.",
+      parameters: { type: "object", properties: {} },
+      execute: swarmExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(swarmExecuteMock).toHaveBeenCalledTimes(1);
+    const swarmArgs = swarmExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(String(swarmArgs["task"])).toContain("SOURCE-SENSITIVE DELEGATION");
+    expect(String(swarmArgs["task"])).toContain(userMessage);
+    expect(String(swarmArgs["task"])).not.toContain("ST MEMS");
+    expect(String(swarmArgs["task"])).not.toContain("I2S/PDM omnidirectional");
+    const historyText = session.getHistory().map((message) => JSON.stringify(message)).join("\n");
+    expect(historyText).not.toContain("ST MEMS I2S/PDM");
+    expect(logAudit).toHaveBeenCalledWith(
+      "tool_call_recovered",
+      expect.objectContaining({
+        originalTool: "swarm_delegate",
+        rewrittenTo: "swarm_delegate",
+        reason: "source_sensitive_original_request_enforced",
+      }),
+      expect.objectContaining({ severity: "info" }),
+    );
+  });
+
+  it("blocks source-sensitive final answers after delegation fails before usable evidence is gathered", async () => {
+    const userMessage = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_failed", {
+          agentName: "researcher",
+          task: "Research ZX-9000 product evidence.",
+        });
+      }
+      return createTextStream("VendorX ZX-9000 is definitely an I2S-only product, so here is the complete design guide.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: false,
+      output: "",
+      error: "Provider returned HTTP 500 before any source was fetched.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: false,
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("belastbare Quellen- oder Tool-Evidenz");
+    expect(result.response).not.toContain("VendorX");
+    expect(result.response).not.toContain("I2S-only");
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "source_sensitive_final_answer_without_evidence_blocked" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("surfaces shared findings instead of accepting a fabricated rewrite after a source-sensitive partial failure", async () => {
+    const userMessage = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+    const sessionId = "sess-source-shared-fact-backstop";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact } = await import("../swarm/memory.js");
+    await writeSharedFact(
+      sessionId,
+      "verified_component_identity",
+      "Official component evidence identifies ZX-9000 as an Infineon analog microphone candidate. Interface, pricing, and broader design recommendations remain incomplete in the current evidence.",
+    );
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_partial_shared_fact", {
+          agentName: "mission_coordinator",
+          task: "Research ZX-9000 product evidence.",
+        });
+      }
+      return createTextStream("VendorX ZX-9000 is definitely an I2S-only product, so here is the complete design guide.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' timed out after 480000ms",
+        "Partial progress before interruption:",
+        "- search_workflows [partial] No workflows matched \"hardware design guide electronics components BOM schematic\" strongly enough.",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("belastbare Evidenz");
+    expect(result.response).toContain("Infineon analog microphone candidate");
+    expect(result.response).toContain("remain incomplete");
+    expect(result.response).not.toContain("VendorX");
+    expect(result.response).not.toContain("I2S-only");
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "source_sensitive_failed_delegation_evidence_backstop" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("rewrites fabricated complete answers after a source-sensitive partial timeout with usable evidence", async () => {
+    const userMessage = "Nutze aktuelle Quellen fuer ein portables Audio-Recorder-Design mit Produktvorschlaegen, Verdrahtung und Verbesserungen fuer Transkription.";
+    const sessionId = "sess-source-partial-timeout-late-guard";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_partial_timeout_guard", {
+          agentName: "mission_coordinator",
+          task: "Research the portable audio recorder design with current sources.",
+        });
+      }
+      return createTextStream("IM73A135V01 is definitely the right choice, here is the complete BOM, the exact ESP32 wiring, and the final layout guide.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' timed out after 480000ms",
+        "Partial progress before interruption:",
+        "- parallel_1 [partial] Component identity research | Official evidence so far identifies IM73A135V01 as an Infineon analog microphone candidate. Interface, ESP32 wiring, charger selection, and the broader BOM remain unverified in the collected evidence.",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("belastbare Evidenz");
+    expect(result.response).toContain("Infineon analog microphone candidate");
+    expect(result.response).toContain("remain unverified");
+    expect(result.response).not.toContain("definitely the right choice");
+    expect(result.response).not.toContain("complete BOM");
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({
+        type: "source_sensitive_failed_delegation_evidence_backstop",
+        finalResponseTransparent: false,
+      }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("bounds broad source-sensitive answers to sparse reused session evidence instead of inventing the missing design", async () => {
+    const userMessage = [
+      "ich möchte ein sehr portables, batterie powered aufnahmegerät bauen",
+      "dazu brauche ich ein sehr flaches microfon modul mit sehr hoher qualität (oder ein array)",
+      "ich denke daran es wahrscheinlich mit einem esp32 zu verbinden um die aufnahmen ota zu syncronisieren",
+      "what else do i need and how do i put all of it together",
+      "can you give me product suggestions as well as a layout how to connect everything together",
+      "what improvements would you add to have the best quality for transcription",
+    ].join("\n");
+    const sessionId = "sess-source-sparse-reuse-backstop";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_sparse_memory_reuse", {
+          agentName: "researcher",
+          task: "Research the portable recorder hardware design with current sources.",
+        });
+      }
+      return createTextStream("IM73A135V01 is analog, so use SPH0645 and here is the complete ESP32-S3 pinout, the charger choice, the full BOM, and the final credit-card layout.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Reused relevant session/task memory for 'portable recorder hardware research' instead of launching another duplicate research pass.",
+        "",
+        "## Shared facts already gathered",
+        "- **im73a135v01_critical_specs** (20%): Infineon IM73A135V01: Analog differential output MEMS microphone (NOT I2S/digital). SNR 73 dB(A), AOP 124 dB, IP57 water/dust resistant. Supply voltage 2.3–3.3 V.",
+        "- **sph0645lm4h_specs** (20%): Sensory SPH0645LM4H-B: Digital I2S MEMS microphone. SNR 66 dB, AOP 119 dB. Supply voltage 1.6–3.6 V. Package SMD-4P 2.8×1.9×0.7 mm.",
+        "- **inmp441_specs** (20%): TDK INMP441: Digital I2S MEMS microphone. SNR 66 dB, frequency response 50 Hz–17 kHz. Supply voltage 1.6–3.6 V. Package 4.8×2.8×0.97 mm.",
+      ].join("\n"),
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: true,
+        reused: true,
+        reusedFromSessionMemory: true,
+        factCount: 3,
+        partialCount: 0,
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("belastbare Evidenz");
+    expect(result.response).toContain("Analog differential output MEMS microphone");
+    expect(result.response).toContain("SPH0645LM4H-B");
+    expect(result.response).toMatch(/unverifiziert|unvollst/);
+    expect(result.response).not.toContain("complete ESP32-S3 pinout");
+    expect(result.response).not.toContain("final credit-card layout");
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "source_sensitive_failed_delegation_evidence_backstop" }),
+      expect.objectContaining({ severity: "warn" }),
+    );
+  });
+
+  it("cleans source-sensitive recovered evidence instead of dumping raw snapshots", async () => {
+    const userMessage = "Use current sources to verify ESP32-S3 audio evidence and what remains missing for IM73A135V01.";
+    const sessionId = "sess-source-bounded-recovery-synthesis";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact } = await import("../swarm/memory.js");
+    await writeSharedFact(
+      sessionId,
+      "auto_researcher_web_fetch_esp32s3_i2s",
+      "[researcher/web_fetch] Content from: https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/i2s.html Page Title: Inter-IC Sound (I2S) - ESP32-S3 - ESP-IDF Programming Guide. Page Snapshot: yaml generic navigation search docs.",
+    );
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_partial_raw_evidence", {
+          agentName: "mission_coordinator",
+          task: "Research ESP32-S3 audio evidence and IM73A135V01.",
+        });
+      }
+      return createTextStream("IM73A135V01 is verified as ST I2S/PDM and the full layout is complete.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Sub-agent 'mission_coordinator' timed out after 480000ms",
+        "Partial progress before interruption:",
+        "- search_workflows [partial] No workflows matched \"hardware design BOM\" strongly enough.",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("docs.espressif.com");
+    expect(result.response).toContain("ESP-IDF Programming Guide");
+    expect(result.response).toContain("unverifiziert");
+    expect(result.response).not.toContain("Page Snapshot");
+    expect(result.response).not.toContain("yaml generic navigation");
+    expect(result.response).not.toContain("ST I2S/PDM");
+  });
+
   it("forces specialist-agent orchestration for explicit online lookup requests instead of allowing direct web tool calls", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation((_messages, tools) => {
@@ -2346,76 +3219,6 @@ describe("runtime delegated-loop regressions", () => {
     expect(assistantWithTools?.tool_calls?.[0]?.function.name).toBe("delegate_to_agent");
   });
 
-  it("sanitizes speculative source-sensitive delegate tasks before execution", async () => {
-    let llmCallCount = 0;
-    streamMock.mockImplementation(() => {
-      llmCallCount += 1;
-      if (llmCallCount === 1) {
-        return createDelegateToolCallStream("candidate_guard_1", {
-          agentName: "mission_coordinator",
-          task: [
-            "Erstelle einen Hardware-Design-Leitfaden.",
-            "",
-            "1. IM73A135V01 (InvenSense/TDK):",
-            "- Spezifikationen: Interface (I2S/PDM), SNR, THD",
-            "- Ist das fuer Transcription geeignet?",
-            "",
-            "2. Alternativen:",
-            "- TDK InvenSense IM46279",
-            "- Infineon ICS-43434",
-          ].join("\n"),
-          fallbackAgents: ["researcher"],
-        });
-      }
-
-      return createTextStream("Die Kandidaten wurden als unverified candidates an die Recherche uebergeben.");
-    });
-
-    const delegateExecuteMock = vi.fn(async () => ({
-      success: true,
-      output: "Delegated result from mission_coordinator — TASK COMPLETED.\nObserved evidence:\nIM73A135V01 remains an unverified candidate until an official source confirms the manufacturer and interface.",
-      metadata: {
-        agentName: "mission_coordinator",
-        attemptedAgents: ["mission_coordinator"],
-        delegationSucceeded: true,
-        delegationOutcome: "success",
-        terminalState: "completed",
-      },
-    }));
-
-    registerTool({
-      name: "delegate_to_agent",
-      description: "Delegate to a specialist.",
-      parameters: { type: "object", properties: {} },
-      execute: delegateExecuteMock,
-    });
-
-    const session = new AgentSession({
-      channel: "test",
-      workspacePath: "/workspace",
-      systemPrompt: "You are a test agent.",
-    });
-
-    const result = await runTurn({
-      session,
-      userMessage: [
-        "Ich moechte ein portables Aufnahmegeraet bauen und die Teile mit aktuellen Quellen verifizieren.",
-        "Maybe I should go with the IM73A135V01 - opinion? Bitte recherchiere und verifiziere die Wahl.",
-        "Was brauche ich sonst noch und wie verbinde ich das mit einem ESP32?",
-      ].join("\n"),
-    });
-
-    const delegatedArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
-
-    expect(result.blocked).toBe(false);
-    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
-    expect(String(delegatedArgs["task"])).toContain("VERIFICATION REQUIRED:");
-    expect(String(delegatedArgs["task"])).toContain("IM73A135V01 (candidate identifier; verify manufacturer/interface/specs from official source first)");
-    expect(String(delegatedArgs["task"])).toContain("Interface (verify from official source first)");
-    expect(String(delegatedArgs["task"])).not.toContain("InvenSense/TDK");
-    expect(result.response).toContain("unverified candidate");
-  });
-
   it("does not force fresh research for short follow-up decisions that can use prior delegated evidence", async () => {
     streamMock.mockImplementation((messages: Array<{ role: string; content?: string | null }>) => {
       const systemText = messages
@@ -2424,21 +3227,21 @@ describe("runtime delegated-loop regressions", () => {
         .join("\n");
       expect(systemText).toContain("CONTINUATION FROM PRIOR EVIDENCE");
       expect(systemText).not.toContain("You MUST use an orchestration tool");
-      return createTextStream("Ja, das ist jetzt eine konsistente Richtung: IM73A135V01 mit externem ADC, 5er-Kreisarray, steifes resin-gedrucktes Gehaeuse und leitfaehige Beschichtung als Shielding-Konzept.");
+      return createTextStream("Ja, das ist jetzt eine konsistente Richtung: zentrale Konfiguration, lokaler Puffer, expliziter Sync-Modus und klare Trennung von Laufzeit- und UI-Verantwortung.");
     });
 
     const priorEvidence = [
       "Delegated result from researcher — TASK COMPLETED.",
       "Observed evidence:",
-      "## Verified microphone evidence",
-      "- IM73A135V01 is an analog differential MEMS microphone, not I2S.",
-      "- SNR is 73 dB(A) at 2.75 V, making it attractive when maximum audio quality matters.",
-      "- Using it with an external ADC is the correct architecture if quality matters more than simplicity.",
-      "- A circular five-microphone array is appropriate for beamforming and spatial filtering.",
-      "- The ESP32-S3 remains a reasonable controller for buffering and OTA sync.",
-      "- Mechanical shielding and acoustic venting matter for transcription quality.",
-      "- Keep microphone analog routing quiet and separate from ESP32 RF/power noise.",
-      "- Electroplated housing can help shielding if isolated from microphone acoustic ports.",
+      "## Verified integration evidence",
+      "- The service endpoint must remain centralized in configuration.",
+      "- Local buffering is required when connectivity is intermittent.",
+      "- Explicit sync mode is preferable to continuous network activity for a battery-powered deployment.",
+      "- Runtime and UI responsibilities should stay separated.",
+      "- The controller remains a reasonable place for buffering and status signalling.",
+      "- Mechanical controls should map to clear record and sync states.",
+      "- Network retries should be bounded and observable.",
+      "- Power-sensitive workflows should avoid idle polling.",
     ].join("\n");
 
     const session = new AgentSession({
@@ -2446,14 +3249,14 @@ describe("runtime delegated-loop regressions", () => {
       workspacePath: "/workspace",
       systemPrompt: "You are a test agent.",
     });
-    session.addMessage({ role: "user", content: "Design a portable microphone recorder with exact source-backed component choices." });
+    session.addMessage({ role: "user", content: "Design a portable service integration with exact source-backed deployment choices." });
     session.addMessage({
       role: "assistant",
       content: null,
       tool_calls: [{
         id: "prior_delegate",
         type: "function",
-        function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "Research microphone architecture." }) },
+        function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "Research service integration architecture." }) },
       }],
     });
     session.addMessage({
@@ -2472,11 +3275,11 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "ok, thx...we will use them with adc because giving the best quality is what it is all about. We will use the circle with 5 mics and resin-3d-print the housing and than electroplating it",
+      userMessage: "ok, thx...we will go with the recommended modules and keep the endpoint centralized because reliability is what it is all about. We will use the explicit sync mode and keep UI responsibilities separated.",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("5er-Kreisarray");
+    expect(result.response).toContain("expliziter Sync-Modus");
     expect(streamMock).toHaveBeenCalledTimes(1);
     expect(completeMock).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalledWith(
@@ -2507,7 +3310,7 @@ describe("runtime delegated-loop regressions", () => {
       return createTextStream("Die HTML-Anleitung wurde als Artefakt erstellt: artifacts/portable-recorder-how-to.html");
     });
 
-    const delegateExecuteMock = vi.fn(async () => ({
+    const delegateExecuteMock = vi.fn(async (_args: Record<string, unknown>) => ({
       success: true,
       output: "Artifact created: artifacts/portable-recorder-how-to.html",
       metadata: {

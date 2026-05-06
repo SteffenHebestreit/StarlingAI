@@ -487,6 +487,152 @@ describe("runtime turn guidance", () => {
     expect(disposition).toBe("failure");
   });
 
+  it("reroutes partial delegated results that only echo a provider HTTP error to the failure branch", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      [
+        "Sub-agent error: Error: OpenAI-compatible request failed (model: qwen3.6-35b-a3b): 500 <!DOCTYPE html>",
+        "<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Error</title></head><body><pre>Internal Server Error</pre></body></html>",
+      ].join(" "),
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "completed",
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK FAILED.");
+    expect(result).not.toContain("TASK COMPLETED");
+    expect(result).not.toContain("PARTIAL");
+  });
+
+  it("reroutes task-title-only partials with provider errors to failure instead of synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      [
+        "Sub-agent 'mission_coordinator' produced no final response after substantive work.",
+        "Partial progress before interruption:",
+        "- parallel_1 [partial] Gather current external source evidence for the requested multi-section report.",
+        "",
+        "Sub-agent error: Error: OpenAI-compatible request failed (model: qwen3.6-35b-a3b): 500 <!DOCTYPE html>",
+        "<html lang=\"en\"><head><title>Error</title></head><body><pre>Internal Server Error</pre></body></html>",
+      ].join("\n"),
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "completed",
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK FAILED.");
+    expect(result).not.toContain("TASK COMPLETED (PARTIAL");
+
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_provider_scaffold_partial",
+        content: result,
+        metadata: {
+          agentName: "mission_coordinator",
+          delegationSucceeded: true,
+          delegationOutcome: "partial",
+          terminalState: "completed",
+        },
+      },
+    ]);
+    expect(disposition).toBe("failure");
+  });
+
+  it("reroutes discovery-only timed-out partial delegations to failure instead of synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      [
+        "Sub-agent 'mission_coordinator' timed out after 300000ms",
+        "Partial progress before interruption:",
+        "- search_workflows [partial] No workflows matched \"multi-section sourced report evidence merge draft review\" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.",
+        "- search_agents [partial] No agents matched \"research report documentation source evidence validation\" (also tried shortened query \"research report documentation\" — also 0 matches). Do not call search_agents again for this turn.",
+      ].join("\n"),
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK FAILED.");
+    expect(result).not.toContain("TASK COMPLETED (PARTIAL");
+  });
+
+  it("does not treat nested timed-out sub-agent task descriptions as usable partial evidence", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      [
+        "Sub-agent 'mission_coordinator' timed out after 300000ms",
+        "Partial progress before interruption:",
+        "- parallel_1 [partial] Research exact source evidence for component ZX-9000 via researcher | Sub-agent 'researcher' produced no final response after substantive work. Partial progress before interruption: - parallel_1 [partial] Research component ZX-9000 as VendorX USB-C-only hardware with 5000mAh battery requirements",
+        "- Tool calls executed: 3",
+        "- Iterations completed: 4",
+      ].join("\n"),
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK FAILED.");
+    expect(result).not.toContain("PARTIAL PROGRESS");
+    expect(result).not.toContain("TASK COMPLETED");
+
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_nested_scaffold_partial",
+        content: result,
+        metadata: {
+          agentName: "mission_coordinator",
+          delegationSucceeded: true,
+          delegationOutcome: "partial",
+          terminalState: "timeout",
+        },
+      },
+    ]);
+    expect(disposition).toBe("failure");
+  });
+
+  it("classifies discovery-only timed-out partial delegations as failures", () => {
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_discovery_only_partial",
+        content: [
+          "Delegated result from mission_coordinator — TASK FAILED.",
+          "Observed evidence:",
+          "Sub-agent 'mission_coordinator' timed out after 300000ms",
+          "Partial progress before interruption:",
+          "- search_workflows [partial] No workflows matched \"multi-section sourced report evidence merge draft review\" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.",
+          "- search_agents [partial] No agents matched \"research report documentation source evidence validation\" (also tried shortened query \"research report documentation\" — also 0 matches). Do not call search_agents again for this turn.",
+        ].join("\n"),
+        metadata: {
+          agentName: "mission_coordinator",
+          delegationSucceeded: true,
+          delegationOutcome: "partial",
+          terminalState: "timeout",
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("failure");
+  });
+
   it("passes long delegated deliverables verbatim instead of truncating to 1600 chars", () => {
     const paperBody = [
       "# KI-Protokolle: MCP, A2A und AG-UI im Vergleich",

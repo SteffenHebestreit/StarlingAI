@@ -255,16 +255,14 @@
 		{
 			"label": "lmstudio models debug",
 			"type": "shell",
-			"command": "curl",
+			"command": "node",
 			"args": [
-				"-sS",
-				"http://10.10.0.2:1234/v1/models"
+				"scripts/lmstudio-models.mjs"
 			],
 			"windows": {
-				"command": "curl.exe",
+				"command": "node",
 				"args": [
-					"-sS",
-					"http://10.10.0.2:1234/v1/models"
+					"scripts/lmstudio-models.mjs"
 				],
 				"options": {
 					"shell": {
@@ -517,10 +515,9 @@
 		{
 			"label": "lmstudio models check",
 			"type": "shell",
-			"command": "curl.exe",
+			"command": "node",
 			"args": [
-				"-sS",
-				"http://10.10.0.2:1234/v1/models"
+				"scripts/lmstudio-models.mjs"
 			],
 			"isBackground": false
 		},

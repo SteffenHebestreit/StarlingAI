@@ -20,7 +20,7 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { withSpan } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
-import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "./container-failure.js";
+import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho } from "./container-failure.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
@@ -29,9 +29,12 @@ import { computerSessionManager } from "./computer-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import { isSessionDegraded } from "./warden.js";
-import { consumeAgentMessages } from "../swarm/memory.js";
+import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult } from "../tools/result-shaping.js";
+import { buildDynamicTurnGuidance } from "./intent-classifier.js";
+import { shareFinding } from "../tools/memory.js";
+import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
 // that register their own mocks before importing this module.
@@ -65,6 +68,306 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "browser_select_option",
   "site_fill_credentials",
 ]);
+
+function chooseConfiguredSubAgent(candidates: readonly string[]): string | undefined {
+  const configuredAgents = getConfig().subAgents ?? {};
+  return candidates.find((name) => name in configuredAgents);
+}
+
+function chooseConfiguredAllowedSubAgent(candidates: readonly string[], allowedAgents?: readonly string[]): string | undefined {
+  const allowedSet = Array.isArray(allowedAgents) && allowedAgents.length > 0
+    ? new Set(allowedAgents)
+    : null;
+  const configuredAgents = getConfig().subAgents ?? {};
+  return candidates.find((name) => name in configuredAgents && (!allowedSet || allowedSet.has(name)));
+}
+
+function defaultSourceSensitiveFallbackAgents(agentName: string | undefined): string[] {
+  return ["mission_coordinator", "researcher"]
+    .filter((candidate) => candidate !== agentName)
+    .filter((candidate) => chooseConfiguredSubAgent([candidate]) === candidate);
+}
+
+type SubAgentRequiredResearchFallbackRoute = {
+  toolName: "delegate_to_agent";
+  label: string;
+  args: Record<string, unknown>;
+  /**
+   * Mutable counter shared across all rewrite sites. Once the rewriter
+   * has fired once, further discovery calls from the same agent within
+   * the same run get blocked rather than re-rewritten — see
+   * `enforceSubAgentRequiredResearchFallbackRouteOnToolCall`.
+   *
+   * Without this guard the coordinator that originally triggered
+   * "no agents matched" loops on (search_agents → rewritten to
+   * delegate_to_agent(parent_task) → swarm sees the parent's own
+   * running task by signature and returns "Task is already running"),
+   * which produces zero progress and burns ~5–10s of LLM time per
+   * iteration before the budget runs out.
+   */
+  applyCount: { value: number };
+};
+
+function buildSubAgentRequiredResearchFallbackRoute(params: {
+  task: string;
+  agentName: string;
+  allowedAgents?: readonly string[];
+  effectiveToolNames?: readonly string[];
+}): SubAgentRequiredResearchFallbackRoute | null {
+  if (!(params.effectiveToolNames ?? []).includes("delegate_to_agent")) return null;
+
+  const preferredAgents = defaultSourceSensitiveFallbackAgents(params.agentName)
+    .filter((candidate) => chooseConfiguredAllowedSubAgent([candidate], params.allowedAgents) === candidate);
+  const selectedAgent = preferredAgents[0];
+  if (!selectedAgent && Array.isArray(params.allowedAgents) && params.allowedAgents.length > 0) {
+    return null;
+  }
+
+  const fallbackAgents = preferredAgents.filter((candidate) => candidate !== selectedAgent);
+  return {
+    toolName: "delegate_to_agent",
+    label: selectedAgent ?? "autonomous_routing",
+    args: {
+      ...(selectedAgent ? { agentName: selectedAgent } : {}),
+      ...(fallbackAgents.length > 0 ? { fallbackAgents } : {}),
+      task: params.task,
+    },
+    applyCount: { value: 0 },
+  };
+}
+
+function subAgentSearchAgentsReturnedNoMatch(result: ToolResult): boolean {
+  const resultCount = typeof result.metadata?.["resultCount"] === "number"
+    ? Number(result.metadata["resultCount"])
+    : undefined;
+  const topResult = typeof result.metadata?.["topResult"] === "string"
+    ? String(result.metadata["topResult"]).trim()
+    : "";
+  if (resultCount === 0 && !topResult) return true;
+  return /^No agents matched\b/i.test(result.output.trim());
+}
+
+function subAgentSearchWorkflowsReturnedNoMatch(result: ToolResult): boolean {
+  const workflowMatches = Array.isArray(result.metadata?.["workflowMatches"])
+    ? result.metadata?.["workflowMatches"] as unknown[]
+    : [];
+  if (workflowMatches.length === 0 && /^No workflows matched\b/i.test(result.output.trim())) return true;
+  return /^No workflows matched\b/i.test(result.output.trim());
+}
+
+function enforceSubAgentRequiredResearchFallbackRouteOnToolCall(
+  toolCall: { name: string; arguments: Record<string, unknown> },
+  route: SubAgentRequiredResearchFallbackRoute,
+  subSessionId: string,
+  agentName: string,
+): boolean {
+  const discoveryRetryTools = new Set(["search_agents", "list_agents", "search_workflows"]);
+  if (!discoveryRetryTools.has(toolCall.name)) return false;
+
+  // Hard cap: only rewrite the FIRST repeated discovery call. After that
+  // the rewrite has been demonstrated not to help (the rewritten delegate
+  // targets the parent's own task and the swarm just returns "already
+  // running"). On subsequent calls, leave the original tool name intact
+  // and let the existing per-tool repeat-call cap surface a structured
+  // refusal that the model can act on without burning another LLM
+  // round-trip on a guaranteed-no-op delegation.
+  if (route.applyCount.value >= 1) {
+    logAudit("sub_agent_tool_call", {
+      agentName,
+      tool: toolCall.name,
+      phase: "recovered",
+      reason: "required_research_discovery_retry_capped",
+      rewriteApplyCount: route.applyCount.value,
+    }, { sessionId: subSessionId, severity: "warn" });
+    return false;
+  }
+
+  const originalTool = toolCall.name;
+  toolCall.name = route.toolName;
+  toolCall.arguments = { ...route.args };
+  route.applyCount.value += 1;
+  logAudit("sub_agent_tool_call", {
+    agentName,
+    tool: originalTool,
+    phase: "recovered",
+    reason: "required_research_discovery_retry_rewritten",
+    rewrittenTo: route.toolName,
+    recoveredAgentName: route.label,
+  }, { sessionId: subSessionId, severity: "warn" });
+  return true;
+}
+
+function withDefaultSourceSensitiveFallbackAgents(args: Record<string, unknown>): Record<string, unknown> {
+  const agentName = typeof args["agentName"] === "string" ? String(args["agentName"]).trim() : undefined;
+  if (!agentName) return args;
+  const existingFallbacks = Array.isArray(args["fallbackAgents"])
+    ? args["fallbackAgents"].map(String).filter(Boolean)
+    : [];
+  if (existingFallbacks.length > 0) return args;
+  const fallbackAgents = defaultSourceSensitiveFallbackAgents(agentName);
+  return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
+}
+
+const MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 3;
+
+function enforceSourceSensitivePreEvidenceDelegation(
+  toolCall: { name: string; arguments: Record<string, unknown> },
+  parentTask: string,
+  subSessionId: string,
+  agentName: string,
+): void {
+  const originalArgs = toolCall.arguments ?? {};
+  let nextArgs: Record<string, unknown> | null = null;
+
+  if (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate" || toolCall.name === "create_ephemeral_agent") {
+    const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
+    const focus = deriveSourceSensitiveDelegationFocus(originalTask, parentTask);
+    nextArgs = withDefaultSourceSensitiveFallbackAgents({ ...originalArgs, task: buildCanonicalSourceSensitiveDelegationTask(parentTask, undefined, focus) });
+    delete nextArgs["context"];
+  } else if (toolCall.name === "parallel_delegate") {
+    const rawTasks = Array.isArray(originalArgs["tasks"])
+      ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
+      : [];
+    if (rawTasks.length > 0) {
+      const cappedTasks = rawTasks.slice(0, MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
+      if (rawTasks.length > cappedTasks.length) {
+        logAudit(
+          "sub_agent_tool_call",
+          {
+            agentName,
+            tool: "parallel_delegate",
+            phase: "recovered",
+            reason: "source_sensitive_parallel_slice_cap",
+            originalTaskCount: rawTasks.length,
+            cappedTaskCount: cappedTasks.length,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
+      nextArgs = {
+        ...originalArgs,
+        tasks: cappedTasks.map((taskSpec, index) => {
+          const originalTask = typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "";
+          const focus = deriveSourceSensitiveDelegationFocus(originalTask, parentTask);
+          const nextTask = withDefaultSourceSensitiveFallbackAgents({
+            ...taskSpec,
+            task: buildCanonicalSourceSensitiveDelegationTask(parentTask, `SLICE ${index + 1}/${cappedTasks.length}`, focus),
+          });
+          delete nextTask["context"];
+          return nextTask;
+        }),
+      };
+    }
+  } else if (toolCall.name === "run_task_graph") {
+    const rawNodes = Array.isArray(originalArgs["nodes"])
+      ? originalArgs["nodes"].filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+      : [];
+    if (rawNodes.length > 0) {
+      nextArgs = {
+        ...originalArgs,
+        objective: parentTask,
+        nodes: rawNodes.map((node, index) => {
+          const originalTask = typeof node["task"] === "string" ? String(node["task"]) : "";
+          const focus = deriveSourceSensitiveDelegationFocus(originalTask, parentTask);
+          const nextNode = withDefaultSourceSensitiveFallbackAgents({
+            ...node,
+            task: buildCanonicalSourceSensitiveDelegationTask(parentTask, `GRAPH NODE ${index + 1}/${rawNodes.length}`, focus),
+          });
+          delete nextNode["context"];
+          return nextNode;
+        }),
+      };
+    }
+  }
+
+  if (!nextArgs || JSON.stringify(nextArgs) === JSON.stringify(originalArgs)) return;
+  toolCall.arguments = nextArgs;
+  logAudit("sub_agent_tool_call", {
+    agentName,
+    tool: toolCall.name,
+    phase: "recovered",
+    reason: "source_sensitive_pre_evidence_parent_task_enforced",
+  }, { sessionId: subSessionId, severity: "info" });
+}
+
+function deriveRootSessionId(sessionId: string): string {
+  let current = sessionId;
+  while (current.startsWith("sub:")) {
+    const inner = current.slice("sub:".length);
+    const lastColon = inner.lastIndexOf(":");
+    if (lastColon === -1) return inner;
+    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
+    if (secondLastColon === -1) return inner;
+    current = inner.slice(0, secondLastColon);
+  }
+  return current;
+}
+
+function hashSharedFindingKey(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Promise<{ content: string; signature: string }> {
+  try {
+    const facts = await readAllFacts(deriveRootSessionId(sessionId));
+    const entries = Object.entries(facts)
+      .filter(([, value]) => value.trim().length > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    const signature = entries.map(([key, value]) => `${key}:${value}`).join("\n");
+    if (entries.length === 0) return { content: "", signature };
+
+    const lines: string[] = [];
+    let usedChars = 0;
+    for (const [key, value] of entries) {
+      const line = `- ${key}: ${value.replace(/\s+/g, " ").trim()}`;
+      if (usedChars + line.length > maxChars && lines.length > 0) break;
+      lines.push(line.length > maxChars ? `${line.slice(0, maxChars - 3)}...` : line);
+      usedChars += line.length;
+      if (lines.length >= 12) break;
+    }
+
+    return {
+      content: [
+        "## Shared findings snapshot",
+        "Use these before calling more tools. Do not duplicate work already captured here; verify any remaining assumptions against evidence before drafting.",
+        ...lines,
+      ].join("\n"),
+      signature,
+    };
+  } catch (err) {
+    log.debug({ err, sessionId }, "Failed to read shared facts snapshot");
+    return { content: "", signature: "" };
+  }
+}
+
+async function autoShareUsefulFinding(params: {
+  sessionId: string;
+  agentName: string;
+  toolName: string;
+  evidence: string;
+  sharedKeys: Set<string>;
+}): Promise<boolean> {
+  const normalized = params.evidence.replace(/\s+/g, " ").trim();
+  if (normalized.length < 180) return false;
+  if (params.toolName === "share_finding" || params.toolName === "read_shared_facts") return false;
+  if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(normalized)) return false;
+
+  const key = `auto_${params.agentName.replace(/[^a-z0-9_]+/gi, "_").toLowerCase().slice(0, 24)}_${params.toolName.replace(/[^a-z0-9_]+/gi, "_").toLowerCase().slice(0, 24)}_${hashSharedFindingKey(normalized)}`;
+  if (params.sharedKeys.has(key)) return false;
+  params.sharedKeys.add(key);
+
+  await shareFinding(
+    params.sessionId,
+    key,
+    `[${params.agentName}/${params.toolName}] ${truncateToolAuditText(normalized, 1_500) ?? normalized.slice(0, 1_500)}`,
+  );
+  return true;
+}
 
 // Per-tool call caps enforced inside sub-agent runs.
 // These prevent a single tool from dominating the iteration budget
@@ -670,6 +973,125 @@ function formatSwarmProgressForInterruption(state: SwarmState | undefined): stri
   return lines.join("\n");
 }
 
+function stripInterruptedProgressPrefix(value: string): string {
+  return value
+    .replace(/^\*\*\[[^\]]+\]\*\*\s*(?:\((?:failed|partial)\))?:\s*/i, "")
+    .replace(/^(?:parallel|task)_\d+\s+\[[^\]]+\]\s*/i, "")
+    .replace(/^[a-z_]+\s+\[[^\]]+\]\s*/i, "")
+    .trim();
+}
+
+function looksLikeInterruptedEvidenceBoilerplate(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  if (/Partial progress before interruption:/i.test(trimmed)) return true;
+  if (/^Recovered evidence snippets from completed tools:/i.test(trimmed)) return true;
+  if (/^Sub-agent '[^']+'/i.test(trimmed)) return true;
+  if (/^(?:Tool calls executed:|Iterations completed:|Artifacts collected:)/i.test(trimmed)) return true;
+  if (/^(?:All candidate agents failed|No (?:agents|workflows) matched)\b/i.test(trimmed)) return true;
+  // Orchestration-scaffold returns that carry no real evidence — these
+  // happen during a coordinator's setup phase (e.g. it routed to itself
+  // via the discovery rewriter, or it polled shared facts before any
+  // child published one). Without classifying them as boilerplate the
+  // source-sensitive pre-evidence guard's `cumulativeUsefulEvidenceBytes
+  // < 120` threshold trips after a handful of these no-op returns and a
+  // subsequent parallel_delegate's task text (which may inline an
+  // unverified user-supplied assumption) escapes the canonical-task
+  // rewrite. Keep this list tight so genuine short tool returns still
+  // count as evidence.
+  if (/^Task '[^']+' is already running\b/i.test(trimmed)) return true;
+  if (/^Task '[^']+' has been called\b/i.test(trimmed)) return true;
+  if (/^Tool '[^']+' (?:has been called|is)\b/i.test(trimmed)) return true;
+  if (/^No shared facts available yet\b/i.test(trimmed)) return true;
+  if (/^All shared facts cleared\b/i.test(trimmed)) return true;
+  return false;
+}
+
+function collectInterruptedEvidenceSnippets(text: string): string[] {
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  const pushSnippet = (candidate: string) => {
+    const normalized = stripInterruptedProgressPrefix(candidate)
+      .replace(/^IMPORTANT:\s.*$/gim, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalized || normalized.length < 80) return;
+    if (looksLikeInterruptedEvidenceBoilerplate(normalized)) return;
+    if (looksLikeProviderErrorEcho(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    snippets.push(normalized);
+  };
+
+  const partialSections = text.split(/Partial progress before interruption:/i).slice(1);
+  for (const section of partialSections) {
+    const block = section.split(/Recovered evidence snippets from completed tools:|\n\n---/i)[0]?.trim();
+    if (!block) continue;
+    for (const rawLine of block.split("\n")) {
+      const line = rawLine.trim();
+      if (!line.startsWith("- ")) continue;
+      const body = line.slice(2).trim();
+      if (!body || /^(?:Tool calls executed:|Iterations completed:|Artifacts collected:)/i.test(body)) continue;
+      const candidate = body.includes(" | ")
+        ? body.split(/\s+\|\s+/).slice(1).join(" | ")
+        : body;
+      pushSnippet(candidate);
+    }
+  }
+
+  const recoveredSections = text.split(/Recovered evidence snippets from completed tools:/i).slice(1);
+  for (const section of recoveredSections) {
+    const block = section.split(/\n\n---/i)[0]?.trim();
+    if (!block) continue;
+    for (const rawLine of block.split("\n")) {
+      const line = rawLine.trim();
+      if (!line.startsWith("- ")) continue;
+      const body = line.slice(2).trim();
+      const candidate = body.includes(":") ? body.split(/:\s+/, 2)[1] ?? body : body;
+      pushSnippet(candidate);
+    }
+  }
+
+  return snippets;
+}
+
+function extractUsefulInterruptedToolEvidence(text: string): string | null {
+  if (!/Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(text)) {
+    return null;
+  }
+
+  const snippets = collectInterruptedEvidenceSnippets(text);
+  if (snippets.length > 0) return snippets.join("\n\n");
+
+  const fallback = text
+    .replace(
+      /Sub-agent '[^']+' timed out after \d+ms\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
+      "",
+    )
+    .replace(
+      /Sub-agent '[^']+' produced no final response after substantive work\.\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
+      "",
+    )
+    .replace(
+      /Sub-agent '[^']+' was cancelled\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
+      "",
+    )
+    .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "")
+    .replace(/Sub-agent '[^']+' produced no final response after substantive work\.\n?/g, "")
+    .replace(/Sub-agent '[^']+' was cancelled\n?/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !looksLikeInterruptedEvidenceBoilerplate(line))
+    .join("\n")
+    .trim();
+
+  if (fallback.length < 120) return null;
+  if (looksLikeProviderErrorEcho(fallback)) return null;
+  return fallback;
+}
+
 function buildInterruptedSubAgentOutput(params: {
   agentName: string;
   reason: string;
@@ -725,6 +1147,49 @@ function buildInterruptedSubAgentOutput(params: {
 }
 
 type SubAgentOutcome = "success" | "partial" | "failure";
+
+function resolveInterruptedEvidenceSnippets(params: {
+  recentEvidenceSnippets?: readonly string[];
+  history?: readonly LLMMessage[];
+  maxSnippets?: number;
+}): string[] {
+  const maxSnippets = Math.max(1, params.maxSnippets ?? 4);
+  const bufferedSnippets = (params.recentEvidenceSnippets ?? []).filter(Boolean).slice(-maxSnippets);
+  if (bufferedSnippets.length > 0) {
+    return [...bufferedSnippets];
+  }
+
+  const recoveredSnippets: string[] = [];
+  const seen = new Set<string>();
+  const toolMessages = [...(params.history ?? [])]
+    .filter((message) => message.role === "tool" && typeof message.content === "string")
+    .reverse();
+
+  for (const message of toolMessages) {
+    const rawContent = typeof message.content === "string" ? message.content.trim() : "";
+    if (!rawContent) continue;
+    const extracted = extractUsefulInterruptedToolEvidence(rawContent) ?? rawContent;
+    const normalized = extracted
+      .replace(/\n\n\[Note: This is a cached[\s\S]*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalized || /^Error:/i.test(normalized)) continue;
+    if (looksLikeInterruptedEvidenceBoilerplate(normalized) || looksLikeProviderErrorEcho(normalized)) continue;
+    const snippet = truncateToolAuditText(normalized, 900);
+    if (!snippet || seen.has(snippet)) continue;
+    seen.add(snippet);
+    recoveredSnippets.push(snippet);
+    if (recoveredSnippets.length >= maxSnippets) break;
+  }
+
+  return recoveredSnippets.reverse();
+}
+
+function looksLikeTimeoutLikeError(error: unknown): boolean {
+  const text = String(error ?? "").trim();
+  if (!text) return false;
+  return /\b(timed out|timeout|abort(?:ed|error)?)\b/i.test(text);
+}
 
 function looksLikePlanningOnlyResult(result: string): boolean {
   const preview = result.slice(0, 600).trim();
@@ -1027,17 +1492,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs ?? defaultTimeoutMs;
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
+  const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
   // I13: Mutable so the cascade-timeout fallback can inject web_search +
   // web_fetch when all delegations have failed and a coordinator agent
   // would otherwise be left with no working capability.
   let effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
-  const timeoutAbort = turnTimeoutMs ? new AbortController() : undefined;
-  const timeoutHandle = timeoutAbort
-    ? setTimeout(() => timeoutAbort.abort(), turnTimeoutMs)
+  let turnTimeoutReached = false;
+  const timeoutHandle = turnTimeoutMs
+    ? setTimeout(() => { turnTimeoutReached = true; }, turnTimeoutMs)
     : undefined;
-  const signal = opts.signal && timeoutAbort
-    ? AbortSignal.any([opts.signal, timeoutAbort.signal])
-    : opts.signal ?? timeoutAbort?.signal;
+  // The wall-clock timeout is a stop-after-current-operation deadline, not
+  // an abort signal for the provider/tool call currently in flight. External
+  // cancellation still aborts immediately through opts.signal.
+  const signal = opts.signal;
 
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
 
@@ -1272,10 +1739,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       log.debug({ err, agentName: opts.agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
     }
 
+    const initialSharedFacts = await formatSharedFactsContext(subSessionId);
+    let lastSharedFactsSignature = initialSharedFacts.signature;
+    const sharedFactsContext = initialSharedFacts.content
+      ? `\n\n${initialSharedFacts.content}`
+      : "";
+
     // Build initial message
     const userContent = opts.context
-      ? `Context:\n${opts.context}${a2aContext}\n\nTask: ${sanitizedTask}`
-      : `${sanitizedTask}${a2aContext}`;
+      ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}`
+      : `${sanitizedTask}${a2aContext}${sharedFactsContext}`;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
@@ -1336,11 +1809,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let cumulativeTimeoutSignalCount = 0;
     let cumulativeUsefulEvidenceBytes = 0;
     let recentEvidenceSnippets: string[] = [];
+    let autoSharedFindingCount = 0;
+    const autoSharedFindingKeys = new Set<string>();
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
     let sufficiencyToolsStripped = false;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
+    let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
     // Track tools stripped by the evidence-cap mechanism so that blocked
     // calls to those tools are classified as "evidence_cap_enforced" rather
     // than "not_in_agent_tools", preventing false-positive warden alerts.
@@ -1495,7 +1971,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         toolCount,
         iterations,
         artifacts,
-        evidenceSnippets: recentEvidenceSnippets,
+        evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
       });
       log.warn(
         { agentName: opts.agentName, toolCount, successfulToolCount, iterations, planningOnlyResponse },
@@ -1509,7 +1985,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return null;
       }
 
-      const graceTimeoutMs = Math.max(1_500, Math.min(5_000, Math.round(turnTimeoutMs * 0.1)));
+      // The grace window has to fit at least one full LLM inference on the
+      // slowest provider the runtime is actually used with. The previous
+      // 5s cap was tuned for cloud APIs; on a local 35B model where each
+      // completion takes 25–60s, the synthesis was aborted before it
+      // could produce a single token and the run died with only the
+      // interrupted-output scaffold. Scale to 15% of the turn budget,
+      // capped at 25s so an 8-minute coordinator does not get an
+      // unboundedly large deadline-grace either.
+      const graceTimeoutMs = Math.max(5_000, Math.min(25_000, Math.round(turnTimeoutMs * 0.15)));
       const graceAbort = new AbortController();
       const graceTimer = setTimeout(() => graceAbort.abort(), graceTimeoutMs);
       const graceSignal = opts.signal
@@ -1539,6 +2023,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+        if (looksLikeProviderErrorEcho(result)) {
+          log.warn(
+            { agentName: opts.agentName, preview: result.slice(0, 200) },
+            "Grace-deadline synthesis returned a regurgitated provider error — falling through to interrupted-output recovery",
+          );
           return null;
         }
         result = await rescueSanitizedEmptyResult(result);
@@ -1655,6 +2146,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
+          return null;
+        }
+        if (looksLikeProviderErrorEcho(result)) {
+          log.warn(
+            { agentName: opts.agentName, preview: result.slice(0, 200) },
+            "Soft-deadline synthesis returned a regurgitated provider error — falling through to interrupted-output recovery",
+          );
           return null;
         }
         result = await rescueSanitizedEmptyResult(result);
@@ -1962,7 +2460,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (
         turnTimeoutMs
         && turnTimeoutMs >= 60_000
-        && !timeoutAbort?.signal.aborted
+        && !turnTimeoutReached
         && !softDeadlineSynthesisAttempted
         && toolCount > 0
         && history.some((message) => message.role === "tool")
@@ -1998,45 +2496,46 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
       }
 
-      if (signal?.aborted) {
-        if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
-          const synthesized = await attemptTimeoutSynthesis();
-          if (synthesized) {
-            return synthesized;
-          }
-          const interruptedOutcome = classifyInterruptedOutcome({
-            successfulToolCount,
-            artifacts,
-            swarmState: toolContext.swarmState,
-          });
-          recordOutcome({
-            ts: new Date().toISOString(),
-            agent: opts.agentName,
-            task: opts.task.slice(0, 200),
-            outcome: interruptedOutcome,
-            iterations,
-            totalTokens: usage.totalTokens,
-            durationMs: Date.now() - runStartedAt,
-            timeoutMs: turnTimeoutMs,
-            error: `timeout (${turnTimeoutMs}ms) reached`,
-          });
-          const output = buildInterruptedSubAgentOutput({
-            agentName: opts.agentName,
-            reason: `timed out after ${turnTimeoutMs}ms`,
-            swarmState: toolContext.swarmState,
-            toolNames,
-            toolCount,
-            iterations,
-            artifacts,
-            evidenceSnippets: recentEvidenceSnippets,
-          });
-          const stats = buildStats("timeout", interruptedOutcome);
-          logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
-          return withArtifacts({
-            output,
-            stats,
-          });
+      if (turnTimeoutReached && turnTimeoutMs) {
+        const synthesized = await attemptTimeoutSynthesis();
+        if (synthesized) {
+          return synthesized;
         }
+        const interruptedOutcome = classifyInterruptedOutcome({
+          successfulToolCount,
+          artifacts,
+          swarmState: toolContext.swarmState,
+        });
+        recordOutcome({
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: interruptedOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          error: `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
+        });
+        const output = buildInterruptedSubAgentOutput({
+          agentName: opts.agentName,
+          reason: `timed out after ${turnTimeoutMs}ms after finishing the current operation`,
+          swarmState: toolContext.swarmState,
+          toolNames,
+          toolCount,
+          iterations,
+          artifacts,
+          evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+        });
+        const stats = buildStats("timeout", interruptedOutcome);
+        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
+        return withArtifacts({
+          output,
+          stats,
+        });
+      }
+
+      if (signal?.aborted) {
         const interruptedOutcome = classifyInterruptedOutcome({
           successfulToolCount,
           artifacts,
@@ -2061,7 +2560,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           toolCount,
           iterations,
           artifacts,
-          evidenceSnippets: recentEvidenceSnippets,
+          evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
         });
         const stats = buildStats("cancelled", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -2202,44 +2701,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       try {
         response = await provider.complete(messages, effectiveTools, signal);
       } catch (err) {
-        if (timeoutAbort?.signal.aborted && turnTimeoutMs) {
-          const synthesized = await attemptTimeoutSynthesis();
-          if (synthesized) {
-            return synthesized;
-          }
-          const interruptedOutcome = classifyInterruptedOutcome({
-            successfulToolCount,
-            artifacts,
-            swarmState: toolContext.swarmState,
-          });
-          recordOutcome({
-            ts: new Date().toISOString(),
-            agent: opts.agentName,
-            task: opts.task.slice(0, 200),
-            outcome: interruptedOutcome,
-            iterations,
-            totalTokens: usage.totalTokens,
-            durationMs: Date.now() - runStartedAt,
-            timeoutMs: turnTimeoutMs,
-            error: `timeout (${turnTimeoutMs}ms) reached`,
-          });
-          const output = buildInterruptedSubAgentOutput({
-            agentName: opts.agentName,
-            reason: `timed out after ${turnTimeoutMs}ms`,
-            swarmState: toolContext.swarmState,
-            toolNames,
-            toolCount,
-            iterations,
-            artifacts,
-            evidenceSnippets: recentEvidenceSnippets,
-          });
-          const stats = buildStats("timeout", interruptedOutcome);
-          logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs }, "warn");
-          return withArtifacts({
-            output,
-            stats,
-          });
-        }
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,
@@ -2274,6 +2735,41 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             stats,
           });
         }
+        const interruptedOutcome = classifyInterruptedOutcome({
+          successfulToolCount,
+          artifacts,
+          swarmState: toolContext.swarmState,
+        });
+        if (looksLikeTimeoutLikeError(err) && interruptedOutcome === "partial") {
+          log.warn({ err, agentName: opts.agentName }, "Sub-agent LLM call timed out after substantive work — returning partial recovered evidence");
+          recordOutcome({
+            ts: new Date().toISOString(),
+            agent: opts.agentName,
+            task: opts.task.slice(0, 200),
+            outcome: interruptedOutcome,
+            iterations,
+            totalTokens: usage.totalTokens,
+            durationMs: Date.now() - runStartedAt,
+            timeoutMs: turnTimeoutMs,
+            error: String(err).slice(0, 200),
+          });
+          const output = buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: "timed out while finalizing the answer after substantive work",
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+            evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+          });
+          const stats = buildStats("timeout", interruptedOutcome);
+          logSubAgentCompletionAudit(stats, output, {
+            timeoutDuringFinalSynthesis: true,
+            error: String(err).slice(0, 200),
+          }, "warn");
+          return withArtifacts({ output, stats });
+        }
         log.error({ err, agentName: opts.agentName }, "Sub-agent LLM call failed");
         recordOutcome({
           ts: new Date().toISOString(),
@@ -2295,6 +2791,42 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       usage.promptTokens += response.usage.promptTokens;
       usage.completionTokens += response.usage.completionTokens;
       usage.totalTokens += response.usage.totalTokens;
+
+      if (turnTimeoutReached && turnTimeoutMs && response.tool_calls.length > 0) {
+        const synthesized = await attemptTimeoutSynthesis();
+        if (synthesized) {
+          return synthesized;
+        }
+        const interruptedOutcome = classifyInterruptedOutcome({
+          successfulToolCount,
+          artifacts,
+          swarmState: toolContext.swarmState,
+        });
+        recordOutcome({
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: interruptedOutcome,
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+          error: `timeout (${turnTimeoutMs}ms) reached before starting another tool run`,
+        });
+        const output = buildInterruptedSubAgentOutput({
+          agentName: opts.agentName,
+          reason: `timed out after ${turnTimeoutMs}ms before starting another tool run`,
+          swarmState: toolContext.swarmState,
+          toolNames,
+          toolCount,
+          iterations,
+          artifacts,
+          evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+        });
+        const stats = buildStats("timeout", interruptedOutcome);
+        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
+        return withArtifacts({ output, stats });
+      }
 
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
@@ -2410,6 +2942,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       // Process tool calls — repair any mangled tool names first
       for (const tc of response.tool_calls) normalizeToolCall(tc);
+      if (sourceSensitiveTask && cumulativeUsefulEvidenceBytes < 120 && substantiveEvidenceCount === 0 && !shareFindinCalledThisRun) {
+        for (const tc of response.tool_calls) {
+          enforceSourceSensitivePreEvidenceDelegation(tc, sanitizedTask, subSessionId, opts.agentName);
+        }
+      }
+      if (requiredResearchFallbackRoute) {
+        for (const tc of response.tool_calls) {
+          enforceSubAgentRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, subSessionId, opts.agentName);
+        }
+      }
 
       if (response.tool_calls.length > 0 && response.content?.trim()) {
         logAudit(
@@ -2425,14 +2967,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         response = { ...response, content: null };
       }
 
+      const assistantToolCalls = response.tool_calls.map(tc => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+      }));
+
       history.push({
         role: "assistant",
         content: response.content,
-        tool_calls: response.tool_calls.map(tc => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-        })),
+        tool_calls: assistantToolCalls,
       });
 
       const toolResults: LLMMessage[] = [];
@@ -2440,8 +2984,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
 
-      for (const tc of response.tool_calls) {
+      for (const [toolCallIndex, tc] of response.tool_calls.entries()) {
         if (signal?.aborted) break;
+        if (requiredResearchFallbackRoute && enforceSubAgentRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, subSessionId, opts.agentName)) {
+          const assistantToolCall = assistantToolCalls[toolCallIndex];
+          if (assistantToolCall) {
+            assistantToolCall.function.name = tc.name;
+            assistantToolCall.function.arguments = JSON.stringify(tc.arguments);
+          }
+        }
         toolCount++;
 
         if (tc.arguments && "_parse_error" in tc.arguments) {
@@ -2655,6 +3206,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             substantiveEvidenceCount += 1;
           }
         }
+        if (sourceSensitiveTask && !requiredResearchFallbackRoute && result.success) {
+          const discoveryNoMatch = (tc.name === "search_agents" && subAgentSearchAgentsReturnedNoMatch(result))
+            || (tc.name === "search_workflows" && subAgentSearchWorkflowsReturnedNoMatch(result));
+          if (discoveryNoMatch) {
+            requiredResearchFallbackRoute = buildSubAgentRequiredResearchFallbackRoute({
+              task: sanitizedTask,
+              agentName: opts.agentName,
+              allowedAgents: opts.allowedAgents,
+              effectiveToolNames,
+            });
+          }
+        }
         if (tc.name === "share_finding") {
           shareFindinCalledThisRun = true;
           shareFindinCallCount += 1;
@@ -2714,23 +3277,63 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           && !/^(All candidate agents failed|Tool '[^']+' has been called|Tool '[^']+' is)/i.test(resultContent)
         ) {
           const usefulPortion = resultContent
-            // Strip timeout boilerplate but stop before any recovered-snippets header.
+            // Strip timeout boilerplate. Stop before recovered-snippets header
+            // OR before the next parallel_delegate result separator (\n\n---)
+            // so that multi-paragraph task descriptions inside partial-progress
+            // blocks are fully consumed and not counted as useful evidence.
             .replace(
-              /Sub-agent '[^']+' timed out after \d+ms\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+              /Sub-agent '[^']+' timed out after \d+ms\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
+              "",
+            )
+            .replace(
+              /Sub-agent '[^']+' produced no final response after substantive work\.\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
               "",
             )
             // Same for cancelled-stanza boilerplate.
             .replace(
-              /Sub-agent '[^']+' was cancelled\nPartial progress before interruption:\n[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n|$)/g,
+              /Sub-agent '[^']+' was cancelled\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
               "",
             )
             // Single-line timeout markers without a partial-progress block.
-            .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "");
-          cumulativeUsefulEvidenceBytes += usefulPortion.length;
-          if (usefulPortion.length >= 180) {
-            const snippet = truncateToolAuditText(usefulPortion, 900);
+            .replace(/Sub-agent '[^']+' timed out after \d+ms\n?/g, "")
+            .replace(/Sub-agent '[^']+' produced no final response after substantive work\.\n?/g, "")
+            .replace(/Sub-agent '[^']+' was cancelled\n?/g, "");
+          const recoveredInterruptedEvidence = extractUsefulInterruptedToolEvidence(resultContent)
+            ?? extractUsefulInterruptedToolEvidence(usefulPortion);
+          const usefulTrimmed = (recoveredInterruptedEvidence ?? usefulPortion).trim();
+          if (
+            !usefulTrimmed
+            || looksLikeInterruptedEvidenceBoilerplate(usefulTrimmed)
+            || looksLikeProviderErrorEcho(usefulTrimmed)
+          ) {
+            continue;
+          }
+          cumulativeUsefulEvidenceBytes += usefulTrimmed.length;
+          const snippetThreshold = recoveredInterruptedEvidence ? 80 : 180;
+          if (usefulTrimmed.length >= snippetThreshold) {
+            const snippet = truncateToolAuditText(usefulTrimmed, 900);
             if (snippet) {
               recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
+            }
+            try {
+              const shared = await autoShareUsefulFinding({
+                sessionId: subSessionId,
+                agentName: opts.agentName,
+                toolName: tc.name,
+                evidence: usefulTrimmed,
+                sharedKeys: autoSharedFindingKeys,
+              });
+              if (shared) {
+                autoSharedFindingCount += 1;
+                logAudit("sub_agent_tool_call", {
+                  agentName: opts.agentName,
+                  tool: tc.name,
+                  phase: "shared_finding_auto",
+                  autoSharedFindingCount,
+                }, { sessionId: subSessionId, severity: "info" });
+              }
+            } catch (err) {
+              log.debug({ err, agentName: opts.agentName, tool: tc.name }, "Failed to auto-share useful tool evidence");
             }
           }
         }
@@ -2974,13 +3577,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
       ) {
         sufficiencyToolsStripped = true;
+        const stripSet = new Set<string>(EVIDENCE_GATHERING_TOOL_NAMES);
+        // After enough evidence is gathered, repeated `share_finding`
+        // calls are pure noise: they don't add to the useful-evidence
+        // total and each one costs another LLM round-trip on a slow
+        // local model. When the agent has already published twice,
+        // strip share_finding alongside the gather tools so the next
+        // iteration has nothing left to call and must synthesize.
+        // (Below the 2-call mark we leave it available so the agent
+        // can still publish one more strong finding before answering.)
+        if (shareFindinCallCount >= 2) {
+          stripSet.add("share_finding");
+        }
         const strippedToolNames = tools
-          .filter((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
+          .filter((tool) => stripSet.has(tool.name))
           .map((tool) => tool.name);
         for (const name of strippedToolNames) evidenceCapStrippedTools.add(name);
-        tools = tools.filter((tool) => !EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name));
+        tools = tools.filter((tool) => !stripSet.has(tool.name));
         if (effectiveToolNames) {
-          effectiveToolNames = effectiveToolNames.filter((name) => !EVIDENCE_GATHERING_TOOL_NAMES.has(name));
+          effectiveToolNames = effectiveToolNames.filter((name) => !stripSet.has(name));
         }
         const lastTR = toolResults[toolResults.length - 1]!;
         lastTR.content +=
@@ -2995,6 +3610,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reason: "sufficient_evidence_tools_stripped",
             usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
             strippedToolNames,
+            shareFindinCallCount,
             iterations,
           },
           { sessionId: subSessionId, severity: "info" },
@@ -3027,6 +3643,50 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
 
       history.push(...toolResults);
+      const refreshedSharedFacts = await formatSharedFactsContext(subSessionId);
+      if (refreshedSharedFacts.content && refreshedSharedFacts.signature !== lastSharedFactsSignature) {
+        lastSharedFactsSignature = refreshedSharedFacts.signature;
+        history.push({
+          role: "system",
+          content: [
+            "[SHARED FINDINGS CHECK BEFORE NEXT ITERATION]",
+            "Review these shared findings before calling more tools. Do not repeat work that is already captured here; use them when drafting the final answer.",
+            refreshedSharedFacts.content,
+          ].join("\n"),
+        });
+      }
+      // Break out of the iteration loop when the model wasted a full
+      // round on tools that have already been stripped. After
+      // `sufficient_evidence_tools_stripped` fires, a model on a slow
+      // local provider routinely keeps emitting the same blocked tool
+      // names for several more iterations — each call returns the
+      // "Tool '...' has been disabled" stub, the loop continues, and
+      // 60–90 seconds of wall time is burned per round before the hard
+      // deadline kills the run with no synthesis. Detecting an
+      // entirely-blocked iteration (every result content is the
+      // disabled-or-capped stub) and falling out of the loop lets the
+      // post-loop forced-synthesis pass run while time still remains.
+      if (
+        sufficiencyToolsStripped
+        && response.tool_calls.length > 0
+        && toolResults.length > 0
+        && toolResults.every((tr) => {
+          const c = typeof tr.content === "string" ? tr.content : "";
+          return /^Tool '[^']+' (?:has been disabled|has been called|is not in this agent's allowed tool set|is blocked by security policy)/.test(c);
+        })
+      ) {
+        logAudit(
+          "sub_agent_synthesis_forced",
+          {
+            agentName: opts.agentName,
+            reason: "all_tool_calls_blocked_after_strip",
+            iterations,
+            blockedToolNames: response.tool_calls.map((tc) => tc.name),
+          },
+          { sessionId: subSessionId, severity: "warn" },
+        );
+        break;
+      }
       iterations++;
     }
 

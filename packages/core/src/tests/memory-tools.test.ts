@@ -109,13 +109,11 @@ describe("memory tools", () => {
     expect(searchResult.output).toContain("[workspace/fact]");
   });
 
-  // Regression: audit session b4fba9c4 (May 2026).  In a 2-level swarm
-  // (main → mission_coordinator → researcher), share_finding from the
-  // researcher silently wrote to bucket `sub:sub` while the main assistant
-  // looked under the root UUID, and the IM73A135V01 manufacturer correction
-  // never reached synthesis.  The fix derives all sub/sub-sub session IDs
-  // back to the same root bucket so cross-agent fact propagation works at
-  // any depth.
+  // Regression: in a 2-level swarm (main → coordinator → researcher),
+  // share_finding from the researcher silently wrote to bucket `sub:sub`
+  // while the main assistant looked under the root UUID. The fix derives
+  // all sub/sub-sub session IDs back to the same root bucket so cross-agent
+  // fact propagation works at any depth.
   it("propagates share_finding facts from a 2-level nested sub-agent to the root session bucket", async () => {
     const { executeTool } = await import("../tools/registry.js");
 
@@ -125,12 +123,12 @@ describe("memory tools", () => {
       "sub:sub:b4fba9c4-ab15-4ae3-a0b6-f39b9df5d317:mission_coordinator:1777925176190:researcher:1777925221848";
 
     await executeTool("share_finding", {
-      key: "im73a135v01_manufacturer_correction",
-      value: "IM73A135V01 is an Infineon XENSIV analog MEMS microphone, not InvenSense digital I2S.",
-      claim: "IM73A135V01 manufacturer correction.",
-      sourceTitle: "Infineon IM73A135 Datasheet v01_00-EN",
-      sourceUrl: "https://www.infineon.com/dgdl/Infineon-IM73A135-DataSheet-v01_00-EN.pdf",
-      publisher: "Infineon Technologies AG",
+      key: "nested_research_fact_correction",
+      value: "The nested researcher found the corrected source-backed fact for the requested component.",
+      claim: "Nested researcher source-backed correction.",
+      sourceTitle: "Official Component Datasheet",
+      sourceUrl: "https://example.test/component-datasheet.pdf",
+      publisher: "Example Components",
       evidenceType: "primary",
       accuracyScore: 0.95,
       trustworthinessScore: 0.98,
@@ -143,12 +141,12 @@ describe("memory tools", () => {
     // `sub:sub` or any other intermediate scope.  The main assistant runs
     // under that root and reads from there.
     const rootFacts = await readAllFacts("b4fba9c4-ab15-4ae3-a0b6-f39b9df5d317");
-    expect(rootFacts["im73a135v01_manufacturer_correction"]).toContain("Infineon XENSIV");
+    expect(rootFacts["nested_research_fact_correction"]).toContain("corrected source-backed fact");
 
     // Negative checks: the broken old derivation would have written under
     // `sub:sub`.  Make sure we don't double-write or leak there.
     const subSubFacts = await readAllFacts("sub:sub");
-    expect(subSubFacts["im73a135v01_manufacturer_correction"]).toBeUndefined();
+    expect(subSubFacts["nested_research_fact_correction"]).toBeUndefined();
   });
 
   it("stores source metadata and validation scores through share_finding", async () => {
