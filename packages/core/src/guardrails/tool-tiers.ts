@@ -36,7 +36,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   search_agents: {
     tier: ToolTier.ZERO_READ_ONLY,
-    description: "Keyword search over sub-agent names and descriptions",
+    description: "Semantic capability search over specialized sub-agents; falls back to guarded routing heuristics when embeddings are unavailable",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

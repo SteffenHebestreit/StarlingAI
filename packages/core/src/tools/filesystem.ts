@@ -237,10 +237,23 @@ registerTool({
         mkdirSync(resolve(resolved, ".."), { recursive: true });
       }
       writeFileSync(resolved, content, "utf-8");
+      const relativePath = path.replace(/^\/?workspace\//i, "").replace(/\\/g, "/");
+      const contentType = inferArtifactContentType(relativePath);
+      const textPreview = buildArtifactTextPreview(content);
       return {
         success: true,
         output: `File written: ${path} (${content.length} chars)`,
-        metadata: { path, size: content.length },
+        metadata: {
+          artifactKind: "workspace_file",
+          path,
+          outputPath: relativePath,
+          filename: artifactFilename(relativePath, ctx.workspacePath),
+          contentType,
+          previewMode: inferArtifactPreviewMode(contentType),
+          isDirectory: false,
+          size: content.length,
+          ...(textPreview ? { textPreview } : {}),
+        },
       };
     } catch (err) {
       log.error({ err, path }, "write_file failed");
@@ -412,6 +425,12 @@ function inferArtifactPreviewMode(contentType: string): "image" | "html" | "pdf"
   if (contentType.startsWith("application/json")) return "json";
   if (contentType.startsWith("text/") || contentType.includes("yaml") || contentType.includes("xml")) return "text";
   return "download";
+}
+
+function buildArtifactTextPreview(content: string): string | undefined {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.length > 1_200 ? `${compact.slice(0, 1_197)}...` : compact;
 }
 
 function safeEntryCount(dir: string): number {

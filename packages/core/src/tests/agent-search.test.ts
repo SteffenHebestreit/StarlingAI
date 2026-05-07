@@ -275,6 +275,83 @@ describe("search_agents tool", () => {
     }
   }, 15000);
 
+  it("marks configured semantic search unavailable instead of returning keyword fallback", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+    const embeddingCachePath = join(tempDir, "embedding-cache.json");
+
+    const subAgents = {
+      researcher: {
+        description: "Finds facts on the web and summarizes them.",
+        tools: ["web_search", "web_fetch"],
+        maxIterations: 4,
+      },
+      browser_agent: {
+        description: "Logs into sites and automates forms in the browser.",
+        tools: ["get_site_credentials", "mcp__playwright__browser_click"],
+        maxIterations: 6,
+      },
+    };
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: {
+            primary: "lmstudio/qwen3.5-9b",
+            embeddingModel: "lmstudio/text-embedding-qwen3-embedding-0.6b",
+          },
+        },
+      },
+      subAgents,
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_EMBEDDING_CACHE"] = embeddingCachePath;
+    vi.resetModules();
+
+    const [{ getTool }, embeddings] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../providers/embeddings.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const provider = {
+      embed: vi.fn(async () => {
+        throw new Error("vk::CommandBuffer::end: ErrorDeviceLost");
+      }),
+    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
+
+    try {
+      await embeddings.buildAgentIndex(subAgents, provider, "lmstudio/text-embedding-qwen3-embedding-0.6b");
+
+      const searchAgents = getTool("search_agents");
+      expect(searchAgents).toBeDefined();
+
+      const result = await searchAgents!.execute(
+        { query: "login form automation" },
+        { sessionId: "test-session", workspacePath: "/workspace" }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Semantic agent search is configured but unavailable");
+      expect(result.output).not.toContain("**browser_agent**");
+      expect(result.metadata).toMatchObject({
+        routingMode: "semantic_unavailable",
+        semanticConfigured: true,
+        semanticAvailable: false,
+        resultCount: 0,
+        weakCount: 0,
+        indexedAgentCount: 0,
+        totalAgentCount: 2,
+      });
+      expect(String(result.metadata?.["semanticUnavailableReason"])).toContain("ErrorDeviceLost");
+    } finally {
+      embeddings.resetEmbeddingSearchStateForTests();
+      delete process.env["SAI_EMBEDDING_CACHE"];
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it("keeps documentation research away from communication-only agents", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
     const configPath = join(tempDir, "starlingai.json");

@@ -163,6 +163,87 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("surfaces saved write_file artifacts when timing out after the current operation", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-write-artifact-timeout-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        writer_agent: {
+          description: "Writer timeout artifact test agent",
+          systemPrompt: "Write the requested artifact.",
+          tools: ["write_file"],
+          maxIterations: 3,
+          turnTimeoutMs: 1000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "write_file",
+      description: "Mock delayed file writer",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        return {
+          success: true,
+          output: "File written: workspace/esp32-mic-array-project/README.md (486 chars)",
+          metadata: {
+            artifactKind: "workspace_file",
+            outputPath: "workspace/esp32-mic-array-project/README.md",
+            filename: "README.md",
+            contentType: "text/markdown; charset=utf-8",
+            previewMode: "text",
+            isDirectory: false,
+            size: 486,
+            textPreview: "# ESP32 recorder Partial design.",
+          },
+        };
+      },
+    });
+
+    completeMock.mockResolvedValueOnce({
+      content: "",
+      tool_calls: [{
+        id: "write-artifact-1",
+        name: "write_file",
+        arguments: {
+          path: "workspace/esp32-mic-array-project/README.md",
+          content: "# ESP32 recorder\n\nPartial design.",
+        },
+      }],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "tool_calls",
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "writer_agent",
+        task: "Write the portable ESP32 recorder README.",
+        parentSessionId: "parent-write-artifact-timeout",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Artifacts collected: 1 (workspace/esp32-mic-array-project/README.md)");
+      expect(result.output).toContain("Saved artifact workspace/esp32-mic-array-project/README.md");
+      expect(result.output).toContain("# ESP32 recorder Partial design.");
+      expect(result.stats.terminalState).toBe("timeout");
+      expect(result.stats.outcome).toBe("partial");
+      expect(result.artifacts?.[0]).toMatchObject({
+        outputPath: "workspace/esp32-mic-array-project/README.md",
+        sourceTool: "write_file",
+      });
+    } finally {
+      unregisterTool("write_file");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("injects shared findings before the sub-agent starts iterating", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-shared-facts-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -288,6 +369,253 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.outcome).toBe("partial");
     } finally {
       unregisterTool("parallel_delegate");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("replaces truncation-claim synthesis with recovered parallel delegation evidence", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-truncation-recovery-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        coordinator_agent: {
+          description: "Coordinator that delegates in parallel",
+          systemPrompt: "Coordinate the task and use tools.",
+          tools: ["parallel_delegate"],
+          maxIterations: 2,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "parallel_delegate",
+      description: "Run multiple delegated slices.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: [
+            "**[researcher]**: [researcher]: Before drafting the final answer, let me correct a critical misidentification from the search results.",
+            "",
+            "---",
+            "",
+            "**CRITICAL CORRECTION:** The ZX-9000 module is manufactured by VendorOne, not VendorTwo.",
+            "Official source: VendorOne ZX-9000 datasheet. It is a verified component candidate for the requested design.",
+            "Recommended follow-up: verify interface, power budget, geometry, and controller pin allocation before final selection.",
+          ].join("\n"),
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "parallel-truncation-1",
+          name: "parallel_delegate",
+          arguments: { tasks: [{ task: "Research microphone candidates." }] },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "The workflow output appears truncated — it cuts off at \"CRITICAL CORRECTION: The ZX-9000 module is ...\" without completing the correction or providing the substantive findings.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coordinator_agent",
+        task: "Coordinate the hardware recorder research.",
+        parentSessionId: "parent-truncation-recovery",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Recovered evidence snippets from completed tools");
+      expect(result.output).toContain("ZX-9000");
+      expect(result.output).toContain("VendorOne");
+      expect(result.output).not.toContain("workflow output appears truncated");
+      expect(result.stats.outcome).toBe("partial");
+    } finally {
+      unregisterTool("parallel_delegate");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it("propagates collected tool evidence in the max-iterations fallback instead of returning the 112-char boilerplate", async () => {
+    // Regression: when a sub-agent exhausted its iteration budget AND the
+    // synthesis-after-max-iterations attempt didn't produce a real text
+    // answer (model kept emitting tool calls or threw), the runtime used to
+    // discard everything the agent had already gathered and return a
+    // single-line "reached the maximum number of tool-call iterations"
+    // boilerplate. The parent then had nothing to work with. Now the
+    // max-iterations path routes through buildInterruptedSubAgentOutput so
+    // recovered tool-result snippets propagate up under the
+    // "Recovered evidence snippets from completed tools:" header that the
+    // parent runtime extracts.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-max-iter-evidence-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      agents: {
+        defaultContainerized: false,
+      },
+      subAgents: {
+        researcher_with_search: {
+          description: "Research agent for max-iterations evidence test",
+          systemPrompt: "Research the topic.",
+          tools: ["web_search"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "web_search",
+      description: "Web search for the test.",
+      parameters: { type: "object", properties: {} },
+      async execute(_args: Record<string, unknown>) {
+        return {
+          success: true,
+          output: "**Web Search Results for:** \"IM73A135V01 MEMS microphone datasheet\" (via searxng) **IM73A135V01 datasheet PDF — MEMS microphone | Infineon** https://datasheet4u.com/datasheets/Infineon/IM73A135V01/1559625 The IM73A135V01 is designed for applications which require a microphone with high SNR and a flat response. **Datasheet PDF** https://www.alldatasheet.com/datasheet-pdf/pdf/1388108/INFINEON/IM73A135V01.html",
+        };
+      },
+    });
+
+    completeMock
+      // Iteration 1: emit a web_search call (uses up the maxIterations=1 budget).
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-1",
+          name: "web_search",
+          arguments: { query: "IM73A135V01 MEMS microphone datasheet" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      // Synthesis-after-max-iterations call: model misbehaves and tries to
+      // call another tool instead of producing text. This is the failure
+      // mode the audit captured (`synthesizedAfterMaxIterations: false`).
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-2",
+          name: "web_search",
+          arguments: { query: "another query" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "researcher_with_search",
+        task: "Verify the IM73A135V01 microphone specs.",
+        parentSessionId: "parent-max-iter-evidence",
+        workspacePath: tempDir,
+      });
+
+      // Must NOT be the 112-char boilerplate.
+      expect(result.output).not.toBe(
+        "Sub-agent 'researcher_with_search' reached the maximum number of tool-call iterations (1). Partial result may be incomplete.",
+      );
+      // Must include the recovered-evidence header so the parent runtime's
+      // extractor can pull the tool result content.
+      expect(result.output).toContain("Recovered evidence snippets from completed tools:");
+      // And must include the actual web_search content the agent collected.
+      expect(result.output).toMatch(/IM73A135V01|Infineon/);
+      expect(result.stats.terminalState).toBe("max_iterations");
+      expect(result.stats.outcome).toBe("partial");
+    } finally {
+      unregisterTool("web_search");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("does not promote workflow no-match bookkeeping to recovered evidence", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-no-match-filter-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        coordinator_agent: {
+          description: "Coordinator that tries workflow discovery",
+          systemPrompt: "Coordinate the topic.",
+          tools: ["search_workflows"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "search_workflows",
+      description: "Mock workflow search",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: 'No workflows matched "hardware design guide BOM" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.',
+          metadata: { workflowMatches: [] },
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "workflow-search-1",
+          name: "search_workflows",
+          arguments: { query: "hardware design guide BOM" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "workflow-search-2",
+          name: "search_workflows",
+          arguments: { query: "hardware design guide BOM retry" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "coordinator_agent",
+        task: "Create a topic-related portable recorder guide.",
+        parentSessionId: "parent-no-match-filter",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).not.toContain("No workflows matched");
+      expect(result.output).not.toContain("Recovered evidence snippets from completed tools");
+      expect(result.output).toContain("before producing usable topic-related output");
+      expect(result.stats.terminalState).toBe("max_iterations");
+      expect(result.stats.outcome).toBe("failure");
+    } finally {
+      unregisterTool("search_workflows");
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 10000);
@@ -1515,11 +1843,348 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.toolNames).toEqual(["search_agents", "delegate_to_agent"]);
       const delegateArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(delegateArgs["agentName"]).toBe("researcher");
+      expect(String(delegateArgs["taskTitle"])).toContain("Source-sensitive researcher task");
       expect(String(delegateArgs["task"])).toContain("Use current sources to verify the exact microphone component choice");
       expect(completeMock).toHaveBeenCalledTimes(2);
     } finally {
       unregisterTool("search_agents");
       unregisterTool("search_workflows");
+      unregisterTool("delegate_to_agent");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses source-sensitive child task titles so fallback delegation does not collide with the running parent coordinator", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-child-task-title-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research from sources.",
+          tools: [],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const summarizeForSignature = (text: string, maxLength: number): string => {
+      const compact = text.replace(/\s+/g, " ").trim();
+      return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+    };
+
+    const parentTask = [
+      "SOURCE-SENSITIVE DELEGATION:",
+      "The user's original request below is the only canonical task.",
+      "Original user request:",
+      "Verify current component facts for a portable recorder.",
+    ].join("\n");
+    const parentTitle = summarizeForSignature(parentTask, 80);
+    const parentSignature = `${parentTitle.toLowerCase()}::${summarizeForSignature(parentTask, 240).toLowerCase()}::`;
+    const startedAt = new Date().toISOString();
+
+    completeMock.mockResolvedValueOnce({
+      content: "Researcher gathered verified component evidence.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    try {
+      await import("../tools/sub-agent.js");
+      const { getTool } = await import("../tools/registry.js");
+      const delegateToAgent = getTool("delegate_to_agent");
+      expect(delegateToAgent).toBeDefined();
+
+      const result = await delegateToAgent!.execute({
+        agentName: "researcher",
+        task: parentTask,
+        taskTitle: "Source-sensitive researcher task: fallback after agent discovery no-match",
+      }, {
+        sessionId: "parent-child-title",
+        workspacePath: tempDir,
+        swarmState: {
+          objective: parentTask,
+          startedAt,
+          updatedAt: startedAt,
+          tasks: {
+            task_1: {
+              id: "task_1",
+              title: parentTitle,
+              status: "running",
+              dependsOn: [],
+              signature: parentSignature,
+              selectedAgent: "mission_coordinator",
+              attempts: [{ agentName: "mission_coordinator", status: "running", startedAt }],
+            },
+          },
+        },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Researcher gathered verified component evidence");
+      expect(result.output).not.toContain("already running via mission_coordinator");
+      expect(completeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps repeated source-sensitive agent discovery after no-match fallback", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-search-agent-cap-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        mission_coordinator: {
+          description: "Mission coordinator",
+          systemPrompt: "Coordinate source-sensitive work.",
+          tools: ["search_agents", "delegate_to_agent"],
+          maxIterations: 5,
+        },
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research from sources.",
+          tools: [],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: 'No agents matched "hardware electronics component selection". Do not call search_agents again for this turn.',
+      metadata: { query: "hardware electronics component selection", resultCount: 0, topResult: null, trippedAgents: ["researcher"] },
+    }));
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Task 'SOURCE-SENSITIVE DELEGATION: The user's original request below is the only canon...' is already running via mission_coordinator.",
+      metadata: { inFlight: true, reused: true },
+    }));
+
+    registerTool({
+      name: "search_agents",
+      description: "Mock search_agents",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Mock delegate_to_agent",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-1",
+          name: "search_agents",
+          arguments: { query: "hardware electronics component selection" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-2",
+          name: "search_agents",
+          arguments: { query: "embedded systems firmware IoT" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-3",
+          name: "search_agents",
+          arguments: { query: "audio microphone PCB design" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "search-4",
+          name: "search_agents",
+          arguments: { query: "ESP32 embedded development firmware IoT" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "No reliable evidence was gathered before discovery exhausted its limits.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Use current sources to verify hardware component recommendations.",
+        parentSessionId: "parent-search-agent-cap",
+        workspacePath: tempDir,
+      });
+
+      expect(searchAgentsMock).toHaveBeenCalledTimes(2);
+      expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+      const fallbackArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(fallbackArgs["agentName"]).toBeUndefined();
+      expect(String(fallbackArgs["taskTitle"])).toContain("Source-sensitive specialist task");
+      expect(result.stats.toolNames).toEqual(["search_agents", "delegate_to_agent", "search_agents", "search_agents"]);
+      expect(result.output).toContain("No reliable evidence was gathered");
+    } finally {
+      unregisterTool("search_agents");
+      unregisterTool("delegate_to_agent");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rewrite search_agents after a workflow no-match in source-sensitive coordinator runs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-workflow-no-match-agent-search-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        mission_coordinator: {
+          description: "Mission coordinator",
+          systemPrompt: "Coordinate source-sensitive work.",
+          tools: ["search_workflows", "search_agents", "delegate_to_agent"],
+          maxIterations: 4,
+        },
+        researcher: {
+          description: "Research specialist",
+          systemPrompt: "Research from sources.",
+          tools: ["read_file"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: 'No workflows matched "hardware design guide BOM component selection electronics" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.',
+      metadata: { workflowMatches: [] },
+    }));
+    const searchAgentsMock = vi.fn(async () => ({
+      success: true,
+      output: 'NEXT ACTION: Call delegate_to_agent(agentName="researcher", task="<your task>") NOW. Do NOT call search_agents again.\n\nAgents matching "hardware design guide BOM" [hybrid search, 1 result(s)]:\n\n**researcher** — high confidence',
+      metadata: {
+        query: "hardware design guide BOM",
+        routingMode: "hybrid",
+        semanticConfigured: true,
+        semanticAvailable: true,
+        resultCount: 1,
+        weakCount: 0,
+        topResult: "researcher",
+      },
+    }));
+    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: "Delegated result from researcher — TASK COMPLETED.\nObserved evidence:\nGrounded hardware evidence.",
+      metadata: {
+        agentName: String(args["agentName"] ?? ""),
+        attemptedAgents: [String(args["agentName"] ?? "")],
+        delegationSucceeded: true,
+        terminalState: "completed",
+      },
+    }));
+
+    registerTool({
+      name: "search_workflows",
+      description: "Mock search_workflows",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    registerTool({
+      name: "search_agents",
+      description: "Mock search_agents",
+      parameters: { type: "object", properties: {} },
+      execute: searchAgentsMock,
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Mock delegate_to_agent",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "workflow-no-match-1",
+          name: "search_workflows",
+          arguments: { query: "hardware design guide BOM component selection electronics" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "agent-search-1",
+          name: "search_agents",
+          arguments: { query: "hardware design guide BOM" },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "delegate-1",
+          name: "delegate_to_agent",
+          arguments: {
+            agentName: "researcher",
+            task: "Verify hardware guide facts from sources.",
+          },
+        }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "Grounded hardware evidence.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Use current sources to create a source-sensitive hardware design guide with verified component facts.",
+        parentSessionId: "parent-workflow-no-match-agent-search",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Grounded hardware evidence");
+      expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+      expect(searchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+      expect(result.stats.toolNames).toEqual(["search_workflows", "search_agents", "delegate_to_agent"]);
+    } finally {
+      unregisterTool("search_workflows");
+      unregisterTool("search_agents");
       unregisterTool("delegate_to_agent");
       rmSync(tempDir, { recursive: true, force: true });
     }

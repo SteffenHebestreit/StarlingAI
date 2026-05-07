@@ -170,6 +170,24 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  it("demotes partial duplicate-running coordinator status to failure", () => {
+    const r = classifyDelegationResult(
+      "Task 'SOURCE-SENSITIVE DELEGATION: The user's original request below is the only canon...' is already running via mission_coordinator.",
+      "partial",
+      {
+        toolCount: 4,
+        toolNames: ["search_workflows", "delegate_to_agent", "search_agents", "search_agents"],
+        terminalState: "completed",
+        outcome: "partial" as const,
+      },
+      { tags: ["coordination"] } as never,
+      "mission_coordinator",
+      "Erstelle einen Hardware-Bau-Leitfaden",
+    );
+
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   // Counter-test: a real partial result with substantive recovered evidence
   // (e.g. a research agent that timed out mid-pass with real web_fetch
   // payloads) must STAY `partial` so the partial-acceptance path still

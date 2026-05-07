@@ -34,7 +34,7 @@
         "topP": 0.9,
         "repeatPenalty": 1.05,
         "maxTokens": 4096,
-        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b"
+        "embeddingModel": "lmstudio/text-embedding-nomic-embed-text-v1.5"
       }
     },
     "ephemeralGeneration": {
