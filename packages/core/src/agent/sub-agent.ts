@@ -69,6 +69,122 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "site_fill_credentials",
 ]);
 
+// Single-delegation passthrough — when a coordinator's only substantive tool
+// output is one delegation result of this size or larger, return it verbatim
+// rather than running a redundant synthesis pass over content that already is
+// the final answer. This dodges the "coordinator times out trying to wrap a
+// completed sub-agent answer" failure mode that destroys 10+ minutes of work.
+const PASSTHROUGH_DELEGATION_MIN_BYTES = 3_000;
+
+// Tools whose presence does NOT disqualify single-delegation passthrough:
+// discovery, memory lookup, shared-fact reads, light bookkeeping. If the
+// coordinator only ran these plus one substantial delegation, the delegation
+// body is the work product.
+const PASSTHROUGH_TRIVIAL_TOOL_NAMES = new Set([
+  "search_agents",
+  "search_workflows",
+  "list_agents",
+  "list_files",
+  "workspace_search",
+  "datetime_arithmetic",
+  "memory_search",
+  "memory_store",
+  "memory_promote",
+  "read_shared_facts",
+  "share_finding",
+  "get_swarm_state",
+  "research_notes_read",
+  "research_notes_summary",
+]);
+
+const PASSTHROUGH_DELEGATION_TOOL_NAMES = new Set([
+  "delegate_to_agent",
+  "parallel_delegate",
+  "swarm_delegate",
+  "run_task_graph",
+  "run_workflow",
+]);
+
+const DELEGATE_TOOL_RESULT_PREFIX_RE = /^(Delegated result from|Parallel delegation completed|Task graph (?:completed|finished)|Workflow\s+\S+\s+\[)/i;
+
+interface SingleDelegationPassthroughCandidate {
+  output: string;
+  delegationToolName: string;
+  bytes: number;
+  /** Inferred from the wrapper prefix; mirrored on the coordinator's outcome. */
+  inferredOutcome: "success" | "partial" | "failure";
+}
+
+/** Detect whether the agent's tool history is "single substantial delegation
+ * plus only trivial discovery/bookkeeping calls". Returns the full delegation
+ * body when so, otherwise null. The caller is expected to surface the body
+ * verbatim instead of running another synthesis LLM pass. */
+function tryExtractSingleDelegationPassthrough(params: {
+  history: readonly LLMMessage[];
+  bytesByTool: ReadonlyMap<string, number>;
+  toolNames: ReadonlyArray<string>;
+}): SingleDelegationPassthroughCandidate | null {
+  let chosenDelegationTool: string | null = null;
+  let chosenDelegationBytes = 0;
+  let substantialCount = 0;
+  for (const [name, bytes] of params.bytesByTool.entries()) {
+    if (!PASSTHROUGH_DELEGATION_TOOL_NAMES.has(name)) continue;
+    if (bytes < PASSTHROUGH_DELEGATION_MIN_BYTES) continue;
+    substantialCount += 1;
+    if (bytes > chosenDelegationBytes) {
+      chosenDelegationBytes = bytes;
+      chosenDelegationTool = name;
+    }
+  }
+  if (substantialCount !== 1 || !chosenDelegationTool) return null;
+
+  for (const name of params.toolNames) {
+    if (name === chosenDelegationTool) continue;
+    if (PASSTHROUGH_TRIVIAL_TOOL_NAMES.has(name)) continue;
+    // A non-trivial, non-chosen tool means the agent did real aggregation work
+    // beyond a single delegation — passthrough would discard that work.
+    return null;
+  }
+
+  for (let i = params.history.length - 1; i >= 0; i--) {
+    const msg = params.history[i]!;
+    if (msg.role !== "tool") continue;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    if (!content || content.length < PASSTHROUGH_DELEGATION_MIN_BYTES) continue;
+    if (!DELEGATE_TOOL_RESULT_PREFIX_RE.test(content)) continue;
+
+    let inferredOutcome: "success" | "partial" | "failure" = "success";
+    if (/—\s*TASK FAILED|—\s*FAILED/i.test(content)) inferredOutcome = "failure";
+    else if (/—\s*PARTIAL PROGRESS|—\s*PARTIAL/i.test(content)) inferredOutcome = "partial";
+
+    return {
+      output: content,
+      delegationToolName: chosenDelegationTool,
+      bytes: content.length,
+      inferredOutcome,
+    };
+  }
+  return null;
+}
+
+/** Return the FULL body of the most-recent substantial delegation tool result
+ * in `history`, or null. Used by the timeout/interrupt path to surface the
+ * actual delegated specialist's answer instead of a 900-char head snippet. */
+function extractMostRecentSubstantialDelegationBody(
+  history: readonly LLMMessage[],
+  minBytes: number = PASSTHROUGH_DELEGATION_MIN_BYTES,
+): { content: string; bytes: number } | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]!;
+    if (msg.role !== "tool") continue;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    if (!content || content.length < minBytes) continue;
+    if (!DELEGATE_TOOL_RESULT_PREFIX_RE.test(content)) continue;
+    return { content, bytes: content.length };
+  }
+  return null;
+}
+
 function chooseConfiguredSubAgent(candidates: readonly string[]): string | undefined {
   const configuredAgents = getConfig().subAgents ?? {};
   return candidates.find((name) => name in configuredAgents);
@@ -86,6 +202,15 @@ function defaultSourceSensitiveFallbackAgents(agentName: string | undefined): st
   return ["mission_coordinator", "researcher"]
     .filter((candidate) => candidate !== agentName)
     .filter((candidate) => chooseConfiguredSubAgent([candidate]) === candidate);
+}
+
+function buildSourceSensitiveChildTaskTitle(agentName: string | undefined, focus: string | undefined): string {
+  const target = agentName?.trim() || "specialist";
+  const compactFocus = focus?.replace(/\s+/g, " ").trim();
+  const title = compactFocus
+    ? `Source-sensitive ${target} task: ${compactFocus}`
+    : `Source-sensitive ${target} task`;
+  return title.length > 120 ? `${title.slice(0, 117)}...` : title;
 }
 
 type SubAgentRequiredResearchFallbackRoute = {
@@ -113,10 +238,13 @@ function buildSubAgentRequiredResearchFallbackRoute(params: {
   agentName: string;
   allowedAgents?: readonly string[];
   effectiveToolNames?: readonly string[];
+  excludedAgents?: readonly string[];
 }): SubAgentRequiredResearchFallbackRoute | null {
   if (!(params.effectiveToolNames ?? []).includes("delegate_to_agent")) return null;
 
+  const excludedAgents = new Set(params.excludedAgents ?? []);
   const preferredAgents = defaultSourceSensitiveFallbackAgents(params.agentName)
+    .filter((candidate) => !excludedAgents.has(candidate))
     .filter((candidate) => chooseConfiguredAllowedSubAgent([candidate], params.allowedAgents) === candidate);
   const selectedAgent = preferredAgents[0];
   if (!selectedAgent && Array.isArray(params.allowedAgents) && params.allowedAgents.length > 0) {
@@ -131,6 +259,7 @@ function buildSubAgentRequiredResearchFallbackRoute(params: {
       ...(selectedAgent ? { agentName: selectedAgent } : {}),
       ...(fallbackAgents.length > 0 ? { fallbackAgents } : {}),
       task: params.task,
+      taskTitle: buildSourceSensitiveChildTaskTitle(selectedAgent, "fallback after agent discovery no-match"),
     },
     applyCount: { value: 0 },
   };
@@ -147,14 +276,6 @@ function subAgentSearchAgentsReturnedNoMatch(result: ToolResult): boolean {
   return /^No agents matched\b/i.test(result.output.trim());
 }
 
-function subAgentSearchWorkflowsReturnedNoMatch(result: ToolResult): boolean {
-  const workflowMatches = Array.isArray(result.metadata?.["workflowMatches"])
-    ? result.metadata?.["workflowMatches"] as unknown[]
-    : [];
-  if (workflowMatches.length === 0 && /^No workflows matched\b/i.test(result.output.trim())) return true;
-  return /^No workflows matched\b/i.test(result.output.trim());
-}
-
 function enforceSubAgentRequiredResearchFallbackRouteOnToolCall(
   toolCall: { name: string; arguments: Record<string, unknown> },
   route: SubAgentRequiredResearchFallbackRoute,
@@ -164,13 +285,11 @@ function enforceSubAgentRequiredResearchFallbackRouteOnToolCall(
   const discoveryRetryTools = new Set(["search_agents", "list_agents", "search_workflows"]);
   if (!discoveryRetryTools.has(toolCall.name)) return false;
 
-  // Hard cap: only rewrite the FIRST repeated discovery call. After that
-  // the rewrite has been demonstrated not to help (the rewritten delegate
-  // targets the parent's own task and the swarm just returns "already
-  // running"). On subsequent calls, leave the original tool name intact
-  // and let the existing per-tool repeat-call cap surface a structured
-  // refusal that the model can act on without burning another LLM
-  // round-trip on a guaranteed-no-op delegation.
+  // Hard cap: only rewrite the FIRST repeated discovery call. On subsequent
+  // calls, leave the original tool name intact and let the per-tool cap for
+  // search_agents/list_agents/search_workflows surface a structured refusal
+  // that the model can act on without burning another LLM round-trip on a
+  // guaranteed-no-op delegation.
   if (route.applyCount.value >= 1) {
     logAudit("sub_agent_tool_call", {
       agentName,
@@ -222,7 +341,12 @@ function enforceSourceSensitivePreEvidenceDelegation(
   if (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate" || toolCall.name === "create_ephemeral_agent") {
     const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
     const focus = deriveSourceSensitiveDelegationFocus(originalTask, parentTask);
-    nextArgs = withDefaultSourceSensitiveFallbackAgents({ ...originalArgs, task: buildCanonicalSourceSensitiveDelegationTask(parentTask, undefined, focus) });
+    const delegatedAgentName = typeof originalArgs["agentName"] === "string" ? String(originalArgs["agentName"]).trim() : undefined;
+    nextArgs = withDefaultSourceSensitiveFallbackAgents({
+      ...originalArgs,
+      task: buildCanonicalSourceSensitiveDelegationTask(parentTask, undefined, focus),
+      taskTitle: buildSourceSensitiveChildTaskTitle(delegatedAgentName, focus),
+    });
     delete nextArgs["context"];
   } else if (toolCall.name === "parallel_delegate") {
     const rawTasks = Array.isArray(originalArgs["tasks"])
@@ -383,6 +507,8 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   web_search: 6,
   web_fetch: 12,
   search_workflows: 2,
+  search_agents: 2,
+  list_agents: 2,
   run_workflow: 2,
   computer_click: 6,
   computer_type: 4,
@@ -966,11 +1092,17 @@ function formatSwarmProgressForInterruption(state: SwarmState | undefined): stri
     const latestAttempt = task.attempts[task.attempts.length - 1];
     const attemptSummary = latestAttempt?.summary?.trim();
     const summary = attemptSummary || task.error || task.output;
+    if (task.status !== "completed" && task.status !== "partial") return "";
+    if (!summary || looksLikeInterruptedEvidenceBoilerplate(summary)) return "";
     const via = task.selectedAgent ? ` via ${task.selectedAgent}` : "";
     return `- ${task.id} [${task.status}] ${task.title}${via}${summary ? ` | ${summary.replace(/\s+/g, " ").slice(0, 220)}` : ""}`;
-  });
+  }).filter(Boolean);
 
   return lines.join("\n");
+}
+
+function stripToolResultLabel(value: string): string {
+  return value.replace(/^(?:[a-z][a-z0-9_]*|artifact):\s+/, "").trim();
 }
 
 function stripInterruptedProgressPrefix(value: string): string {
@@ -984,6 +1116,9 @@ function stripInterruptedProgressPrefix(value: string): string {
 function looksLikeInterruptedEvidenceBoilerplate(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return true;
+  const withoutToolLabel = stripToolResultLabel(trimmed);
+  if (withoutToolLabel && withoutToolLabel !== trimmed && looksLikeInterruptedEvidenceBoilerplate(withoutToolLabel)) return true;
+  if (looksLikeHallucinatedTruncationClaim(trimmed)) return true;
   if (/Partial progress before interruption:/i.test(trimmed)) return true;
   if (/^Recovered evidence snippets from completed tools:/i.test(trimmed)) return true;
   if (/^Sub-agent '[^']+'/i.test(trimmed)) return true;
@@ -1007,12 +1142,19 @@ function looksLikeInterruptedEvidenceBoilerplate(value: string): boolean {
   return false;
 }
 
+function looksLikeHallucinatedTruncationClaim(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b.{0,140}\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b/i.test(trimmed)
+    || /\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b.{0,140}\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b/i.test(trimmed);
+}
+
 function collectInterruptedEvidenceSnippets(text: string): string[] {
   const snippets: string[] = [];
   const seen = new Set<string>();
 
   const pushSnippet = (candidate: string) => {
-    const normalized = stripInterruptedProgressPrefix(candidate)
+    const normalized = stripToolResultLabel(stripInterruptedProgressPrefix(candidate))
       .replace(/^IMPORTANT:\s.*$/gim, "")
       .replace(/\s+/g, " ")
       .trim();
@@ -1101,21 +1243,18 @@ function buildInterruptedSubAgentOutput(params: {
   iterations: number;
   artifacts: Record<string, unknown>[];
   evidenceSnippets?: string[];
+  /** Most-recent substantial delegation body from history, surfaced verbatim
+   * (capped at 16 KB) instead of via 900-char snippets. Used when the agent
+   * collected a substantial delegated answer but timed out before emitting
+   * its own synthesis. Without this, the parent only saw the 900-char head
+   * and the rest of the delegated specialist's work was discarded. */
+  primaryDelegationBody?: { content: string; bytes: number } | null;
 }): string {
   const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
   const progressLines: string[] = [];
 
   if (swarmSummary) {
     progressLines.push(swarmSummary);
-  }
-
-  if (params.toolCount > 0) {
-    const uniqueToolNames = [...new Set(params.toolNames)].slice(0, 8);
-    progressLines.push(`- Tool calls executed: ${params.toolCount}${uniqueToolNames.length > 0 ? ` (${uniqueToolNames.join(", ")})` : ""}`);
-  }
-
-  if (params.iterations > 0) {
-    progressLines.push(`- Iterations completed: ${params.iterations}`);
   }
 
   if (params.artifacts.length > 0) {
@@ -1131,7 +1270,33 @@ function buildInterruptedSubAgentOutput(params: {
     progressLines.push(`- Artifacts collected: ${params.artifacts.length}${artifactHints.length > 0 ? ` (${artifactHints.join(", ")})` : ""}`);
   }
 
-  const evidenceSnippets = (params.evidenceSnippets ?? []).filter(Boolean).slice(-4);
+  // Primary delegation body: when a substantial delegated specialist answer
+  // exists in history, surface it BEFORE the snippet section so the parent
+  // sees the actual content instead of only a 900-char head.
+  if (params.primaryDelegationBody && params.primaryDelegationBody.content.length >= PASSTHROUGH_DELEGATION_MIN_BYTES) {
+    const body = params.primaryDelegationBody.content.length > 16_000
+      ? params.primaryDelegationBody.content.slice(0, 16_000) + "\n\n[... truncated for evidence relay; full content available via the delegation tool result ...]"
+      : params.primaryDelegationBody.content;
+    progressLines.push("Recovered delegated specialist body (full):");
+    progressLines.push(body);
+  }
+
+  const snippetCap = params.primaryDelegationBody ? 2 : 4;
+  const evidenceSnippets = [
+    ...(params.evidenceSnippets ?? []),
+    ...formatArtifactEvidenceSnippets(params.artifacts),
+  ]
+    .map((snippet) => stripToolResultLabel(snippet).replace(/\s+/g, " ").trim())
+    .filter((snippet) => snippet.length > 0)
+    .filter((snippet) => !looksLikeInterruptedEvidenceBoilerplate(snippet) && !looksLikeProviderErrorEcho(snippet))
+    // Drop snippets that are merely a head of the primary delegation body —
+    // they would be duplicate information.
+    .filter((snippet) => {
+      if (!params.primaryDelegationBody) return true;
+      const head = params.primaryDelegationBody.content.slice(0, 200).replace(/\s+/g, " ").trim();
+      return !snippet.includes(head.slice(0, 80));
+    })
+    .slice(-snippetCap);
   if (evidenceSnippets.length > 0) {
     progressLines.push("Recovered evidence snippets from completed tools:");
     for (const snippet of evidenceSnippets) {
@@ -1140,7 +1305,7 @@ function buildInterruptedSubAgentOutput(params: {
   }
 
   if (progressLines.length === 0) {
-    return `Sub-agent '${params.agentName}' ${params.reason}`;
+    return `Sub-agent '${params.agentName}' ${params.reason} before producing usable topic-related output.`;
   }
 
   return `Sub-agent '${params.agentName}' ${params.reason}\nPartial progress before interruption:\n${progressLines.join("\n")}`;
@@ -1154,7 +1319,11 @@ function resolveInterruptedEvidenceSnippets(params: {
   maxSnippets?: number;
 }): string[] {
   const maxSnippets = Math.max(1, params.maxSnippets ?? 4);
-  const bufferedSnippets = (params.recentEvidenceSnippets ?? []).filter(Boolean).slice(-maxSnippets);
+  const bufferedSnippets = (params.recentEvidenceSnippets ?? [])
+    .map((snippet) => stripToolResultLabel(snippet).replace(/\s+/g, " ").trim())
+    .filter((snippet) => snippet.length > 0)
+    .filter((snippet) => !looksLikeInterruptedEvidenceBoilerplate(snippet) && !looksLikeProviderErrorEcho(snippet))
+    .slice(-maxSnippets);
   if (bufferedSnippets.length > 0) {
     return [...bufferedSnippets];
   }
@@ -1169,7 +1338,7 @@ function resolveInterruptedEvidenceSnippets(params: {
     const rawContent = typeof message.content === "string" ? message.content.trim() : "";
     if (!rawContent) continue;
     const extracted = extractUsefulInterruptedToolEvidence(rawContent) ?? rawContent;
-    const normalized = extracted
+    const normalized = stripToolResultLabel(extracted)
       .replace(/\n\n\[Note: This is a cached[\s\S]*$/i, "")
       .replace(/\s+/g, " ")
       .trim();
@@ -1259,6 +1428,10 @@ function maybePreferWorkflowOutput(result: string, workflowOutput: string | null
     return result;
   }
 
+  if (looksLikeHallucinatedTruncationClaim(normalizedWorkflowOutput) && !looksLikeHallucinatedTruncationClaim(normalizedResult)) {
+    return result;
+  }
+
   const workflowHeader = normalizedWorkflowOutput.split(/\r?\n/, 1)[0]?.trim();
   if (workflowHeader && normalizedResult.includes(workflowHeader)) {
     return result;
@@ -1273,7 +1446,7 @@ function hasDeliverableArtifact(artifacts: Record<string, unknown>[]): boolean {
     const previewMode = typeof artifact["previewMode"] === "string" ? artifact["previewMode"] : "";
     const contentType = typeof artifact["contentType"] === "string" ? artifact["contentType"] : "";
 
-    if (["generate_document", "generate_pdf", "generate_chart_html", "generate_mermaid_diagram", "export_workspace_artifact"].includes(sourceTool)) {
+    if (["generate_document", "generate_pdf", "generate_chart_html", "generate_mermaid_diagram", "export_workspace_artifact", "write_file"].includes(sourceTool)) {
       return true;
     }
 
@@ -1283,6 +1456,26 @@ function hasDeliverableArtifact(artifacts: Record<string, unknown>[]): boolean {
       || contentType.startsWith("application/pdf")
       || contentType.startsWith("application/json");
   });
+}
+
+function formatArtifactEvidenceSnippets(artifacts: Record<string, unknown>[]): string[] {
+  return artifacts
+    .map((artifact) => {
+      const outputPath = typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "";
+      const filename = typeof artifact["filename"] === "string" ? artifact["filename"] : "";
+      const externalUrl = typeof artifact["externalUrl"] === "string" ? artifact["externalUrl"] : "";
+      const sourceTool = typeof artifact["sourceTool"] === "string" ? artifact["sourceTool"] : "artifact tool";
+      const size = typeof artifact["size"] === "number" ? ` (${artifact["size"]} chars)` : "";
+      const textPreview = typeof artifact["textPreview"] === "string"
+        ? artifact["textPreview"].replace(/\s+/g, " ").trim()
+        : "";
+      const location = outputPath || filename || externalUrl;
+      if (!location) return "";
+      const preview = textPreview ? ` Preview: ${textPreview.slice(0, 900)}` : "";
+      return `Saved artifact ${location}${size} via ${sourceTool}.${preview}`;
+    })
+    .filter(Boolean)
+    .slice(-4);
 }
 
 function classifyInterruptedOutcome(params: {
@@ -1344,6 +1537,14 @@ function summarizeMailBody(text: string, maxLength = 220): string {
 export interface SubAgentRunOptions {
   agentName: string;
   task: string;
+  /** Optional human-readable title for this delegation, set by the caller via
+   * delegate_to_agent's `taskTitle` argument or by the discovery-fallback
+   * rewriter. The runner uses it to detect "this task was routed via the
+   * no-specialist-match fallback path", which short-circuits its own
+   * discovery passes (Fix 4) — without this signal, every coordinator that
+   * receives a fallback-routed task wastes 2 LLM rounds redoing the same
+   * search_agents/search_workflows call the parent already failed on. */
+  taskTitle?: string;
   context?: string;
   parentSessionId: string;
   workspacePath: string;
@@ -1493,10 +1694,37 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
+  // Fix 4: detect when this task was routed via the no-specialist-match
+  // discovery fallback. The taskTitle marker is set by both the runtime-side
+  // rewriter (after main-assistant search_agents returned no match) and the
+  // sub-agent-side rewriter (after a sub-agent's own discovery returned no
+  // match). When set, the swarm has already attempted discovery and found
+  // nothing — running it again here would waste another LLM round on a
+  // guaranteed-no-match call.
+  const cameViaDiscoveryFallback = typeof opts.taskTitle === "string"
+    && /fallback after agent discovery no-match/i.test(opts.taskTitle);
   // I13: Mutable so the cascade-timeout fallback can inject web_search +
   // web_fetch when all delegations have failed and a coordinator agent
   // would otherwise be left with no working capability.
   let effectiveToolNames = getEffectiveToolNames(opts.agentName, agentCfg.tools, sanitizedTask);
+  if (cameViaDiscoveryFallback && effectiveToolNames) {
+    const beforeCount = effectiveToolNames.length;
+    const discoveryStripSet = new Set(["search_agents", "search_workflows", "list_agents"]);
+    effectiveToolNames = effectiveToolNames.filter((name) => !discoveryStripSet.has(name));
+    if (effectiveToolNames.length < beforeCount) {
+      logAudit(
+        "sub_agent_started",
+        {
+          agentName: opts.agentName,
+          stage: "discovery_fallback_strip",
+          strippedTools: ["search_agents", "search_workflows", "list_agents"]
+            .filter((name) => !effectiveToolNames!.includes(name)),
+          taskTitle: opts.taskTitle,
+        },
+        { sessionId: opts.parentSessionId, severity: "info" },
+      );
+    }
+  }
   let turnTimeoutReached = false;
   const timeoutHandle = turnTimeoutMs
     ? setTimeout(() => { turnTimeoutReached = true; }, turnTimeoutMs)
@@ -1655,6 +1883,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const agentDiscoveryGuidance = isOrchestrationCapableRun(effectiveToolNames)
       ? buildSubAgentAgentDiscoveryGuidance(opts.agentName, opts.allowedAgents)
       : "";
+    // Fix 4: discovery-fallback notice. When this run was routed via the
+    // no-specialist-match fallback, tell the model that discovery already
+    // failed in the parent context, so it should skip search_agents /
+    // search_workflows / list_agents (which we have also stripped from its
+    // tool set) and proceed directly to delegation or its own work tools.
+    const discoveryFallbackNotice = cameViaDiscoveryFallback
+      ? "[DISCOVERY FALLBACK CONTEXT] This task was routed to you because the parent's "
+        + "search_agents / search_workflows lookups returned no specialist match. "
+        + "Discovery has already been attempted — do NOT call search_agents, search_workflows, "
+        + "or list_agents (these tools are unavailable). Proceed directly with delegate_to_agent "
+        + "(use autonomous routing by omitting agentName, or pick from the explicit fallback list "
+        + "if one is offered) or with your own evidence-gathering tools (web_search, web_fetch, etc.)."
+      : "";
     // E19 graceful-degradation ladder: short velocity-warning nudge injected
     // when the warden has flagged this session with an imminent storm/flood
     // alert. Tells the model to narrow scope and finish quickly instead of
@@ -1666,8 +1907,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         + "or parallel tool fan-out unless strictly required to complete the task."
       : "";
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent. E20: rerank by semantic
     // relevance to the current task so the model sees the most relevant
@@ -1902,6 +2143,86 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     };
 
+    /** Single-delegation passthrough — see PASSTHROUGH_DELEGATION_MIN_BYTES.
+     * If this agent's only substantive tool work was one large delegation,
+     * return that delegation's body as the agent's own result instead of
+     * running another LLM synthesis pass on top of an answer that is already
+     * the answer. Returns null when the condition does not apply. */
+    const tryReturnSingleDelegationPassthrough = (
+      reasonTag: string,
+    ): SubAgentRunResult | null => {
+      if (signal?.aborted) return null;
+      const candidate = tryExtractSingleDelegationPassthrough({
+        history,
+        bytesByTool,
+        toolNames: [...toolNames],
+      });
+      if (!candidate) return null;
+
+      const result = candidate.output;
+      const stats = buildStats("completed", candidate.inferredOutcome);
+
+      recordOutcome({
+        ts: new Date().toISOString(),
+        agent: opts.agentName,
+        task: opts.task.slice(0, 200),
+        outcome: candidate.inferredOutcome,
+        iterations,
+        totalTokens: usage.totalTokens,
+        durationMs: Date.now() - runStartedAt,
+        timeoutMs: turnTimeoutMs,
+      });
+      logAudit(
+        "sub_agent_synthesis_forced",
+        {
+          agentName: opts.agentName,
+          reason: "single_delegation_passthrough",
+          passthroughTrigger: reasonTag,
+          delegationToolName: candidate.delegationToolName,
+          delegationBytes: candidate.bytes,
+          inferredOutcome: candidate.inferredOutcome,
+          iterations,
+        },
+        { sessionId: subSessionId, severity: "info" },
+      );
+      logSubAgentCompletionAudit(
+        stats,
+        result,
+        {
+          singleDelegationPassthrough: true,
+          passthroughTrigger: reasonTag,
+          delegationToolName: candidate.delegationToolName,
+          delegationBytes: candidate.bytes,
+        },
+        candidate.inferredOutcome === "failure" ? "warn" : "info",
+      );
+      log.info(
+        {
+          agentName: opts.agentName,
+          delegationToolName: candidate.delegationToolName,
+          delegationBytes: candidate.bytes,
+          reasonTag,
+          inferredOutcome: candidate.inferredOutcome,
+        },
+        "Single-delegation passthrough — returning delegated body verbatim",
+      );
+      opts.onProgress?.({
+        agentName: opts.agentName,
+        kind: "completed",
+        iteration: iterations,
+        summary: `Returned single-delegation result directly from ${opts.agentName}.`,
+      });
+      return withArtifacts({ output: result, stats });
+    };
+
+    /** Closure shorthand for buildInterruptedSubAgentOutput callers in the
+     * run function — pre-fills `primaryDelegationBody` from history so the
+     * full delegated specialist's body is surfaced verbatim instead of being
+     * lost behind 900-char snippets. Returns null when no substantial body
+     * was collected, which lets callers preserve their existing snippet flow. */
+    const currentPrimaryDelegationBody = (): { content: string; bytes: number } | null =>
+      extractMostRecentSubstantialDelegationBody(history);
+
     const rescueSanitizedEmptyResult = async (rawResult: string): Promise<string> => {
       const visibleResult = stripHallucinatedToolTags(rawResult);
       if (visibleResult || toolCount === 0 || signal?.aborted) {
@@ -1972,6 +2293,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         iterations,
         artifacts,
         evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+        primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
       });
       log.warn(
         { agentName: opts.agentName, toolCount, successfulToolCount, iterations, planningOnlyResponse },
@@ -1980,10 +2302,55 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       return { result: recovered, forcedOutcome: "partial" };
     };
 
+    const recoverHallucinatedTruncationAfterSubstantiveWork = (rawResult: string): { result: string; forcedOutcome: SubAgentOutcome | null } => {
+      if (!looksLikeHallucinatedTruncationClaim(rawResult)) {
+        return { result: rawResult, forcedOutcome: null };
+      }
+
+      const usableBufferedSnippets = resolveInterruptedEvidenceSnippets({
+        recentEvidenceSnippets,
+        history,
+        maxSnippets: 6,
+      }).filter((snippet) => !looksLikeHallucinatedTruncationClaim(snippet));
+      const usableHistorySnippets = usableBufferedSnippets.length > 0
+        ? usableBufferedSnippets
+        : resolveInterruptedEvidenceSnippets({ history, maxSnippets: 6 })
+            .filter((snippet) => !looksLikeHallucinatedTruncationClaim(snippet));
+
+      if (usableHistorySnippets.length === 0) {
+        return { result: rawResult, forcedOutcome: null };
+      }
+
+      const recovered = buildInterruptedSubAgentOutput({
+        agentName: opts.agentName,
+        reason: "produced an incomplete synthesis after substantive work.",
+        swarmState: toolContext.swarmState,
+        toolNames,
+        toolCount,
+        iterations,
+        artifacts,
+        evidenceSnippets: usableHistorySnippets,
+        primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+      });
+      log.warn(
+        { agentName: opts.agentName, resultLength: rawResult.length, recoveredSnippets: usableHistorySnippets.length },
+        "Sub-agent claimed collected evidence was truncated — returning recovered tool evidence instead",
+      );
+      return { result: recovered, forcedOutcome: "partial" };
+    };
+
     const attemptTimeoutSynthesis = async (): Promise<SubAgentRunResult | null> => {
       if (!turnTimeoutMs || toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
         return null;
       }
+
+      // Single-delegation passthrough first. If the only substantive work was
+      // one substantial delegation, the synthesis pass is wasted effort — the
+      // delegated specialist's body IS the answer. Returning it directly
+      // avoids burning the grace window on a synthesis that often produces a
+      // truncated head of the same content anyway.
+      const passthrough = tryReturnSingleDelegationPassthrough("timeout_synthesis");
+      if (passthrough) return passthrough;
 
       // The grace window has to fit at least one full LLM inference on the
       // slowest provider the runtime is actually used with. The previous
@@ -2036,6 +2403,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const recovered = recoverNoResponseAfterSubstantiveWork(result);
         result = recovered.result;
         result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+        const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
+        result = truncationRecovered.result;
         if (result === "Sub-agent produced no final response.") {
           return null;
         }
@@ -2051,6 +2420,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
+          ?? truncationRecovered.forcedOutcome
           ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
             ? "partial"
             : "success");
@@ -2109,6 +2479,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
         return null;
       }
+
+      // Single-delegation passthrough — the soft-deadline synthesis would just
+      // re-wrap one already-final delegation result. Skip the LLM call when
+      // we can return the body directly.
+      const passthrough = tryReturnSingleDelegationPassthrough("soft_deadline_synthesis");
+      if (passthrough) return passthrough;
 
       const synthAbort = new AbortController();
       const synthTimer = setTimeout(() => synthAbort.abort(), budgetMs);
@@ -2526,6 +2902,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           iterations,
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+          primaryDelegationBody: currentPrimaryDelegationBody(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
@@ -2561,6 +2938,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           iterations,
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+          primaryDelegationBody: currentPrimaryDelegationBody(),
         });
         const stats = buildStats("cancelled", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -2727,6 +3105,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             iterations,
             artifacts,
             evidenceSnippets: recentEvidenceSnippets,
+            primaryDelegationBody: currentPrimaryDelegationBody(),
           });
           const stats = buildStats("cancelled", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -2762,6 +3141,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             iterations,
             artifacts,
             evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+            primaryDelegationBody: currentPrimaryDelegationBody(),
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, {
@@ -2822,6 +3202,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           iterations,
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+          primaryDelegationBody: currentPrimaryDelegationBody(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
@@ -2877,6 +3258,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const recovered = recoverNoResponseAfterSubstantiveWork(result);
         result = recovered.result;
         result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+        const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
+        result = truncationRecovered.result;
 
         // Scan for secrets before returning to parent session
         const outputScan = scanOutput(result);
@@ -2890,6 +3273,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
+          ?? truncationRecovered.forcedOutcome
           ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
             ? "partial"
             : "success");
@@ -3207,14 +3591,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
         if (sourceSensitiveTask && !requiredResearchFallbackRoute && result.success) {
-          const discoveryNoMatch = (tc.name === "search_agents" && subAgentSearchAgentsReturnedNoMatch(result))
-            || (tc.name === "search_workflows" && subAgentSearchWorkflowsReturnedNoMatch(result));
+          const discoveryNoMatch = tc.name === "search_agents" && subAgentSearchAgentsReturnedNoMatch(result);
           if (discoveryNoMatch) {
+            const trippedAgents = Array.isArray(result.metadata?.["trippedAgents"])
+              ? result.metadata?.["trippedAgents"].map(String).filter(Boolean)
+              : [];
             requiredResearchFallbackRoute = buildSubAgentRequiredResearchFallbackRoute({
               task: sanitizedTask,
               agentName: opts.agentName,
               allowedAgents: opts.allowedAgents,
               effectiveToolNames,
+              excludedAgents: trippedAgents,
             });
           }
         }
@@ -3576,6 +3963,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && toolResults.length > 0
         && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
       ) {
+        // Single-delegation passthrough — short-circuit before stripping. When
+        // the only substantive evidence came from one large delegation, the
+        // synthesis pass that strip+nudge forces is wasted work: we already
+        // have a complete final answer in tool history. Returning it directly
+        // saves the rest of the time budget and prevents the "coordinator
+        // wraps a complete sub-agent answer for 8 minutes then times out"
+        // failure mode from destroying real evidence.
+        const passthrough = tryReturnSingleDelegationPassthrough("evidence_strip");
+        if (passthrough) return passthrough;
+
         sufficiencyToolsStripped = true;
         const stripSet = new Set<string>(EVIDENCE_GATHERING_TOOL_NAMES);
         // After enough evidence is gathered, repeated `share_finding`
@@ -3615,6 +4012,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           },
           { sessionId: subSessionId, severity: "info" },
         );
+        // Fix 5: bounded synthesis immediately after strip. Without this, the
+        // next iteration's LLM call runs unbounded; on slow local models the
+        // synthesis pass routinely hangs for 5–10 minutes (hitting the hard
+        // turn timeout with no synthesis emitted), which is exactly the
+        // failure mode that destroyed the original recording-device turn.
+        // Reserve a synthesis window of min(remaining-budget, 90s, 25% of
+        // turnTimeoutMs) and attempt the synthesis directly. If it produces
+        // a usable result, return it. If not, fall through and let the next
+        // iteration try with whatever budget remains.
+        if (turnTimeoutMs && !signal?.aborted) {
+          history.push(...toolResults);
+          toolResults.length = 0;
+          const elapsed = Date.now() - runStartedAt;
+          const remaining = Math.max(0, turnTimeoutMs - elapsed);
+          if (remaining > 5_000) {
+            const synthBudget = Math.min(
+              remaining - 2_000,
+              90_000,
+              Math.round(turnTimeoutMs * 0.25),
+            );
+            if (synthBudget > 5_000) {
+              const synthesized = await attemptPreDeadlineSynthesis(synthBudget);
+              if (synthesized) return synthesized;
+            }
+          }
+        }
       } else if (
         !sufficiencySynthesisNudged
         && !cascadeSynthesisForced
@@ -3700,6 +4123,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // LLM with NO tools so it cannot make more tool calls and must produce a
     // plain-text answer from whatever it has gathered so far.
     if (!signal?.aborted) {
+      // Single-delegation passthrough — when the only substantive evidence is
+      // one large delegation, the post-loop synthesis pass is wasted work.
+      // Return the delegation body directly.
+      const passthrough = tryReturnSingleDelegationPassthrough("max_iterations_synthesis");
+      if (passthrough) return passthrough;
       try {
         const synthMessages: LLMMessage[] = [
           {
@@ -3760,6 +4188,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
           result = await rescueSanitizedEmptyResult(result);
           result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
+          const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
+          result = truncationRecovered.result;
 
           const outputScan = scanOutput(result);
           if (!outputScan.safe && outputScan.redacted) {
@@ -3831,6 +4261,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     });
 
     const completedFromArtifact = hasDeliverableArtifact(artifacts);
+    // When synthesis-after-max-iterations didn't produce a real text answer
+    // (model kept emitting tool calls or threw) we used to return a 112-char
+    // boilerplate string and discard ~10 KB of useful evidence the agent had
+    // already gathered. Route through buildInterruptedSubAgentOutput so the
+    // recovered tool-result snippets propagate up to the parent agent under
+    // the "Recovered evidence snippets from completed tools:" header that the
+    // runtime knows how to extract.
+    const recoveredEvidenceSnippets = resolveInterruptedEvidenceSnippets({
+      recentEvidenceSnippets,
+      history,
+      maxSnippets: 6,
+    });
+    const recoveredUsefulEvidence = recoveredEvidenceSnippets.length > 0;
     const maxIterationsOutput = workflowPassthroughOutput
       ? maybePreferWorkflowOutput(workflowPassthroughOutput, workflowPassthroughOutput, toolNames)
       : completedFromArtifact
@@ -3839,10 +4282,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           maxIterations,
           artifacts,
         })
-      : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`;
+      : recoveredEvidenceSnippets.length > 0
+      ? buildInterruptedSubAgentOutput({
+          agentName: opts.agentName,
+          reason: `reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
+          swarmState: toolContext.swarmState,
+          toolNames,
+          toolCount,
+          iterations,
+          artifacts,
+          evidenceSnippets: recoveredEvidenceSnippets,
+          primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+        })
+      : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}) before producing usable topic-related output.`;
     const maxIterationsStats = completedFromArtifact
       ? buildStats("completed", "success")
-      : buildStats("max_iterations", "partial");
+      : buildStats("max_iterations", recoveredUsefulEvidence || Boolean(workflowPassthroughOutput) ? "partial" : "failure");
     logSubAgentCompletionAudit(maxIterationsStats, maxIterationsOutput, {
       synthesizedAfterMaxIterations: false,
       completedFromArtifact,

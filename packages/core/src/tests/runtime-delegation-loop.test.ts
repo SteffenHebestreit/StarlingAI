@@ -169,6 +169,12 @@ function createTextStream(text: string) {
   })();
 }
 
+function createThrowingStream(message: string) {
+  return (async function* () {
+    throw new Error(message);
+  })();
+}
+
 function createLengthLimitedTextStream(text: string) {
   return (async function* () {
     yield { type: "text_delta", content: text };
@@ -982,6 +988,408 @@ describe("runtime delegated-loop regressions", () => {
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).not.toHaveBeenCalled();
+  });
+
+  it("uses workflow-execution evidence directly when the model tries another delegation after synthesis is required", async () => {
+    // Regression: when run_workflow returns a substantive dossier and the
+    // model then emits another tool call past [SYNTHESIS REQUIRED], the
+    // terminal-evidence backstop must prefer the workflow dossier over the
+    // suppressed preamble text. Previously the backstop only matched
+    // delegate_to_agent / parallel_delegate / run_task_graph results, so
+    // workflow output was treated as "no evidence available" and the user
+    // received a 222-char "let me research…" preamble instead of the 14k
+    // dossier the workflow had already produced.
+    const workflowDossier = [
+      "# Portable ESP32 audio recorder dossier",
+      "",
+      ...Array.from({ length: 16 }, (_, index) => `- Component decision ${index + 1}: verified part, datasheet URL, and rationale captured for slice ${index + 1}.`),
+      "",
+      "Final recommended bill of materials and pin layout follow above.",
+    ].join("\n");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("wf_run_1", "run_workflow", {
+          name: "deep_research",
+          workflowType: "scene",
+          params: { topic: "Portable ESP32 audio recorder" },
+        });
+      }
+
+      return createDelegateToolCallStream("post_synth_delegate", {
+        agentName: "mission_coordinator",
+        task: "Re-run the same research again.",
+      });
+    });
+
+    const workflowExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Workflow deep_research [scene] completed. Executed steps: 1/1.",
+        "IMPORTANT: Treat this as executed workflow output, not a plan.",
+        "Observed evidence:",
+        workflowDossier,
+      ].join("\n"),
+      metadata: {
+        workflowName: "deep_research",
+        workflowType: "scene",
+        blocked: false,
+        toolCallsExecuted: 2,
+        stepCount: 1,
+      },
+    }));
+
+    registerTool({
+      name: "run_workflow",
+      description: "Run a reusable workflow.",
+      parameters: { type: "object", properties: {} },
+      execute: workflowExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    try {
+      const result = await runTurn({
+        session,
+        userMessage: "Build me a portable ESP32 recorder dossier with components and a layout.",
+      });
+
+      expect(result.blocked).toBe(false);
+      expect(result.response).toContain("Portable ESP32 audio recorder dossier");
+      expect(result.response).toContain("Component decision 16");
+      expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+      expect(workflowExecuteMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unregisterTool("run_workflow");
+    }
+  });
+
+  it("persists recovered delegated evidence when the parent LLM fails after tool work", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate-timeout-artifact", {
+          agentName: "mission_coordinator",
+          task: "Research and write the portable recorder deliverable.",
+        });
+      }
+      return createThrowingStream("context window overflow after delegation");
+    });
+
+    const recoveredArtifactEvidence = [
+      "Sub-agent 'mission_coordinator' timed out after 480000ms after finishing the current operation",
+      "Partial progress before interruption:",
+      "- Tool calls executed: 7 (search_agents, delegate_to_agent, search_workflows, write_file)",
+      "- Iterations completed: 4",
+      "- Artifacts collected: 1 (workspace/esp32-mic-array-project/README.md)",
+      "Recovered evidence snippets from completed tools:",
+      "- Saved artifact workspace/esp32-mic-array-project/README.md (486 chars) via write_file. Preview: # ESP32 5-Mikrofon Array - Aufnahmegeraet fuer OTA-Transkription Projektuebersicht: sehr flaches batteriebetriebenes Aufnahmegeraet mit 5 MEMS-Mikrofonen.",
+    ].join("\n");
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+        "Observed evidence:",
+        recoveredArtifactEvidence,
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "ich brauche source-backed product suggestions and a layout for a portable ESP32 recorder",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.performance?.finishReason).toBe("llm_error_evidence_backstop");
+    expect(result.response).toContain("Die bisher belastbare Evidenz aus diesem Lauf");
+    expect(result.response).toContain("workspace/esp32-mic-array-project/README.md");
+    expect(result.response).toContain("5-Mikrofon Array");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).not.toHaveBeenCalled();
+
+    const transcript = session.toTranscript();
+    expect(transcript.at(-1)?.role).toBe("assistant");
+    expect(transcript.at(-1)?.content).toContain("workspace/esp32-mic-array-project/README.md");
+  });
+
+  it("reformats the raw shared-facts dump into a readable answer when synthesis is bypassed with shared-facts evidence", async () => {
+    // Regression: when a delegation timed out and only auto-shared findings
+    // (e.g. multiple `auto_researcher_web_search_xxx` shared facts) survive,
+    // the bypass-with-evidence path used to surface the raw bullet dump
+    // verbatim — `- auto_researcher_web_search_<hash>: [researcher/web_search]
+    // ...` lines truncated mid-word at "...". The user saw what looked like
+    // debug output instead of an answer. The runtime now strips the
+    // `auto_xxx:` keys and the `[agent/tool]` tags, finishes truncated text
+    // at sentence/word boundaries, and adds a clear preamble explaining the
+    // research was interrupted.
+    const sessionId = "sess-shared-facts-readability-regression";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact, resetSharedMemoryForTests } = await import("../swarm/memory.js");
+    await resetSharedMemoryForTests();
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    // Pre-populate the parent session's shared facts the way the auto-share
+    // mechanism would after a sub-sub-agent collected web_search evidence.
+    // The follow-up partial-timeout delegation surfaces no usable inline
+    // evidence, so the runtime falls back to these shared facts.
+    await writeSharedFact(
+      sessionId,
+      "auto_researcher_web_search_aaa",
+      "[researcher/web_search] **Web Search Results for:** \"ESP32-S3 I2S PDM microphone input\" (via searxng) **integration of multiple microphones in same ESP32-S3 I2S interface** https://electronics.stackexchange.com/questions/698757 The ESP32 supports 8 channels as four data wires sending 2 I2S channels each. **I2S Audio Interface of ESP32** https://circuitlabs.net/i2s-audio-interface-of-esp32/ Learn to use the I2S interface for digital audio input and output. **ESP32 + multiple i2S MEMS microphones** https://forum.arduino.cc/t/esp32-multiple-i2s-mems-microphones/623438 Connect one I/O pin for each INMP441 to the CHIPEN pin and...",
+    );
+    await writeSharedFact(
+      sessionId,
+      "auto_researcher_web_search_bbb",
+      "[researcher/web_search] **Web Search Results for:** \"microphone array beamforming\" (via searxng) **Design of a ceiling-microphone array for speech applications** https://www.ikt.uni-hannover.de/fileadmin/ikt/D_Forschung/D_Publikationen/DAGA2017_Mortsiefer.pdf A microphone array increases the speech intelligibility in challenging acoustic situations by creating a highly directive pick-up pattern that captures...",
+    );
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("interrupted_research", {
+          agentName: "mission_coordinator",
+          task: "Research a portable hardware project.",
+        });
+      }
+      return createDelegateToolCallStream("post_synth_search", {
+        agentName: "researcher",
+        task: "Look it up again.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+        "IMPORTANT: The specialist timed out.",
+        "Observed evidence:",
+        "Task is already running via mission_coordinator.",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    try {
+      const result = await freshRunTurn({
+        session,
+        userMessage: "ich möchte ein sehr portables, batterie powered aufnahmegerät bauen mit einem ESP32 und einem array of 5 microphones. what improvements would you add to have the best quality for transcription",
+      });
+
+      expect(result.blocked).toBe(false);
+      // The user-facing message must NOT contain raw shared-fact keys or the
+      // `[agent/tool]` provenance tag — those are debug artifacts.
+      expect(result.response).not.toMatch(/auto_researcher_web_search_/);
+      expect(result.response).not.toContain("[researcher/web_search]");
+      // It MUST contain the actual research evidence so the user sees value.
+      expect(result.response).toContain("ESP32");
+      expect(result.response).toContain("microphone array");
+      // And it must be wrapped with a clear preamble explaining the situation.
+      expect(result.response).toMatch(/Recherche.*unterbrochen|Dossier/i);
+      expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    } finally {
+      await resetSharedMemoryForTests();
+    }
+  });
+
+  it("reformats a coordinator-baked shared-facts dump (read_shared_facts shape) into a readable answer", async () => {
+    // Regression: when a coordinator's final synthesis times out at the LLM
+    // provider after collecting shared findings, its partial-progress output
+    // bakes the raw `read_shared_facts` tool result into the evidence
+    // snippet. The delegation tool result that reaches the main assistant
+    // then contains `- read_shared_facts: ## Shared Session Facts (N)
+    // **auto_xxx**: <value> **auto_yyy**: <value> ...` on a single flattened
+    // line. The previous formatter only matched `- auto_xxx:` shape, so this
+    // shape went straight to the user as debug output.
+    const sessionId = "sess-coordinator-baked-shared-facts-regression";
+    const {
+      AgentSession: FreshAgentSession,
+      runTurn: freshRunTurn,
+      registerTool: freshRegisterTool,
+    } = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("baked_shared_facts", {
+          agentName: "mission_coordinator",
+          task: "Research a portable hardware project.",
+        });
+      }
+      return createDelegateToolCallStream("post_synth_search", {
+        agentName: "researcher",
+        task: "Look it up again.",
+      });
+    });
+
+    const sharedFactsBakedEvidence = [
+      "- read_shared_facts: ## Shared Session Facts (5) **auto_researcher_web_search_v2wtqq**: [researcher/web_search] **Web Search Results for:** \"USB-C battery charging module portable device TP4056 BQ24743 alternatives 2025\" (via searxng) **Battery Charging Module Type C: Best Picks for 2025 - Accio** https://www.accio.com/plp/battery-charging-module-type-c Find top-rated battery charging modules with USB PD support. **auto_researcher_web_search_aaa**: [researcher/web_search] **Web Search Results for:** \"ESP32 PDM I2S microphone interface\" (via searxng) **integration of multiple microphones in same ESP32-S3 I2S interface** https://electronics.stackexchange.com/questions/698757 The ESP32 supports 8 channels as four data wires sending 2 I2S channels each. **auto_researcher_web_search_bbb**: [researcher/web_search] **Web Search Results for:** \"IM73A135V01 MEMS microphone\" (via searxng) **IM73A135V01 Datasheet (PDF) - Infineon** https://www.alldatasheet.com/datasheet-pdf/pdf/1388108/INFINEON/IM73A135V01.html",
+    ].join("\n");
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+        "IMPORTANT: The specialist timed out.",
+        "Observed evidence:",
+        sharedFactsBakedEvidence,
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    freshRegisterTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new FreshAgentSession({
+      sessionId,
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRunTurn({
+      session,
+      userMessage: "ich möchte ein sehr portables, batterie powered aufnahmegerät bauen mit einem ESP32 und einem array of 5 microphones. what improvements would you add to have the best quality for transcription",
+    });
+
+    expect(result.blocked).toBe(false);
+    // The user-facing message must NOT contain raw shared-fact keys, the
+    // `[agent/tool]` provenance tag, or the `## Shared Session Facts`
+    // / `read_shared_facts:` framing — those are all debug artifacts.
+    expect(result.response).not.toMatch(/auto_researcher_web_search_/);
+    expect(result.response).not.toContain("[researcher/web_search]");
+    expect(result.response).not.toContain("## Shared Session Facts");
+    expect(result.response).not.toMatch(/^- read_shared_facts:/m);
+    // It MUST contain the actual research evidence so the user sees value.
+    expect(result.response).toContain("ESP32");
+    expect(result.response).toContain("IM73A135V01");
+    expect(result.response).toContain("USB");
+    // And it must be wrapped with a clear preamble explaining the situation.
+    expect(result.response).toMatch(/Recherche.*unterbrochen|Dossier/i);
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+  });
+
+  it("reformats read_shared_facts-prefixed delegated evidence with plain auto keys", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("hardware_research_partial_1", {
+          agentName: "mission_coordinator",
+          task: "Research portable recorder hardware.",
+        });
+      }
+      return createDelegateToolCallStream("hardware_research_partial_2", {
+        agentName: "researcher",
+        task: "Retry the same hardware research.",
+      });
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: [
+        "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+        "IMPORTANT: The specialist timed out.",
+        "Observed evidence:",
+        "- read_shared_facts: ## Shared Session Facts (2) auto_researcher_web_search_mic: [researcher/web_search] Web Search Results for: \"IM73A135V01 MEMS microphone datasheet\" (via searxng) IM73A135V01 Datasheet(PDF) - Infineon Technologies AG https://www.alldatasheet.com/datasheet-pdf/pdf/1388108/INFINEON/IM73A135V01.html The IM73A135V01 is designed for high-performance audio capture. auto_researcher_web_search_esp32: [researcher/web_search] Web Search Results for: \"ESP32 PDM I2S microphone interface support\" (via searxng) I2S Audio Interface of ESP32 https://circuitlabs.net/i2s-audio-interface-of-esp32/ Learn to use the I2S interface for digital audio input and output.",
+      ].join("\n"),
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "ich brauche ein portables ESP32 Aufnahmegeraet und will wissen ob IM73A135V01 passt",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("Die Recherche wurde unterbrochen");
+    expect(result.response).toContain("IM73A135V01 Datasheet(PDF) - Infineon Technologies AG");
+    expect(result.response).toContain("I2S Audio Interface of ESP32");
+    expect(result.response).not.toContain("read_shared_facts:");
+    expect(result.response).not.toContain("auto_researcher_web_search_");
+    expect(result.response).not.toContain("[researcher/web_search]");
+    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces extracted evidence instead of raw timeout scaffolding when a partial delegation is forced to synthesize", async () => {
@@ -2384,7 +2792,7 @@ describe("runtime delegated-loop regressions", () => {
     });
   });
 
-  it("falls back to a configured research path when search_agents returns no match on source-sensitive turns", async () => {
+  it("falls back to a configured research path when search_agents returns no strong match on source-sensitive turns", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -2413,7 +2821,7 @@ describe("runtime delegated-loop regressions", () => {
         minConfidence: "medium",
         routingMode: "hybrid",
         resultCount: 0,
-        weakCount: 0,
+        weakCount: 3,
         topResult: null,
       },
     }));

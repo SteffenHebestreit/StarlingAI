@@ -889,6 +889,9 @@ let _queryVectorCache = new Map<string, CachedQueryVector>();
 let _queryVectorInflight = new Map<string, Promise<Float32Array | null>>();
 let _lastProvider: LMStudioProvider | null = null;
 let _lastSubAgents: Record<string, SubAgentConfig> = {};
+let _lastEmbeddingError: string | undefined;
+let _lastEmbeddingFailedAgent: string | undefined;
+let _lastEmbeddingFailureAt: string | undefined;
 let _retryTimer: ReturnType<typeof setTimeout> | null = null;
 let _retryDelayMs = 0;
 // Concurrency guard: only one buildAgentIndex may run at a time.
@@ -920,6 +923,38 @@ const SEARCH_STOP_WORDS = new Set<string>([
   "hat", "hier", "ich", "ihm", "ihn", "ihr", "kein", "keine", "noch", "nur", "oder",
   "sei", "seit", "sie", "so", "von", "vor", "war", "wie", "wo", "zu", "zum", "zur",
 ]);
+
+export interface EmbeddingSearchStatus {
+  configured: boolean;
+  available: boolean;
+  model: string | null;
+  indexedAgentCount: number;
+  totalAgentCount: number;
+  retryScheduled: boolean;
+  retryDelayMs: number;
+  lastError?: string;
+  lastFailedAgent?: string;
+  lastFailureAt?: string;
+}
+
+function summarizeEmbeddingError(err: unknown): string {
+  const value = err instanceof Error
+    ? err.message || err.toString()
+    : String(err);
+  return value.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown embedding error";
+}
+
+function recordEmbeddingFailure(err: unknown, failedAgent?: string): void {
+  _lastEmbeddingError = summarizeEmbeddingError(err);
+  _lastEmbeddingFailedAgent = failedAgent;
+  _lastEmbeddingFailureAt = new Date().toISOString();
+}
+
+function clearEmbeddingFailure(): void {
+  _lastEmbeddingError = undefined;
+  _lastEmbeddingFailedAgent = undefined;
+  _lastEmbeddingFailureAt = undefined;
+}
 
 function normalizeSearchText(value: string): string {
   return value
@@ -1146,6 +1181,7 @@ async function _buildAgentIndexInner(
   if (entries.length === 0) {
     _index = [];
     _available = false;
+    clearEmbeddingFailure();
     clearEmbeddingRetryTimer();
     return;
   }
@@ -1179,6 +1215,7 @@ async function _buildAgentIndexInner(
     }));
     _available = true;
     _retryDelayMs = 0;
+    clearEmbeddingFailure();
     clearEmbeddingRetryTimer();
     log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index loaded from cache (no changes)");
     return;
@@ -1210,6 +1247,7 @@ async function _buildAgentIndexInner(
         saveEmbeddingCache(embeddingModel, updatedCache);
       }
     } catch (err) {
+      recordEmbeddingFailure(err, name);
       log.warn({ err, agent: name, model: embeddingModel }, "Failed to embed agent — will retry remaining agents");
       failed = true;
       break;
@@ -1236,6 +1274,7 @@ async function _buildAgentIndexInner(
   } else {
     _available = true;
     _retryDelayMs = 0;
+    clearEmbeddingFailure();
     clearEmbeddingRetryTimer();
     log.info(
       { model: embeddingModel, agentCount: _index.length, embedded: embeddedCount, cached: unchanged },
@@ -1292,6 +1331,7 @@ export async function searchByEmbedding(
     storeCachedEmbeddingQuery(cacheKey, results);
     return results;
   } catch (err) {
+    recordEmbeddingFailure(err);
     log.warn({ err }, "Embedding search failed — falling back to keyword");
     scheduleEmbeddingRetry();
     return [];
@@ -1341,6 +1381,7 @@ export async function searchAgentsByEmbedding(
         if (ranked.length > 0) return ranked;
       }
     } catch (err) {
+      recordEmbeddingFailure(err);
       log.warn({ err }, "Agent embedding search failed — falling back to keyword");
       scheduleEmbeddingRetry();
     }
@@ -1401,6 +1442,21 @@ export function isEmbeddingAvailable(): boolean {
   return _available;
 }
 
+export function getEmbeddingSearchStatus(): EmbeddingSearchStatus {
+  return {
+    configured: Boolean(_embeddingModel),
+    available: _available,
+    model: _embeddingModel || null,
+    indexedAgentCount: _index.length,
+    totalAgentCount: Object.keys(_lastSubAgents).length,
+    retryScheduled: Boolean(_retryTimer),
+    retryDelayMs: _retryDelayMs,
+    lastError: _lastEmbeddingError,
+    lastFailedAgent: _lastEmbeddingFailedAgent,
+    lastFailureAt: _lastEmbeddingFailureAt,
+  };
+}
+
 /**
  * G33: Compute an embedding for an arbitrary query string using the currently
  * configured embedding provider.  Returns `null` if unavailable.
@@ -1420,7 +1476,8 @@ async function getOrComputeQueryEmbedding(
     try {
       const [vec] = await provider.embed([text], model);
       return vec ?? null;
-    } catch {
+    } catch (err) {
+      recordEmbeddingFailure(err);
       return null;
     }
   }
@@ -1443,7 +1500,8 @@ async function getOrComputeQueryEmbedding(
         }
       }
       return vec ?? null;
-    } catch {
+    } catch (err) {
+      recordEmbeddingFailure(err);
       return null;
     } finally {
       _queryVectorInflight.delete(cacheKey);
@@ -1459,6 +1517,7 @@ export function resetEmbeddingSearchStateForTests(): void {
   _embeddingModel = "";
   _lastProvider = null;
   _lastSubAgents = {};
+  clearEmbeddingFailure();
   _retryDelayMs = 0;
   _buildInProgress = false;
   _pendingBuild = null;

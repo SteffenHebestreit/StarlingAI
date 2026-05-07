@@ -9,7 +9,7 @@ import { registerTool, getAllTools, rerankToolsForTask, searchToolsByEmbedding, 
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
+import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -409,7 +409,7 @@ export interface AgentRoutingCandidate {
 export interface AgentRoutingResolution {
   query: string;
   minConfidence: "high" | "medium" | "low";
-  mode: "keyword" | "hybrid";
+  mode: "keyword" | "hybrid" | "semantic_unavailable";
   results: AgentRoutingCandidate[];
   weakCandidates: AgentRoutingCandidate[];
   gated: boolean;
@@ -419,6 +419,40 @@ export interface AgentRoutingResolution {
   allLowConfidence: boolean;
   /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
   excludedAgents?: string[];
+  /** Why semantic search could not run even though an embedding model is configured. */
+  semanticUnavailableReason?: string;
+}
+
+function buildSemanticRoutingMetadata(resolution: AgentRoutingResolution): Record<string, unknown> {
+  const status = getEmbeddingSearchStatus();
+  const configuredModel = getConfig().agents.defaults.model.embeddingModel;
+  const semanticConfigured = Boolean(configuredModel);
+  const semanticAvailable = resolution.mode === "hybrid";
+  const semanticUnavailableReason = semanticConfigured && !semanticAvailable
+    ? status.lastError ?? resolution.semanticUnavailableReason ?? "embedding_index_unavailable"
+    : undefined;
+
+  return {
+    semanticAvailable,
+    semanticConfigured,
+    embeddingModel: status.model ?? configuredModel ?? null,
+    indexedAgentCount: status.indexedAgentCount,
+    totalAgentCount: status.totalAgentCount,
+    embeddingRetryScheduled: status.retryScheduled,
+    ...(semanticUnavailableReason ? { semanticUnavailableReason } : {}),
+    ...(status.lastFailedAgent ? { embeddingLastFailedAgent: status.lastFailedAgent } : {}),
+    ...(status.lastFailureAt ? { embeddingLastFailureAt: status.lastFailureAt } : {}),
+  };
+}
+
+function formatSemanticUnavailableNote(metadata: Record<string, unknown>): string {
+  if (metadata["semanticConfigured"] !== true || metadata["semanticAvailable"] === true) return "";
+  const reason = typeof metadata["semanticUnavailableReason"] === "string"
+    ? metadata["semanticUnavailableReason"]
+    : "embedding index unavailable";
+  const indexed = typeof metadata["indexedAgentCount"] === "number" ? metadata["indexedAgentCount"] : 0;
+  const total = typeof metadata["totalAgentCount"] === "number" ? metadata["totalAgentCount"] : 0;
+  return `\n⚠ Semantic agent search is configured but unavailable (${reason}; indexed ${indexed}/${total}). Keyword candidate ranking is disabled for this search.`;
 }
 
 interface RoutingSelectionReason {
@@ -629,6 +663,7 @@ export async function resolveAgentRouting(
     minConfidence?: "high" | "medium" | "low";
     allowedAgents?: string[];
     excludeAgents?: string[];
+    allowKeywordFallback?: boolean;
   },
 ): Promise<AgentRoutingResolution> {
   const raw = query.trim();
@@ -640,6 +675,7 @@ export async function resolveAgentRouting(
   // post-rerank gate can read the resolved value.
   let minScore = Math.max(confidenceThreshold(minConfidence), SEMANTIC_AGENT_ROUTING_MIN_SCORE);
   const config = getConfig();
+  const embeddingConfigured = Boolean(config.agents.defaults.model.embeddingModel);
   // Merge promoted agents — they are visible to routing but don't override
   // permanent config entries.
   const promotedAgents = readPromotedAgents(config.workspacePath);
@@ -666,9 +702,11 @@ export async function resolveAgentRouting(
 
   const semanticScores = new Map<string, number>();
   let usedSemanticSearch = false;
+  let semanticSearchAttempted = false;
 
   if (isEmbeddingAvailable()) {
     try {
+      semanticSearchAttempted = true;
       const provider = getEmbeddingProvider();
       const results = await searchByEmbedding(raw, provider, 8);
       for (const result of results) {
@@ -679,6 +717,23 @@ export async function resolveAgentRouting(
     } catch {
       // fallback to keyword-only ranking
     }
+  }
+
+  if (opts?.allowKeywordFallback === false && embeddingConfigured && !usedSemanticSearch) {
+    return {
+      query: raw,
+      minConfidence,
+      mode: "semantic_unavailable",
+      results: [],
+      weakCandidates: [],
+      gated: true,
+      trippedAgents,
+      allLowConfidence: false,
+      excludedAgents: opts?.excludeAgents,
+      semanticUnavailableReason: semanticSearchAttempted
+        ? "embedding_query_failed_or_empty"
+        : "embedding_index_unavailable",
+    };
   }
 
   // Resolve the qualification floor now that we know which scoring mode
@@ -1490,6 +1545,13 @@ function summarizeText(text: string, maxLength = 180): string {
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
 }
 
+function resolveDelegationTaskTitle(args: Record<string, unknown>, task: string): string {
+  const explicitTitle = typeof args["taskTitle"] === "string"
+    ? String(args["taskTitle"]).replace(/\s+/g, " ").trim()
+    : "";
+  return explicitTitle ? summarizeText(explicitTitle, 80) : summarizeText(task, 80);
+}
+
 /**
  * Resolve the per-task soft budgets from config.
  * Returns 0 for any disabled limit. Kept inline so config changes are picked up
@@ -1729,6 +1791,14 @@ export function looksLikeFailureResult(result: string): boolean {
     return true;
   }
 
+  if (/\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(preview)) {
+    return true;
+  }
+
+  if (/\bNo (?:agents|workflows) matched\b/i.test(preview)) {
+    return true;
+  }
+
   if (/\b(i can(?:not|'t) access|i do not have access|i can(?:not|'t) retrieve|cannot retrieve the latest|cannot access real[- ]time|knowledge cutoff|my knowledge is based on the data i was trained on)\b/i.test(preview)) {
     return true;
   }
@@ -1738,6 +1808,16 @@ export function looksLikeFailureResult(result: string): boolean {
   }
 
   return looksLikePlanningOnlyResult(preview);
+}
+
+function looksLikeRunningTaskStatusResult(result: string): boolean {
+  const normalized = result
+    .replace(/^\[[^\]]+\]:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || normalized.length > 1000) return false;
+  return /\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(normalized)
+    && !/(?:^|\s)(?:FACT:|https?:\/\/|datasheet|specification|voltage|current|capacity|snr|frequency|dimension|pinout)\b/i.test(normalized);
 }
 
 /**
@@ -1920,7 +2000,7 @@ export function classifyDelegationResult(
     // Letting this through as `partial` skips the failure-handling cascade
     // (failed-delegation diagnostic, warden escalation) and surfaces stubs
     // to the model as if they were real evidence.
-    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output) && !looksLikeOnlyFailureStubs(output)) {
+    if (hasPartialContent && output.trim() && !looksLikePlanningOnlyResult(output) && !looksLikeOnlyFailureStubs(output) && !looksLikeRunningTaskStatusResult(output)) {
       return "partial";
     }
     return looksLikeInfrastructureFailure(output) ? "infrastructure_failure" : "failure";
@@ -2829,6 +2909,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
+        taskTitle: request.taskTitle,
         context: handoffContext,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
@@ -3769,7 +3850,10 @@ registerTool({
       minConfidence: "low",
       excludeAgents: ctx.currentAgentName ? [ctx.currentAgentName] : undefined,
       allowedAgents: ctx.allowedAgents,
+      allowKeywordFallback: false,
     });
+    const semanticMetadata = buildSemanticRoutingMetadata(resolution);
+    const semanticUnavailableNote = formatSemanticUnavailableNote(semanticMetadata);
 
     const allCandidates = [
       ...resolution.results,
@@ -3782,11 +3866,12 @@ registerTool({
         : "";
       return {
         success: true,
-        output: `No agents matched "${raw}"${scopeNote}. Use create_ephemeral_agent to build a purpose-built specialist for this task.`,
+        output: `No agents matched "${raw}"${scopeNote}.${semanticUnavailableNote} Use create_ephemeral_agent to build a purpose-built specialist for this task.`,
         metadata: {
           query: raw,
           resultCount: 0,
           routingMode: resolution.mode,
+          ...semanticMetadata,
         },
       };
     }
@@ -3805,12 +3890,13 @@ registerTool({
 
     return {
       success: true,
-      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${allCandidates.length} result(s)]:\n\n${allCandidates.map(formatRoutingCandidate).join("\n\n")}${circuitNote}`,
+      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${allCandidates.length} result(s)]:${semanticUnavailableNote}\n\n${allCandidates.map(formatRoutingCandidate).join("\n\n")}${circuitNote}`,
       metadata: {
         query: raw,
         resultCount: allCandidates.length,
         routingMode: resolution.mode,
         topResult: allCandidates[0]?.name ?? null,
+        ...semanticMetadata,
       },
     };
   },
@@ -3851,6 +3937,7 @@ registerTool({
     const rawResolution = await resolveAgentRouting(raw, {
       minConfidence,
       allowedAgents: ctx.allowedAgents,
+      allowKeywordFallback: false,
     });
     const selfExcluded = currentAgentName
       ? rawResolution.results.some((candidate) => candidate.name === currentAgentName)
@@ -3863,11 +3950,14 @@ registerTool({
           weakCandidates: rawResolution.weakCandidates.filter((candidate) => candidate.name !== currentAgentName),
         }
       : rawResolution;
+    const semanticMetadata = buildSemanticRoutingMetadata(resolution);
+    const semanticUnavailableNote = formatSemanticUnavailableNote(semanticMetadata);
 
     logAudit("agent_routing_evaluated", {
       query: raw,
       minConfidence,
       mode: resolution.mode,
+      ...semanticMetadata,
       resultCount: resolution.results.length,
       weakCount: resolution.weakCandidates.length,
       gated: resolution.gated,
@@ -3900,6 +3990,7 @@ registerTool({
         const retryResolutionRaw = await resolveAgentRouting(shortened, {
           minConfidence,
           allowedAgents: ctx.allowedAgents,
+          allowKeywordFallback: false,
         });
         const retryResolution = currentAgentName
           ? {
@@ -3909,12 +4000,14 @@ registerTool({
             }
           : retryResolutionRaw;
         if (retryResolution.results.length > 0) {
+          const retrySemanticMetadata = buildSemanticRoutingMetadata(retryResolution);
           logAudit("agent_routing_evaluated", {
             query: shortened,
             originalQuery: raw,
             retryAfterEmpty: true,
             minConfidence,
             mode: retryResolution.mode,
+            ...retrySemanticMetadata,
             resultCount: retryResolution.results.length,
             weakCount: retryResolution.weakCandidates.length,
             gated: retryResolution.gated,
@@ -3935,6 +4028,7 @@ registerTool({
               retryAfterEmpty: true,
               minConfidence,
               routingMode: retryResolution.mode,
+              ...retrySemanticMetadata,
               resultCount: retryResolution.results.length,
               weakCount: retryResolution.weakCandidates.length,
               topResult: topAgent.name,
@@ -3957,14 +4051,17 @@ registerTool({
         : "";
       return {
         success: true,
-        output: `No agents matched "${raw}"${shortenedNote}. Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}`,
+        output: `No agents matched "${raw}"${shortenedNote}.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}`,
         metadata: {
           query: raw,
           minConfidence,
           routingMode: resolution.mode,
+          ...semanticMetadata,
           resultCount: 0,
           weakCount: 0,
           topResult: null,
+          trippedAgents: resolution.trippedAgents,
+          excludedAgents: resolution.excludedAgents ?? [],
           ...(shortened ? { shortenedQueryAttempted: shortened } : {}),
         },
       };
@@ -3980,14 +4077,17 @@ registerTool({
       }).catch(() => { /* self-improvement may be disabled */ });
       return {
         success: true,
-        output: `No agents matched "${raw}" with ${minConfidence} confidence or better. Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, delegate to a known coordinator, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
+        output: `No agents matched "${raw}" with ${minConfidence} confidence or better.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, delegate to a known coordinator, or use create_ephemeral_agent if this is a new capability.${circuitNote}${selfExclusionNote}\n\nTop weak candidates:\n${topCandidates}`,
         metadata: {
           query: raw,
           minConfidence,
           routingMode: resolution.mode,
+          ...semanticMetadata,
           resultCount: 0,
           weakCount: resolution.weakCandidates.length,
           topResult: null,
+          trippedAgents: resolution.trippedAgents,
+          excludedAgents: resolution.excludedAgents ?? [],
         },
       };
     }
@@ -4013,17 +4113,20 @@ registerTool({
       : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
       success: true,
-      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
+      output: `${nextActionLine}\n\nAgents matching "${raw}" [${resolution.mode} search, ${resolution.results.length} result(s)]:${semanticUnavailableNote}\n\n${resolution.results.map(formatRoutingCandidate).join("\n\n")}${lowConfidenceWarning}${circuitNote}${resultSelfExclusionNote}`,
       metadata: {
         query: raw,
         minConfidence,
         routingMode: resolution.mode,
+        ...semanticMetadata,
         resultCount: resolution.results.length,
         weakCount: resolution.weakCandidates.length,
         topResult: topAgent.name,
         topResultConfidence: topAgent.confidence,
         topResultScore: topAgent.score,
         suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
+        trippedAgents: resolution.trippedAgents,
+        excludedAgents: resolution.excludedAgents ?? [],
       },
     };
   },
@@ -4137,6 +4240,7 @@ registerTool({
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
+    const taskTitle = resolveDelegationTaskTitle(args, task);
 
     if (!task) {
       return { success: false, output: "", error: "task is required" };
@@ -4190,7 +4294,7 @@ registerTool({
       fallbackAgents,
       routingQuery,
       skillMatchThreshold,
-      taskTitle: summarizeText(task, 80),
+      taskTitle,
     }, ctx);
   },
 });
@@ -4234,6 +4338,7 @@ registerTool({
     const context = args["context"] ? String(args["context"]) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
+    const taskTitle = resolveDelegationTaskTitle(args, task);
 
     if (!task) {
       return { success: false, output: "", error: "task is required" };
@@ -4245,7 +4350,7 @@ registerTool({
       context,
       routingQuery,
       skillMatchThreshold,
-      taskTitle: summarizeText(task, 80),
+      taskTitle,
     }, ctx);
   },
 });

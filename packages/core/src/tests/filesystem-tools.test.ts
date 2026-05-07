@@ -83,6 +83,29 @@ describe("filesystem tools", () => {
     });
   });
 
+  it("marks write_file outputs as workspace artifacts", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("write_file");
+
+    const result = await tool!.execute({ path: "reports/recorder.md", content: "# Recorder\n\nPartial design." }, {
+      sessionId: "session-write-artifact",
+      workspacePath: tempDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata).toMatchObject({
+      artifactKind: "workspace_file",
+      path: "reports/recorder.md",
+      outputPath: "reports/recorder.md",
+      filename: "recorder.md",
+      contentType: "text/markdown; charset=utf-8",
+      previewMode: "text",
+      isDirectory: false,
+      size: 27,
+      textPreview: "# Recorder Partial design.",
+    });
+  });
+
   it("exports an existing folder as a downloadable archive artifact", async () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("export_workspace_artifact");

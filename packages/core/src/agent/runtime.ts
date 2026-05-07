@@ -237,6 +237,116 @@ async function getSharedFactsEvidenceForFinalSynthesis(
   }
 }
 
+/**
+ * Returns true when the evidence looks like a raw shared-facts dump that
+ * should not go to the user verbatim. Two shapes show up in practice:
+ *
+ *   1. `getSharedFactsEvidenceForFinalSynthesis` output — bullet list whose
+ *      lines start with `- auto_<agent>_<tool>_<hash>:` keys.
+ *   2. `read_shared_facts` tool output collapsed into a sub-agent's
+ *      partial-progress evidence snippet — prefixed by `- read_shared_facts:`
+ *      and containing `## Shared Session Facts (N)` plus space-separated
+ *      `**auto_xxx**: <value>` pairs (whitespace flattened by the snippet
+ *      truncator). This shape arrives when a coordinator's final synthesis
+ *      times out at the LLM provider after collecting shared findings.
+ *
+ * Either shape is debug-shaped output unsuitable for the user.
+ */
+function looksLikeRawSharedFactsDump(evidence: string): boolean {
+  const trimmed = evidence.trim();
+  if (!trimmed) return false;
+  if (/^[ \t]*-\s+auto_[a-z0-9_]+:\s*/im.test(trimmed)) return true;
+  if (/##\s+Shared\s+Session\s+Facts\s+\(\d+\)/i.test(trimmed)
+    && /(?:\*\*)?auto_[a-z0-9_]+(?:\*\*)?:\s*/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[ \t]*-\s+read_shared_facts:\s*/im.test(trimmed)
+    && /(?:\*\*)?auto_[a-z0-9_]+(?:\*\*)?:\s*/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Reformat a raw shared-facts dump into a user-readable list. Strips the
+ * `auto_<agent>_<tool>_<hash>:` keys and the `[agent/tool]` provenance tag
+ * (still useful for the LLM context but noisy for end users), and rewrites
+ * mid-word "..." truncations to clean ellipses at sentence/word boundaries.
+ *
+ * Handles both the bullet-line shape (`- auto_xxx: <value>`) and the
+ * `read_shared_facts` heading shape (`## Shared Session Facts (N) **auto_xxx**:
+ * <value> **auto_yyy**: <value>`), splitting on whichever marker is present.
+ *
+ * Non-shared-facts evidence (e.g. delegation evidence with structured
+ * markdown) is returned unchanged so we don't accidentally damage real
+ * dossiers that happen to land on this code path.
+ */
+function formatSharedFactsRecoveryForUserDisplay(evidence: string): string {
+  if (!looksLikeRawSharedFactsDump(evidence)) return evidence;
+  // Strip shared-facts framing that would otherwise leak into the output:
+  //   `- read_shared_facts:` prefix the coordinator added when the
+  //   tool result was harvested as a recovery evidence snippet, and the
+  //   `## Shared Session Facts (N)` heading from `read_shared_facts`.
+  const stripped = evidence
+    .replace(/^[ \t]*-\s+read_shared_facts:\s*/im, "")
+    .replace(/##\s+Shared\s+Session\s+Facts\s+\(\d+\)\s*/i, "")
+    .trim();
+  // Split on whichever auto-key marker is present:
+  //   `- auto_xxx_yyy:` (bullet-line shape) — preserve the leading split
+  //   `**auto_xxx_yyy**:` (heading shape) — preserve same
+  const splitRe = /(?=(?:^|[\s])[ \t]*-?\s*(?:\*\*)?auto_[a-z0-9_]+(?:\*\*)?:)/gim;
+  const blocks = stripped
+    .split(splitRe)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const cleanedBlocks: string[] = [];
+  for (const rawBlock of blocks) {
+    const cleaned = rawBlock
+      .replace(/^[ \t]*-\s+/, "")
+      .replace(/^\*\*auto_[a-z0-9_]+\*\*:\s*/i, "")
+      .replace(/^auto_[a-z0-9_]+:\s*/i, "")
+      .replace(/^\[[^\]]+\]\s*/, "")
+      .trim();
+    if (!cleaned) continue;
+    cleanedBlocks.push(`- ${trimSharedFactDisplayTail(cleaned)}`);
+  }
+  if (cleanedBlocks.length === 0) return evidence;
+  return cleanedBlocks.join("\n\n");
+}
+
+function trimSharedFactDisplayTail(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact.endsWith("...") && !compact.endsWith("…")) return compact;
+  const stripped = compact.replace(/[\s.…]+$/g, "").trim();
+  const lastPeriod = stripped.lastIndexOf(".");
+  if (lastPeriod >= 120 && lastPeriod < stripped.length - 1) {
+    return stripped.slice(0, lastPeriod + 1);
+  }
+  const lastSpace = stripped.lastIndexOf(" ");
+  if (lastSpace >= 120) return `${stripped.slice(0, lastSpace).trim()} […]`;
+  return `${stripped} […]`;
+}
+
+function buildRecoveryEvidenceUserMessage(evidence: string): string {
+  const formatted = formatSharedFactsRecoveryForUserDisplay(evidence);
+  // Bilingual preamble + suffix so this works whether the user wrote in German
+  // or English. Both are short — the evidence is the bulk of the message.
+  return [
+    "Die Recherche wurde unterbrochen, bevor ein vollständiges Dossier fertiggestellt werden konnte. Die bisher gesammelten Quellen und Fakten:",
+    formatted,
+    "Bitte starte den Lauf mit engerem Fokus erneut, damit ein Spezialist die fehlenden Abschnitte (Produkt-Empfehlungen, Verdrahtung, BOM, Verbesserungen) belastbar abdecken kann.",
+  ].join("\n\n");
+}
+
+function formatRecoveryEvidenceForFinalUser(
+  evidence: string,
+  options?: { sourceSensitive?: boolean },
+): string {
+  if (looksLikeRawSharedFactsDump(evidence)) return buildRecoveryEvidenceUserMessage(evidence);
+  if (options?.sourceSensitive) return formatSourceSensitiveEvidenceBackstop(evidence);
+  return evidence;
+}
+
 function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
   const lines = evidence
     .split("\n")
@@ -253,8 +363,9 @@ function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
       if (line.length > 900) line = `${line.slice(0, 897)}...`;
       return line;
     })
+    .filter((line) => !looksLikeOrchestrationOnlyEvidence(line))
     .filter((line) => line.length > 0);
-  return lines.join("\n").trim() || evidence.trim();
+  return lines.join("\n").trim() || "In diesem Lauf wurde keine verwertbare fachliche Evidenz erzeugt.";
 }
 
 function formatSourceSensitiveEvidenceBackstop(evidence: string): string {
@@ -803,9 +914,8 @@ function extractAgentRoutingSuggestionFromMetadata(
 
 function searchAgentsReturnedNoMatch(metadata: Record<string, unknown> | undefined): boolean {
   const resultCount = typeof metadata?.["resultCount"] === "number" ? metadata["resultCount"] : 0;
-  const weakCount = typeof metadata?.["weakCount"] === "number" ? metadata["weakCount"] : 0;
   const topResult = typeof metadata?.["topResult"] === "string" ? metadata["topResult"].trim() : "";
-  return resultCount === 0 && weakCount === 0 && !topResult;
+  return resultCount === 0 && !topResult;
 }
 
 function chooseConfiguredAgent(candidates: readonly string[]): string | undefined {
@@ -1476,6 +1586,7 @@ async function finalizeUserFacingAssistantResponse(
 }
 
 const DELEGATE_TOOL_RESULT_RE = /^(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
+const WORKFLOW_TOOL_RESULT_RE = /^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:completed|blocked)\./i;
 const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
 
 function isForcedSynthesisSystemMessage(message: { role: string; content?: string | null }): boolean {
@@ -1485,6 +1596,55 @@ function isForcedSynthesisSystemMessage(message: { role: string; content?: strin
       message.content.startsWith("[SYNTHESIS REQUIRED]")
       || message.content.startsWith("[WARDEN STOP — FORCED SYNTHESIS]")
     );
+}
+
+const PRIOR_DELEGATION_JUNK_SUBSTANCE_FLOOR = 1500;
+
+/**
+ * Walk recent history for the most recent delegation tool result and decide
+ * whether it qualifies as "junk" — i.e. a partial/timeout result whose
+ * actual substantive evidence is below the usability floor. Used by the
+ * synthesis-required guardrail (Fix 3) to allow ONE recovery delegation
+ * through instead of locking the model into synthesizing from a truncated
+ * stub. Returns null when the most recent delegation is either substantial
+ * or absent.
+ */
+function findRecentJunkDelegationResult(
+  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+): { agentName: string; substanceChars: number; terminalState: string | null } | null {
+  const recent = [...history].reverse().slice(0, 12);
+  for (const message of recent) {
+    if (message.role !== "tool") continue;
+    const content = String(message.content ?? "");
+    const meta = message.metadata ?? {};
+    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
+    if (!isDelegate) continue;
+
+    const terminalState = typeof meta["terminalState"] === "string" ? String(meta["terminalState"]) : null;
+    const delegationOutcome = typeof meta["delegationOutcome"] === "string" ? String(meta["delegationOutcome"]) : null;
+    const isPartialOrTimeout = terminalState === "timeout"
+      || delegationOutcome === "partial"
+      || /—\s*PARTIAL PROGRESS|TIMEOUT|TASK FAILED/i.test(content);
+    if (!isPartialOrTimeout) {
+      // Most recent delegation succeeded with full evidence — there is no
+      // recovery scenario to authorize. Stop walking.
+      return null;
+    }
+
+    // Measure substantive evidence: strip the "Delegated result from / IMPORTANT / Observed evidence:" wrapper and count the body.
+    const evidenceMatch = /Observed evidence:\s*([\s\S]+?)(?:\n\n|$)/.exec(content);
+    const body = evidenceMatch ? evidenceMatch[1]!.trim() : content.trim();
+    // A body containing the "Recovered delegated specialist body (full):"
+    // marker is NOT junk — Fix 2 already surfaced the full delegated answer.
+    if (/Recovered delegated specialist body \(full\):/i.test(body)) return null;
+    if (body.length >= PRIOR_DELEGATION_JUNK_SUBSTANCE_FLOOR) return null;
+
+    const agentName = typeof meta["agentName"] === "string" && meta["agentName"]
+      ? meta["agentName"]
+      : (content.match(/Delegated result from\s+([^\s—]+)/)?.[1] ?? "a specialist agent");
+    return { agentName, substanceChars: body.length, terminalState };
+  }
+  return null;
 }
 
 function hasRecentForcedSynthesisNudge(
@@ -1666,9 +1826,21 @@ const INTERRUPTED_REASON_LINE_RE = /^(?:after finishing the current operation|be
 // got surfaced as if it were real evidence.
 const SCAFFOLD_LIST_LINE_RE = /^(?:[-*]\s+)?(?:Tool calls executed:|Iterations completed:|Artifacts collected:)/i;
 
+function stripToolEvidencePrefix(text: string): string {
+  return text.replace(/^(?:[-*]\s*)?(?:[a-z][a-z0-9_]*|artifact)\s*(?:\[[^\]]+\])?:\s+/, "").trim();
+}
+
+function stripRecoveredSnippetToolLabel(text: string): string {
+  const stripped = stripToolEvidencePrefix(text);
+  return stripped || text.trim();
+}
+
 function looksLikeOrchestrationOnlyEvidence(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
+  const withoutToolPrefix = stripToolEvidencePrefix(trimmed);
+  if (withoutToolPrefix && withoutToolPrefix !== trimmed && looksLikeOrchestrationOnlyEvidence(withoutToolPrefix)) return true;
+  if (looksLikeHallucinatedTruncationClaim(trimmed)) return true;
   if (looksLikeDelegationTaskEcho(trimmed)) return true;
   if (/Partial progress before interruption:/i.test(trimmed)) {
     return true;
@@ -1696,6 +1868,9 @@ function looksLikeOrchestrationOnlyEvidence(text: string): boolean {
   if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(trimmed)) {
     return true;
   }
+  if (/\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(trimmed)) {
+    return true;
+  }
   if (/^(?:task_\d+\s+\[running\]|parallel_\d+\s+\[(?:running|pending)\])/i.test(trimmed)) {
     return true;
   }
@@ -1717,6 +1892,13 @@ function looksLikeOrchestrationOnlyEvidence(text: string): boolean {
     return true;
   }
   return false;
+}
+
+function looksLikeHallucinatedTruncationClaim(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b.{0,140}\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b/i.test(trimmed)
+    || /\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b.{0,140}\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b/i.test(trimmed);
 }
 
 function looksLikeDelegationTaskEcho(text: string): boolean {
@@ -1750,7 +1932,16 @@ function collectInterruptedDelegationSnippets(text: string): string[] {
     snippets.push(normalized);
   };
 
-  const progressMatch = /Partial progress before interruption:\s*([\s\S]*?)(?=\nRecovered evidence snippets from completed tools:|$)/i.exec(cleaned);
+  // Recovered delegated specialist body — full delegated content surfaced
+  // verbatim by the inner agent's interrupt path (Fix 2). Push it FIRST so
+  // it ranks ahead of bullet-list snippets and a downstream cap preserves
+  // the actual delegated answer rather than a 900-char head.
+  const fullBodyMatch = /Recovered delegated specialist body \(full\):\s*\n([\s\S]+?)(?=\nRecovered evidence snippets from completed tools:|$)/i.exec(cleaned);
+  if (fullBodyMatch?.[1]) {
+    pushSnippet(fullBodyMatch[1].trim());
+  }
+
+  const progressMatch = /Partial progress before interruption:\s*([\s\S]*?)(?=\nRecovered (?:delegated specialist body \(full\)|evidence snippets from completed tools):|$)/i.exec(cleaned);
   if (progressMatch?.[1]) {
     for (const rawLine of progressMatch[1].split("\n")) {
       const line = rawLine.trim();
@@ -1773,7 +1964,7 @@ function collectInterruptedDelegationSnippets(text: string): string[] {
       const line = rawLine.trim();
       if (!line.startsWith("- ")) continue;
       const body = line.slice(2).trim();
-      const candidate = body.includes(":") ? body.split(/:\s+/, 2)[1] ?? "" : body;
+      const candidate = stripRecoveredSnippetToolLabel(body);
       pushSnippet(candidate);
     }
   }
@@ -1831,8 +2022,16 @@ function findRecentDelegateEvidence(
     const content = String(message.content ?? "");
     const meta = message.metadata ?? {};
 
+    // Workflow execution results (run_workflow) carry the same
+    // "Observed evidence:" block as delegated results and are an equally
+    // valid synthesis backstop when the model misbehaves at the synthesis
+    // step (e.g. emits another tool call after [SYNTHESIS REQUIRED]).
+    // Recognize them here so the terminal-evidence backstop can prefer
+    // the actual workflow dossier over the model's preamble text.
+    const isWorkflowResult = WORKFLOW_TOOL_RESULT_RE.test(content)
+      || typeof meta["workflowName"] === "string";
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate) continue;
+    if (!isDelegate && !isWorkflowResult) continue;
 
     const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
     const rawEvidence = evidenceMatch
@@ -2159,6 +2358,8 @@ function looksLikeDelegatedFailureEvidence(value: string): boolean {
   if (looksLikeProviderErrorEcho(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
+    || /\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(preview)
+    || /\bNo (?:agents|workflows) matched\b/i.test(preview)
     || /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview)
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
 }
@@ -2200,9 +2401,14 @@ export function classifyPostOrchestrationDisposition(
     const delegationSucceeded = metadata["delegationSucceeded"] !== false;
     const delegationOutcome = typeof metadata["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
     const delegationPartial = delegationOutcome === "partial";
+    const evidenceMatch = EVIDENCE_SECTION_RE.exec(text);
+    const observedEvidence = evidenceMatch
+      ? text.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
+      : text;
+    const hasInterruptedShape = /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(observedEvidence);
     const interruptedPartialWithoutUsableEvidence = agentName !== "computer_use_agent"
       && delegationPartial
-      && looksLikeInterruptedDelegationWithoutUsableEvidence(text);
+      && (looksLikeInterruptedDelegationWithoutUsableEvidence(text) || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(observedEvidence)));
 
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
@@ -2253,9 +2459,10 @@ export function buildModelVisibleToolResult(
       : undefined;
     const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
     const delegationOutcome = typeof metadata?.["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
+    const hasInterruptedShape = /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(cleaned);
     const partialHasNoUsableEvidence = agentName !== "computer_use_agent"
       && delegationOutcome === "partial"
-      && looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned);
+      && (looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned) || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(cleaned)));
     // A "partial" outcome whose surfaced content is just a regurgitated
     // provider/HTTP error (e.g. LM Studio HTTP 500 HTML page that the
     // soft-deadline synthesis quoted back) is not a useful partial — the
@@ -2316,7 +2523,14 @@ export function buildModelVisibleToolResult(
     }
 
     const partialEvidence = extractUsefulInterruptedDelegationEvidence(cleaned);
-    const evidence = truncatePlainText(partialEvidence ?? cleaned, 1600);
+    // When the inner agent surfaced its full delegated specialist body via
+    // the "Recovered delegated specialist body (full):" marker (Fix 2), the
+    // partial evidence IS the actual completed sub-task answer — bump the
+    // cap to the long-deliverable budget so it survives wrapping. Otherwise
+    // the parent only sees ~1.6 KB of a 13 KB completed answer.
+    const partialEvidenceHasFullBody = /Recovered delegated specialist body \(full\):/i.test(cleaned);
+    const partialEvidenceCap = partialEvidenceHasFullBody ? 12_000 : 1600;
+    const evidence = truncatePlainText(partialEvidence ?? cleaned, partialEvidenceCap);
     if (delegationFailed) {
       const parts = [
         `Delegated result from ${agentName} — TASK FAILED.`,
@@ -2705,6 +2919,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let maintenanceDelegationEnforcementPrompt = "";
   let unresolvedDelegationContinuationRetryUsed = false;
   let unresolvedDelegationEnforcementPrompt = "";
+  // Synthesis-required-after-junk recovery retry. The synthesis-required
+  // guardrail rejects further tool calls once a forced-synthesis nudge is in
+  // history — the right behavior when the prior delegation actually returned
+  // substantial evidence. But when the prior delegation TIMED OUT and what
+  // the model received was a truncated stub, the model's recovery delegation
+  // is correct: there is nothing useful to synthesize from. Allow ONE such
+  // recovery retry per turn (Fix 3).
+  let synthesisRequiredRecoveryRetryUsed = false;
   const isWorkflowExecutionTurn = session.channel === "workflow" || (opts._workflowExecutionStack?.length ?? 0) > 0;
   const workflowCatalogSuppressedForMaintenance = Boolean(
     initialDynamicGuidance?.swarmMaintenanceSensitive || recentWorkflowAuthoringMaintenanceContext,
@@ -2887,13 +3109,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const systemPrompt = session.getSystemPrompt();
     const temporalContext = buildTemporalContextPrompt();
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
-    const flowGuidance = iterationCount === 0
+    let flowGuidance = iterationCount === 0
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
     const languageAndIdentityGuidance = iterationCount === 0
       ? buildLanguageAndIdentityTurnGuidance(userMessage)
       : "";
-    const memoryGuidance = iterationCount === 0
+    let memoryGuidance = iterationCount === 0
       ? await formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
           sessionId: session.id,
           scopes: ["session", "workspace", "user"],
@@ -2901,8 +3123,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
         })
       : "";
+    let activeTrajectoryInjectionContext = iterationCount === 0 ? trajectoryInjectionContext : null;
     const collapsedHistory = session.getCollapsedHistory();
-    const systemMessages: LLMMessage[] = [
+
+    const buildSystemMessages = (): LLMMessage[] => [
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
@@ -2920,22 +3144,68 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
       // G33: Inject cached trajectory evidence on first iteration only
-      ...(iterationCount === 0 && trajectoryInjectionContext ? [{ role: "system" as const, content: trajectoryInjectionContext }] : []),
+      ...(iterationCount === 0 && activeTrajectoryInjectionContext ? [{ role: "system" as const, content: activeTrajectoryInjectionContext }] : []),
     ];
+
+    let systemMessages = buildSystemMessages();
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
 
-    // ── Prompt budget check ───────────────────────────────────────────────
-    // Warn once per turn on the first iteration if the system prompt exceeds the budget.
+    // ── Prompt budget enforcement ─────────────────────────────────────────
+    // Fix 6: when the system prompt exceeds the configured budget, trim
+    // optional/auxiliary sections in priority order (least → most critical)
+    // until under budget OR no further drops are available. The previous
+    // behavior was to log a warning and ship the over-budget prompt anyway,
+    // which never actually reduced any prompt and made the audit a dead
+    // signal. We never touch the main systemPrompt or active enforcement
+    // prompts — those were set this turn for a reason.
     if (iterationCount === 0) {
       const promptBudget = getConfig().agents.performance.promptBudgetChars;
       if (lastPromptMetrics.systemPromptChars > promptBudget) {
+        const initialChars = lastPromptMetrics.systemPromptChars;
+        const droppedSections: Array<{ name: string; chars: number }> = [];
+
+        // Priority 1: trajectory injection (cached evidence — helpful but optional)
+        if (lastPromptMetrics.systemPromptChars > promptBudget && activeTrajectoryInjectionContext) {
+          droppedSections.push({ name: "trajectoryInjectionContext", chars: activeTrajectoryInjectionContext.length });
+          activeTrajectoryInjectionContext = null;
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 2: memory guidance (background context — non-critical)
+        if (lastPromptMetrics.systemPromptChars > promptBudget && memoryGuidance) {
+          droppedSections.push({ name: "memoryGuidance", chars: memoryGuidance.length });
+          memoryGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 3: flow guidance (workflow memory — non-critical)
+        if (lastPromptMetrics.systemPromptChars > promptBudget && flowGuidance) {
+          droppedSections.push({ name: "flowGuidance", chars: flowGuidance.length });
+          flowGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+
+        const stillOver = lastPromptMetrics.systemPromptChars > promptBudget;
         logAudit("prompt_budget_exceeded", {
           systemPromptChars: lastPromptMetrics.systemPromptChars,
           budgetChars: promptBudget,
-          excessChars: lastPromptMetrics.systemPromptChars - promptBudget,
+          initialChars,
+          excessChars: Math.max(0, lastPromptMetrics.systemPromptChars - promptBudget),
           agentId: session.id,
-        }, { sessionId: session.id, severity: "warn" });
-        log.warn({ sessionPromptChars: lastPromptMetrics.systemPromptChars, budget: promptBudget }, "System prompt exceeds budget — consider trimming history or shortening the system prompt");
+          droppedSections: droppedSections.map((section) => section.name),
+          droppedChars: droppedSections.reduce((sum, section) => sum + section.chars, 0),
+          remainsOverBudget: stillOver,
+        }, { sessionId: session.id, severity: stillOver ? "warn" : "info" });
+        log.warn({
+          initialChars,
+          finalChars: lastPromptMetrics.systemPromptChars,
+          budget: promptBudget,
+          droppedSections: droppedSections.map((section) => section.name),
+          remainsOverBudget: stillOver,
+        }, stillOver
+          ? "System prompt still exceeds budget after trimming optional sections — consider shortening the main system prompt or enforcement messages"
+          : "System prompt was over budget; trimmed optional sections to fit");
       }
     }
 
@@ -2994,6 +3264,63 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
+      const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+      const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+      const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
+      if (recoveryEvidence) {
+        const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
+          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+        });
+        persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+        if (opts.onChunk) opts.onChunk(finalResponse);
+        const performance = buildTurnPerformanceMetrics({
+          turnStartedAt,
+          firstModelResponseMs,
+          llmCalls,
+          llmTimeMs,
+          toolCallsRequested,
+          toolExecutionTimeMs,
+          lastPromptMetrics,
+          completionChars: finalResponse.length,
+          finishReason: "llm_error_evidence_backstop",
+          blocked: false,
+          toolIterations: iterationCount,
+        });
+        logAudit("guardrail_flagged", {
+          type: "llm_error_evidence_backstop",
+          error: String(err).slice(0, 300),
+          evidenceLength: recoveryEvidence.evidence.length,
+          evidenceItems: recoveryEvidence.itemCount,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+          sessionId: session.id,
+          channel: session.channel,
+          severity: "warn",
+        });
+        logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+          sessionId: session.id,
+          channel: session.channel,
+          severity: "warn",
+        });
+        logAudit("turn_scorecard", {
+          delegationCount: _turnDelegationCount,
+          shareFindingCount: _turnShareFindingCount,
+          forcedSynthesisFired: _forcedSynthesisFired,
+          wardenFailureCount: _consecutiveDelegationFailures,
+          finalAnswerLength: finalResponse.length,
+          toolIterations: iterationCount,
+          finishReason: "llm_error_evidence_backstop",
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        return {
+          response: finalResponse,
+          toolCallsExecuted: iterationCount,
+          guardrailEvents,
+          usage: totalUsage,
+          blocked: false,
+          swarmState: getTurnSwarmState(),
+          performance,
+        };
+      }
       return blocked(
         `LLM error: ${String(err)}`,
         getTurnSwarmState(),
@@ -3232,18 +3559,51 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     );
 
     if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0) {
-      logAudit("guardrail_flagged", {
-        type: "tool_calls_after_synthesis_required",
-        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
-      }, { sessionId: session.id, severity: "warn" });
-      guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
-      _forcedSynthesisFired = true;
-      terminalFinishReason = "synthesis_required_tool_call_rejected";
-      terminalSynthesisInstruction =
-        "A previous orchestration result already required final synthesis, but the model attempted another tool call. Reject that tool call. Using ONLY the evidence already present in the tool results above, write the final user-facing answer now. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
-      opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
-      log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
-      break;
+      // Fix 3: If the prior delegation was a partial/timeout whose surfaced
+      // substance is below the usability floor (e.g. 900-char truncation
+      // stub), the model's recovery delegation is the correct response —
+      // there is no real evidence to synthesize from. Allow ONE retry per
+      // turn so the swarm can recover the lost work instead of being locked
+      // into "answer from a stub" mode. Subsequent tool calls in the same
+      // turn still fall through to the original block-and-synthesize path.
+      const junkPriorDelegation = synthesisRequiredRecoveryRetryUsed
+        ? null
+        : findRecentJunkDelegationResult(collapsedHistory);
+      if (junkPriorDelegation) {
+        synthesisRequiredRecoveryRetryUsed = true;
+        logAudit("guardrail_flagged", {
+          type: "synthesis_required_recovery_allowed",
+          priorAgent: junkPriorDelegation.agentName,
+          priorSubstanceChars: junkPriorDelegation.substanceChars,
+          priorTerminalState: junkPriorDelegation.terminalState,
+          retryToolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        }, { sessionId: session.id, severity: "info" });
+        guardrailEvents.push({ type: "synthesis_required", details: "recovery_retry_allowed" });
+        log.info(
+          {
+            sessionId: session.id,
+            priorAgent: junkPriorDelegation.agentName,
+            priorSubstanceChars: junkPriorDelegation.substanceChars,
+            priorTerminalState: junkPriorDelegation.terminalState,
+          },
+          "Synthesis-required guardrail granted one recovery retry — prior delegation produced sub-floor evidence",
+        );
+        // Fall through to normal tool-call processing this iteration.
+      } else {
+        logAudit("guardrail_flagged", {
+          type: "tool_calls_after_synthesis_required",
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+          recoveryRetryUsed: synthesisRequiredRecoveryRetryUsed,
+        }, { sessionId: session.id, severity: "warn" });
+        guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
+        _forcedSynthesisFired = true;
+        terminalFinishReason = "synthesis_required_tool_call_rejected";
+        terminalSynthesisInstruction =
+          "A previous orchestration result already required final synthesis, but the model attempted another tool call. Reject that tool call. Using ONLY the evidence already present in the tool results above, write the final user-facing answer now. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
+        opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
+        log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
+        break;
+      }
     }
 
     if (userResponseRequiredInHistory && llmResponse.tool_calls.length > 0) {
@@ -4512,8 +4872,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // "I've gathered partial results" message — that string was correct
   // about what happened but threw away the partial results.  Only fall
   // back to the static message when no usable evidence exists.
+  // The bypass evidence is often a raw shared-facts dump (`- auto_xxx_xxx:
+  // <tool tag> <content>` with mid-word "..." cuts). Surfacing that
+  // verbatim looks like debug output to the user. Reformat it into a
+  // readable list with a clear "research was interrupted" preamble before
+  // it becomes the final answer.
   const fallbackMsg = (bypassTerminalSynthesis && terminalEvidenceBackstop)
-    ? terminalEvidenceBackstop.evidence
+    ? (looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
+        ? buildRecoveryEvidenceUserMessage(terminalEvidenceBackstop.evidence)
+        : terminalEvidenceBackstop.evidence)
     : terminalFinishReason === "max_tool_iterations"
       ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
       : resolveEmptyAssistantResponseFallback("", "", session);
@@ -4556,14 +4923,18 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       suppressedTextLength: lastSuppressedAssistantText.length,
     }, { sessionId: session.id, severity: "warn" });
   }
-  const finalCandidate = useEvidenceOverSynthesis && terminalEvidenceBackstop
-    ? terminalEvidenceBackstop.evidence
+  const evidenceForUserDisplay = terminalEvidenceBackstop
+    && looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
+    ? buildRecoveryEvidenceUserMessage(terminalEvidenceBackstop.evidence)
+    : terminalEvidenceBackstop?.evidence;
+  const finalCandidate = useEvidenceOverSynthesis && evidenceForUserDisplay
+    ? evidenceForUserDisplay
     : useSuppressedTextOverSynthesis && lastSuppressedAssistantText !== null
       ? lastSuppressedAssistantText
       : (synthesized ?? fallbackMsg);
   const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount) || fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
-    ? (terminalEvidenceBackstop?.evidence ?? resolveEmptyAssistantResponseFallback("", "", session))
+    ? (evidenceForUserDisplay ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
   const finalMsg = await rewriteTerminalResponseIfNeeded(evidenceBackstopMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());

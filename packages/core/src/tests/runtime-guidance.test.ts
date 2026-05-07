@@ -569,6 +569,43 @@ describe("runtime turn guidance", () => {
     expect(result).not.toContain("TASK COMPLETED (PARTIAL");
   });
 
+  it("reroutes duplicate in-flight delegation status to failure instead of synthesis", () => {
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      "The user's original request below is the only canon...' is already running via mission_coordinator.",
+      {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "completed",
+        inFlight: true,
+        reused: true,
+      },
+    );
+
+    expect(result).toContain("Delegated result from mission_coordinator — TASK FAILED.");
+    expect(result).toContain("already running via mission_coordinator");
+    expect(result).not.toContain("PARTIAL PROGRESS");
+    expect(result).not.toContain("grounded evidence");
+
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_duplicate_running_partial",
+        content: result,
+        metadata: {
+          agentName: "mission_coordinator",
+          delegationSucceeded: true,
+          delegationOutcome: "partial",
+          terminalState: "completed",
+          inFlight: true,
+        },
+      },
+    ]);
+    expect(disposition).toBe("failure");
+  });
+
   it("does not treat nested timed-out sub-agent task descriptions as usable partial evidence", () => {
     const result = buildModelVisibleToolResult(
       "delegate_to_agent",
