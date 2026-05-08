@@ -31,7 +31,7 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import { isSessionDegraded } from "./warden.js";
 import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
-import { truncateToolResult } from "../tools/result-shaping.js";
+import { truncateToolResult, extractKeyFacts } from "../tools/result-shaping.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
@@ -50,8 +50,14 @@ async function getSearchCleanup(): Promise<(sessionId: string) => void> {
 const log = childLogger("agent:sub-agent");
 
 const DEFAULT_MAX_ITERATIONS = 5;
-const SUFFICIENT_EVIDENCE_NUDGE_BYTES = 3_000;
-const SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES = 8_000;
+// These thresholds are measured in *extracted* finding bytes — the length of
+// what extractKeyFacts() distills and stores as a shared fact (≤ 600 chars each).
+// This makes the cap measure actual stored knowledge density, not raw dump volume.
+// With web_search capped at 14 calls × ~600 chars = ~8,400 chars max from search
+// alone, the strip threshold (12,000) acts as an emergency brake for delegation
+// chains rather than a normal research stopper.
+const SUFFICIENT_EVIDENCE_NUDGE_BYTES = 4_000;    // ~7 extracted findings
+const SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES = 12_000; // ~20 extracted findings
 const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "delegate_to_agent",
   "parallel_delegate",
@@ -327,7 +333,10 @@ function withDefaultSourceSensitiveFallbackAgents(args: Record<string, unknown>)
   return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
 }
 
-const MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 3;
+// Capped at 2 because all slices share the same local GPU (qwen3.6-35b-a3b).
+// 3 concurrent inference sessions saturate VRAM and the third slice times out
+// with 0 iterations before getting any GPU time (session a9b1ac76, May 2026).
+const MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 2;
 
 function enforceSourceSensitivePreEvidenceDelegation(
   toolCall: { name: string; arguments: Record<string, unknown> },
@@ -469,28 +478,39 @@ async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Pr
   }
 }
 
+// Returns the extracted finding text that was stored, or null if skipped
+// (too short, duplicate, or boilerplate). The caller counts the returned
+// length toward cumulativeUsefulEvidenceBytes so the evidence cap tracks
+// actual stored knowledge density rather than raw tool output volume.
 async function autoShareUsefulFinding(params: {
   sessionId: string;
   agentName: string;
   toolName: string;
-  evidence: string;
+  evidence: string;  // raw (structured) tool output — not whitespace-collapsed
   sharedKeys: Set<string>;
-}): Promise<boolean> {
+}): Promise<string | null> {
+  // Normalize only for length check and dedup key — preserve structure for extraction
   const normalized = params.evidence.replace(/\s+/g, " ").trim();
-  if (normalized.length < 180) return false;
-  if (params.toolName === "share_finding" || params.toolName === "read_shared_facts") return false;
-  if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(normalized)) return false;
+  if (normalized.length < 180) return null;
+  if (params.toolName === "share_finding" || params.toolName === "read_shared_facts") return null;
+  if (/^(?:No agents matched|No workflows matched|Tool calls executed:|Iterations completed:)/i.test(normalized)) return null;
 
   const key = `auto_${params.agentName.replace(/[^a-z0-9_]+/gi, "_").toLowerCase().slice(0, 24)}_${params.toolName.replace(/[^a-z0-9_]+/gi, "_").toLowerCase().slice(0, 24)}_${hashSharedFindingKey(normalized)}`;
-  if (params.sharedKeys.has(key)) return false;
+  if (params.sharedKeys.has(key)) return null;
   params.sharedKeys.add(key);
+
+  // Extract key facts from the structured (un-normalized) evidence: strips
+  // boilerplate headers and bare URLs, extracts title+snippet per search result.
+  // This produces a compact, information-dense summary instead of a head-truncated
+  // raw dump that wastes shared-facts space on headers and URL lines.
+  const extracted = extractKeyFacts(params.evidence, params.toolName);
 
   await shareFinding(
     params.sessionId,
     key,
-    `[${params.agentName}/${params.toolName}] ${truncateToolAuditText(normalized, 1_500) ?? normalized.slice(0, 1_500)}`,
+    `[${params.agentName}/${params.toolName}] ${extracted}`,
   );
-  return true;
+  return extracted;
 }
 
 // Per-tool call caps enforced inside sub-agent runs.
@@ -504,8 +524,8 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_list_windows: 3,
   computer_focus_window: 3,
   computer_snapshot: 8,
-  web_search: 6,
-  web_fetch: 12,
+  web_search: 14,
+  web_fetch: 16,
   search_workflows: 2,
   search_agents: 2,
   list_agents: 2,
@@ -3695,7 +3715,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           ) {
             continue;
           }
-          cumulativeUsefulEvidenceBytes += usefulTrimmed.length;
           const snippetThreshold = recoveredInterruptedEvidence ? 80 : 180;
           if (usefulTrimmed.length >= snippetThreshold) {
             const snippet = truncateToolAuditText(usefulTrimmed, 900);
@@ -3703,20 +3722,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
             }
             try {
-              const shared = await autoShareUsefulFinding({
+              // autoShareUsefulFinding returns the extracted finding text that was
+              // stored, or null if skipped. Count only the extracted length so that
+              // cumulativeUsefulEvidenceBytes reflects actual stored knowledge
+              // density — not raw dump volume inflated by search headers and URLs.
+              const extractedFinding = await autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
                 evidence: usefulTrimmed,
                 sharedKeys: autoSharedFindingKeys,
               });
-              if (shared) {
+              if (extractedFinding !== null) {
                 autoSharedFindingCount += 1;
+                cumulativeUsefulEvidenceBytes += extractedFinding.length;
                 logAudit("sub_agent_tool_call", {
                   agentName: opts.agentName,
                   tool: tc.name,
                   phase: "shared_finding_auto",
                   autoSharedFindingCount,
+                  extractedChars: extractedFinding.length,
                 }, { sessionId: subSessionId, severity: "info" });
               }
             } catch (err) {
@@ -4029,8 +4054,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           if (remaining > 5_000) {
             const synthBudget = Math.min(
               remaining - 2_000,
-              90_000,
-              Math.round(turnTimeoutMs * 0.25),
+              300_000,                          // cap at 5 min (was 90s, raised for large local models)
+              Math.round(turnTimeoutMs * 0.4),
             );
             if (synthBudget > 5_000) {
               const synthesized = await attemptPreDeadlineSynthesis(synthBudget);

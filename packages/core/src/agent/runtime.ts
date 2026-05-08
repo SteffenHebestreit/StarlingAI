@@ -1566,7 +1566,10 @@ async function finalizeUserFacingAssistantResponse(
       session,
       provider,
       signal,
-      "You have already executed the necessary tools. Write the final user-facing answer now. Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
+      "You have already executed the necessary tools. Write the final user-facing answer now."
+      + " Synthesize the tool results and [SHARED FINDINGS AVAILABLE] entries into a complete, well-structured answer in the user's language."
+      + " Do NOT echo raw shared-finding key names (e.g. auto_xxx_yyy) — convert them into readable sentences."
+      + " Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
     );
     if (synthesized) {
       const cleanedSynthesized = sanitizeUserFacingAssistantResponse(synthesized, 0);
@@ -1675,7 +1678,11 @@ function resolveEmptyAssistantResponseFallback(
         },
         { sessionId: session.id, channel: session.channel, severity: "warn" },
       );
-      return evidence.evidence;
+      // Format the evidence before returning — raw shared-fact key dumps
+      // (auto_xxx_yyy: "...") and orchestration scaffolding must not reach
+      // the user verbatim; formatRecoveryEvidenceForFinalUser renders them
+      // into a bilingual partial-answer preamble that is at least readable.
+      return formatRecoveryEvidenceForFinalUser(evidence.evidence);
     }
   }
 
@@ -2252,9 +2259,11 @@ async function enforceDelegateCoverage(
 
   const resynth = await forceSynthesis(session, provider, signal, instruction);
   if (!resynth) {
-    // Resynthesis failed entirely. If the original draft was a
-    // truncation hallucination and we have rich evidence, bypass.
-    if (evidenceIsRich && draftClaimsTruncation) {
+    // Resynthesis failed entirely (e.g. local GPU returned null/empty after
+    // a long session).  When rich evidence exists, always prefer surfacing the
+    // coordinator's full answer over keeping the under-synthesized draft —
+    // regardless of whether the draft claimed truncation.
+    if (evidenceIsRich) {
       return evidence.evidence;
     }
     return finalResponse;
@@ -2903,6 +2912,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let _forcedSynthesisFired = false;
   // G33: Collected share_finding texts for trajectory cache write
   const sharedFindingsThisTurn: string[] = [];
+  // Shared findings injected into the main LLM context after delegations complete.
+  // Populated once after the first delegation tool result arrives so the main
+  // orchestrator's final synthesis call sees verified sub-agent findings rather
+  // than falling back to training-data hallucinations.
+  let _sharedFindingsSystemMessage = "";
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
@@ -3145,6 +3159,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
       // G33: Inject cached trajectory evidence on first iteration only
       ...(iterationCount === 0 && activeTrajectoryInjectionContext ? [{ role: "system" as const, content: activeTrajectoryInjectionContext }] : []),
+      // Inject shared findings from sub-agents on post-delegation iterations so the
+      // main orchestrator's synthesis call sees verified facts instead of hallucinating
+      // from training data (e.g. mic interface type, verified part specs, etc.).
+      ...(_sharedFindingsSystemMessage ? [{ role: "system" as const, content: _sharedFindingsSystemMessage }] : []),
     ];
 
     let systemMessages = buildSystemMessages();
@@ -3599,7 +3617,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         _forcedSynthesisFired = true;
         terminalFinishReason = "synthesis_required_tool_call_rejected";
         terminalSynthesisInstruction =
-          "A previous orchestration result already required final synthesis, but the model attempted another tool call. Reject that tool call. Using ONLY the evidence already present in the tool results above, write the final user-facing answer now. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
+          "RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer in the user's language that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverifiziert — Recherche unvollständig] when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.";
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
         break;
@@ -3846,6 +3864,55 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         ? Math.max(iterationCount, 1)
         : iterationCount;
       let finalResponse = await finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
+
+      // General shared-facts synthesis backstop — fires for ALL turns (not just source-sensitive)
+      // when the final response looks like a raw dump or is suspiciously short after orchestration
+      // ran. The source-sensitive path below handles `sourceSensitive` cases; this catches the
+      // general research case (BOM, hardware design, multi-source comparison, etc.) where the
+      // researcher gathered good shared facts but forceSynthesis timed out or the model echoed
+      // raw auto_xxx_yyy key names instead of synthesizing them into prose.
+      if (
+        currentTurnHasExecutableOrchestration
+        && !initialDynamicGuidance?.sourceSensitive
+        && (
+          looksLikeRawSharedFactsDump(finalResponse)
+          || looksLikeOrchestrationOnlyEvidence(finalResponse)
+          || (_forcedSynthesisFired && finalResponse.length < 600)
+        )
+      ) {
+        const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id, 6_000);
+        const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+        const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: true });
+        if (recoveryEvidence && !looksLikeWeakRecoveryEvidence(recoveryEvidence.evidence)) {
+          const synthesized = await forceSynthesis(
+            session,
+            provider,
+            signal,
+            "Research specialists have gathered findings during this turn. Synthesize all [SHARED FINDINGS AVAILABLE] entries and the recovered evidence below into a complete, well-structured answer in the user's language.\n"
+            + "Do NOT echo raw key names (e.g. auto_xxx_yyy). Convert every finding into readable, user-facing prose.\n"
+            + "Recovered evidence:\n" + recoveryEvidence.evidence.slice(0, 5_000),
+          );
+          const candidateResponse = synthesized && sanitizeUserFacingAssistantResponse(synthesized, 0);
+          if (candidateResponse && candidateResponse.length > finalResponse.length) {
+            finalResponse = candidateResponse;
+            logAudit("guardrail_flagged", {
+              type: "general_shared_facts_synthesis_backstop",
+              evidenceLength: recoveryEvidence.evidence.length,
+              evidenceItems: recoveryEvidence.itemCount,
+              originalLength: rawResponse.length,
+              synthesizedLength: finalResponse.length,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          } else {
+            // Synthesis still failed or was too short — format the evidence at minimum
+            finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence);
+            logAudit("guardrail_flagged", {
+              type: "general_shared_facts_format_backstop",
+              evidenceLength: recoveryEvidence.evidence.length,
+              evidenceItems: recoveryEvidence.itemCount,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          }
+        }
+      }
 
       if (
         initialDynamicGuidance?.sourceSensitive
@@ -4770,6 +4837,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     iterationCount++;
 
+    // After each iteration that included a delegation, refresh the shared-findings
+    // system message so the next LLM call (which may be the final synthesis) sees
+    // any facts that sub-agents published to shared session memory.  This prevents
+    // the orchestrator from hallucinating training-data values (e.g. wrong mic
+    // interface type) when a researcher has already verified and shared the truth.
+    if (_turnDelegationCount > 0) {
+      _sharedFindingsSystemMessage = await formatSharedFactsForFinalSynthesis(session.id);
+    }
+
     // ── All-blocked iteration guard ────────────────────────────────────────
     // If every tool call in this iteration was blocked (per-turn limit, not-allowed,
     // or parse error) the model is stuck — force synthesis after N such iterations.
@@ -5008,9 +5084,12 @@ async function forceSynthesis(
       { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.` },
     ];
 
-    // Use a fresh 60s timeout — independent of the (possibly already aborted) turn signal
+    // No hard timeout on the synthesis call — the provider (LMStudio / API)
+    // is responsible for its own request deadline, and large local GPU models
+    // may need several minutes for a full context. A fixed JS timer here
+    // aborts a still-running synthesis and returns null, causing the user to
+    // see a raw evidence dump instead of a real answer.
     const synthAbort = new AbortController();
-    const synthTimer = setTimeout(() => synthAbort.abort(), 60_000);
 
     // E25: prefer the synthesis-tier provider when configured — smaller,
     // instruction-tuned models produce tighter final answers and avoid the
@@ -5022,7 +5101,7 @@ async function forceSynthesis(
       const text = response.content?.trim();
       return text || null;
     } finally {
-      clearTimeout(synthTimer);
+      synthAbort.abort(); // release resources if call is still open
     }
   } catch {
     return null;

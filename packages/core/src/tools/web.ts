@@ -305,13 +305,64 @@ registerTool({
         };
       }
 
-      // HTML / other content → prefer Playwright (renders JS, handles cookie banners)
+      // HTML / other content.
+      // Strategy: native fetch + HTML strip first (gives clean prose text for
+      // most static documentation/article pages). Only fall back to Playwright
+      // when native returns too little content (JS-rendered pages) or fails.
+      // This avoids the YAML accessibility-tree noise that browser_snapshot
+      // produces, which inflates context and causes LLM synthesis timeouts.
+
+      let nativeFetchText: string | null = null;
+      try {
+        const res = await fetchWithTimeout(url, 12000, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
+            "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
+          },
+        });
+        if (res.ok) {
+          const ct = res.headers.get("content-type") ?? "";
+          let raw = await res.text();
+          if (ct.includes("text/html")) raw = stripHtml(raw);
+          if (raw.trim().length > 200) {
+            nativeFetchText = raw.trim();
+          }
+        }
+      } catch {
+        // ignore — fall through to Playwright
+      }
+
+      if (nativeFetchText !== null) {
+        let text = nativeFetchText;
+        if (text.length > maxLength) {
+          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+        }
+        return {
+          success: true,
+          output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
+          metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "native" },
+        };
+      }
+
+      // Native fetch returned empty/short content — page is JS-rendered.
+      // Use Playwright, but convert the accessibility snapshot to readable text
+      // rather than passing the raw YAML DOM tree to the LLM.
       const playwrightAvailable = getMcpConnections().has("playwright");
       if (playwrightAvailable) {
         try {
           await callPlaywrightTool("browser_navigate", { url });
-          const snapshot = await callPlaywrightTool("browser_snapshot", {});
-          let text = snapshot;
+          let text = "";
+          try {
+            // browser_evaluate is available in Playwright MCP >= 0.0.21
+            text = await callPlaywrightTool("browser_evaluate", {
+              expression: `(document.body?.innerText??'').replace(/\\t/g,' ').replace(/[ \\t]{3,}/g,'  ').replace(/\\n{4,}/g,'\\n\\n\\n').trim()`,
+            });
+          } catch {
+            // Fall back to snapshot and convert to readable text
+            log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
+            const rawSnapshot = await callPlaywrightTool("browser_snapshot", {});
+            text = snapshotToReadableText(rawSnapshot);
+          }
           if (text.length > maxLength) {
             text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
           }
@@ -321,41 +372,36 @@ registerTool({
             metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright" },
           };
         } catch (playwrightErr) {
-          log.warn({ err: playwrightErr, url }, "web_fetch Playwright failed, falling back to native fetch");
+          log.warn({ err: playwrightErr, url }, "web_fetch Playwright failed");
         }
       }
 
-      // Fallback: native fetch with HTML stripping
-      const res = await fetchWithTimeout(url, 15000, {
-        headers: {
-          "User-Agent": "StarlingAI/0.1 (research assistant)",
-          "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
-        },
-      });
-
-      if (!res.ok) {
-        return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
+      // Last resort: native fetch even if content seems thin
+      try {
+        const res = await fetchWithTimeout(url, 15000, {
+          headers: {
+            "User-Agent": "StarlingAI/0.1 (research assistant)",
+            "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
+          },
+        });
+        if (!res.ok) {
+          return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
+        }
+        const resContentType = res.headers.get("content-type") ?? "";
+        let text = await res.text();
+        if (resContentType.includes("text/html")) text = stripHtml(text);
+        if (text.length > maxLength) {
+          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+        }
+        return {
+          success: true,
+          output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
+          metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback" },
+        };
+      } catch (err) {
+        log.error({ err, url }, "web_fetch failed");
+        return { success: false, output: "", error: `Fetch failed: ${String(err)}` };
       }
-
-      const resContentType = res.headers.get("content-type") ?? "";
-      let text: string;
-
-      if (resContentType.includes("text/html")) {
-        const html = await res.text();
-        text = stripHtml(html);
-      } else {
-        text = await res.text();
-      }
-
-      if (text.length > maxLength) {
-        text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
-      }
-
-      return {
-        success: true,
-        output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
-        metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback" },
-      };
     } catch (err) {
       log.error({ err, url }, "web_fetch failed");
       return { success: false, output: "", error: `Fetch failed: ${String(err)}` };
@@ -364,6 +410,47 @@ registerTool({
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Converts a Playwright browser_snapshot accessibility-tree output into compact
+ * readable prose. The snapshot is a YAML DOM tree full of structural nodes
+ * (generic, banner, listitem, [ref=eN], [cursor=pointer]) that are pure noise
+ * for text synthesis. This function extracts heading and text nodes only and
+ * caps output at maxChars.
+ */
+function snapshotToReadableText(snapshot: string, maxChars = 4_000): string {
+  const titleLine = snapshot.match(/^-\s+Page Title:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  const yamlBlock = snapshot.match(/```ya?ml\n([\s\S]*?)```/)?.[1] ?? "";
+  const pieces: string[] = [];
+  if (titleLine) pieces.push("# " + titleLine);
+  if (yamlBlock) {
+    for (const rawLine of yamlBlock.split("\n")) {
+      const line = rawLine.trim();
+      // - heading "TEXT" [...]
+      const hm = line.match(/^-\s+heading\s+"([^"]+)"/);
+      if (hm) { pieces.push("## " + hm[1]); continue; }
+      // - text: "VALUE"  or  - text: VALUE
+      const tm = line.match(/^-\s+text:\s+(?:"([^"]+)"|(\S.*\S))$/);
+      if (tm) { const v = (tm[1] ?? tm[2] ?? "").trim(); if (v.length > 3) pieces.push(v); continue; }
+      // - link "LABEL" — skip short nav labels
+      const lm = line.match(/^-\s+link\s+"([^"]{7,})"/);
+      if (lm?.[1] && !/^(Skip|Close|Back|Next|Previous|Search|Home|Menu|Login|Register|Contact|About|×)/i.test(lm[1])) {
+        pieces.push(lm[1]); continue;
+      }
+    }
+  }
+  const extracted = pieces.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  // If the tree parser yielded too little, strip structural markers from raw YAML
+  if (extracted.length < 200 && yamlBlock.length > 400) {
+    const stripped = yamlBlock
+      .replace(/\[ref=e\d+\]/g, "").replace(/\[cursor=[^\]]+\]/g, "")
+      .replace(/^\s*-\s+\/url:[^\n]*\n?/gm, "")
+      .replace(/^\s*-\s+(generic|listitem|list\b|navigation|banner|main|section|article|figure|footer|header|aside|form|dialog|region|landmark|complementary|contentinfo)\b[^\n]*/gm, "")
+      .replace(/\n{3,}/g, "\n\n").trim();
+    return stripped.slice(0, maxChars);
+  }
+  return extracted.slice(0, maxChars);
+}
 
 async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
