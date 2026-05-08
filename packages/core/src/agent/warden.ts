@@ -47,15 +47,15 @@ const log = childLogger("agent:warden");
 // ── Rolling window thresholds ─────────────────────────────────────────────────
 
 const TOOL_STORM_WINDOW_MS = 5 * 60 * 1_000;  // 5 min
-const TOOL_STORM_THRESHOLD = 15;               // tool calls per session
+const TOOL_STORM_THRESHOLD = 80;               // tool calls per session — raised to accommodate parallel sub-agent waves (3 researchers × ~5 tool calls each per wave, multiple waves)
 
 // E19: Predictive window — if a session accumulates enough tool calls in a
 // short sub-window to suggest it will hit the storm threshold on trajectory,
 // fire a warning early so operators / interventions can react before the
-// hard threshold trips. Pick a 60s window with an 8-call bar: any session
-// sustaining ≥8 calls/min will cross the 15-in-5-min hard line if unabated.
+// hard threshold trips. Pick a 60s window with a 40-call bar: any session
+// sustaining ≥40 calls/min will cross the 80-in-5-min hard line if unabated.
 const TOOL_STORM_PREDICT_WINDOW_MS = 60 * 1_000;
-const TOOL_STORM_PREDICT_THRESHOLD = 8;
+const TOOL_STORM_PREDICT_THRESHOLD = 40;
 const TOOL_STORM_PREDICT_COOLDOWN_MS = 5 * 60 * 1_000;
 
 const AGENT_MESSAGE_PREDICT_WINDOW_MS = 20 * 1_000;

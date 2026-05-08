@@ -1,4 +1,9 @@
 {
+  "agents": {
+    "performance": {
+      "promptBudgetChars": 36000
+    }
+  },
   "gateway": {
     "port": 8765,
     "restPort": 8766,

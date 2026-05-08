@@ -835,7 +835,18 @@
         </div>
       </div>
 
-      <div class="text-xs text-gray-700 mt-2 px-1">
+      <div v-if="tokenMeter" class="flex items-center gap-2 text-xs text-gray-600 mt-2 px-1">
+        <span class="shrink-0 font-mono tabular-nums">{{ tokenMeter.label }}</span>
+        <div class="flex-1 h-0.5 rounded-full bg-white/5 overflow-hidden">
+          <div
+            class="h-full rounded-full transition-[width] duration-300"
+            :class="tokenMeter.pct >= 90 ? 'bg-red-500/70' : tokenMeter.pct >= 75 ? 'bg-amber-400/70' : 'bg-purple-500/40'"
+            :style="{ width: `${tokenMeter.pct}%` }"
+          />
+        </div>
+        <span class="shrink-0 w-8 text-right tabular-nums">{{ tokenMeter.pct }}%</span>
+      </div>
+      <div class="text-xs text-gray-700 mt-1 px-1">
         Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code>
       </div>
     </div>
@@ -870,6 +881,7 @@ import { ref, computed, nextTick, watch, onMounted, onUnmounted, onBeforeUnmount
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { sanitizeAssistantMessageContent, useGatewayStore } from "@/stores/gateway";
+import { useAgentsStore } from "@/stores/agents";
 import { useJobsStore } from "@/stores/jobs";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
@@ -888,6 +900,7 @@ import type { ChatAttachment } from "@/stores/gateway";
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
 const gateway = useGatewayStore();
+const agentsStore = useAgentsStore();
 const jobsStore = useJobsStore();
 const scenesStore = useScenesStore();
 const multimodalStore = useMultimodalStore();
@@ -935,6 +948,20 @@ const expandedMessageHistory = ref(false);
 const audioProgressPercent = computed(() => {
   if (audioDuration.value <= 0) return 0;
   return Math.min(100, Math.max(0, (audioCurrentTime.value / audioDuration.value) * 100));
+});
+
+/** Live estimate of context window usage based on last known prompt tokens + current input. */
+const tokenMeter = computed(() => {
+  const lastUsage = [...gateway.messages].reverse().find(m => m.usage?.promptTokens)?.usage;
+  const lastPromptTokens = lastUsage?.promptTokens ?? 0;
+  const inputTokenEstimate = Math.ceil(inputText.value.length / 4);
+  const totalEstimate = lastPromptTokens + inputTokenEstimate;
+  if (totalEstimate === 0) return null;
+  const mainAgent = agentsStore.agents[0];
+  const contextWindow = mainAgent?.model.contextWindow ?? 32768;
+  const pct = Math.min(100, Math.round((totalEstimate / contextWindow) * 100));
+  const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  return { totalEstimate, contextWindow, pct, label: `~${fmt(totalEstimate)} / ${fmt(contextWindow)} tokens` };
 });
 
 function removeImage(idx: number) {
