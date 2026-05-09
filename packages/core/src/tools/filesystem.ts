@@ -1,41 +1,77 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { basename, resolve, extname } from "node:path";
+import { basename, resolve, extname, join } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
+// Text-based formats agents can read and write directly.
 const ALLOWED_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".jsonc", ".jsonl", ".yaml", ".yml", ".toml", ".env.example",
   ".mmd",
-  ".ts", ".tsx", ".js", ".jsx", ".py", ".sh", ".bash",
-  ".html", ".css", ".sql", ".xml", ".csv", ".log",
+  ".ts", ".tsx", ".js", ".mjs", ".jsx", ".py", ".sh", ".bash",
+  ".html", ".htm", ".css", ".sql", ".xml", ".csv", ".log",
+  ".svg",  // SVG is text-based
 ]);
+// MIME types for content-type inference and preview-mode selection.
+// Binary formats (docx, xlsx, pptx, pdf, images, audio…) are download-only
+// unless a viewer is built in. Agents can't write binary directly but an
+// external tool (pandoc, python-docx, etc.) might produce them in the workspace.
 const MIME_TYPES: Record<string, string> = {
-  ".csv": "text/csv; charset=utf-8",
-  ".gif": "image/gif",
-  ".htm": "text/html; charset=utf-8",
+  // Web
   ".html": "text/html; charset=utf-8",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  // Text / code
+  ".txt": "text/plain; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".mmd": "text/vnd.mermaid; charset=utf-8",
+  // Data
   ".json": "application/json; charset=utf-8",
   ".jsonc": "application/json; charset=utf-8",
-  ".log": "text/plain; charset=utf-8",
-  ".m4a": "audio/mp4",
-  ".mmd": "text/vnd.mermaid; charset=utf-8",
-  ".md": "text/markdown; charset=utf-8",
-  ".mp3": "audio/mpeg",
-  ".pdf": "application/pdf",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain; charset=utf-8",
-  ".wav": "audio/wav",
-  ".webm": "audio/webm",
-  ".webp": "image/webp",
-  ".xml": "application/xml; charset=utf-8",
+  ".jsonl": "application/json; charset=utf-8",
   ".yaml": "application/yaml; charset=utf-8",
   ".yml": "application/yaml; charset=utf-8",
+  // Documents (download-only)
+  ".pdf": "application/pdf",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".doc": "application/msword",
+  ".odt": "application/vnd.oasis.opendocument.text",
+  ".rtf": "application/rtf",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".odp": "application/vnd.oasis.opendocument.presentation",
+  // Images
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+  ".ico": "image/x-icon",
+  // Audio
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg",
+  ".webm": "audio/webm",
+  ".flac": "audio/flac",
+  // Video
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  // Archives
+  ".zip": "application/zip",
 };
 
 function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
@@ -174,8 +210,10 @@ registerTool({
       const contentType = isDirectory
         ? "application/x-directory"
         : inferArtifactContentType(resolvedPath.relativePath);
+      // Directories that contain an index.html are previewable as a website.
+      const hasIndexHtml = isDirectory && existsSync(join(resolvedPath.resolved, "index.html"));
       const previewMode = isDirectory
-        ? "download"
+        ? (hasIndexHtml ? "website" : "download")
         : inferArtifactPreviewMode(contentType);
 
       return {
@@ -418,12 +456,15 @@ function inferArtifactContentType(relativePath: string): string {
 }
 
 function inferArtifactPreviewMode(contentType: string): "image" | "html" | "pdf" | "text" | "json" | "audio" | "download" {
+  if (contentType.startsWith("image/svg")) return "html"; // SVGs render in an iframe
   if (contentType.startsWith("image/")) return "image";
   if (contentType.startsWith("audio/")) return "audio";
+  if (contentType.startsWith("video/")) return "download"; // no inline video viewer yet
   if (contentType.startsWith("text/html")) return "html";
   if (contentType.startsWith("application/pdf")) return "pdf";
   if (contentType.startsWith("application/json")) return "json";
-  if (contentType.startsWith("text/") || contentType.includes("yaml") || contentType.includes("xml")) return "text";
+  if (contentType.startsWith("text/") || contentType.includes("yaml") || contentType.includes("xml") || contentType.includes("mermaid")) return "text";
+  // Office docs, archives and other binary formats → trigger browser download
   return "download";
 }
 

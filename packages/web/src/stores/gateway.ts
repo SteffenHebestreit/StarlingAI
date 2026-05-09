@@ -568,6 +568,18 @@ function buildAcceptedStatusMessage(data: Record<string, unknown>): string | nul
   return segments.join("\n");
 }
 
+export interface OrchestrationConfig {
+  maxParallelSlices: number;
+  subAgentToolCaps: Record<string, number>;
+  coordinatorToolCaps: Record<string, number>;
+  perTurnCaps: Record<string, number>;
+}
+
+export interface OrchestrationConfigResponse {
+  config: OrchestrationConfig;
+  defaults: OrchestrationConfig;
+}
+
 export const useGatewayStore = defineStore("gateway", () => {
   const audit = useAuditStore();
   const notifications = useNotificationStore();
@@ -2208,6 +2220,21 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as SpeechToTextResult;
   }
 
+  // ── Orchestration tuning ────────────────────────────────────────────────
+  async function getOrchestrationConfig(): Promise<OrchestrationConfigResponse> {
+    const response = await authorizedFetch("/api/orchestration/config");
+    return await response.json() as OrchestrationConfigResponse;
+  }
+
+  async function saveOrchestrationConfig(config: OrchestrationConfig): Promise<OrchestrationConfig> {
+    const response = await authorizedFetch("/api/orchestration/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    return await response.json() as OrchestrationConfig;
+  }
+
   async function listVoices(): Promise<{ voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string }> {
     const response = await authorizedFetch("/api/multimodal/voices");
     return await response.json() as { voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string };
@@ -2310,6 +2337,17 @@ export const useGatewayStore = defineStore("gateway", () => {
     anchor.download = options.suggestedFilename ?? artifact.filename;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /**
+   * Build a URL for the workspace static preview server.
+   * The token is embedded as a query parameter so that an iframe src can use it
+   * (browsers cannot set Authorization headers on iframe src attributes).
+   * `root` is the workspace-relative directory. `file` is relative to that root.
+   */
+  function buildWorkspacePreviewUrl(root: string, file = "index.html"): string {
+    const params = new URLSearchParams({ root, file, token: token.value });
+    return `${restBaseUrl()}/api/workspace/preview?${params.toString()}`;
   }
 
   async function downloadSessionDebugMarkdown(sessionId: string): Promise<void> {
@@ -2460,9 +2498,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     synthesizeSpeech,
     summarizeForSpeech,
     analyzeImageFile,
+    getOrchestrationConfig,
+    saveOrchestrationConfig,
     uploadToWorkspace,
     fetchWorkspaceArtifactBlob,
     downloadWorkspaceArtifact,
+    buildWorkspacePreviewUrl,
     downloadSessionDebugMarkdown,
     downloadSessionAuditMarkdown,
     respondApproval,

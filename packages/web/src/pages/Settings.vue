@@ -794,6 +794,105 @@
           <div v-else class="empty-state">No jobs configured.</div>
         </div>
 
+          <!-- ── Orchestration Tuning ────────────────────────────────── -->
+          <div v-if="isAgentsPage" class="glass-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0">Orchestration Tuning</h3>
+                <div class="text-xs text-gray-500 mt-1">Adjust limits to match your hardware. Leave a field at its default to use the built-in value.</div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+                <button @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              </div>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure orchestration limits.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required.
+              </div>
+
+              <!-- Parallel slices -->
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Max Parallel Research Slices <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.maxParallelSlices ?? 2 }}</span></label>
+                  <input v-model.number="orchestrationForm.maxParallelSlices" type="number" min="1" max="8" class="input-box" />
+                  <div class="text-xs text-gray-500 mt-1">2 for a single local GPU · 3–4 for multi-GPU or API backends</div>
+                </div>
+              </div>
+
+              <!-- Sub-agent caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Sub-Agent Caps</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_search ?? 14 }}</span></label>
+                    <input v-model.number="orchestrationForm.subAgentWebSearch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_search ?? 14)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16 }}</span></label>
+                    <input v-model.number="orchestrationForm.subAgentWebFetch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Coordinator caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Coordinator Caps</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordWebSearch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordWebFetch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordDelegate" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Per-turn caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Per-Turn Caps (main agent)</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnDelegate" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">computer_click <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_click ?? 8 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnComputerClick" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_click ?? 8)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">computer_type <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_type ?? 6 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnComputerType" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_type ?? 6)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="orchestrationError" class="text-sm text-red-400">{{ orchestrationError }}</div>
+
+              <div class="flex justify-end">
+                <button @click="saveOrchestrationConfigUI" :disabled="orchestrationSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ orchestrationSaving ? 'Saving…' : 'Save Limits' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div v-if="isAgentsPage" class="glass-card p-5">
             <div class="flex items-center justify-between mb-4 gap-3">
               <div>
@@ -1800,7 +1899,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
@@ -2840,6 +2939,86 @@ async function submitConfigAssistantRequest() {
   }
 }
 
+// ── Orchestration Tuning ──────────────────────────────────────────────────
+const orchestrationSaving = ref(false);
+const orchestrationError = ref("");
+const orchestrationDefaults = ref<Record<string, any>>({});
+
+const orchestrationForm = reactive<{
+  maxParallelSlices: number | null;
+  subAgentWebSearch: number | null;
+  subAgentWebFetch: number | null;
+  coordWebSearch: number | null;
+  coordWebFetch: number | null;
+  coordDelegate: number | null;
+  perTurnDelegate: number | null;
+  perTurnComputerClick: number | null;
+  perTurnComputerType: number | null;
+}>({
+  maxParallelSlices: null,
+  subAgentWebSearch: null,
+  subAgentWebFetch: null,
+  coordWebSearch: null,
+  coordWebFetch: null,
+  coordDelegate: null,
+  perTurnDelegate: null,
+  perTurnComputerClick: null,
+  perTurnComputerType: null,
+});
+
+function applyOrchestrationConfigToForm(config: any) {
+  orchestrationForm.maxParallelSlices = config.maxParallelSlices ?? null;
+  orchestrationForm.subAgentWebSearch = config.subAgentToolCaps?.web_search ?? null;
+  orchestrationForm.subAgentWebFetch = config.subAgentToolCaps?.web_fetch ?? null;
+  orchestrationForm.coordWebSearch = config.coordinatorToolCaps?.web_search ?? null;
+  orchestrationForm.coordWebFetch = config.coordinatorToolCaps?.web_fetch ?? null;
+  orchestrationForm.coordDelegate = config.coordinatorToolCaps?.delegate_to_agent ?? null;
+  orchestrationForm.perTurnDelegate = config.perTurnCaps?.delegate_to_agent ?? null;
+  orchestrationForm.perTurnComputerClick = config.perTurnCaps?.computer_click ?? null;
+  orchestrationForm.perTurnComputerType = config.perTurnCaps?.computer_type ?? null;
+}
+
+async function reloadOrchestrationConfig() {
+  try {
+    const { config, defaults } = await gateway.getOrchestrationConfig();
+    orchestrationDefaults.value = defaults;
+    applyOrchestrationConfigToForm(config);
+    orchestrationError.value = "";
+  } catch (e) {
+    orchestrationError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function resetOrchestrationConfig() {
+  applyOrchestrationConfigToForm({});
+}
+
+async function saveOrchestrationConfigUI() {
+  orchestrationSaving.value = true;
+  orchestrationError.value = "";
+  try {
+    const payload: any = {
+      maxParallelSlices: orchestrationForm.maxParallelSlices ?? 2,
+      subAgentToolCaps: {} as Record<string, number>,
+      coordinatorToolCaps: {} as Record<string, number>,
+      perTurnCaps: {} as Record<string, number>,
+    };
+    if (orchestrationForm.subAgentWebSearch) payload.subAgentToolCaps.web_search = orchestrationForm.subAgentWebSearch;
+    if (orchestrationForm.subAgentWebFetch) payload.subAgentToolCaps.web_fetch = orchestrationForm.subAgentWebFetch;
+    if (orchestrationForm.coordWebSearch) payload.coordinatorToolCaps.web_search = orchestrationForm.coordWebSearch;
+    if (orchestrationForm.coordWebFetch) payload.coordinatorToolCaps.web_fetch = orchestrationForm.coordWebFetch;
+    if (orchestrationForm.coordDelegate) payload.coordinatorToolCaps.delegate_to_agent = orchestrationForm.coordDelegate;
+    if (orchestrationForm.perTurnDelegate) payload.perTurnCaps.delegate_to_agent = orchestrationForm.perTurnDelegate;
+    if (orchestrationForm.perTurnComputerClick) payload.perTurnCaps.computer_click = orchestrationForm.perTurnComputerClick;
+    if (orchestrationForm.perTurnComputerType) payload.perTurnCaps.computer_type = orchestrationForm.perTurnComputerType;
+    await gateway.saveOrchestrationConfig(payload);
+  } catch (e) {
+    orchestrationError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    orchestrationSaving.value = false;
+  }
+}
+
 async function reloadConfigAssistant() {
   await Promise.all([
     configAssistant.fetchProposals(),
@@ -2927,6 +3106,7 @@ function loadDefinitionsData() {
   void configAssistant.fetchProposals();
   void configAssistant.fetchFlowMemory();
   void runtime.fetch();
+  void reloadOrchestrationConfig();
 }
 
 // ── Auto-load when connected ─────────────────────────────────────────────────

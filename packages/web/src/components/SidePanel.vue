@@ -32,7 +32,7 @@
         stroke-linejoin="round"
         aria-hidden="true"
       >
-        <path :d="modelValue ? 'M10 3L5 8l5 5' : 'M6 3l5 5-5 5'" />
+        <path :d="modelValue ? 'M6 3l5 5-5 5' : 'M10 3L5 8l5 5'" />
       </svg>
       <!-- Activity pulse dot shown when live content is available and panel is closed -->
       <span v-if="hasLiveContent && !modelValue" class="sp-handle__dot" aria-hidden="true" />
