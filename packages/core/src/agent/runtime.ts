@@ -125,6 +125,8 @@ export interface TurnPerformanceMetrics {
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
+  const cfgOverride = getConfig().orchestration?.perTurnCaps?.[toolName];
+  if (cfgOverride !== undefined) return cfgOverride;
   return PER_TURN_TOOL_CALL_LIMITS[toolName];
 }
 

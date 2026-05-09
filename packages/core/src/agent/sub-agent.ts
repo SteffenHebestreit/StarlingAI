@@ -333,10 +333,9 @@ function withDefaultSourceSensitiveFallbackAgents(args: Record<string, unknown>)
   return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
 }
 
-// Capped at 2 because all slices share the same local GPU (qwen3.6-35b-a3b).
-// 3 concurrent inference sessions saturate VRAM and the third slice times out
-// with 0 iterations before getting any GPU time (session a9b1ac76, May 2026).
-const MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 2;
+// Built-in default: 2 (safe for single local GPU).
+// Configurable at runtime via orchestration.maxParallelSlices in the gateway settings.
+const DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 2;
 
 function enforceSourceSensitivePreEvidenceDelegation(
   toolCall: { name: string; arguments: Record<string, unknown> },
@@ -362,7 +361,7 @@ function enforceSourceSensitivePreEvidenceDelegation(
       ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
       : [];
     if (rawTasks.length > 0) {
-      const cappedTasks = rawTasks.slice(0, MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
+      const cappedTasks = rawTasks.slice(0, getConfig().orchestration?.maxParallelSlices ?? DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
       if (rawTasks.length > cappedTasks.length) {
         logAudit(
           "sub_agent_tool_call",
@@ -630,12 +629,15 @@ const IDEMPOTENT_TOOLS = new Set<string>([
 ]);
 
 function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
+  const orchestration = getConfig().orchestration;
   if (isCoordinatorAgent) {
-    const override = COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES[toolName];
-    if (override !== undefined) {
-      return override;
-    }
+    const cfgOverride = orchestration?.coordinatorToolCaps?.[toolName];
+    if (cfgOverride !== undefined) return cfgOverride;
+    const builtInOverride = COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES[toolName];
+    if (builtInOverride !== undefined) return builtInOverride;
   }
+  const cfgOverride = orchestration?.subAgentToolCaps?.[toolName];
+  if (cfgOverride !== undefined) return cfgOverride;
   return SUB_AGENT_PER_TOOL_CAPS[toolName];
 }
 

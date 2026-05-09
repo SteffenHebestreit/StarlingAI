@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { resolve, basename, extname } from "node:path";
+import { resolve, basename, extname, sep } from "node:path";
 import JSON5 from "json5";
 import { z } from "zod";
 import { WebSocketServer } from "ws";
@@ -64,7 +64,7 @@ import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejec
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
 import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
-import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema } from "../config/schema.js";
+import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { handleMcpHttpRequest, shutdownMcpHttpSessions, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
@@ -221,24 +221,75 @@ export function createGateway() {
   function guessWorkspaceContentType(filePath: string): string {
     const extension = extname(filePath).toLowerCase();
     const contentTypes: Record<string, string> = {
+      // Web
       ".html": "text/html; charset=utf-8",
       ".htm": "text/html; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".mjs": "text/javascript; charset=utf-8",
+      ".ts": "text/plain; charset=utf-8",
+      ".jsx": "text/plain; charset=utf-8",
+      ".tsx": "text/plain; charset=utf-8",
+      // Documents
       ".md": "text/markdown; charset=utf-8",
       ".txt": "text/plain; charset=utf-8",
-      ".json": "application/json; charset=utf-8",
       ".pdf": "application/pdf",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".doc": "application/msword",
+      ".odt": "application/vnd.oasis.opendocument.text",
+      ".rtf": "application/rtf",
+      // Spreadsheets
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".xls": "application/vnd.ms-excel",
+      ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+      ".csv": "text/csv; charset=utf-8",
+      // Presentations
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ".ppt": "application/vnd.ms-powerpoint",
+      ".odp": "application/vnd.oasis.opendocument.presentation",
+      // Data
+      ".json": "application/json; charset=utf-8",
+      ".jsonc": "application/json; charset=utf-8",
+      ".jsonl": "application/json; charset=utf-8",
+      ".yaml": "application/yaml; charset=utf-8",
+      ".yml": "application/yaml; charset=utf-8",
+      ".xml": "application/xml; charset=utf-8",
+      ".toml": "text/plain; charset=utf-8",
+      ".sql": "text/plain; charset=utf-8",
+      ".sh": "text/plain; charset=utf-8",
+      ".py": "text/plain; charset=utf-8",
+      ".log": "text/plain; charset=utf-8",
+      // Images
       ".png": "image/png",
       ".jpg": "image/jpeg",
       ".jpeg": "image/jpeg",
       ".gif": "image/gif",
       ".webp": "image/webp",
       ".svg": "image/svg+xml",
+      ".ico": "image/x-icon",
+      ".bmp": "image/bmp",
+      ".tiff": "image/tiff",
+      ".avif": "image/avif",
+      // Audio
       ".wav": "audio/wav",
       ".mp3": "audio/mpeg",
       ".m4a": "audio/mp4",
       ".ogg": "audio/ogg",
       ".webm": "audio/webm",
-      ".csv": "text/csv; charset=utf-8",
+      ".flac": "audio/flac",
+      // Video
+      ".mp4": "video/mp4",
+      ".mov": "video/quicktime",
+      ".avi": "video/x-msvideo",
+      ".mkv": "video/x-matroska",
+      // Archives
+      ".zip": "application/zip",
+      ".tar": "application/x-tar",
+      ".gz": "application/gzip",
+      // Fonts
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
+      ".ttf": "font/ttf",
     };
     return contentTypes[extension] ?? "application/octet-stream";
   }
@@ -2035,6 +2086,49 @@ export function createGateway() {
     }
   });
 
+  // ── Orchestration tuning ──────────────────────────────────────────────────
+  // GET /api/orchestration/config — returns current config plus built-in defaults
+  // PUT /api/orchestration/config — validates and persists the orchestration section
+  app.get("/api/orchestration/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json({
+      config: getConfig().orchestration,
+      defaults: {
+        maxParallelSlices: 2,
+        subAgentToolCaps: { web_search: 14, web_fetch: 16, write_file: 3, delegate_to_agent: 3, computer_snapshot: 8 },
+        coordinatorToolCaps: { delegate_to_agent: 6, swarm_delegate: 6, web_search: 20, web_fetch: 25 },
+        perTurnCaps: { delegate_to_agent: 5, computer_click: 8, computer_type: 6, computer_hotkey: 6, computer_snapshot: 3 },
+      },
+    });
+  });
+
+  app.put("/api/orchestration/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = OrchestrationSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid orchestration configuration", details: parsed.error.flatten() }, 400);
+    }
+
+    try {
+      const updatedConfig = updateConfig((raw) => {
+        raw["orchestration"] = parsed.data;
+      });
+      return c.json(updatedConfig.orchestration);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
   app.post("/api/multimodal/file-to-markdown", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -2782,8 +2876,66 @@ export function createGateway() {
     }
   });
 
-  // ── Memory inspector endpoints ────────────────────────────────────────────
-  // Read-only views into the durable memory store and the MemGraph knowledge
+  // ── Workspace static preview server ──────────────────────────────────────
+  // GET /api/workspace/preview?root=<dir>&file=<rel>&token=<jwt>
+  //
+  // Serves any file within a workspace directory as a proper static response.
+  // Designed for iframe use: the token travels as a query parameter because
+  // browsers cannot set Authorization headers on iframe src attributes.
+  // `root` is the workspace-relative directory that forms the document root.
+  // `file` is the file path relative to that root (defaults to index.html).
+  // Only files strictly inside the root are served (path-traversal blocked).
+  //
+  // This enables multi-file web projects (HTML + CSS + JS + assets) to load
+  // with all relative imports resolved correctly, including fonts and images.
+  app.get("/api/workspace/preview", async (c) => {
+    const queryToken = c.req.query("token")?.trim();
+    if (!queryToken || !await verifyToken(queryToken)) {
+      return c.text("Unauthorized", 401);
+    }
+
+    const root = c.req.query("root")?.trim();
+    const file = c.req.query("file")?.trim() || "index.html";
+
+    if (!root) return c.text("root query parameter is required", 400);
+
+    // Validate that both root and file stay within the workspace
+    let rootResolved: string;
+    let fileResolved: string;
+    try {
+      const rootTarget = resolveWorkspaceTarget(root);
+      rootResolved = rootTarget.resolved;
+
+      // Resolve the requested file within the root (not the workspace) to
+      // block path traversal attempts like `../../etc/passwd`.
+      const candidate = resolve(rootResolved, file.replace(/^\/+/, ""));
+      if (!candidate.startsWith(rootResolved + sep) && candidate !== rootResolved) {
+        return c.text("File path escapes root directory", 400);
+      }
+      fileResolved = candidate;
+    } catch {
+      return c.text("Path escapes workspace boundary", 400);
+    }
+
+    const fileStat = await stat(fileResolved).catch(() => null);
+    if (!fileStat?.isFile()) {
+      return c.text("File not found", 404);
+    }
+    if (fileStat.size > WORKSPACE_FILE_MAX_BYTES) {
+      return c.text("File too large", 413);
+    }
+
+    const bytes = await readFile(fileResolved);
+    const filename = basename(fileResolved);
+    return c.body(bytes, 200, {
+      "Content-Type": guessWorkspaceContentType(filename),
+      // Allow the iframe's scripts to make requests back to the same origin
+      // for additional assets via /api/workspace/preview, but nothing else.
+      "Cross-Origin-Resource-Policy": "same-origin",
+    });
+  });
+
+  // ── Memory inspector endpoints ────────────────────────────────────────────  // Read-only views into the durable memory store and the MemGraph knowledge
   // graph for the operator UI under /memory. Both endpoints degrade gracefully
   // when their backing store is offline.
 

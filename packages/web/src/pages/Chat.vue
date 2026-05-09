@@ -149,7 +149,7 @@
         <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
       </template>
 
-      <!-- Artifacts slot: previewable files produced by the agent -->
+      <!-- Artifacts slot: previewable and downloadable files produced by the agent -->
       <template #artifacts>
         <template v-if="sessionArtifacts.length > 0">
           <!-- Artifact selector pills -->
@@ -166,6 +166,26 @@
             >
               <span class="panel-artifact-pill__icon" aria-hidden="true">{{ panelArtifactIcon(att) }}</span>
               <span class="panel-artifact-pill__name">{{ att.title || att.filename }}</span>
+            </button>
+          </div>
+
+          <!-- Toolbar: download / ZIP buttons for the selected artifact -->
+          <div v-if="selectedPanelArtifact" class="panel-artifact-toolbar">
+            <button
+              v-if="selectedPanelArtifact.isDirectory"
+              class="btn-ghost px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5"
+              title="Download as ZIP"
+              @click="gateway.downloadWorkspaceArtifact(selectedPanelArtifact.relativePath!, { archive: true, suggestedFilename: (selectedPanelArtifact.title || selectedPanelArtifact.filename) + '.zip' })"
+            >
+              <span aria-hidden="true">⬇</span> Download ZIP
+            </button>
+            <button
+              v-else
+              class="btn-ghost px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5"
+              title="Download file"
+              @click="gateway.downloadWorkspaceArtifact(selectedPanelArtifact.relativePath!, { suggestedFilename: selectedPanelArtifact.filename })"
+            >
+              <span aria-hidden="true">⬇</span> Download
             </button>
           </div>
 
@@ -195,14 +215,27 @@
                 controls
                 class="panel-artifact-audio"
               />
+              <!-- Website preview: served directly from gateway so relative imports work -->
               <iframe
                 v-else-if="panelArtifactPreview.kind === 'website'"
-                :srcdoc="panelArtifactPreview.srcdoc"
+                :src="panelArtifactPreview.url"
                 class="panel-artifact-frame"
-                sandbox="allow-same-origin"
+                sandbox="allow-scripts allow-same-origin allow-forms"
                 referrerpolicy="no-referrer"
                 title="Website preview"
               />
+              <!-- Download-only: no inline preview, just a prompt -->
+              <div v-else-if="panelArtifactPreview.kind === 'download'" class="panel-artifact-download-prompt">
+                <span class="panel-artifact-download-prompt__icon" aria-hidden="true">{{ panelArtifactIcon(selectedPanelArtifact!) }}</span>
+                <p class="panel-artifact-download-prompt__name">{{ selectedPanelArtifact!.title || selectedPanelArtifact!.filename }}</p>
+                <p class="panel-artifact-download-prompt__hint">No inline preview available for this file type.</p>
+                <button
+                  class="btn-grad px-5 py-2 rounded-xl text-sm mt-2"
+                  @click="gateway.downloadWorkspaceArtifact(selectedPanelArtifact!.relativePath!, { suggestedFilename: selectedPanelArtifact!.filename })"
+                >
+                  Download file
+                </button>
+              </div>
               <pre v-else class="panel-artifact-text">{{ panelArtifactPreview.text }}</pre>
             </template>
           </div>
@@ -835,17 +868,6 @@
         </div>
       </div>
 
-      <div v-if="tokenMeter" class="flex items-center gap-2 text-xs text-gray-600 mt-2 px-1">
-        <span class="shrink-0 font-mono tabular-nums">{{ tokenMeter.label }}</span>
-        <div class="flex-1 h-0.5 rounded-full bg-white/5 overflow-hidden">
-          <div
-            class="h-full rounded-full transition-[width] duration-300"
-            :class="tokenMeter.pct >= 90 ? 'bg-red-500/70' : tokenMeter.pct >= 75 ? 'bg-amber-400/70' : 'bg-purple-500/40'"
-            :style="{ width: `${tokenMeter.pct}%` }"
-          />
-        </div>
-        <span class="shrink-0 w-8 text-right tabular-nums">{{ tokenMeter.pct }}%</span>
-      </div>
       <div class="text-xs text-gray-700 mt-1 px-1">
         Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code>
       </div>
@@ -951,19 +973,6 @@ const audioProgressPercent = computed(() => {
 });
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
-const tokenMeter = computed(() => {
-  const lastUsage = [...gateway.messages].reverse().find(m => m.usage?.promptTokens)?.usage;
-  const lastPromptTokens = lastUsage?.promptTokens ?? 0;
-  const inputTokenEstimate = Math.ceil(inputText.value.length / 4);
-  const totalEstimate = lastPromptTokens + inputTokenEstimate;
-  if (totalEstimate === 0) return null;
-  const mainAgent = agentsStore.agents[0];
-  const contextWindow = mainAgent?.model.contextWindow ?? 32768;
-  const pct = Math.min(100, Math.round((totalEstimate / contextWindow) * 100));
-  const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-  return { totalEstimate, contextWindow, pct, label: `~${fmt(totalEstimate)} / ${fmt(contextWindow)} tokens` };
-});
-
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
   if (img) URL.revokeObjectURL(img.previewUrl);
@@ -1194,13 +1203,18 @@ watch(hasSidePanels, (nowHas, hadBefore) => {
 });
 
 // Aggregate previewable, non-image attachments from all messages in the session
+// Aggregate previewable and downloadable attachments from all messages in the session.
+// Previously only "previewable" (non-download, non-image) attachments were shown here.
+// We now include everything except raw inline images (those are shown inline in the message).
 const sessionArtifacts = computed((): ChatAttachment[] => {
   const seen = new Set<string>();
   const results: ChatAttachment[] = [];
   for (const msg of gateway.messages) {
     for (const att of msg.attachments ?? []) {
-      if (att.previewMode === "image" || att.previewMode === "download") continue;
+      // Skip inline images — they are already shown within the chat bubble.
+      if (att.previewMode === "image") continue;
       if (att.dataUrl?.startsWith("data:image/")) continue;
+      // Must have an accessible path or external URL.
       if (!att.relativePath && !att.externalUrl) continue;
       if (seen.has(att.filename)) continue;
       seen.add(att.filename);
@@ -1215,9 +1229,8 @@ const panelArtifactLoading = ref(false);
 const panelArtifactError = ref<string | null>(null);
 
 interface PanelArtifactPreview {
-  kind: "html" | "pdf" | "audio" | "website" | "text";
+  kind: "html" | "pdf" | "audio" | "website" | "text" | "download";
   url?: string;
-  srcdoc?: string;
   text?: string;
 }
 
@@ -1232,15 +1245,25 @@ function revokePanelObjectUrl() {
 }
 
 function panelArtifactIcon(att: ChatAttachment): string {
+  if (att.isDirectory) return "⊞";
   switch (att.previewMode) {
-    case "html":    return "⟨/⟩";
-    case "pdf":     return "⊞";
-    case "audio":   return "♪";
-    case "website": return "⊕";
-    case "markdown":return "✎";
-    case "json":    return "{}";
-    case "mermaid": return "⬡";
-    default:        return "▤";
+    case "html":     return "⟨/⟩";
+    case "pdf":      return "⊞";
+    case "audio":    return "♪";
+    case "website":  return "⊕";
+    case "markdown": return "✎";
+    case "json":     return "{}";
+    case "mermaid":  return "⬡";
+    case "download": {
+      const ext = att.filename.split(".").pop()?.toLowerCase() ?? "";
+      if (["docx","doc","odt","rtf"].includes(ext)) return "📄";
+      if (["xlsx","xls","ods","csv"].includes(ext)) return "📊";
+      if (["pptx","ppt","odp"].includes(ext)) return "📊";
+      if (["zip","tar","gz"].includes(ext)) return "🗜";
+      if (["mp4","mov","avi","mkv"].includes(ext)) return "▶";
+      return "⬇";
+    }
+    default: return "▤";
   }
 }
 
@@ -1263,11 +1286,22 @@ async function selectPanelArtifact(att: ChatAttachment): Promise<void> {
       panelArtifactError.value = "No file path available for this artifact.";
       return;
     }
-    const { blob } = await gateway.fetchWorkspaceArtifactBlob(att.relativePath, { disposition: "inline" });
-    if (att.previewMode === "website") {
-      panelArtifactPreview.value = { kind: "website", srcdoc: await blob.text() };
+
+    // Download-only artifacts: show the download prompt panel without fetching.
+    if (att.previewMode === "download") {
+      panelArtifactPreview.value = { kind: "download" };
       return;
     }
+
+    // Directory (website project): serve from the gateway static-serve endpoint
+    // so that relative CSS/JS/image imports resolve correctly inside the iframe.
+    if (att.isDirectory || att.previewMode === "website") {
+      const previewUrl = gateway.buildWorkspacePreviewUrl(att.relativePath);
+      panelArtifactPreview.value = { kind: "website", url: previewUrl };
+      return;
+    }
+
+    const { blob } = await gateway.fetchWorkspaceArtifactBlob(att.relativePath, { disposition: "inline" });
     if (att.previewMode === "html" || att.previewMode === "pdf" || att.previewMode === "audio") {
       const url = URL.createObjectURL(blob);
       currentPanelObjectUrl = url;
@@ -4066,6 +4100,45 @@ onUnmounted(() => {
   word-break: break-word;
   scrollbar-width: thin;
   scrollbar-color: rgba(168, 85, 247, 0.2) transparent;
+}
+
+.panel-artifact-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  flex-shrink: 0;
+}
+
+.panel-artifact-download-prompt {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.panel-artifact-download-prompt__icon {
+  font-size: 2rem;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.panel-artifact-download-prompt__name {
+  font-size: 0.85rem;
+  color: rgb(216 180 254);
+  font-weight: 500;
+  margin: 0;
+  word-break: break-word;
+}
+
+.panel-artifact-download-prompt__hint {
+  font-size: 0.75rem;
+  color: rgb(71 85 105);
+  margin: 0;
 }
 
 @media (min-width: 1024px) {

@@ -1126,6 +1126,28 @@ export const SelfImprovementSchema = z.object({
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
 export type SelfImprovementConfig = z.infer<typeof SelfImprovementSchema>;
 
+// ─── Orchestration tuning ─────────────────────────────────────────────────────
+// Hardware-dependent limits that previously required code edits. All values
+// overlay the built-in defaults — omit a key to keep the default.
+export const OrchestrationSchema = z.object({
+  /** Max simultaneous parallel research slices dispatched by a source-sensitive
+   *  coordinator.  Set to 2 for a single local GPU, 3-4 for multi-GPU or
+   *  API-based backends.  Built-in default: 2. */
+  maxParallelSlices: z.number().int().min(1).max(8).default(2),
+  /** Per-call caps for regular researcher sub-agents.
+   *  Keys are tool names; values override the built-in defaults.
+   *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
+  subAgentToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
+  /** Per-call caps specifically for the mission_coordinator sub-agent.
+   *  Coordinator overrides layer on top of subAgentToolCaps overrides.
+   *  Built-in: delegate_to_agent=6, swarm_delegate=6, web_search=20, web_fetch=25. */
+  coordinatorToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
+  /** Per-turn caps for the main orchestrator agent (not sub-agents).
+   *  Built-in: delegate_to_agent=5, computer_click=8, computer_type=6, … */
+  perTurnCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
+});
+export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
+
 export const ConfigSchema = z.object({
   providers: ProvidersSchema.default({}),
   agents: z.object({
@@ -1222,6 +1244,7 @@ export const ConfigSchema = z.object({
     dir: z.string().optional(),
   }).default({}),
   workspacePath: z.string().default("/workspace"),
+  orchestration: OrchestrationSchema.default({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
