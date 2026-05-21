@@ -221,6 +221,7 @@ const allNavEntries: NavEntry[] = [
     ],
   },
   { kind: "leaf", to: "/memory", label: "Memory" },
+  { kind: "leaf", to: "/skills", label: "Skills" },
   {
     kind: "group",
     label: "Manage",
