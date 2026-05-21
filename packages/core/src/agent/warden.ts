@@ -95,6 +95,12 @@ const COMPUTER_STALE_LOOP_THRESHOLD = 3;          // identical screenshots in a 
 const CONFIG_PROPOSAL_WINDOW_MS = 10 * 60 * 1_000; // 10 min
 const CONFIG_PROPOSAL_THRESHOLD = 5;               // proposals per session
 
+// Skill-authoring abuse: a session that authors/distills many skills in a short
+// window is either thrashing or attempting to flood the procedural-memory
+// surface. Skills are non-privileged guidance, so this is "warn", not a halt.
+const SKILL_AUTHOR_WINDOW_MS = 10 * 60 * 1_000;    // 10 min
+const SKILL_AUTHOR_THRESHOLD = 8;                  // skills authored per session
+
 // Self-improvement loop detection (closes GAP-4): a session that keeps having
 // its self-improvement work REJECTED (config proposals, tool promotions,
 // tool-dev sessions) is wasting cycles or probing for a way around guardrails.
@@ -148,6 +154,9 @@ const _computerScreenshotHashes = new Map<string, string[]>();
 
 /** sessionId → config proposal timestamps (self-improvement abuse detection) */
 const _configProposalsBySession = new Map<string, number[]>();
+
+/** sessionId → skill author/distill timestamps */
+const _skillAuthoringBySession = new Map<string, number[]>();
 const _selfImproveRejectionsBySession = new Map<string, number[]>();
 
 /** sessionId → expiry ts for imminent-storm alert cooldown (E19). */
@@ -194,7 +203,7 @@ export function isSessionTurnActive(sessionId: string): boolean {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {
-  type: "tool_storm" | "tool_storm_imminent" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "agent_message_flood_imminent" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "tier_escalation_attempt" | "self_improve_loop" | "docker_daemon_unreachable";
+  type: "tool_storm" | "tool_storm_imminent" | "repeated_failures" | "tool_escape_attempt" | "rate_limit_flood" | "agent_message_flood" | "agent_message_flood_imminent" | "turn_slo_breach" | "tool_failure_spike" | "repeated_identical_output" | "computer_focus_thrashing" | "computer_click_storm" | "computer_credential_prompt_loop" | "computer_clipboard_exfiltration" | "computer_stale_loop" | "tool_dev_stuck" | "tool_dev_runaway" | "config_proposal_flood" | "tier_escalation_attempt" | "self_improve_loop" | "docker_daemon_unreachable" | "skill_authoring_flood";
   severity: "warn" | "error";
   subject: string;
   detail: string;
@@ -345,6 +354,16 @@ export function startWarden(): void {
       const hits = _configProposalsBySession.get(event.sessionId) ?? [];
       hits.push(now);
       _configProposalsBySession.set(event.sessionId, hits);
+    }
+
+    // ── Skill authoring accumulation (procedural-memory abuse detection) ───
+    if (
+      (event.type === "skill_authored" || event.type === "skill_distilled") &&
+      event.sessionId
+    ) {
+      const hits = _skillAuthoringBySession.get(event.sessionId) ?? [];
+      hits.push(now);
+      _skillAuthoringBySession.set(event.sessionId, hits);
     }
 
     // ── Self-improvement rejection accumulation (closes GAP-4) ─────────────
@@ -548,6 +567,7 @@ export function resetWardenForTests(): void {
   _computerClipboardReads.clear();
   _computerScreenshotHashes.clear();
   _configProposalsBySession.clear();
+  _skillAuthoringBySession.clear();
   _selfImproveRejectionsBySession.clear();
   _toolStormImminentCooldown.clear();
   _agentMessageImminentCooldown.clear();
@@ -785,6 +805,30 @@ function sweepAnomalies(): WardenAlert[] {
       alerts.push(alert);
       // Reset window so the alert fires at most once per burst
       _configProposalsBySession.set(sessionId, []);
+    }
+  }
+
+  // 7a. Skill authoring flood (procedural-memory abuse) ─────────────────────
+  for (const [sessionId, timestamps] of _skillAuthoringBySession) {
+    const recent = timestamps.filter((t) => now - t < SKILL_AUTHOR_WINDOW_MS);
+    if (recent.length === 0) {
+      _skillAuthoringBySession.delete(sessionId);
+      continue;
+    }
+    _skillAuthoringBySession.set(sessionId, recent);
+
+    if (recent.length >= SKILL_AUTHOR_THRESHOLD) {
+      const alert = makeAlert(
+        "skill_authoring_flood",
+        "warn",
+        sessionId,
+        `Session authored ${recent.length} skills in 10 minutes — possible procedural-memory thrashing. Review distilled/recorded skills for quality.`,
+        "logged",
+      );
+      emitAlert(alert);
+      alerts.push(alert);
+      // Reset window so the alert fires at most once per burst.
+      _skillAuthoringBySession.set(sessionId, []);
     }
   }
 

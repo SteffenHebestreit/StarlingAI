@@ -74,6 +74,22 @@ describe("Warden — tool storm detection", () => {
     expect(alerts.filter(a => a.type === "tool_storm")).toHaveLength(0);
   });
 
+  it("fires skill_authoring_flood when a session authors too many skills", () => {
+    for (let i = 0; i < 8; i++) {
+      fireEvent({ type: i % 2 === 0 ? "skill_authored" : "skill_distilled", sessionId: "sess-skill", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some(a => a.type === "skill_authoring_flood" && a.subject === "sess-skill")).toBe(true);
+  });
+
+  it("does not fire skill_authoring_flood below threshold", () => {
+    for (let i = 0; i < 4; i++) {
+      fireEvent({ type: "skill_authored", sessionId: "sess-skill-2", data: {} });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.filter(a => a.type === "skill_authoring_flood")).toHaveLength(0);
+  });
+
   it("resets window after firing so it does not re-alert on the same burst", () => {
     for (let i = 0; i < 15; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-2", data: {} });

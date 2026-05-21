@@ -1126,6 +1126,54 @@ export const SelfImprovementSchema = z.object({
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
 export type SelfImprovementConfig = z.infer<typeof SelfImprovementSchema>;
 
+export const SkillLibrarySchema = z.object({
+  /**
+   * Enable the procedural Skill Library: swarm-authored, self-improving
+   * markdown procedures retrieved at planning time. Pure guidance — no code,
+   * no privilege. Safe to leave on; produces no effect until skills exist.
+   */
+  enabled: z.boolean().default(true),
+  /**
+   * Autonomously distill skills from successful trajectories. Safe: drafts only
+   * (graduate to active on first real-use success), deduped against existing
+   * skills, and the Warden caps authoring bursts (skill_authoring_flood).
+   */
+  autoAuthor: z.boolean().default(true),
+  /** Min delegations/tool steps in a successful turn before auto-authoring is considered. */
+  minStepsToAuthor: z.number().int().min(1).max(50).default(3),
+  /** Max skills retrieved and injected into the planner prompt per turn. */
+  maxInjected: z.number().int().min(1).max(10).default(3),
+  /** Success-rate floor (0–1) below which the driver retires a skill (Phase 3). */
+  retireBelowSuccessRate: z.number().min(0).max(1).default(0.34),
+  /** Minimum recorded uses before retirement is considered (Phase 3). */
+  retireMinUses: z.number().int().min(1).max(100).default(5),
+  /**
+   * Auto-promote consistently reliable skills into reusable scenes in the
+   * workflow catalog. Disable to keep the swarm from creating scenes without an
+   * operator in the loop while still authoring/retiring skills.
+   */
+  autoPromoteToScene: z.boolean().default(true),
+});
+
+export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;
+
+export const ToolPipelineSchema = z.object({
+  /**
+   * Enable run_tool_pipeline: a declarative batch executor that runs several
+   * tool calls in one turn (collapsing model round-trips). Every step still
+   * dispatches through the normal tier/approval/audit path AND is restricted to
+   * the calling agent's own tool allowlist — so it batches without escalating.
+   * Only agents explicitly granted run_tool_pipeline can use it.
+   */
+  enabled: z.boolean().default(true),
+  /** Maximum steps in a single pipeline. */
+  maxSteps: z.number().int().min(1).max(25).default(8),
+  /** Cap on a prior step's output length when substituted into a later step's args. */
+  maxTemplateOutputChars: z.number().int().min(200).max(20_000).default(4_000),
+});
+
+export type ToolPipelineConfig = z.infer<typeof ToolPipelineSchema>;
+
 // ─── Orchestration tuning ─────────────────────────────────────────────────────
 // Hardware-dependent limits that previously required code edits. All values
 // overlay the built-in defaults — omit a key to keep the default.
@@ -1223,6 +1271,8 @@ export const ConfigSchema = z.object({
   mail: MailServiceSchema.default({}),
   toolDevelopment: ToolDevelopmentSchema.default({}),
   selfImprovement: SelfImprovementSchema.default({}),
+  skillLibrary: SkillLibrarySchema.default({}),
+  toolPipeline: ToolPipelineSchema.default({}),
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),

@@ -21,6 +21,10 @@ import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
+import { retrieveSkillGuidance } from "../skills/service.js";
+import { recordSkillOutcomeAsync } from "../skills/store.js";
+import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
+import { formatUserModelGuidance } from "../user-model/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
@@ -2857,6 +2861,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     onComputerScreenshot: opts.onComputerScreenshot,
     onComputerSessionState: opts.onComputerSessionState,
     allowedAgents: opts.allowedAgents,
+    allowedTools: allowedToolNames,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
     maxIterationsOverride: opts.maxIterationsOverride,
@@ -2914,6 +2919,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let _forcedSynthesisFired = false;
   // G33: Collected share_finding texts for trajectory cache write
   const sharedFindingsThisTurn: string[] = [];
+  // Phase 3: skills injected into the planner this turn — outcomes recorded at
+  // turn end so retrieval reliability is learned (success rate drives ranking).
+  let injectedSkillSlugs: string[] = [];
   // Shared findings injected into the main LLM context after delegations complete.
   // Populated once after the first delegation tool result arrives so the main
   // orchestrator's final synthesis call sees verified sub-agent findings rather
@@ -3139,6 +3147,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
         })
       : "";
+    // Procedural memory: surface reusable skills the swarm distilled from past
+    // successful work, so the planner reuses a known-good approach before
+    // inventing a fresh plan. Guidance only — the guardrail stack still applies.
+    let skillGuidance = "";
+    if (iterationCount === 0 && getConfig().skillLibrary.enabled) {
+      const retrieved = await retrieveSkillGuidance(session.getWorkspacePath(), userMessage, {
+        maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
+      });
+      skillGuidance = retrieved.text;
+      injectedSkillSlugs = retrieved.slugs;
+    }
+    // Dialectic user model — small, injected only when populated. Adapts the
+    // agent to the user across sessions; droppable under prompt budget.
+    let userModelGuidance = iterationCount === 0 ? formatUserModelGuidance() : "";
     let activeTrajectoryInjectionContext = iterationCount === 0 ? trajectoryInjectionContext : null;
     const collapsedHistory = session.getCollapsedHistory();
 
@@ -3158,6 +3180,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(approvedRunCandidateEnforcementPrompt ? [{ role: "system" as const, content: approvedRunCandidateEnforcementPrompt }] : []),
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
+      ...(skillGuidance ? [{ role: "system" as const, content: skillGuidance }] : []),
+      ...(userModelGuidance ? [{ role: "system" as const, content: userModelGuidance }] : []),
       ...(memoryGuidance ? [{ role: "system" as const, content: memoryGuidance }] : []),
       // G33: Inject cached trajectory evidence on first iteration only
       ...(iterationCount === 0 && activeTrajectoryInjectionContext ? [{ role: "system" as const, content: activeTrajectoryInjectionContext }] : []),
@@ -3195,6 +3219,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         if (lastPromptMetrics.systemPromptChars > promptBudget && memoryGuidance) {
           droppedSections.push({ name: "memoryGuidance", chars: memoryGuidance.length });
           memoryGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 2b: skill guidance (procedural memory — non-critical)
+        if (lastPromptMetrics.systemPromptChars > promptBudget && skillGuidance) {
+          droppedSections.push({ name: "skillGuidance", chars: skillGuidance.length });
+          skillGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 2c: user-model guidance (cross-session adaptation — non-critical)
+        if (lastPromptMetrics.systemPromptChars > promptBudget && userModelGuidance) {
+          droppedSections.push({ name: "userModelGuidance", chars: userModelGuidance.length });
+          userModelGuidance = "";
           systemMessages = buildSystemMessages();
           lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
         }
@@ -4023,8 +4061,32 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // negative-signal counterpart that closes the E26 loop in both
       // directions rather than relying solely on slow decay.
       const isApology = finalResponse.toLowerCase().startsWith("i apologize");
+      // Phase 3: credit/penalize the skills injected into this turn so retrieval
+      // reliability is learned. Success graduates drafts to active in the store.
+      // Only attribute on turns that actually did multi-step work — skills are
+      // procedures, so a direct single-shot answer is not evidence the procedure
+      // was followed (avoids inflating success rates on trivial turns).
+      // Fire-and-forget async writes — never block the turn return.
+      if (injectedSkillSlugs.length > 0 && _turnDelegationCount > 0) {
+        const outcome = finalResponse.length > 50 && !isApology ? "success" : "failure";
+        const skillWorkspace = session.getWorkspacePath();
+        for (const slug of injectedSkillSlugs) {
+          void recordSkillOutcomeAsync(skillWorkspace, slug, outcome).catch(() => { /* non-critical */ });
+        }
+      }
       if (finalResponse.length > 50 && !isApology) {
         graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
+        // Phase 2: distill a reusable skill from this successful multi-step turn
+        // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
+        maybeDistillSkillFromTurn({
+          workspacePath: session.getWorkspacePath(),
+          sessionId: session.id,
+          objective: userMessage,
+          finalAnswer: finalResponse,
+          delegationCount: _turnDelegationCount,
+          sharedFindings: sharedFindingsThisTurn,
+          swarmState: getTurnSwarmState(),
+        }).catch(() => undefined);
         // G33 follow-up: positive signal — the injected cached trajectory
         // contributed to a successful answer. Pairs with `trajectory_cache_hit`
         // and `trajectory_cache_invalidated` so operators can compute the
