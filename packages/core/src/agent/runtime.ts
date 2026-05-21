@@ -1069,10 +1069,17 @@ function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][]): Workf
   });
 }
 
-function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatalogMatch[]): boolean {
+export function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatalogMatch[]): boolean {
   const topMatch = matches[0];
   if (!topMatch) return false;
-  return topMatch.score >= 0.2 || topMatch.matchedTerms.length >= 3;
+  // Only FORCE a workflow run when the match is genuinely strong. The
+  // search_workflows tool surfaces candidates at a low floor (>=0.18) as a
+  // discovery aid, but hard-forcing run_workflow on a weak/incidental match
+  // (e.g. an unrelated DB-analysis job scoring 0.24 on two generic terms like
+  // "inspection"/"analysis") deadlocks the turn: the model rightly refuses the
+  // irrelevant workflow, produces nothing, and the user gets an empty answer.
+  // Require a strong score, or 3+ matched terms backed by a non-trivial score.
+  return topMatch.score >= 0.5 || (topMatch.matchedTerms.length >= 3 && topMatch.score >= 0.3);
 }
 
 function formatWorkflowExecutionPromptFromSearch(matches: WorkflowCatalogMatch[]): string {

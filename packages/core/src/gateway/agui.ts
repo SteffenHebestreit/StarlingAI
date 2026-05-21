@@ -102,6 +102,7 @@ export async function handleAguiStream(
 
   try {
     let textStarted = false;
+    let streamedMeaningfulText = false;
 
     const turnResult = await runTurn({
       session,
@@ -113,6 +114,7 @@ export async function handleAguiStream(
           sseEvent(res, { type: "TEXT_MESSAGE_STARTED", messageId, role: "assistant" });
           textStarted = true;
         }
+        if (text && text.trim().length > 0) streamedMeaningfulText = true;
         sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: text });
       },
 
@@ -132,13 +134,26 @@ export async function handleAguiStream(
     cleanupTimeout();
     if (timedOut) return;
 
-    // If the turn was blocked and no text was streamed (blocked turns suppress
-    // initial streaming), surface the blocked reason as an assistant message so
-    // the user is not left with a silent empty response.
-    if (turnResult.blocked && !textStarted && turnResult.response) {
-      sseEvent(res, { type: "TEXT_MESSAGE_STARTED", messageId, role: "assistant" });
-      sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: turnResult.response });
-      textStarted = true;
+    // Never leave the user with a silent/empty reply. If streaming produced no
+    // meaningful (non-whitespace) text — which happens when a turn is blocked,
+    // or when the model emitted only whitespace before deadlocking on a
+    // guardrail — surface the final response, or a generic fallback if that is
+    // also empty. (A whitespace-only stream previously set textStarted=true and
+    // suppressed the blocked-reason fallback, leaving a blank message.)
+    if (!streamedMeaningfulText) {
+      const fallback = turnResult.response && turnResult.response.trim().length > 0
+        ? turnResult.response
+        : turnResult.blocked
+          ? "I couldn't complete that request this turn — I got stuck routing it. Please rephrase or try again, and I'll take another pass."
+          : "";
+      if (fallback) {
+        if (!textStarted) {
+          sseEvent(res, { type: "TEXT_MESSAGE_STARTED", messageId, role: "assistant" });
+          textStarted = true;
+        }
+        sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: fallback });
+        streamedMeaningfulText = fallback.trim().length > 0;
+      }
     }
 
     if (textStarted) {
