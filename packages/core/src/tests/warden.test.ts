@@ -26,6 +26,8 @@ import {
   clearSessionDegraded,
   startWarden,
   stopWarden,
+  TOOL_STORM_THRESHOLD,
+  TOOL_STORM_PREDICT_THRESHOLD,
 } from "../agent/warden.js";
 import { logAudit } from "../audit/logger.js";
 
@@ -46,7 +48,7 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("does not alert below threshold", () => {
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD - 1; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-1", data: {} });
     }
     const alerts = sweepAnomaliesNow();
@@ -54,7 +56,7 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("fires tool_storm when threshold is reached", () => {
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-1", data: {} });
     }
     const alerts = sweepAnomaliesNow();
@@ -67,7 +69,7 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("ignores done-phase sub-agent tool events for tool storm counting", () => {
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-done", data: { phase: "done", success: true } });
     }
     const alerts = sweepAnomaliesNow();
@@ -91,7 +93,7 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("resets window after firing so it does not re-alert on the same burst", () => {
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-2", data: {} });
     }
     sweepAnomaliesNow();
@@ -102,8 +104,8 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("E19: fires tool_storm_imminent when short-window velocity is elevated", () => {
-    // 8 calls in <60s — below hard threshold (15/5min) but meets predict bar.
-    for (let i = 0; i < 8; i++) {
+    // Meets the predict bar in <60s but stays below the hard storm threshold.
+    for (let i = 0; i < TOOL_STORM_PREDICT_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-imm", data: {} });
     }
     const alerts = sweepAnomaliesNow();
@@ -112,7 +114,7 @@ describe("Warden — tool storm detection", () => {
   });
 
   it("E19: imminent alert does not re-fire during cooldown", () => {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < TOOL_STORM_PREDICT_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-cool", data: {} });
     }
     sweepAnomaliesNow();
@@ -127,7 +129,7 @@ describe("Warden — tool storm detection", () => {
     // Subject must match extractSessionIdFromSubject's pattern — use a
     // UUID-like session ID so the warden recognises it as a session subject.
     const sid = "abcdef0123456789";
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < TOOL_STORM_PREDICT_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: sid, data: {} });
     }
     sweepAnomaliesNow();
@@ -384,7 +386,7 @@ describe("Warden — stats and lifecycle", () => {
 
   it("tracks total alerts emitted across sweeps", () => {
     startWarden();
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-x", data: {} });
     }
     sweepAnomaliesNow();
@@ -395,7 +397,7 @@ describe("Warden — stats and lifecycle", () => {
   it("is idempotent — starting twice does not double-register", () => {
     startWarden();
     startWarden();
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
       fireEvent({ type: "sub_agent_tool_call", sessionId: "sess-y", data: {} });
     }
     vi.mocked(logAudit).mockClear();

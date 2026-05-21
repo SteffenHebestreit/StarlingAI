@@ -284,11 +284,15 @@ describe("search_agents tool", () => {
       researcher: {
         description: "Finds facts on the web and summarizes them.",
         tools: ["web_search", "web_fetch"],
+        tags: [],
+        capabilities: [],
         maxIterations: 4,
       },
       browser_agent: {
         description: "Logs into sites and automates forms in the browser.",
         tools: ["get_site_credentials", "mcp__playwright__browser_click"],
+        tags: [],
+        capabilities: [],
         maxIterations: 6,
       },
     };
