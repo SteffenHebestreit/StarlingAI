@@ -104,6 +104,13 @@ export interface ToolContext {
   /** When set by a scene, only these sub-agent names may be delegated to */
   allowedAgents?: string[];
   /**
+   * Tool names the current caller (orchestrator turn or sub-agent) is allowed to
+   * use this turn. Set by the dispatch loop. Tools that fan out to other tools —
+   * e.g. run_tool_pipeline — must honor this so they cannot reach tools outside
+   * the caller's grant. Undefined means "not scoped" (no extra restriction).
+   */
+  allowedTools?: string[];
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */

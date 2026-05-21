@@ -32,6 +32,7 @@ import {
   type MemoryKind,
   type MemoryScope,
 } from "../memory/service.js";
+import { computeMemoryCurationReport } from "../memory/steward.js";
 import {
   loadMainAssistantPersonality,
   updateMainAssistantPersonality,
@@ -1432,6 +1433,49 @@ registerTool({
         ageMinutes,
         turnCount: session.getTurnCount(),
       },
+    };
+  },
+});
+
+registerTool({
+  name: "curate_memory",
+  description:
+    "Review durable memory health and optionally consolidate it. Returns a curation report — duplicate "
+    + "clusters and stale low-value notes — with a one-line nudge. Pass apply=true to actually compact "
+    + "duplicates. Use this to keep long-lived memory clean instead of letting it sprawl.",
+  parameters: {
+    type: "object",
+    properties: {
+      apply: { type: "boolean", description: "When true, compact duplicate memories. Default: false (report only)." },
+    },
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const apply = args["apply"] === true;
+    const report = computeMemoryCurationReport(ctx.workspacePath);
+
+    logAudit("memory_curation_nudge", {
+      totalRecords: report.totalRecords,
+      duplicateClusters: report.duplicateClusters,
+      removableDuplicates: report.removableDuplicates,
+      staleVolatile: report.staleVolatile,
+      applied: apply,
+    }, { sessionId: ctx.sessionId, severity: "info" });
+
+    if (!apply) {
+      return {
+        success: true,
+        output: report.nudge
+          ? `## Memory Curation\n\n- Records: ${report.totalRecords}\n- Duplicate clusters: ${report.duplicateClusters} (${report.removableDuplicates} removable)\n- Stale notes/facts: ${report.staleVolatile}\n\n${report.nudge}`
+          : `Memory is clean — ${report.totalRecords} records, no duplicates or notable staleness.`,
+        metadata: { ...report },
+      };
+    }
+
+    const result = compactWorkspaceMemoryRecords(ctx.workspacePath);
+    return {
+      success: true,
+      output: `## Memory Curated\n\nMerged ${result.merged} duplicate cluster(s), removed ${result.removed} record(s). ${result.kept} records kept.`,
+      metadata: { before: report, after: result },
     };
   },
 });

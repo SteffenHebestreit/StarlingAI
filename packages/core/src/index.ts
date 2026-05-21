@@ -58,6 +58,10 @@ import "./tools/credentials.js";
 import "./tools/sub-agent.js";
 import "./tools/federation.js";
 import "./tools/workflow-catalog.js";
+import "./tools/skills.js";
+import "./tools/session-search.js";
+import "./tools/user-model.js";
+import "./tools/tool-pipeline.js";
 import "./tools/memory.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";
@@ -242,6 +246,13 @@ export async function main() {
   // Start Warden — background anomaly monitor
   startWarden();
 
+  // Start the Skill Library self-improvement driver — periodically retires low
+  // performers, archives duplicates, and promotes proven skills to scenes.
+  if (getConfig().skillLibrary.enabled) {
+    const { startSkillImprovementDriver } = await import("./skills/driver.js");
+    startSkillImprovementDriver();
+  }
+
   // Start transitive federation peer discovery (no-op when disabled)
   const { startPeerDiscovery } = await import("./federation/index.js");
   startPeerDiscovery();
@@ -302,6 +313,12 @@ export async function main() {
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
     stopWarden();
+    try {
+      const { stopSkillImprovementDriver } = await import("./skills/driver.js");
+      stopSkillImprovementDriver();
+    } catch {
+      // best-effort
+    }
     const { stopPeerDiscovery } = await import("./federation/index.js");
     stopPeerDiscovery();
     try {

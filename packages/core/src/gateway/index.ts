@@ -64,7 +64,7 @@ import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejec
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
 import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
-import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema } from "../config/schema.js";
+import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { handleMcpHttpRequest, shutdownMcpHttpSessions, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
@@ -2129,6 +2129,131 @@ export function createGateway() {
     }
   });
 
+  // ── Skill Library + Tool Pipeline feature config ──────────────────────────
+  // GET returns both feature sections; PUT accepts a partial { skillLibrary?,
+  // toolPipeline? } and validates each section independently.
+  app.get("/api/skill-library/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const cfg = getConfig();
+    return c.json({ skillLibrary: cfg.skillLibrary, toolPipeline: cfg.toolPipeline });
+  });
+
+  app.put("/api/skill-library/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: { skillLibrary?: unknown; toolPipeline?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    let skillLibrary: ReturnType<typeof SkillLibrarySchema.parse> | undefined;
+    let toolPipeline: ReturnType<typeof ToolPipelineSchema.parse> | undefined;
+    if (body.skillLibrary !== undefined) {
+      const parsed = SkillLibrarySchema.safeParse(body.skillLibrary);
+      if (!parsed.success) return c.json({ error: "Invalid skillLibrary configuration", details: parsed.error.flatten() }, 400);
+      skillLibrary = parsed.data;
+    }
+    if (body.toolPipeline !== undefined) {
+      const parsed = ToolPipelineSchema.safeParse(body.toolPipeline);
+      if (!parsed.success) return c.json({ error: "Invalid toolPipeline configuration", details: parsed.error.flatten() }, 400);
+      toolPipeline = parsed.data;
+    }
+    if (!skillLibrary && !toolPipeline) {
+      return c.json({ error: "Provide skillLibrary and/or toolPipeline" }, 400);
+    }
+
+    try {
+      const updated = updateConfig((raw) => {
+        if (skillLibrary) raw["skillLibrary"] = skillLibrary;
+        if (toolPipeline) raw["toolPipeline"] = toolPipeline;
+      });
+      return c.json({ skillLibrary: updated.skillLibrary, toolPipeline: updated.toolPipeline });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // ── Skill Library inspector ───────────────────────────────────────────────
+  // GET  /api/skills            — list skills (filter by status/query)
+  // POST /api/skills/:slug/archive — archive a skill
+  // DELETE /api/skills/:slug    — delete a skill
+  app.get("/api/skills", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { listSkills, skillSuccessRate } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const includeArchived = c.req.query("includeArchived") === "true";
+      const statusFilter = c.req.query("status");
+      const query = (c.req.query("query") ?? "").toLowerCase().trim();
+      let skills = listSkills(cfg.workspacePath, { includeArchived });
+      if (statusFilter) skills = skills.filter((s) => s.frontmatter.status === statusFilter);
+      if (query) {
+        skills = skills.filter((s) =>
+          s.frontmatter.name.toLowerCase().includes(query)
+          || s.frontmatter.description.toLowerCase().includes(query)
+          || s.frontmatter.whenToUse.toLowerCase().includes(query)
+          || s.frontmatter.tags.some((t) => t.toLowerCase().includes(query)));
+      }
+      const records = skills.map((s) => ({
+        slug: s.frontmatter.slug,
+        name: s.frontmatter.name,
+        description: s.frontmatter.description,
+        whenToUse: s.frontmatter.whenToUse,
+        version: s.frontmatter.version,
+        status: s.frontmatter.status,
+        tags: s.frontmatter.tags,
+        agents: s.frontmatter.agents,
+        tools: s.frontmatter.tools,
+        origin: s.meta.origin,
+        uses: s.meta.uses,
+        successes: s.meta.successes,
+        failures: s.meta.failures,
+        successRate: skillSuccessRate(s.meta),
+        updatedAt: s.meta.updatedAt,
+        lastUsedAt: s.meta.lastUsedAt,
+        body: s.body,
+      }));
+      return c.json({ total: records.length, records });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/archive", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, setSkillStatus } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      setSkillStatus(cfg.workspacePath, slug, "archived");
+      return c.json({ slug, status: "archived" });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.delete("/api/skills/:slug", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, deleteSkill } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      deleteSkill(cfg.workspacePath, slug);
+      return c.json({ slug, deleted: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.post("/api/multimodal/file-to-markdown", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -2964,6 +3089,36 @@ export function createGateway() {
     }
   });
 
+  // ── Memory curation steward ───────────────────────────────────────────────
+  // GET  /api/memory/curation — duplicate/stale report + nudge (read-only)
+  // POST /api/memory/curate   — compact duplicates (apply)
+  app.get("/api/memory/curation", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { computeMemoryCurationReport } = await import("../memory/steward.js");
+      const cfg = getConfig();
+      return c.json(computeMemoryCurationReport(cfg.workspacePath));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/memory/curate", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { computeMemoryCurationReport } = await import("../memory/steward.js");
+      const { compactWorkspaceMemoryRecords } = await import("../memory/service.js");
+      const cfg = getConfig();
+      const before = computeMemoryCurationReport(cfg.workspacePath);
+      const after = compactWorkspaceMemoryRecords(cfg.workspacePath);
+      return c.json({ before, after });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.get("/api/graph/labels", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -3396,6 +3551,44 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     return c.json(resetMainAssistantPersonality("user", "Reset from dashboard"));
+  });
+
+  // ── Dialectic user model ──────────────────────────────────────────────────
+  app.get("/api/user-model", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const { loadUserModel } = await import("../user-model/service.js");
+    return c.json(loadUserModel());
+  });
+
+  app.put("/api/user-model", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const body = await c.req.json<Record<string, unknown>>();
+      const toList = (v: unknown): string[] | undefined =>
+        Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : undefined;
+      const { updateUserModel } = await import("../user-model/service.js");
+      const profile = updateUserModel({
+        goals: toList(body["goals"]),
+        expertise: toList(body["expertise"]),
+        workingStyle: toList(body["workingStyle"]),
+        communication: toList(body["communication"]),
+        openQuestions: toList(body["openQuestions"]),
+        append: body["append"] === true,
+        reset: body["reset"] === true,
+      }, "user");
+      return c.json(profile);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/user-model/reset", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const { updateUserModel } = await import("../user-model/service.js");
+    return c.json(updateUserModel({ reset: true }, "user"));
   });
 
   app.post("/api/config-assistant/proposals", async (c) => {

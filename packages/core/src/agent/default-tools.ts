@@ -8,6 +8,7 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   "memory_search",
   "assistant_personality_view",
   "assistant_personality_update",
+  "user_model_update",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [
@@ -15,6 +16,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "list_files",
   "export_workspace_artifact",
   "workspace_search",
+  "search_sessions",
   "read_shared_facts",
   "session_status",
   "send_agent_message",
@@ -76,6 +78,7 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "search_tools",
   "search_workflows",
   "run_workflow",
+  "search_skills",
   "parallel_delegate",
   "create_ephemeral_agent",
   "get_swarm_state",

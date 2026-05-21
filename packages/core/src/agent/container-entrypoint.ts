@@ -83,6 +83,7 @@ async function main(): Promise<void> {
     sessionId: subSessionId,
     workspacePath,
     approvalCallback: undefined,
+    allowedTools: agentConfig.tools,
   };
 
   const userContent = context ? `Context:\n${context}\n\nTask: ${task}` : task;
