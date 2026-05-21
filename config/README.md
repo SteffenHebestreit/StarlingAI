@@ -14,6 +14,33 @@ This directory holds the **user-managed** configuration that defines how Starlin
 | `integrations/` | n8n, webhooks, sites, approval channels, workspace path |
 | `tooling/` | Retrieval, computer-use adapters, pentest scope, MCP servers |
 
+## Skill Library & Tool Pipeline
+
+Two feature sections control the self-improving procedural-memory layer. Both can be edited in the dashboard under **Settings → Agents → Skill Library & Automation**, or in config:
+
+```jsonc
+{
+  // Procedural memory: swarm-authored, self-improving SKILL.md procedures.
+  "skillLibrary": {
+    "enabled": true,            // retrieve + inject "Learned Procedures" at planning time
+    "autoAuthor": true,         // distill skill drafts from successful multi-step turns
+    "minStepsToAuthor": 3,      // min delegations in a turn before auto-authoring
+    "maxInjected": 3,           // max skills injected into the planner prompt per turn
+    "retireBelowSuccessRate": 0.34, // archive skills below this success rate…
+    "retireMinUses": 5,         // …once they have at least this many recorded uses
+    "autoPromoteToScene": true  // promote consistently reliable skills to workflow scenes
+  },
+  // Batched, guarded tool execution.
+  "toolPipeline": {
+    "enabled": true,            // allow run_tool_pipeline for agents granted the tool
+    "maxSteps": 8,              // max steps in one pipeline
+    "maxTemplateOutputChars": 4000 // cap on a prior step's output substituted into later args
+  }
+}
+```
+
+Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignored). Authoring is automatic via the distiller, and any agent granted `record_skill` can author explicitly; recall/curation tools (`search_skills`, `search_sessions`, `curate_memory`) and `run_tool_pipeline` are granted per-agent in `workspace/agents/`. Every pipeline step still passes the normal tier + approval checks **and** is restricted to the calling agent's own tool allowlist.
+
 ## How it works
 
 The config loader reads `.json` and `.jsonc` files recursively in **lexicographic** path order, then deep-merges them. Prefix filenames with numbers (e.g. `10-`, `20-`) to control merge order.
