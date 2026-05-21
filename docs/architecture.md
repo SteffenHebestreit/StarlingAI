@@ -75,7 +75,34 @@ This does not override the earlier principles; it extends them. Self-improvement
 
 The hard boundary is secrets and privilege escalation. Stored credentials must never be read into model context or exposed as plain text to an agent. They may only be consumed through dedicated secret-handling tools such as `site_fill_credentials` and `computer_type_credential`, under approval and audit. The same rule applies to sandboxing, tool tiers, approval gates, and host access: self-improvement may optimize behavior, but it may not weaken the controls.
 
-**Current status:** Partially implemented and intentionally guarded. Flow memory, proposal-based config changes, prompt refinement, and agent evolution exist; privileged boundaries still remain outside autonomous control.
+**Current status:** Partially implemented and intentionally guarded. Flow memory, proposal-based config changes, prompt refinement, agent evolution, and the **procedural Skill Library** (below) exist; privileged boundaries still remain outside autonomous control.
+
+#### Procedural memory: the self-authoring Skill Library
+
+The clearest realization of bounded self-improvement is the **Skill Library** (`packages/core/src/skills/`). A *skill* is a named, versioned **procedure** — how to accomplish a recurring task — stored as a portable `SKILL.md` (YAML frontmatter + Markdown body) under `.starlingai/skills/<slug>/`. Skills are pure guidance: no code, no credentials, no privilege. They cannot grant tools or alter tiers — the guardrail stack still governs every tool a skill suggests — which is exactly why they are a safe autonomous surface.
+
+The loop is: author skills from experience, then improve them during use.
+
+- **Author from experience** — after a successful multi-step turn, `skills/distiller.ts` distills a generalized `SKILL.md` draft from the trajectory (which agents ran, which tools, the evidence). Gated by `skillLibrary.autoAuthor`; deduped against existing skills. Agents can also author explicitly via `record_skill`.
+- **Retrieve at planning time** — `skills/service.ts` ranks skills (keyword + embedding + a success-rate boost) and injects the top matches as a bounded, droppable **"Learned Procedures"** block, so the planner reuses a known-good approach before inventing one. `search_skills` fetches full bodies on demand.
+- **Improve during use** — every injected skill's outcome is recorded; drafts graduate to `active` on first success. The periodic `skills/driver.ts` retires low performers, archives near-duplicates, and **promotes** consistently reliable skills into first-class reusable scenes in the workflow catalog.
+- **Guarded** — credential-shaped content is rejected on write; the Warden detects `skill_authoring_flood`; every step emits audit events (`skill_authored`, `skill_distilled`, `skill_retired`, `skill_promoted_to_scene`).
+
+This sits beside the existing reuse layers — scenes/jobs are *human-authored* workflows; promoted agents are *auto-authored agents*; the Skill Library is *auto-authored procedures*.
+
+#### Cross-session recall and user modeling
+
+Two further memory upgrades round out the loop:
+
+- **Session Intelligence** (`agent/session-search.ts`, tool `search_sessions`) — keyword/FTS search over past conversations with optional LLM summarization, so the swarm can recall prior work without rehydrating whole transcripts into context.
+- **Dialectic user model** (`user-model/service.ts`, tools `user_model_view` / `user_model_update`) — an evolving, *reasoned* profile of the user (goals, expertise, working style, communication preferences, and open questions it is still verifying), injected as a small bounded block and distinct from both the assistant personality and discrete memory facts.
+- **Memory steward** (`memory/steward.ts`, tool `curate_memory`) — reasoned, surfaceable memory curation: a report of duplicate clusters and stale notes plus a one-line nudge, with consolidation applied only on request.
+
+All three guidance blocks (Learned Procedures, User Model, and the existing memory/flow blocks) are injected only on the first iteration, only when populated, are size-bounded, and are dropped first under prompt-budget pressure — so cross-session intelligence never crowds out the working prompt.
+
+#### Batched execution: the tool pipeline
+
+`run_tool_pipeline` (`tools/tool-pipeline.ts`) reduces the per-step context overhead of long observe→decide→call loops: the planner submits an ordered list of tool calls in one turn, and a later step can consume an earlier step's result via `{{steps.<id>.output}}` templating. It executes nothing itself — every step is dispatched through the same `executeTool` path, so each sub-call keeps its tier check, per-call approval gate, sandbox requirement, and audit span. Delegation and workflow tools are blocked as steps to prevent fan-out amplification and recursion. Because it amplifies one model action into several, it is opt-in (`toolPipeline.enabled`, default off) and not granted to any agent by default.
 
 ### 4. Guarded (The Watched Swarm)
 
@@ -136,6 +163,14 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Server-aware SSH and ops routing** | 9.2 | Implemented | Headless server tasks prefer `shell_agent` / `ops_triage`; `ssh_exec` can resolve configured `remote_ssh` nodes, including password-backed targets |
 | **Markdown artifact previews + audit-only exports** | 9.2 | Implemented | Markdown artifacts render inline in chat; sessions can export focused audit-only Markdown alongside the full debug bundle |
 | **Live shell preview and synthetic swarm status** | 9.2 | Implemented | The dashboard can surface shell/SSH activity and keep showing swarm progress from audit events even when explicit swarm-state updates lag |
+| **Procedural Skill Library** | 13 | Implemented | Portable `SKILL.md` skills; `search_skills` / `list_skills` / `record_skill`; bounded, droppable "Learned Procedures" injection; `skillLibrary` config block |
+| **Autonomous skill authoring** | 13 | Implemented | `skills/distiller.ts` distills drafts from successful trajectories (gated by `skillLibrary.autoAuthor`), deduped; `skill_authored` / `skill_distilled` audit |
+| **Skill self-improvement** | 13 | Implemented | Outcome-driven ranking, draft→active graduation, periodic `skills/driver.ts` retire/merge/promote-to-scene; Warden `skill_authoring_flood` |
+| **Session Intelligence** | 13 | Implemented | `search_sessions` — keyword/FTS recall over past conversations with optional LLM summarization |
+| **Dialectic user model** | 13 | Implemented | `user-model/service.ts` + `user_model_view` / `user_model_update`; bounded prompt injection distinct from personality and memory facts |
+| **Memory steward** | 13 | Implemented | `curate_memory` — reasoned duplicate/stale report + nudge, consolidation on request |
+| **Tool pipeline** | 13 | Implemented | `run_tool_pipeline` batches several tool calls in one turn via `{{steps.id.output}}` templating; each step dispatches through the guarded `executeTool` path **and is restricted to the calling agent's tool allowlist**; `toolPipeline.enabled` default on, granted to `data_analyst` |
+| **Skill loop activation** | 13 | Implemented | `skillLibrary.autoAuthor` default on (drafts + dedupe + Warden guard); sub-agents receive Learned Procedures; catalog grants: `record_skill`/`search_skills`/`search_sessions` → `web_task_coordinator`, `curate_memory`/`search_sessions` → `ops_triage` |
 
 ---
 
@@ -387,6 +422,15 @@ packages/
                             memory.ts — collective memory (Redis Hash+List + embeddings)
                             concurrency.ts — per-agent semaphores with FIFO queuing
                             bidding.ts — task_announced / task_bid auction protocol
+      skills/               store.ts — SKILL.md (+meta) read/write, versioning, credential scrub
+                            service.ts — hybrid skill search + "Learned Procedures" guidance
+                            distiller.ts — distill skills from successful trajectories
+                            driver.ts — periodic retire / merge / promote-to-scene
+      user-model/           service.ts — dialectic user profile (goals, expertise, open questions)
+      tools/                tool-pipeline.ts — run_tool_pipeline batched, guarded tool execution
+                            session-search.ts — search_sessions cross-session recall
+                            skills.ts — search_skills / list_skills / record_skill
+                            user-model.ts — user_model_view / user_model_update
       tools/                registry.ts — tool registration and tier enforcement
                             sub-agent.ts — delegate_to_agent / parallel_delegate
                             filesystem.ts · shell.ts · web.ts · memory.ts
