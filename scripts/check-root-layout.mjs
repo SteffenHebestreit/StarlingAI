@@ -12,6 +12,7 @@ const allowedFiles = new Set([
   ".env.example",
   ".gitignore",
   ".mcp.json",
+  "CONTRIBUTING.md",
   "docker-compose.computer.yml",
   "docker-compose.model-servers.yml",
   "docker-compose.strix-halo.yml",
