@@ -25,6 +25,7 @@ const allowedFiles = new Set([
   "ROADMAP.md",
   "sai",
   "sai.cmd",
+  "scene-eval.jsonc",
   "starlingai.example.json",
   "starlingai.json",
   "start-computer-node.bat",
@@ -36,6 +37,7 @@ const allowedFiles = new Set([
 const allowedDirectories = new Set([
   ".claude",
   ".git",
+  ".github",
   ".starlingai",
   ".vscode",
   "artifacts",
@@ -43,9 +45,11 @@ const allowedDirectories = new Set([
   "config",
   "docker",
   "docs",
+  "examples",
   "node_modules",
   "packages",
   "scripts",
+  "specs",
   "tutorials",
   "workspace",
 ]);

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "private/**"]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm must be installed before setup-node so the pnpm cache works.
+      # Version is read from the root package.json "packageManager" field.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # The Docker build uses --no-frozen-lockfile; match it until the lockfiles
+      # are reconciled (DEVPLAN P2: drop the stray package-lock.json).
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # Root layout guard + per-package typecheck (tsc / vue-tsc).
+      - name: Typecheck
+        run: pnpm check
+
+      # pnpm -r test runs each package's vitest from ITS OWN directory. This
+      # matters: the core tests resolve config relative to packages/core, so
+      # running them from the repo root produces false path-resolution failures.
+      - name: Test
+        run: pnpm test
+
+      # Production build (tsc -p tsconfig.build.json + vite build).
+      - name: Build
+        run: pnpm build
+
+      # Config-validity gate: the compiled starlingai.json must build cleanly
+      # from config/ + workspace/ (catches schema drift and bad model ids before
+      # they reach a container). DEVPLAN P1 will extend this into a drift diff.
+      - name: Config builds cleanly
+        run: pnpm config:build
