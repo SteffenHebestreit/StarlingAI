@@ -371,8 +371,8 @@ describe("config loader mutable overlay", () => {
     const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
     const webTaskCoordinator = workspaceRaw.subAgents?.["web_task_coordinator"];
 
-    expect(mainAssistantInstructions).toContain("the retrieved evidence wins immediately");
-    expect(mainAssistantInstructions).toContain("every factual claim in your answer must be supported by that evidence");
+    expect(mainAssistantInstructions).toContain("Retrieved evidence always overrides prior assumptions");
+    expect(mainAssistantInstructions).toContain("Every factual claim must be supported by current-turn evidence");
     expect(mainAssistantInstructions).toContain("Never name an official source, manufacturer, product page, URL, spec, quote, or numeric value unless it appears in the current evidence");
     expect(mainAssistantInstructions).toContain("do not answer from memory first");
 
@@ -398,7 +398,7 @@ describe("config loader mutable overlay", () => {
     const computerUsePrompt = computerUseAgent?.systemPrompt ?? "";
 
     expect(mainAssistantInstructions).toContain("SERVICE-FIRST ROUTING");
-    expect(mainAssistantInstructions).toContain("route by access method and evidence type instead");
+    expect(mainAssistantInstructions).toContain("narrowest direct execution path");
     expect(mainAssistantInstructions).not.toContain("LM STUDIO SHORTCUT");
     expect(mainAssistantInstructions).not.toContain("1234/v1/models");
 
