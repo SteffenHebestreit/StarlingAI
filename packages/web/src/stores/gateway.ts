@@ -580,6 +580,57 @@ export interface OrchestrationConfigResponse {
   defaults: OrchestrationConfig;
 }
 
+export interface SkillLibraryConfig {
+  enabled: boolean;
+  autoAuthor: boolean;
+  minStepsToAuthor: number;
+  maxInjected: number;
+  retireBelowSuccessRate: number;
+  retireMinUses: number;
+  autoPromoteToScene: boolean;
+}
+
+export interface ToolPipelineConfig {
+  enabled: boolean;
+  maxSteps: number;
+  maxTemplateOutputChars: number;
+}
+
+export interface SkillFeatureConfig {
+  skillLibrary: SkillLibraryConfig;
+  toolPipeline: ToolPipelineConfig;
+}
+
+export interface UserModelProfile {
+  schemaVersion: 1;
+  goals: string[];
+  expertise: string[];
+  workingStyle: string[];
+  communication: string[];
+  openQuestions: string[];
+  revision: number;
+  updatedAt: string;
+  updatedBy: "user" | "assistant" | "system";
+}
+
+export interface UserModelInput {
+  goals?: string[];
+  expertise?: string[];
+  workingStyle?: string[];
+  communication?: string[];
+  openQuestions?: string[];
+  append?: boolean;
+  reset?: boolean;
+}
+
+export interface MemoryCurationReport {
+  totalRecords: number;
+  duplicateClusters: number;
+  removableDuplicates: number;
+  staleVolatile: number;
+  nudge: string;
+}
+
 export const useGatewayStore = defineStore("gateway", () => {
   const audit = useAuditStore();
   const notifications = useNotificationStore();
@@ -2235,6 +2286,49 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as OrchestrationConfig;
   }
 
+  async function getSkillLibraryConfig(): Promise<SkillFeatureConfig> {
+    const response = await authorizedFetch("/api/skill-library/config");
+    return await response.json() as SkillFeatureConfig;
+  }
+
+  async function saveSkillLibraryConfig(config: Partial<SkillFeatureConfig>): Promise<SkillFeatureConfig> {
+    const response = await authorizedFetch("/api/skill-library/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    return await response.json() as SkillFeatureConfig;
+  }
+
+  async function getUserModel(): Promise<UserModelProfile> {
+    const response = await authorizedFetch("/api/user-model");
+    return await response.json() as UserModelProfile;
+  }
+
+  async function saveUserModel(input: UserModelInput): Promise<UserModelProfile> {
+    const response = await authorizedFetch("/api/user-model", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return await response.json() as UserModelProfile;
+  }
+
+  async function resetUserModel(): Promise<UserModelProfile> {
+    const response = await authorizedFetch("/api/user-model/reset", { method: "POST" });
+    return await response.json() as UserModelProfile;
+  }
+
+  async function getMemoryCuration(): Promise<MemoryCurationReport> {
+    const response = await authorizedFetch("/api/memory/curation");
+    return await response.json() as MemoryCurationReport;
+  }
+
+  async function curateMemory(): Promise<{ before: MemoryCurationReport; after: { kept: number; removed: number; merged: number } }> {
+    const response = await authorizedFetch("/api/memory/curate", { method: "POST" });
+    return await response.json() as { before: MemoryCurationReport; after: { kept: number; removed: number; merged: number } };
+  }
+
   async function listVoices(): Promise<{ voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string }> {
     const response = await authorizedFetch("/api/multimodal/voices");
     return await response.json() as { voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string };
@@ -2500,6 +2594,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     analyzeImageFile,
     getOrchestrationConfig,
     saveOrchestrationConfig,
+    getSkillLibraryConfig,
+    saveSkillLibraryConfig,
+    getUserModel,
+    saveUserModel,
+    resetUserModel,
+    getMemoryCuration,
+    curateMemory,
     uploadToWorkspace,
     fetchWorkspaceArtifactBlob,
     downloadWorkspaceArtifact,

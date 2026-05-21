@@ -893,6 +893,118 @@
             </div>
           </div>
 
+          <!-- ── Skill Library & Automation ──────────────────────────── -->
+          <div v-if="isAgentsPage" class="glass-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0">Skill Library &amp; Automation</h3>
+                <div class="text-xs text-gray-500 mt-1">Self-authoring procedural memory and batched tool execution. Browse authored skills on the <RouterLink to="/skills" class="text-indigo-300 hover:underline">Skills</RouterLink> page.</div>
+              </div>
+              <button v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure the Skill Library.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required.
+              </div>
+
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Enable Skill Library</div>
+                  <div class="text-xs text-gray-500">Retrieve and inject learned procedures at planning time.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.enabled" @change="skillForm.enabled = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Autonomous authoring</div>
+                  <div class="text-xs text-gray-500">Distill skill drafts from successful multi-step turns.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.autoAuthor" :disabled="!skillForm.enabled" @change="skillForm.autoAuthor = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Auto-promote to scenes</div>
+                  <div class="text-xs text-gray-500">Graduate consistently reliable skills into reusable workflow scenes.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.autoPromoteToScene" :disabled="!skillForm.enabled" @change="skillForm.autoPromoteToScene = $event" />
+              </div>
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Max skills injected per turn <span class="text-gray-600 font-normal">default 3</span></label>
+                  <input v-model.number="skillForm.maxInjected" type="number" min="1" max="10" class="input-box" />
+                </div>
+              </div>
+
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Tool Pipeline</div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Enable run_tool_pipeline</div>
+                    <div class="text-xs text-gray-500">Let granted agents batch several tool calls in one turn. Each step still passes tier + approval + the agent's own allowlist.</div>
+                  </div>
+                  <ToggleSwitch :value="pipelineForm.enabled" @change="pipelineForm.enabled = $event" />
+                </div>
+              </div>
+
+              <div v-if="skillConfigError" class="text-sm text-red-400">{{ skillConfigError }}</div>
+
+              <div class="flex justify-end">
+                <button @click="saveSkillConfigUI" :disabled="skillConfigSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ skillConfigSaving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── User Model ──────────────────────────────────────────── -->
+          <div v-if="isAgentsPage" class="glass-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0">User Model</h3>
+                <div class="text-xs text-gray-500 mt-1">The swarm's evolving understanding of you — one item per line. The agent also refines this automatically as it learns; this is distinct from durable memory facts and the assistant's own personality.</div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button v-if="gateway.connected" @click="reloadUserModel" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+                <button @click="resetUserModelUI" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              </div>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to view the user model.</div>
+            <div v-else class="space-y-3">
+              <div>
+                <label class="field-label">Goals</label>
+                <textarea v-model="userModelForm.goals" rows="2" class="input-box" placeholder="One goal per line"></textarea>
+              </div>
+              <div>
+                <label class="field-label">Expertise</label>
+                <textarea v-model="userModelForm.expertise" rows="2" class="input-box" placeholder="Domains and skill level"></textarea>
+              </div>
+              <div>
+                <label class="field-label">Working style</label>
+                <textarea v-model="userModelForm.workingStyle" rows="2" class="input-box" placeholder="How you prefer to work"></textarea>
+              </div>
+              <div>
+                <label class="field-label">Communication preferences</label>
+                <textarea v-model="userModelForm.communication" rows="2" class="input-box" placeholder="Tone and format preferences"></textarea>
+              </div>
+              <div>
+                <label class="field-label">Open questions <span class="text-gray-600 font-normal">hypotheses the agent is still testing</span></label>
+                <textarea v-model="userModelForm.openQuestions" rows="2" class="input-box"></textarea>
+              </div>
+
+              <div v-if="userModelError" class="text-sm text-red-400">{{ userModelError }}</div>
+
+              <div class="flex items-center justify-between">
+                <div class="text-xs text-gray-500">rev {{ userModelRevision }}<span v-if="userModelUpdatedBy"> · last updated by {{ userModelUpdatedBy }}</span></div>
+                <button @click="saveUserModelUI" :disabled="userModelSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ userModelSaving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div v-if="isAgentsPage" class="glass-card p-5">
             <div class="flex items-center justify-between mb-4 gap-3">
               <div>
@@ -3019,6 +3131,124 @@ async function saveOrchestrationConfigUI() {
   }
 }
 
+// ── Skill Library & Tool Pipeline ─────────────────────────────────────────
+const skillConfigSaving = ref(false);
+const skillConfigError = ref("");
+const skillForm = reactive<{
+  enabled: boolean;
+  autoAuthor: boolean;
+  autoPromoteToScene: boolean;
+  maxInjected: number;
+}>({ enabled: true, autoAuthor: true, autoPromoteToScene: true, maxInjected: 3 });
+const pipelineForm = reactive<{ enabled: boolean }>({ enabled: false });
+
+async function reloadSkillConfig() {
+  try {
+    const { skillLibrary, toolPipeline } = await gateway.getSkillLibraryConfig();
+    skillForm.enabled = skillLibrary.enabled;
+    skillForm.autoAuthor = skillLibrary.autoAuthor;
+    skillForm.autoPromoteToScene = skillLibrary.autoPromoteToScene;
+    skillForm.maxInjected = skillLibrary.maxInjected;
+    pipelineForm.enabled = toolPipeline.enabled;
+    skillConfigError.value = "";
+  } catch (e) {
+    skillConfigError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function saveSkillConfigUI() {
+  skillConfigSaving.value = true;
+  skillConfigError.value = "";
+  try {
+    const current = await gateway.getSkillLibraryConfig();
+    await gateway.saveSkillLibraryConfig({
+      skillLibrary: {
+        ...current.skillLibrary,
+        enabled: skillForm.enabled,
+        autoAuthor: skillForm.autoAuthor,
+        autoPromoteToScene: skillForm.autoPromoteToScene,
+        maxInjected: skillForm.maxInjected,
+      },
+      toolPipeline: {
+        ...current.toolPipeline,
+        enabled: pipelineForm.enabled,
+      },
+    });
+  } catch (e) {
+    skillConfigError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    skillConfigSaving.value = false;
+  }
+}
+
+// ── User Model ─────────────────────────────────────────────────────────────
+const userModelSaving = ref(false);
+const userModelError = ref("");
+const userModelRevision = ref(0);
+const userModelUpdatedBy = ref("");
+const userModelForm = reactive<{
+  goals: string;
+  expertise: string;
+  workingStyle: string;
+  communication: string;
+  openQuestions: string;
+}>({ goals: "", expertise: "", workingStyle: "", communication: "", openQuestions: "" });
+
+function linesToList(value: string): string[] {
+  return value.split("\n").map((x) => x.trim()).filter(Boolean);
+}
+
+function applyUserModel(p: import("@/stores/gateway").UserModelProfile) {
+  userModelForm.goals = p.goals.join("\n");
+  userModelForm.expertise = p.expertise.join("\n");
+  userModelForm.workingStyle = p.workingStyle.join("\n");
+  userModelForm.communication = p.communication.join("\n");
+  userModelForm.openQuestions = p.openQuestions.join("\n");
+  userModelRevision.value = p.revision;
+  userModelUpdatedBy.value = p.updatedBy;
+}
+
+async function reloadUserModel() {
+  try {
+    applyUserModel(await gateway.getUserModel());
+    userModelError.value = "";
+  } catch (e) {
+    userModelError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function saveUserModelUI() {
+  userModelSaving.value = true;
+  userModelError.value = "";
+  try {
+    const p = await gateway.saveUserModel({
+      goals: linesToList(userModelForm.goals),
+      expertise: linesToList(userModelForm.expertise),
+      workingStyle: linesToList(userModelForm.workingStyle),
+      communication: linesToList(userModelForm.communication),
+      openQuestions: linesToList(userModelForm.openQuestions),
+      append: false,
+    });
+    applyUserModel(p);
+  } catch (e) {
+    userModelError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    userModelSaving.value = false;
+  }
+}
+
+async function resetUserModelUI() {
+  userModelSaving.value = true;
+  userModelError.value = "";
+  try {
+    applyUserModel(await gateway.resetUserModel());
+  } catch (e) {
+    userModelError.value = `Failed to reset: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    userModelSaving.value = false;
+  }
+}
+
 async function reloadConfigAssistant() {
   await Promise.all([
     configAssistant.fetchProposals(),
@@ -3107,6 +3337,8 @@ function loadDefinitionsData() {
   void configAssistant.fetchFlowMemory();
   void runtime.fetch();
   void reloadOrchestrationConfig();
+  void reloadSkillConfig();
+  void reloadUserModel();
 }
 
 // ── Auto-load when connected ─────────────────────────────────────────────────

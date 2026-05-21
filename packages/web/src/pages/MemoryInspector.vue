@@ -104,6 +104,18 @@
         <button class="memory-controls__refresh" @click="loadMemory()" :disabled="memoryLoading">
           {{ memoryLoading ? "Loading…" : "Refresh" }}
         </button>
+        <button
+          v-if="memoryScope === 'workspace'"
+          class="memory-controls__refresh"
+          :disabled="curating || (curationReport?.removableDuplicates ?? 0) === 0"
+          :title="(curationReport?.removableDuplicates ?? 0) === 0 ? 'No duplicates to consolidate' : 'Merge duplicate memories'"
+          @click="runCurate()"
+        >
+          {{ curating ? "Curating…" : "Curate" }}
+        </button>
+      </div>
+      <div v-if="curationReport && curationReport.nudge && memoryScope === 'workspace'" class="memory-page__notice memory-page__notice--info">
+        {{ curationReport.nudge }}
       </div>
       <div v-if="memoryError" class="memory-page__notice memory-page__notice--error">{{ memoryError }}</div>
       <div v-else-if="memoryRecords.length === 0 && !memoryLoading" class="memory-page__notice">
@@ -210,6 +222,16 @@ const memoryError = ref<string | null>(null);
 const memoryRecords = ref<MemoryRecord[]>([]);
 const memoryTotal = ref<number>(0);
 let memoryQueryTimer: ReturnType<typeof setTimeout> | null = null;
+
+interface CurationReport {
+  totalRecords: number;
+  duplicateClusters: number;
+  removableDuplicates: number;
+  staleVolatile: number;
+  nudge: string;
+}
+const curationReport = ref<CurationReport | null>(null);
+const curating = ref(false);
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -381,6 +403,32 @@ async function loadMemory(): Promise<void> {
   }
 }
 
+async function loadCuration(): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase()}/api/memory/curation`, { headers: authHeaders() });
+    if (!res.ok) return;
+    curationReport.value = await res.json() as CurationReport;
+  } catch {
+    /* non-fatal */
+  }
+}
+
+async function runCurate(): Promise<void> {
+  curating.value = true;
+  try {
+    const res = await fetch(`${apiBase()}/api/memory/curate`, { method: "POST", headers: authHeaders() });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    await Promise.all([loadMemory(), loadCuration()]);
+  } catch (err) {
+    memoryError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    curating.value = false;
+  }
+}
+
 function onMemoryQueryChange(): void {
   if (memoryQueryTimer) clearTimeout(memoryQueryTimer);
   memoryQueryTimer = setTimeout(() => { void loadMemory(); }, 250);
@@ -400,11 +448,12 @@ watch(activeTab, (tab) => {
     nextTick(() => { void loadGraph(); });
   } else {
     void loadMemory();
+    void loadCuration();
   }
 });
 
 onMounted(async () => {
-  await Promise.all([loadGraphLabels(), loadMemory()]);
+  await Promise.all([loadGraphLabels(), loadMemory(), loadCuration()]);
   await nextTick();
   void loadGraph();
 });

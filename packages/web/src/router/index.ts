@@ -11,6 +11,7 @@ const router = createRouter({
     { path: "/settings", component: () => import("@/pages/Settings.vue") },
     { path: "/swarm", component: () => import("@/pages/SwarmDashboard.vue") },
     { path: "/memory", component: () => import("@/pages/MemoryInspector.vue") },
+    { path: "/skills", component: () => import("@/pages/Skills.vue") },
     { path: "/federation", component: () => import("@/pages/Federation.vue") },
     { path: "/users", component: () => import("@/pages/Users.vue") },
     { path: "/plugins", component: () => import("@/pages/Plugins.vue") },
