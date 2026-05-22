@@ -44,45 +44,6 @@
             </span>
           </div>
 
-          <!-- Current user pill: visible only when an authenticated identity is
-               attached to the JWT (i.e. multi-user auth is enabled).  Single-
-               operator setups using the bootstrap admin token render no pill.
-               A small role badge reminds viewers they have read-only access. -->
-          <div
-            v-if="currentUser && currentUser.username !== 'admin'"
-            class="hidden sm:flex items-center gap-2 text-xs text-gray-300 shrink-0"
-            :title="currentUser.role === 'operator' ? 'Operator account — full access' : 'Viewer account — read-only'"
-          >
-            <span class="rounded-full bg-purple-900/40 border border-purple-500/30 px-2.5 py-0.5">
-              {{ currentUser.displayName ?? currentUser.username }}
-            </span>
-            <span
-              v-if="currentUser.role === 'viewer'"
-              class="rounded-full bg-amber-900/40 border border-amber-500/30 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-200"
-            >
-              Viewer
-            </span>
-            <button
-              type="button"
-              class="text-gray-400 hover:text-gray-200 transition"
-              title="Sign out"
-              @click="signOut"
-            >
-              ↪
-            </button>
-          </div>
-
-          <!-- Sign in / switch account — the only entry point to the login modal
-               in token or bootstrap-admin mode, where no per-user pill renders. -->
-          <button
-            v-if="gateway.connected && !signedInUser"
-            type="button"
-            class="inline-flex shrink-0 items-center rounded-full border border-purple-400/30 bg-purple-500/10 px-3 py-1 text-[11px] font-medium text-purple-100 transition hover:border-purple-300/50 hover:bg-purple-500/15"
-            @click="showLogin = true"
-          >
-            Sign in
-          </button>
-
           <button
             v-if="notifications.supported && notifications.permission === 'default'"
             class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
@@ -116,6 +77,75 @@
               />
             </template>
           </nav>
+
+          <!-- Account: far-right icon that opens a small menu — username + sign
+               out when signed in, or a sign-in entry point in token mode. -->
+          <div class="relative shrink-0">
+            <button
+              type="button"
+              class="inline-flex h-9 w-9 items-center justify-center rounded-full border transition"
+              :class="signedInUser
+                ? 'border-purple-400/40 bg-purple-500/15 text-purple-100 hover:bg-purple-500/25'
+                : 'border-white/10 bg-white/5 text-gray-300 hover:border-white/20 hover:bg-white/10 hover:text-white'"
+              :title="signedInUser ? (currentUser?.displayName ?? currentUser?.username) : 'Sign in'"
+              :aria-label="signedInUser ? 'Account menu' : 'Sign in'"
+              aria-haspopup="menu"
+              :aria-expanded="accountMenuOpen"
+              @click="accountMenuOpen = !accountMenuOpen"
+            >
+              <svg v-if="signedInUser" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-[18px] w-[18px]">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 20c0-4 3.6-6 8-6s8 2 8 6" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-[18px] w-[18px]">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                <path d="M10 17l5-5-5-5" />
+                <path d="M15 12H3" />
+              </svg>
+            </button>
+
+            <!-- Outside-click backdrop -->
+            <div v-if="accountMenuOpen" class="fixed inset-0 z-40" @click="accountMenuOpen = false" />
+
+            <div
+              v-if="accountMenuOpen"
+              class="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+              role="menu"
+            >
+              <div class="border-b border-white/10 px-3 py-2.5">
+                <template v-if="signedInUser">
+                  <div class="truncate text-sm font-medium text-gray-100">{{ currentUser?.displayName ?? currentUser?.username }}</div>
+                  <div
+                    class="mt-0.5 text-[10px] uppercase tracking-wider"
+                    :class="currentUser?.role === 'viewer' ? 'text-amber-300' : 'text-cyan-300/80'"
+                  >
+                    {{ currentUser?.role === 'viewer' ? 'Viewer · read-only' : 'Operator' }}
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="text-sm font-medium text-gray-100">Not signed in</div>
+                  <div class="mt-0.5 text-[10px] text-gray-500">Token / single-operator mode</div>
+                </template>
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                class="block w-full px-3 py-2 text-left text-sm text-gray-300 transition hover:bg-white/5 hover:text-white"
+                @click="openAccountLogin"
+              >
+                {{ signedInUser ? 'Switch account' : 'Sign in' }}
+              </button>
+              <button
+                v-if="signedInUser"
+                type="button"
+                role="menuitem"
+                class="block w-full px-3 py-2 text-left text-sm text-red-300 transition hover:bg-red-500/10 hover:text-red-200"
+                @click="signOutFromMenu"
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </header>
@@ -196,12 +226,25 @@ const $route = useRoute();
 
 const currentUser = computed(() => auth.currentUser);
 // A real per-user identity (multi-user auth). The bootstrap admin token and the
-// legacy single-operator token render no pill, so they rely on the Sign in button.
+// legacy single-operator token have none, so the account menu shows a sign-in entry.
 const signedInUser = computed(() => Boolean(currentUser.value && currentUser.value.username !== "admin"));
 const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+
+// Far-right account menu (username + sign out, or sign in).
+const accountMenuOpen = ref(false);
+function openAccountLogin(): void {
+  accountMenuOpen.value = false;
+  showLogin.value = true;
+}
+function signOutFromMenu(): void {
+  accountMenuOpen.value = false;
+  signOut();
+}
+// Close the menu on navigation so it never lingers over a new page.
+watch(() => $route.path, () => { accountMenuOpen.value = false; });
 
 /**
  * The top-level nav is small (5 entries) and either renders as a single
