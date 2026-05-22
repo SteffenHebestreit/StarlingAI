@@ -3793,6 +3793,72 @@ describe("runtime delegated-loop regressions", () => {
     );
   });
 
+  it("trusts the model's direct answer on a research-sensitive turn by default (no forced delegation)", async () => {
+    // Phase 2: with trustModelRouting on (default), a freshness-sensitive turn the
+    // model chooses to answer directly is accepted on the first pass — no nudge,
+    // no rejection, no wasted round-trip. This is the fix for the blank reply to
+    // "kannst du jetzt eigene skills erlernen?".
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      return createTextStream("Here is what I know about the latest 2026 updates from my own knowledge.");
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "What are the latest 2026 AI breakthroughs?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("latest 2026 updates");
+    expect(llmCallCount).toBe(1);
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required" }),
+    ]));
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "routing_nudge_released" }),
+    ]));
+  });
+
+  it("never-empty: strict trustModelRouting=false still releases the draft after one nudge", async () => {
+    // Phase 1 safety net: even in strict mode, a model that insists on answering
+    // tool-free is nudged once and then released — the turn never ends empty.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      agents: { mainAssistant: { toolMode: "orchestration_only", trustModelRouting: false } },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      return createTextStream("Here is what I know about the latest 2026 updates from my own knowledge.");
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "What are the latest 2026 AI breakthroughs?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("latest 2026 updates");
+    expect(llmCallCount).toBe(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
+      expect.objectContaining({ type: "routing_nudge_released", details: "tool_free_research_answer_rejected" }),
+    ]));
+  });
+
   it("treats create_ephemeral_agent as a current-turn orchestration attempt for source-sensitive requests", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

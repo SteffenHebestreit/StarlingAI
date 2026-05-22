@@ -24,6 +24,29 @@ export const FRESHNESS_HINT_TERMS = [
   "recent", "recently", "today", "updated", "updates",
 ];
 
+// Self-referential capability / meta questions about the assistant itself
+// ("kannst du …?", "can you …?", "what can you do?"). These are answered from
+// the system's own configuration and never need fresh web sources, so a weak
+// temporal word like "jetzt"/"now" inside them must not flip freshnessSensitive
+// — that would force delegated research and dead-end the turn into an empty
+// answer. The capability phrasing must co-occur with a self-reference term.
+export const SELF_CAPABILITY_QUESTION_PATTERNS = [
+  /\b(kannst|k[öo]nntest)\s+du\b/,
+  /\bbist\s+du\s+(in\s+der\s+lage|f[äa]hig)\b/,
+  /\b(was|welche)\s+(kannst|kann)\s+du\b/,
+  /\bcan\s+you\b/,
+  /\bare\s+you\s+(able|capable)\b/,
+  /\bwhat\s+can\s+you\s+do\b/,
+];
+
+export const SELF_CAPABILITY_REFERENCE_TERMS = [
+  "eigene", "eigenen", "eigener", "dich selbst", "selbst verbessern",
+  "skill", "skills", "fähigkeit", "faehigkeit", "fähigkeiten", "faehigkeiten",
+  "fertigkeit", "fertigkeiten", "lernen", "erlernen", "dazulernen",
+  "yourself", "your own", "your skills", "your abilities", "ability", "abilities",
+  "learn new",
+];
+
 export const SOURCE_HINT_TERMS = [
   "beleg", "belege", "offizielle quelle", "offizielle quellen", "quelle", "quellen",
   "cite", "cites", "citation", "citations", "docs", "documentation", "official", "release notes",
@@ -294,11 +317,31 @@ export interface DynamicTurnGuidance {
  * prompt for the current turn.  Returns null when no guidance is needed
  * (generic message with no detectable intent signals).
  */
+/**
+ * Word-START aware membership test. Requires a leading word boundary so short
+ * terms don't match mid-word — e.g. "now" must not match "know"/"known", "live"
+ * must not match "delivery"/"alive", "new" must not match "knew"/"renew" — while
+ * still allowing trailing suffixes so German declensions are caught ("aktuell"
+ * matches "aktuellen", "neueste" matches "neuesten"). Multi-word phrases are
+ * matched verbatim.
+ */
+function includesTermAtWordStart(normalized: string, terms: readonly string[]): boolean {
+  return terms.some((term) => {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}`, "u").test(normalized);
+  });
+}
+
 export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssistantToolMode = getConfig().agents.mainAssistant.toolMode): DynamicTurnGuidance | null {
   const normalized = userMessage.trim().toLowerCase();
   if (!normalized) return null;
 
-  const freshnessSensitiveByTerm = FRESHNESS_HINT_TERMS.some((term) => normalized.includes(term));
+  const freshnessSensitiveByTerm = includesTermAtWordStart(normalized, FRESHNESS_HINT_TERMS);
+  // Self-referential capability question — suppresses freshness so a weak
+  // "jetzt"/"now" cannot force delegated research for a meta question.
+  const selfCapabilityQuestion =
+    SELF_CAPABILITY_QUESTION_PATTERNS.some((pattern) => pattern.test(normalized))
+    && SELF_CAPABILITY_REFERENCE_TERMS.some((term) => normalized.includes(term));
   const sourceSensitiveByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
     || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
     || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized));
@@ -340,7 +383,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   // Either review path overrides freshness/source sensitivity — the user
   // already pasted the state, we don't need to fetch fresh sources.
   const inlineReview = localServerConfigReview || inlineAnalyticalContent;
-  const freshnessSensitive = inlineReview ? false : freshnessSensitiveByTerm;
+  const freshnessSensitive = (inlineReview || selfCapabilityQuestion) ? false : freshnessSensitiveByTerm;
   const sourceSensitive = inlineReview ? false : sourceSensitiveByTerm;
 
   const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent };

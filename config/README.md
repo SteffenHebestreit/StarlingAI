@@ -41,6 +41,22 @@ Two feature sections control the self-improving procedural-memory layer. Both ca
 
 Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignored). Authoring is automatic via the distiller, and any agent granted `record_skill` can author explicitly; recall/curation tools (`search_skills`, `search_sessions`, `curate_memory`) and `run_tool_pipeline` are granted per-agent in `workspace/agents/`. Every pipeline step still passes the normal tier + approval checks **and** is restricted to the calling agent's own tool allowlist.
 
+## Main-Assistant Routing
+
+```jsonc
+{
+  "agents": {
+    "mainAssistant": {
+      "toolMode": "orchestration_only", // hybrid | orchestration_only | delegate_only
+      "trustModelRouting": true          // see below
+    }
+  }
+}
+```
+
+- **`trustModelRouting`** (default `true`) — trusts the model's own decision to answer a turn directly. The weak, false-positive-prone **freshness** keyword heuristic (`jetzt`/`now`/`latest`) no longer *forces* delegation; it stays as advisory guidance in the turn prompt. **Source-sensitive** intent — explicit `cite official sources`, `search online`, product/hardware research — still forces delegation for anti-hallucination value. Set `false` to also force delegation on freshness signals (the stricter, legacy behavior).
+- Regardless of this flag, a turn **never ends empty**: if the model is nudged to delegate but still answers directly, its draft is released (after the security output scan + redactor) rather than being blocked.
+
 ## How it works
 
 The config loader reads `.json` and `.jsonc` files recursively in **lexicographic** path order, then deep-merges them. Prefix filenames with numbers (e.g. `10-`, `20-`) to control merge order.

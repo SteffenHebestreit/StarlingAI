@@ -93,6 +93,12 @@ export const RateLimitSchema = z.object({
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
   customInstructions: z.string().trim().min(1).max(16000).optional(),
+  // When true (default), the model's own routing decision is trusted: keyword
+  // freshness/source signals become advisory hints in the turn guidance rather
+  // than a hard gate that forces delegation. The never-empty release still
+  // applies in either mode. Set false to restore the strict "must delegate for
+  // fresh/source-sensitive work" enforcement.
+  trustModelRouting: z.boolean().default(true),
 });
 
 export const EphemeralGenerationSchema = z.object({

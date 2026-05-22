@@ -2935,8 +2935,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // than falling back to training-data hallucinations.
   let _sharedFindingsSystemMessage = "";
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
+  // Trust-the-LLM routing (Phase 2). The weak, false-positive-prone *freshness*
+  // keyword heuristic ("jetzt"/"now"/"latest") no longer forces delegation when
+  // trustModelRouting is on (default) — the model's own decision to answer
+  // directly is respected; freshness stays as advisory guidance in the prompt.
+  // *Source-sensitive* intent is explicit ("cite official sources", "search
+  // online", product research) and still forces delegation for anti-hallucination
+  // value. Set trustModelRouting=false to also force on freshness. Either way the
+  // never-empty release applies if the model declines after the nudge.
+  const trustModelRouting = getConfig().agents.mainAssistant.trustModelRouting !== false;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
-    && Boolean(initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive);
+    && Boolean(
+      initialDynamicGuidance?.sourceSensitive
+      || (initialDynamicGuidance?.freshnessSensitive && !trustModelRouting),
+    );
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.artifactSensitive);
   const requiresMaintenanceFollowUpDelegation = recentWorkflowAuthoringMaintenanceContext
@@ -3693,12 +3705,29 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // are literally zero tool calls to process.
     if (llmResponse.tool_calls.length === 0) {
       const rawResponse = llmResponse.content ?? "";
+      // Trust-the-LLM never-empty guarantee. The routing guardrails below each
+      // nudge the model ONCE to use an orchestration/workflow tool. If it still
+      // answers tool-free after that nudge, we no longer dead-end the turn into
+      // an empty `blocked()` response — we release its draft answer through the
+      // normal finalization path (which still runs the security output scan +
+      // redactor). Once a terminal decides to release, this flag short-circuits
+      // the remaining routing terminals so the draft falls straight through.
+      let releasedAfterRoutingNudge = false;
+      const releaseAfterRoutingNudge = (original: string): void => {
+        releasedAfterRoutingNudge = true;
+        guardrailEvents.push({ type: "routing_nudge_released", details: original });
+        logAudit("guardrail_flagged", {
+          type: "routing_nudge_released",
+          original,
+          reason: "model answered directly after one delegation nudge; releasing draft instead of blocking",
+        }, { sessionId: session.id, severity: "info" });
+      };
       const unresolvedDelegatedActionInHistory = hasRecentUnresolvedDelegatedAction(session.getHistory());
       const promisedContinuationWithoutTools = looksLikeContinuationPromise(rawResponse);
       const promisedMaintenanceExecutionWithoutTools = requiresMaintenanceFollowUpDelegation
         && looksLikeMaintenanceExecutionPromise(rawResponse);
 
-      if (promisedMaintenanceExecutionWithoutTools) {
+      if (!releasedAfterRoutingNudge && promisedMaintenanceExecutionWithoutTools) {
         if (!maintenanceDelegationRetryUsed) {
           maintenanceDelegationRetryUsed = true;
           maintenanceDelegationEnforcementPrompt = [
@@ -3716,26 +3745,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        return blocked(
-          "This workflow-authoring follow-up required an orchestration tool, but the model only promised the action without executing it.",
-          getTurnSwarmState(),
-          buildTurnPerformanceMetrics({
-            turnStartedAt,
-            firstModelResponseMs,
-            llmCalls,
-            llmTimeMs,
-            toolCallsRequested,
-            toolExecutionTimeMs,
-            lastPromptMetrics,
-            completionChars: 0,
-            finishReason: "missing_required_maintenance_delegation",
-            blocked: true,
-            toolIterations: iterationCount,
-          }),
-        );
+        releaseAfterRoutingNudge("tool_free_maintenance_answer_rejected");
       }
 
-      if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
+      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
         if (!workflowCatalogRetryUsed) {
           workflowCatalogRetryUsed = true;
           workflowCatalogEnforcementPrompt = [
@@ -3757,11 +3770,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        return blockMissingWorkflowCatalogCheck();
+        releaseAfterRoutingNudge("tool_free_workflow_answer_rejected");
       }
 
       if (
-        !workflowCatalogSuppressedForMaintenance
+        !releasedAfterRoutingNudge
+        && !workflowCatalogSuppressedForMaintenance
         &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn
@@ -3777,23 +3791,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        return blocked(
-          "This turn found reusable workflow matches but the model tried to finish without running one.",
-          getTurnSwarmState(),
-          buildTurnPerformanceMetrics({
-            turnStartedAt,
-            firstModelResponseMs,
-            llmCalls,
-            llmTimeMs,
-            toolCallsRequested,
-            toolExecutionTimeMs,
-            lastPromptMetrics,
-            completionChars: 0,
-            finishReason: "missing_required_workflow_execution",
-            blocked: true,
-            toolIterations: iterationCount,
-          }),
-        );
+        releaseAfterRoutingNudge("tool_free_workflow_run_rejected");
       }
 
       if (promisedContinuationWithoutTools && unresolvedDelegatedActionInHistory && !unresolvedDelegationContinuationRetryUsed) {
@@ -3819,7 +3817,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         || workflowRunCompletedThisTurn
         || ((_turnToolCallCounts.get("run_workflow") ?? 0) > 0);
 
-      if (requiresArtifactDelegation && !currentTurnHasExecutableOrchestration) {
+      if (!releasedAfterRoutingNudge && requiresArtifactDelegation && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           delegatedResearchEnforcementPrompt = [
@@ -3839,26 +3837,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        return blocked(
-          "This request required artifact-producing delegation, but the model tried to answer without using an orchestration tool.",
-          getTurnSwarmState(),
-          buildTurnPerformanceMetrics({
-            turnStartedAt,
-            firstModelResponseMs,
-            llmCalls,
-            llmTimeMs,
-            toolCallsRequested,
-            toolExecutionTimeMs,
-            lastPromptMetrics,
-            completionChars: 0,
-            finishReason: "missing_required_artifact_delegation",
-            blocked: true,
-            toolIterations: iterationCount,
-          }),
-        );
+        releaseAfterRoutingNudge("tool_free_artifact_answer_rejected");
       }
 
-      if (requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
+      if (!releasedAfterRoutingNudge && requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
@@ -3886,23 +3868,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        return blocked(
-          "This request required delegation to a specialist agent, but the model tried to answer without using an orchestration tool.",
-          getTurnSwarmState(),
-          buildTurnPerformanceMetrics({
-            turnStartedAt,
-            firstModelResponseMs,
-            llmCalls,
-            llmTimeMs,
-            toolCallsRequested,
-            toolExecutionTimeMs,
-            lastPromptMetrics,
-            completionChars: 0,
-            finishReason: "missing_required_delegation",
-            blocked: true,
-            toolIterations: iterationCount,
-          }),
-        );
+        releaseAfterRoutingNudge("tool_free_research_answer_rejected");
       }
 
       // Output guardrail scan
