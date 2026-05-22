@@ -9,6 +9,10 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   "assistant_personality_view",
   "assistant_personality_update",
   "user_model_update",
+  // Durable self-improvement: the main assistant can author its own reusable
+  // skills (same Tier 1, no-approval profile as memory_store). No-ops gracefully
+  // when skillLibrary.enabled is false.
+  "record_skill",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [
