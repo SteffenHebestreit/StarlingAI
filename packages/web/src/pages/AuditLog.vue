@@ -1,5 +1,5 @@
 <template>
-  <div class="p-4 h-full overflow-hidden flex flex-col" style="height: calc(100vh - 57px)">
+  <div class="p-4 h-full overflow-hidden flex flex-col">
     <div class="flex items-center justify-between mb-4">
       <h2 class="font-semibold text-lg">Audit Log</h2>
       <div class="flex gap-2">

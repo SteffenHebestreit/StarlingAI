@@ -3363,7 +3363,7 @@ watch(() => multimodalStore.config, (config) => {
 
 <style scoped>
 .settings-page {
-  height: calc(100vh - 57px);
+  height: 100%;
   overflow-y: auto;
   padding: 1.5rem;
 }

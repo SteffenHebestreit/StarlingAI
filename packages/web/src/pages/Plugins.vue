@@ -1,5 +1,5 @@
 <template>
-  <div class="plugins-page" style="height: calc(100vh - 57px); overflow-y: auto">
+  <div class="plugins-page" style="height: 100%; overflow-y: auto">
     <div class="plugins-page__header">
       <div>
         <h2 class="plugins-page__title">Plugins</h2>

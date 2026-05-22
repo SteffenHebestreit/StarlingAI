@@ -1,5 +1,5 @@
 <template>
-  <div class="memory-page" :style="{ height: 'calc(100vh - 56px)' }">
+  <div class="memory-page" style="height: 100%">
     <header class="memory-page__header">
       <div>
         <h1 class="memory-page__title">Memory &amp; Knowledge</h1>

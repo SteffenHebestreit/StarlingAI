@@ -1,5 +1,5 @@
 <template>
-  <div class="skills-page" :style="{ height: 'calc(100vh - 56px)' }">
+  <div class="skills-page" style="height: 100%">
     <header class="skills-page__header">
       <div>
         <h1 class="skills-page__title">Skill Library</h1>
