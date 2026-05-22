@@ -63,6 +63,7 @@ import "./tools/session-search.js";
 import "./tools/user-model.js";
 import "./tools/tool-pipeline.js";
 import "./tools/memory.js";
+import "./tools/recall-context.js";
 import "./personality/service.js";
 import "./tools/workspace-search.js";
 import "./tools/web.js";
