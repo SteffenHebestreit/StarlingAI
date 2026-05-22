@@ -82,6 +82,7 @@
                out when signed in, or a sign-in entry point in token mode. -->
           <div class="relative shrink-0">
             <button
+              ref="accountBtnRef"
               type="button"
               class="inline-flex h-9 w-9 items-center justify-center rounded-full border transition"
               :class="signedInUser
@@ -91,7 +92,7 @@
               :aria-label="signedInUser ? 'Account menu' : 'Sign in'"
               aria-haspopup="menu"
               :aria-expanded="accountMenuOpen"
-              @click="accountMenuOpen = !accountMenuOpen"
+              @click="toggleAccountMenu"
             >
               <svg v-if="signedInUser" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-[18px] w-[18px]">
                 <circle cx="12" cy="8" r="4" />
@@ -104,14 +105,17 @@
               </svg>
             </button>
 
-            <!-- Outside-click backdrop -->
-            <div v-if="accountMenuOpen" class="fixed inset-0 z-40" @click="accountMenuOpen = false" />
+            <!-- Teleported to <body> so it escapes the header's stacking
+                 context (otherwise the page content paints over it). -->
+            <Teleport to="body">
+              <div v-if="accountMenuOpen" class="fixed inset-0 z-[60]" @click="accountMenuOpen = false" />
 
-            <div
-              v-if="accountMenuOpen"
-              class="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
-              role="menu"
-            >
+              <div
+                v-if="accountMenuOpen"
+                class="fixed z-[70] w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+                :style="accountMenuStyle"
+                role="menu"
+              >
               <div class="border-b border-white/10 px-3 py-2.5">
                 <template v-if="signedInUser">
                   <div class="truncate text-sm font-medium text-gray-100">{{ currentUser?.displayName ?? currentUser?.username }}</div>
@@ -144,7 +148,8 @@
               >
                 Sign out
               </button>
-            </div>
+              </div>
+            </Teleport>
           </div>
         </div>
       </div>
@@ -210,7 +215,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
@@ -233,8 +238,26 @@ const signOut = auth.signOut;
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
 
-// Far-right account menu (username + sign out, or sign in).
+// Far-right account menu (username + sign out, or sign in). The dropdown is
+// teleported to <body> and positioned with fixed coords anchored to the button,
+// so it escapes the header's stacking context (no z-index fighting with page content).
 const accountMenuOpen = ref(false);
+const accountBtnRef = ref<HTMLElement | null>(null);
+const accountMenuStyle = ref<Record<string, string>>({});
+function positionAccountMenu(): void {
+  const el = accountBtnRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  accountMenuStyle.value = {
+    position: "fixed",
+    top: `${rect.bottom + 6}px`,
+    right: `${Math.max(8, window.innerWidth - rect.right)}px`,
+  };
+}
+function toggleAccountMenu(): void {
+  accountMenuOpen.value = !accountMenuOpen.value;
+  if (accountMenuOpen.value) void nextTick(positionAccountMenu);
+}
 function openAccountLogin(): void {
   accountMenuOpen.value = false;
   showLogin.value = true;
@@ -360,6 +383,10 @@ onMounted(() => {
   notifications.syncPermission();
   if (gateway.token) gateway.connect();
   void auth.refreshCurrentUser();
+  // Keep the teleported account menu anchored to its button on resize.
+  window.addEventListener("resize", () => {
+    if (accountMenuOpen.value) positionAccountMenu();
+  });
 });
 
 // Re-fetch the current user whenever the connection state flips to
