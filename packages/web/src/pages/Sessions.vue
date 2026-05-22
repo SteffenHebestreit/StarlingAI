@@ -1,5 +1,5 @@
 <template>
-  <div class="sessions-page" style="height: calc(100vh - 57px); overflow-y: auto">
+  <div class="sessions-page" style="height: 100%; overflow-y: auto">
     <div class="sessions-page__header">
       <div>
         <h2 class="sessions-page__title">Sessions</h2>

@@ -1,5 +1,5 @@
 <template>
-  <div class="jobs-page" style="height: calc(100vh - 57px); overflow-y: auto">
+  <div class="jobs-page" style="height: 100%; overflow-y: auto">
     <div class="jobs-page__header">
       <div>
         <h2 class="jobs-page__title">Jobs</h2>

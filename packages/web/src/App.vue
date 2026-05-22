@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
+  <div class="app-shell overflow-hidden bg-gray-950 text-gray-100 flex flex-col">
 
     <!-- Background orbs -->
     <div class="bg-orb bg-orb-1" aria-hidden="true" />
@@ -157,7 +157,7 @@
     </TransitionGroup>
 
     <!-- Router view -->
-    <main class="relative z-10 flex-1 overflow-hidden">
+    <main class="relative z-10 flex-1 min-h-0 overflow-hidden">
       <RouterView />
     </main>
   </div>
@@ -305,6 +305,17 @@ watch(() => gateway.connected, (now) => {
 </script>
 
 <style>
+/* The app shell owns the viewport height so child pages size themselves with
+   height:100% / h-full instead of fragile `calc(100vh - <header px>)` math that
+   broke whenever the real header height differed or the nav wrapped. 100dvh
+   tracks the visible area on mobile (URL bar show/hide); 100vh is the fallback
+   for browsers without dvh. Combined with `<main class="flex-1 min-h-0">`, the
+   content area is always exactly viewport minus header — no overflow. */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
 .toast-enter-active,
 .toast-leave-active,
 .toast-move {

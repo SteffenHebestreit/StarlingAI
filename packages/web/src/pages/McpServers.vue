@@ -1,5 +1,5 @@
 <template>
-  <div class="mcp-page" style="height: calc(100vh - 57px); overflow-y: auto">
+  <div class="mcp-page" style="height: 100%; overflow-y: auto">
     <div class="mcp-page__header">
       <div>
         <h2 class="mcp-page__title">MCP Integration</h2>

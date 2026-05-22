@@ -3222,14 +3222,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* Use the dynamic viewport unit on mobile so the chat fills exactly what's
-   visible — iOS Safari changes viewport height as the URL bar shows/hides,
-   and 100vh would otherwise extend behind the bar (cutting off the
-   composer). 100dvh tracks the visible area; 100vh stays as a fallback for
-   browsers that don't support dvh. */
+/* The app shell (.app-shell + main.flex-1.min-h-0) sizes this area to exactly
+   viewport-minus-header, including the dynamic mobile viewport, so the chat
+   just fills its parent. */
 .chat-viewport {
-  height: calc(100vh - 56px);
-  height: calc(100dvh - 56px);
+  height: 100%;
 }
 
 .approval-enter-active,

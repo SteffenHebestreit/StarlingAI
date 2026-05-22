@@ -1,5 +1,5 @@
 <template>
-  <div class="a2a-page" style="height: calc(100vh - 57px); overflow-y: auto">
+  <div class="a2a-page" style="height: 100%; overflow-y: auto">
     <div class="a2a-page__header">
       <div>
         <h2 class="a2a-page__title">A2A Peers</h2>
