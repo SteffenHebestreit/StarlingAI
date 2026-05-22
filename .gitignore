@@ -1,23 +1,29 @@
+# Dependencies & build output
 node_modules/
 dist/
-.env
-*.env.local
-.DS_Store
-*.log
 coverage/
 .turbo/
 
-# Claude Code local settings (per-user permission allowlist, etc.)
-.claude/
+# OS / logs
+.DS_Store
+*.log
+
+# Environment & secrets
+.env
+*.env.local
 
 # Runtime secrets and credentials
-.guardedswarm/
-guardedswarm.json
 starlingai.json
 config/mail/accounts.json
 
 # Runtime data directories (any location in the repo)
 **/.starlingai/
+
+# Generated reports, exports, and operator-collected artifacts
+artifacts/
+
+# Claude Code local settings (per-user permission allowlist, etc.)
+.claude/
 
 # Transpiled JS in web source (accidental build artifacts)
 packages/web/src/**/*.js
@@ -26,23 +32,21 @@ packages/web/src/**/*.js
 computer-remote-build.log
 *.deb
 
-# Temporary development/patch scripts in root
-fix.cjs
-fix_parse.cjs
-fix_parse_smart.cjs
-fix_tags.cjs
-patch_*.cjs
-patch_*.mjs
-safe_patch.cjs
-search.mjs
-skip_tests*.js
-skip/
+# Temporary development/patch scripts (root-level only — anchored so they
+# don't shadow real files like scripts/devtools/search.mjs)
+/fix.cjs
+/fix_parse.cjs
+/fix_parse_smart.cjs
+/fix_tags.cjs
+/patch_*.cjs
+/patch_*.mjs
+/safe_patch.cjs
+/search.mjs
+/skip_tests*.js
+/skip/
 
 # Agent-mutable runtime overrides (local state)
 workspace/runtime/runtime.overrides.json
-
-# Local IDE / tool settings
-.claude/settings.local.json
 
 # Test artifacts
 packages/core/tmp/

@@ -6,7 +6,7 @@
  * over the shared secret configured on both sides.  Tokens are short-lived
  * (5 min) and scoped to a specific peer via the `aud` claim.  Each instance
  * keeps full control of its own tool tiers and human-in-loop policies —
- * federation cannot bypass local guardrails.  See ROADMAP.md → Stage 11.
+ * federation cannot bypass local guardrails.
  */
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { getConfig } from "../config/loader.js";

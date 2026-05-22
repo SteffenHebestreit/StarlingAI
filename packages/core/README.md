@@ -93,4 +93,3 @@ pnpm security:pack     # verify the packed artifact contains no .map or debug fi
 - [docs/security.md](../../docs/security.md) — auth, credential handling, sandboxing, audit
 - [docs/tool-tiers.md](../../docs/tool-tiers.md) — compile-time tool permission tiers and approval rules
 - [docs/channels.md](../../docs/channels.md) and [docs/channel-setup.md](../../docs/channel-setup.md) — channel capability matrix and onboarding
-- [ROADMAP.md](../../ROADMAP.md) — stage tracker, gap analysis, invariants

@@ -116,9 +116,9 @@ The **human-in-the-loop approval system** (`approval/`) adds a third layer of ov
 
 The "Guarded" in StarlingAI reflects a fundamental constraint: agents in a starling murmuration are free to move, but StarlingAI agents operate within strict security boundaries. Speed and autonomy never come at the cost of control. This security contract applies regardless of what task domain the swarm is working in.
 
-**Current sandbox scope — important clarification:** Sandboxing applies at the tool-execution level, not the agent-process level. `shell_exec`, `run_script`, and all `selfdev__*` dynamic tools always execute inside the dedicated `sandbox` Docker container (`--cap-drop ALL`, `--read-only`, `--network none`). Individual sub-agents that have `container.enabled: true` in their config also run their entire LLM loop in an isolated container via `container-runner.ts`. However, sub-agents without that flag run in-process inside the gateway. Stage 8 will invert this to an opt-out model: all sub-agents default to containerized execution.
+**Current sandbox scope — important clarification:** Sandboxing applies at the tool-execution level, not the agent-process level. `shell_exec`, `run_script`, and all `selfdev__*` dynamic tools always execute inside the dedicated `sandbox` Docker container (`--cap-drop ALL`, `--read-only`, `--network none`). Individual sub-agents that have `container.enabled: true` in their config also run their entire LLM loop in an isolated container via `container-runner.ts`. Sub-agents now default to containerized execution (opt-out model): each sub-agent runs its full LLM loop in an isolated container via `container-runner.ts` unless it sets `container.disabled: true`. The global default is `agents.defaultContainerized: true`; set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out (e.g. in tests).
 
-**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing for tool execution, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational. See [ROADMAP.md](../ROADMAP.md#gap-1--container-isolation-is-opt-in-not-universal) for the planned Stage 8 container isolation improvements.
+**Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing for tool execution, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational. Container isolation now defaults to an opt-out model (see the Implementation Status table below).
 
 See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) for the full specification.
 
@@ -126,7 +126,7 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The system has completed **Stage 9** of the swarm vision. The current codebase extends the `v0.5.0` release line with workflow-catalog reuse, server-aware ops routing, richer session and audit exports, and inline Markdown artifact previews.
+The current `v0.9.0` codebase implements the swarm vision through **Stage 13** (procedural skill library), layering federated swarms (Stage 11) and open interoperability (Stage 12) on top of the Stage 1–9 foundation. Cross-cutting platform work — plugin SDK, OpenTelemetry tracing, cost governance, and optional multi-user auth — rounds out the current line (see the table and notes below).
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
@@ -153,7 +153,7 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
 | **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
-| **Container opt-out model** | 8 | Implemented (v0.3.2, default flipped post-v0.6.4) | `agents.defaultContainerized: true` global flag (set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out in tests) + per-agent `container.disabled: true` escape hatch; 27 trusted agents pre-opted-out in the workspace catalog (see GAP-1 in ROADMAP) |
+| **Container opt-out model** | 8 | Implemented (v0.3.2, default flipped post-v0.6.4) | `agents.defaultContainerized: true` global flag (set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out in tests) + per-agent `container.disabled: true` escape hatch; 27 trusted agents pre-opted-out in the workspace catalog |
 | **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
 | **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
 | **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |
@@ -163,6 +163,8 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Server-aware SSH and ops routing** | 9.2 | Implemented | Headless server tasks prefer `shell_agent` / `ops_triage`; `ssh_exec` can resolve configured `remote_ssh` nodes, including password-backed targets |
 | **Markdown artifact previews + audit-only exports** | 9.2 | Implemented | Markdown artifacts render inline in chat; sessions can export focused audit-only Markdown alongside the full debug bundle |
 | **Live shell preview and synthetic swarm status** | 9.2 | Implemented | The dashboard can surface shell/SSH activity and keep showing swarm progress from audit events even when explicit swarm-state updates lag |
+| **Federated swarms** | 11 | Implemented | Cross-instance delegation over HMAC-signed, short-lived, peer-scoped JWTs; `traceparent` propagated across hops; federation cannot bypass local tool tiers or approval gates (`federation/index.ts`) |
+| **Open interoperability** | 12 | Implemented | StarlingAI serves an MCP server (HTTP + stdio) exposing its tools, and ships a public A2A protocol (JSON-RPC 2.0 server + client with agent cards); peers and exposed servers are configurable at runtime with dashboard management (`mcp/`, `a2a/`) |
 | **Procedural Skill Library** | 13 | Implemented | Portable `SKILL.md` skills; `search_skills` / `list_skills` / `record_skill`; bounded, droppable "Learned Procedures" injection; `skillLibrary` config block |
 | **Autonomous skill authoring** | 13 | Implemented | `skills/distiller.ts` distills drafts from successful trajectories (gated by `skillLibrary.autoAuthor`), deduped; `skill_authored` / `skill_distilled` audit |
 | **Skill self-improvement** | 13 | Implemented | Outcome-driven ranking, draft→active graduation, periodic `skills/driver.ts` retire/merge/promote-to-scene; Warden `skill_authoring_flood` |
@@ -171,6 +173,13 @@ The system has completed **Stage 9** of the swarm vision. The current codebase e
 | **Memory steward** | 13 | Implemented | `curate_memory` — reasoned duplicate/stale report + nudge, consolidation on request |
 | **Tool pipeline** | 13 | Implemented | `run_tool_pipeline` batches several tool calls in one turn via `{{steps.id.output}}` templating; each step dispatches through the guarded `executeTool` path **and is restricted to the calling agent's tool allowlist**; `toolPipeline.enabled` default on, granted to `data_analyst` |
 | **Skill loop activation** | 13 | Implemented | `skillLibrary.autoAuthor` default on (drafts + dedupe + Warden guard); sub-agents receive Learned Procedures; catalog grants: `record_skill`/`search_skills`/`search_sessions` → `web_task_coordinator`, `curate_memory`/`search_sessions` → `ops_triage` |
+
+**Cross-cutting platform capabilities** (not tied to a single stage):
+
+- **Plugin SDK** — third-party tool packages auto-load from `~/.starlingai/plugins` at Tier 2 with tier-shadow rejection (`plugin/loader.ts`).
+- **OpenTelemetry tracing** — spans for tool calls, sub-agents, and federation hops, exported over OTLP (`observability/tracing.ts`).
+- **Cost governance** — token-usage aggregation with per-model pricing and budget thresholds, surfaced on a `/cost` dashboard (`observability/cost.ts`).
+- **Multi-user authentication** — optional per-user username/password accounts gating the dashboard and API; disabled by default for backwards-compatible single-user setups (`gateway/auth.ts`).
 
 ---
 
