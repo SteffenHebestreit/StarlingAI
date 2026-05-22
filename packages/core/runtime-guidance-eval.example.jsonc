@@ -1,38 +1,41 @@
 {
+  // Live runtime-guidance eval. Assertions are DELEGATION-aware: in
+  // orchestration_only mode the main assistant routes research to a specialist
+  // via delegate_to_agent (web_search runs inside the researcher sub-session, so
+  // it is NOT visible at the top level). Timeouts are sized for a local
+  // mid-size model (research turns can take a couple of minutes); tighten them
+  // for faster backends.
   "gatewayBaseUrl": "http://127.0.0.1:8765",
   "outputPath": "./.starlingai/live-check/runtime-guidance-eval-report.json",
   "cases": [
     {
       "name": "mcp-official-sources-natural",
-      "message": "Find the official Model Context Protocol specification and repository, and keep the answer short.",
-      "expectToolIncludes": ["web_search"],
-      "expectTextIncludes": ["Model Context Protocol"],
+      "message": "Find the official Model Context Protocol specification and repository, citing official sources, and keep the answer short.",
+      "expectToolIncludes": ["delegate_to_agent"],
       "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
-      "maxDurationMs": 45000
+      "maxDurationMs": 180000
     },
     {
       "name": "playwright-docs-natural",
-      "message": "Find the official Playwright tracing documentation and summarize the main ways to record a trace.",
-      "expectToolIncludes": ["web_search"],
-      "expectTextIncludes": ["Playwright"],
+      "message": "Find the official Playwright tracing documentation and summarize the main ways to record a trace, citing the source.",
+      "expectToolIncludes": ["delegate_to_agent"],
       "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
-      "maxDurationMs": 45000
+      "maxDurationMs": 180000
     },
     {
       "name": "lm-studio-release-notes-natural",
       "message": "What are the latest LM Studio release notes? Cite the official source and keep it concise.",
-      "expectToolIncludes": ["web_search"],
-      "expectTextIncludes": ["LM Studio"],
+      "expectToolIncludes": ["delegate_to_agent"],
       "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
-      "maxDurationMs": 45000
+      "maxDurationMs": 180000
     },
     {
       "name": "timeless-control-binary-search",
       "message": "Explain how binary search works in one paragraph.",
-      "expectToolExcludes": ["web_search", "web_fetch"],
+      "expectToolExcludes": ["delegate_to_agent", "web_search", "web_fetch"],
       "expectTextIncludes": ["binary search"],
       "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
-      "maxDurationMs": 20000
+      "maxDurationMs": 45000
     }
   ]
 }

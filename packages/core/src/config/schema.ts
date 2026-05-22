@@ -1238,6 +1238,16 @@ export const ConfigSchema = z.object({
       firstTokenSloMs: z.number().int().min(1_000).default(30_000),
       /** Warn when system prompt exceeds this char count (~8k tokens). */
       promptBudgetChars: z.number().int().min(1_000).default(32_000),
+      /**
+       * Lean context injection. When true, the per-turn memory/user-model/skill/
+       * flow/trajectory blocks are NOT pushed into the system prompt; instead a
+       * tiny digest tells the model to pull them on demand via recall_context.
+       * Keeps the prompt lean and saves the retrieval latency on turns that don't
+       * need it. Default true — validated against qwen3.6-35b (May 2026): routing
+       * unchanged vs. always-on injection, and the model pulls context via
+       * recall_context before delegating. Set false to restore always-on blocks.
+       */
+      leanContextInjection: z.boolean().default(true),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.

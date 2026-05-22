@@ -57,6 +57,15 @@ Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignor
 - **`trustModelRouting`** (default `true`) — trusts the model's own decision to answer a turn directly. The weak, false-positive-prone **freshness** keyword heuristic (`jetzt`/`now`/`latest`) no longer *forces* delegation; it stays as advisory guidance in the turn prompt. **Source-sensitive** intent — explicit `cite official sources`, `search online`, product/hardware research — still forces delegation for anti-hallucination value. Set `false` to also force delegation on freshness signals (the stricter, legacy behavior).
 - Regardless of this flag, a turn **never ends empty**: if the model is nudged to delegate but still answers directly, its draft is released (after the security output scan + redactor) rather than being blocked.
 
+## Context Injection
+
+```jsonc
+{ "agents": { "performance": { "leanContextInjection": true } } }
+```
+
+- **`leanContextInjection`** (default `true`) — the per-turn memory / user-model / skill / flow / trajectory blocks are **not** pushed into the system prompt. Instead a one-line digest tells the model to pull what it needs on demand via the `recall_context` tool. This keeps the prompt lean and skips the retrieval latency on turns that don't need that context. Validated against qwen3.6-35b (routing unchanged vs. always-on injection; the model calls `recall_context` before delegating). Set `false` to restore the always-on blocks.
+- Every turn emits a `prompt_section_sizes` audit event (per-section char counts: base, memory, skill, user-model, flow, trajectory, digest) so you can measure exactly what dominates the prompt before and after enabling lean mode.
+
 ## How it works
 
 The config loader reads `.json` and `.jsonc` files recursively in **lexicographic** path order, then deep-merges them. Prefix filenames with numbers (e.g. `10-`, `20-`) to control merge order.
