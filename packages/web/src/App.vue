@@ -72,6 +72,17 @@
             </button>
           </div>
 
+          <!-- Sign in / switch account — the only entry point to the login modal
+               in token or bootstrap-admin mode, where no per-user pill renders. -->
+          <button
+            v-if="gateway.connected && !signedInUser"
+            type="button"
+            class="inline-flex shrink-0 items-center rounded-full border border-purple-400/30 bg-purple-500/10 px-3 py-1 text-[11px] font-medium text-purple-100 transition hover:border-purple-300/50 hover:bg-purple-500/15"
+            @click="showLogin = true"
+          >
+            Sign in
+          </button>
+
           <button
             v-if="notifications.supported && notifications.permission === 'default'"
             class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
@@ -109,8 +120,13 @@
       </div>
     </header>
 
-    <!-- Login modal if not connected or auth failed -->
-    <LoginModal v-if="gateway.authFailed || (!gateway.connected && !gateway.connecting)" />
+    <!-- Login modal: auto-shown when disconnected/auth-failed, or opened on
+         demand (e.g. token mode → sign in as a created user / switch account). -->
+    <LoginModal
+      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting)"
+      :dismissible="gateway.connected"
+      @close="showLogin = false"
+    />
 
     <TransitionGroup
       name="toast"
@@ -164,7 +180,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
@@ -179,7 +195,13 @@ const notifications = useNotificationStore();
 const $route = useRoute();
 
 const currentUser = computed(() => auth.currentUser);
+// A real per-user identity (multi-user auth). The bootstrap admin token and the
+// legacy single-operator token render no pill, so they rely on the Sign in button.
+const signedInUser = computed(() => Boolean(currentUser.value && currentUser.value.username !== "admin"));
 const signOut = auth.signOut;
+
+// Manual login-modal trigger (token mode → sign in as a created user / switch account).
+const showLogin = ref(false);
 
 /**
  * The top-level nav is small (5 entries) and either renders as a single
@@ -300,7 +322,10 @@ onMounted(() => {
 // Re-fetch the current user whenever the connection state flips to
 // connected (covers reconnects, token rotations from /api/auth/login).
 watch(() => gateway.connected, (now) => {
-  if (now) void auth.refreshCurrentUser();
+  if (now) {
+    showLogin.value = false; // a successful (re)connect closes a manually-opened modal
+    void auth.refreshCurrentUser();
+  }
 });
 </script>
 

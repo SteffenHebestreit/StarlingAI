@@ -1,7 +1,19 @@
 <template>
   <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-       role="dialog" aria-modal="true" aria-labelledby="login-heading">
-    <div class="glass-card w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
+       role="dialog" aria-modal="true" aria-labelledby="login-heading"
+       @click.self="onBackdrop">
+    <div class="glass-card relative w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
+
+      <!-- Close (only when the modal was opened manually while connected) -->
+      <button
+        v-if="dismissible"
+        type="button"
+        class="absolute right-3 top-3 rounded-full border border-white/10 px-2 py-0.5 text-sm text-gray-400 transition hover:border-white/20 hover:text-gray-200"
+        aria-label="Close login"
+        @click="close"
+      >
+        ✕
+      </button>
 
       <!-- Header -->
       <div class="text-center mb-8">
@@ -106,10 +118,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
 
+const props = withDefaults(defineProps<{ dismissible?: boolean }>(), { dismissible: false });
+const emit = defineEmits<{ (event: "close"): void }>();
+
 const gateway = useGatewayStore();
+
+function close(): void {
+  emit("close");
+}
+
+function onBackdrop(): void {
+  if (props.dismissible) close();
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && props.dismissible) close();
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
 type Mode = "password" | "token";
 const mode = ref<Mode>("password");
