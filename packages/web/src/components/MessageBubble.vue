@@ -22,9 +22,9 @@
       <div v-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
         {{ blockLabel }}
       </div>
-      <div v-if="message.guardrailEvents?.length" class="guardrail-events">
-        <div v-for="(ev, i) in message.guardrailEvents" :key="i" class="guardrail-badge guardrail-badge--warn">
-          ⚠ {{ ev.type }}: {{ ev.details }}
+      <div v-if="visibleGuardrailEvents.length" class="guardrail-events">
+        <div v-for="(label, i) in visibleGuardrailEvents" :key="i" class="guardrail-badge guardrail-badge--warn">
+          {{ label }}
         </div>
       </div>
 
@@ -581,6 +581,27 @@ const blockLabel = computed((): string => {
   if (/prompt injection|secret scan|output guardrail/i.test(details)) return "⛔ Blocked by guardrails";
   return "⚠ Request blocked";
 });
+// Most guardrail events are benign internal orchestration mechanics — the
+// orchestrator enforced delegation, nudged routing, deduped a tool call, or the
+// turn was blocked (already shown via the block badge above). Those belong in
+// the audit log, not surfaced to the user as warnings. Only genuinely
+// user-relevant outcomes (e.g. output redaction) are shown in chat.
+const HIDDEN_GUARDRAIL_TYPES = new Set([
+  "delegation_required",
+  "workflow_required",
+  "routing_nudge_released",
+  "tool_blocked",
+  "blocked",
+]);
+const GUARDRAIL_LABELS: Record<string, string> = {
+  output_redacted: "🔒 Sensitive output was redacted",
+};
+const visibleGuardrailEvents = computed(() =>
+  (props.message.guardrailEvents ?? [])
+    .filter((ev) => !HIDDEN_GUARDRAIL_TYPES.has(ev.type))
+    .map((ev) => GUARDRAIL_LABELS[ev.type] ?? `⚠ ${ev.type}: ${ev.details}`),
+);
+
 const swarmTasks = computed(() => Object.values(props.message.swarmState?.tasks ?? {}));
 
 // ── Execution history label ──────────────────────────────────────────────────
