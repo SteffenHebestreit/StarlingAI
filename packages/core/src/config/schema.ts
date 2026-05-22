@@ -1248,6 +1248,17 @@ export const ConfigSchema = z.object({
        * recall_context before delegating. Set false to restore always-on blocks.
        */
       leanContextInjection: z.boolean().default(true),
+      /**
+       * Task-conditional base prompt. When true, the always-on intent-routing
+       * rules (computer-use / server-ops / pentest-methodology / swarm-maintenance)
+       * are dropped from the static system prompt — the per-turn classifier
+       * already injects richer, more specific guidance for each of those intents
+       * only when it fires. Trims the base template. Default true — A/B'd live
+       * against qwen3.6-35b (May 2026): intent routing unchanged with the
+       * always-on bullets removed (e.g. server-ops still delegates correctly).
+       * Set false to restore the always-on intent rules.
+       */
+      taskConditionalPrompt: z.boolean().default(true),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
