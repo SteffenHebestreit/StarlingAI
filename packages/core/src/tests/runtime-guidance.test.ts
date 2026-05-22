@@ -59,6 +59,21 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
   });
 
+  it("does not treat self-referential capability questions as freshness-sensitive", () => {
+    // Regression: "jetzt" (now) is a weak temporal word. Inside a meta question
+    // about the assistant's own skills it must NOT flip freshnessSensitive —
+    // doing so forced delegated research and dead-ended the turn into an empty
+    // answer ("kannst du jetzt eigene skills erlernen?" → blank reply).
+    const guidance = buildDynamicTurnGuidance("kannst du jetzt eigene skills erlernen?", "orchestration_only");
+    expect(guidance?.freshnessSensitive ?? false).toBe(false);
+  });
+
+  it("does not flag freshness from mid-word substrings like 'know' or 'delivery'", () => {
+    // "now" must not match "know"/"known"; "live" must not match "delivery".
+    expect(buildDynamicTurnGuidance("do you know how this feature works?", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
+    expect(buildDynamicTurnGuidance("what is the delivery process for our orders?", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
+  });
+
   it("treats explicit online-search requests as source-sensitive", () => {
     const guidance = buildDynamicTurnGuidance("suche online nach der genauen entfernung vom flughafen heraklion zum hotel out of the blue", "orchestration_only");
 

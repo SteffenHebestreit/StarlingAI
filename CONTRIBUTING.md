@@ -44,7 +44,7 @@ Three long-lived branches:
 - `config/` is operator-owned and the agent swarm cannot modify it; `workspace/` is the agent-tunable zone. The loader merges `config/` → `workspace/` → `workspace/runtime/runtime.overrides.json`.
 - `starlingai.json` is a **generated artifact** (gitignored) — never hand-edit it. After changing `config/` or `workspace/`, run `pnpm config:build` and restart the gateway container.
 - Model identifiers must be valid for the configured provider (e.g. `lmstudio/qwen3.6-35b-a3b`). A typo or stale id (`lmstudio/qwen/qwen3.5-35b-a3b`) makes the gateway reject every turn with `400 Invalid model identifier`. The CI `config:build` step catches build-time config errors.
-- Feature flags `skillLibrary` and `toolPipeline` are documented in [config/README.md](config/README.md).
+- Feature flags `skillLibrary`, `toolPipeline`, and `agents.mainAssistant.trustModelRouting` are documented in [config/README.md](config/README.md).
 
 ## Adding capabilities
 
