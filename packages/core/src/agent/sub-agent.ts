@@ -1789,7 +1789,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent is containerized when EITHER:
     //   a) its own config has container.enabled: true  (explicit opt-in), OR
     //   b) agents.defaultContainerized is true globally AND container.disabled !== true
-    //      (opt-out model — closed GAP-1 from ROADMAP)
+    //      (opt-out model)
     //
     // EXCEPTION: agents whose tool list contains orchestration/discovery tools
     // or gateway-bound service tools must run in-process.

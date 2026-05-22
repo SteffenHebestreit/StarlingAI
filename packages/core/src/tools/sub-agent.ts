@@ -565,7 +565,7 @@ function computeOutcomeBoost(agentName: string, workspacePath: string): number {
  *     it gets a small positive boost.
  *   - If an agent declares a minVramMb > 0, that metadata is surfaced in search
  *     results so operators know the requirement (routing cannot enforce VRAM at
- *     runtime without hardware introspection — see ROADMAP Stage 9).
+ *     runtime without hardware introspection).
  */
 const GPU_HEAVY_QUERY_TERMS = [
   "embed", "embedding", "transcribe", "speech", "audio", "image", "generate image",

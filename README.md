@@ -22,10 +22,10 @@
 
 ## Latest Main-Branch Highlights
 
-- **Reusable workflow catalog** — coordinators can call `search_workflows` and `run_workflow` to reuse named scenes and multi-step jobs instead of inventing a fresh plan for recurring packets.
-- **Server-aware operations routing** — SSH, Docker, and service-health work now routes to `shell_agent` or `ops_triage` instead of desktop computer-use flows, and `ssh_exec` can resolve configured `remote_ssh` nodes by `nodeName`.
-- **Richer operator review surface** — the dashboard can export audit-only Markdown, show a live shell preview, surface synthetic swarm progress from audit events, and filter tool or sub-agent activity in the Audit view.
-- **Better artifact previews** — Markdown documents now render inline beside HTML, PDF, Mermaid, text, JSON, and audio artifacts in the chat UI.
+- **Federated swarms** — instances delegate work to each other over HMAC-signed, peer-scoped tokens, while each side keeps full control of its own tool tiers and approval gates.
+- **Open interoperability** — StarlingAI serves an MCP server (HTTP + stdio) and a public A2A protocol (server + client), so external clients and agents can use and collaborate with the swarm.
+- **Procedural skill library** — agents author and refine reusable `SKILL.md` playbooks at runtime; `search_skills` / `record_skill` and a background distiller turn successful trajectories into discoverable procedures.
+- **Cost & access controls** — token usage is aggregated with per-model pricing and budgets on a `/cost` dashboard, and optional per-user accounts gate the dashboard and API.
 
 ## The Starling Swarm — How Biology Inspired This Architecture
 
@@ -87,6 +87,10 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Reusable Workflows** — Scenes and multi-step jobs can be discovered with `search_workflows` and executed inline with `run_workflow`, so recurring packets do not have to be replanned from scratch.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
 - **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
+- **Federated Swarms** — Instances delegate work to one another over HMAC-signed, short-lived, peer-scoped tokens. Each side keeps full control of its own tool tiers and approval policies — federation never bypasses local guardrails.
+- **Open Interoperability** — StarlingAI both speaks and serves the open agent protocols: an MCP server (HTTP + stdio) exposes its tools to other clients, and a public A2A protocol (server + client) lets external agents collaborate with the swarm.
+- **Skill Library** — Agents author and refine reusable `SKILL.md` procedures at runtime, so successful multi-step approaches are distilled into discoverable, improvable playbooks.
+- **Plugin SDK** — Third-party tool packages auto-load from `~/.starlingai/plugins` at Tier 2 with tier-shadow rejection, so the toolset can grow without touching core.
 - **Multimodal Tools** — Speech-to-text, speech synthesis, image analysis, file-to-markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
 - **Server Operations Routing** — Headless server work such as SSH, Docker, `systemctl`, and log triage is routed to shell and ops specialists with `ssh_exec` support instead of desktop automation.
 - **Credential-Safe Automation** — Stored site credentials never need to enter the LLM context. Agents inspect login metadata with `get_site_credentials` and inject secrets only through `site_fill_credentials` or `computer_type_credential` under approval.
@@ -95,6 +99,9 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Multi-Channel Messaging** — Webchat, Telegram, Slack, Discord, WhatsApp, and email with consistent delivery SLOs, dead-letter queues, and retry with backoff.
 - **Warden Monitoring** — A background warden detects tool storms, escape attempts, failure spikes, and SLO breaches in real time.
 - **Live Observability** — Token streaming to the dashboard via AG-UI SSE, live shell previews, per-turn performance telemetry, and audit/debug Markdown exports sit on top of the JSONL + PostgreSQL audit trail.
+- **Distributed Tracing** — OpenTelemetry spans cover tool calls, sub-agents, and federation hops, with W3C `traceparent` propagated across instances for end-to-end visibility.
+- **Cost Governance** — Token usage is aggregated with per-model pricing and budget thresholds, surfaced on a dedicated `/cost` dashboard.
+- **Multi-User Access** — Optional per-user accounts (username + password) gate the dashboard and API; leaving auth disabled keeps the single-user setup fully backwards compatible.
 - **Scenes And Jobs** — Reusable scene templates and multi-step jobs live in the workspace. Scenes remain launchable from chat, the dashboard, or webhooks and are tracked as async jobs.
 - **Penetration Testing** — Full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 

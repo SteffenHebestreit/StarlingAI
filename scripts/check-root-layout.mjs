@@ -23,7 +23,6 @@ const allowedFiles = new Set([
   "pnpm-workspace.yaml",
   "QUICKSTART.md",
   "README.md",
-  "ROADMAP.md",
   "sai",
   "sai.cmd",
   "scene-eval.jsonc",

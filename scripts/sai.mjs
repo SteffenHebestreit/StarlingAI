@@ -288,7 +288,6 @@ ${BOLD}Commands:${RESET}
     --fresh                            Wipe volumes + rebuild (clean slate)
     --pentest                          Include Kali pentest service
     --strix-halo                       Include Strix Halo ROCm compose overrides
-    --speech                           Include ASR/TTS speech services
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
   stop  [--volumes] [--strix-halo]   Stop services (--volumes wipes data)
