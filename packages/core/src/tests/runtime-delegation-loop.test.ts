@@ -3859,6 +3859,49 @@ describe("runtime delegated-loop regressions", () => {
     ]));
   });
 
+  it("lean context injection (default on) injects the recall_context digest + emits prompt_section_sizes telemetry", async () => {
+    streamMock.mockImplementation(() => createTextStream("Direct answer."));
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage: "hello there" });
+
+    expect(result.blocked).toBe(false);
+    const messages = streamMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+    const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+    expect(systemText).toContain("are NOT preloaded into this prompt");
+    expect(logAudit).toHaveBeenCalledWith(
+      "prompt_section_sizes",
+      expect.objectContaining({ leanContextInjection: true }),
+      expect.anything(),
+    );
+  });
+
+  it("explicit leanContextInjection=false restores full context injection (no digest)", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      agents: { mainAssistant: { toolMode: "orchestration_only" }, performance: { leanContextInjection: false } },
+    });
+
+    streamMock.mockImplementation(() => createTextStream("Direct answer."));
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({ session, userMessage: "hello there" });
+
+    expect(result.blocked).toBe(false);
+    const messages = streamMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+    const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+    expect(systemText).not.toContain("are NOT preloaded into this prompt");
+  });
+
   it("treats create_ephemeral_agent as a current-turn orchestration attempt for source-sensitive requests", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

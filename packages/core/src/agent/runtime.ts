@@ -3152,13 +3152,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const systemPrompt = session.getSystemPrompt();
     const temporalContext = buildTemporalContextPrompt();
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
-    let flowGuidance = iterationCount === 0
+    // Lean context injection: when on, the heavy per-turn memory/user-model/skill/
+    // flow/trajectory blocks are not pushed into the prompt — the model pulls them
+    // on demand via recall_context (see config.agents.performance.leanContextInjection).
+    // This also skips the retrieval calls entirely, saving latency on turns that
+    // don't need that context.
+    const leanContextInjection = getConfig().agents.performance.leanContextInjection === true;
+    const injectTurnContext = iterationCount === 0 && !leanContextInjection;
+    let flowGuidance = injectTurnContext
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
     const languageAndIdentityGuidance = iterationCount === 0
       ? buildLanguageAndIdentityTurnGuidance(userMessage)
       : "";
-    let memoryGuidance = iterationCount === 0
+    let memoryGuidance = injectTurnContext
       ? await formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
           sessionId: session.id,
           scopes: ["session", "workspace", "user"],
@@ -3170,7 +3177,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // successful work, so the planner reuses a known-good approach before
     // inventing a fresh plan. Guidance only — the guardrail stack still applies.
     let skillGuidance = "";
-    if (iterationCount === 0 && getConfig().skillLibrary.enabled) {
+    if (injectTurnContext && getConfig().skillLibrary.enabled) {
       const retrieved = await retrieveSkillGuidance(session.getWorkspacePath(), userMessage, {
         maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
       });
@@ -3179,8 +3186,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
     // Dialectic user model — small, injected only when populated. Adapts the
     // agent to the user across sessions; droppable under prompt budget.
-    let userModelGuidance = iterationCount === 0 ? formatUserModelGuidance() : "";
-    let activeTrajectoryInjectionContext = iterationCount === 0 ? trajectoryInjectionContext : null;
+    let userModelGuidance = injectTurnContext ? formatUserModelGuidance() : "";
+    let activeTrajectoryInjectionContext = injectTurnContext ? trajectoryInjectionContext : null;
+    // In lean mode, replace the always-on context blocks with a one-line pointer
+    // so the model knows to pull what it needs instead of assuming it is in view.
+    const contextRecallDigest = (iterationCount === 0 && leanContextInjection)
+      ? "Durable memory, the user model, this session's working facts, recent related sessions, and learned skills are NOT preloaded into this prompt. Before any non-trivial planning or delegation, call recall_context(query) to pull what is relevant. Do not assume that context is already in view."
+      : "";
     const collapsedHistory = session.getCollapsedHistory();
 
     const buildSystemMessages = (): LLMMessage[] => [
@@ -3189,6 +3201,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
+      ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
@@ -3212,6 +3225,28 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     let systemMessages = buildSystemMessages();
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+
+    // ── Per-section prompt-size telemetry ─────────────────────────────────
+    // Emitted once per turn (iteration 0) so we can see exactly what dominates
+    // the system prompt and prove the win from lean context injection. The base
+    // template is typically the bulk; memory/skill/user/flow/trajectory are the
+    // reducible part that recall_context now covers on demand.
+    if (iterationCount === 0) {
+      logAudit("prompt_section_sizes", {
+        total: lastPromptMetrics.systemPromptChars,
+        base: systemPrompt.length,
+        temporal: temporalContext.length,
+        dynamicGuidance: dynamicGuidance?.prompt.length ?? 0,
+        languageIdentity: languageAndIdentityGuidance.length,
+        flow: flowGuidance.length,
+        skill: skillGuidance.length,
+        userModel: userModelGuidance.length,
+        memory: memoryGuidance.length,
+        trajectory: activeTrajectoryInjectionContext?.length ?? 0,
+        contextDigest: contextRecallDigest.length,
+        leanContextInjection,
+      }, { sessionId: session.id, severity: "info" });
+    }
 
     // ── Prompt budget enforcement ─────────────────────────────────────────
     // Fix 6: when the system prompt exceeds the configured budget, trim
