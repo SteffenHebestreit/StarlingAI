@@ -183,12 +183,13 @@ describe("AgentSession collapsed history", () => {
     const prompt = session.getSystemPrompt();
 
     expect(prompt).toContain("You are the main assistant inside StarlingAI");
-    expect(prompt).toContain("computer-use tasks, not pentest tasks");
-    expect(prompt).toContain("prefer delegate_to_agent(agentName: \"computer_use_agent\", task: \"...\") first");
-    expect(prompt).toContain("Requests asking how the pentest swarm works");
-    expect(prompt).toContain("Do not ask for authorization or scope unless the user explicitly switches to running a real assessment");
+    // Intent-routing rules are task-conditional (taskConditionalPrompt default on):
+    // dropped from the always-on prompt; the per-turn classifier injects richer
+    // guidance for those intents only when they fire.
+    expect(prompt).not.toContain("computer-use tasks, not pentest tasks");
+    expect(prompt).not.toContain("Requests asking how the pentest swarm works");
+    expect(prompt).toContain("Tool Use Discipline");
     expect(prompt).toContain("swarm_maintainer");
-    expect(prompt).toContain("do NOT call search_agents or list_agents first");
     expect(prompt).toContain("prefer delegate_to_agent(task: \"...\") without agentName first");
     expect(prompt).toContain("sourced chart, table, or HTML visualization");
     expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");

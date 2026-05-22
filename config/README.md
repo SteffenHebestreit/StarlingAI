@@ -60,10 +60,11 @@ Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignor
 ## Context Injection
 
 ```jsonc
-{ "agents": { "performance": { "leanContextInjection": true } } }
+{ "agents": { "performance": { "leanContextInjection": true, "taskConditionalPrompt": true } } }
 ```
 
 - **`leanContextInjection`** (default `true`) — the per-turn memory / user-model / skill / flow / trajectory blocks are **not** pushed into the system prompt. Instead a one-line digest tells the model to pull what it needs on demand via the `recall_context` tool. This keeps the prompt lean and skips the retrieval latency on turns that don't need that context. Validated against qwen3.6-35b (routing unchanged vs. always-on injection; the model calls `recall_context` before delegating). Set `false` to restore the always-on blocks.
+- **`taskConditionalPrompt`** (default `false`) — when `true`, the always-on intent-routing rules (computer-use / server-ops / pentest-methodology / swarm-maintenance) are dropped from the static base prompt. The per-turn classifier already injects richer, more specific guidance for each of those intents only when it fires, so the always-on copies are redundant. Trims the base template; relies on the classifier catching the intent, so A/B with `pnpm agents:evaluate` before enabling.
 - Every turn emits a `prompt_section_sizes` audit event (per-section char counts: base, memory, skill, user-model, flow, trajectory, digest) so you can measure exactly what dominates the prompt before and after enabling lean mode.
 
 ## How it works

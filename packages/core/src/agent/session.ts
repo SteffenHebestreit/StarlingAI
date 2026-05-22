@@ -839,6 +839,32 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
     ? `\n\n## Main Assistant Custom Instructions\n${customInstructions}`
     : "";
 
+  // Task-conditional base prompt: these intent-routing rules are duplicated by
+  // the per-turn classifier (buildDynamicTurnGuidance), which injects richer,
+  // more specific guidance for each intent ONLY when it fires. When
+  // taskConditionalPrompt is on, drop them from the always-on prompt and rely on
+  // that per-turn guidance. Leading "\n" lives in the variable so the line
+  // collapses cleanly when omitted.
+  const taskConditionalPrompt = config.agents.performance.taskConditionalPrompt === true;
+  const intentRoutingRules = taskConditionalPrompt ? "" : "\n" + [
+    `- Requests to access, control, or work on the user's own computer, workstation, desktop, editor, or remote Windows PC are computer-use tasks, not pentest tasks.`,
+    `- For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.`,
+    `- Requests to SSH into the user's server, inspect Docker containers, read logs, check systemd services, or diagnose a headless host are server administration tasks, not desktop computer-use tasks.`,
+    `- For those server administration requests, prefer delegate_to_agent(agentName: "shell_agent", task: "...") for straightforward remote commands and delegate_to_agent(agentName: "ops_triage", task: "...") for service failures, unhealthy containers, deployment issues, or log-driven diagnosis.`,
+    `- Requests asking how the pentest swarm works, what methodology or plan it follows, how the pentest coordinator would approach an engagement, or whether a prior pentest answer was correct are planning and prompt-analysis tasks, not live pentest engagements.`,
+    `- For those pentest methodology or prompt-analysis requests, inspect the local pentest config and docs or delegate to pentest_coordinator in maintenance mode. Do not ask for authorization or scope unless the user explicitly switches to running a real assessment.`,
+    `- Requests to improve StarlingAI itself such as changing the main assistant, agent prompts, sub-agent behavior, tool routing, or workspace swarm definitions are maintenance tasks on this repository.`,
+    `- For those maintenance tasks, inspect local workspace definitions first and route the task to swarm_maintainer when available. Use prompt_optimizer only for narrowly prompt-only adjustments, or integration_builder for clearly integration-specific wiring.`,
+    `- When swarm_maintainer exists, do NOT call search_agents or list_agents first for those requests. Delegate to swarm_maintainer directly.`,
+    `- Do not answer with generic claims that you cannot modify the toolset or agent set when the requested change is achievable by editing repository files under workspace/ or other writable project paths.`,
+    `- If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.`,
+    `- If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.`,
+    `- For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.`,
+    `- If the user asks to access a specific host for SSH, Docker, container, service, or log work, include that host in the delegation context but keep the task on the server CLI path rather than computer_use_agent unless the user explicitly asks for desktop/UI interaction.`,
+    `- Do not invent adapter names or switch to alternate adapters just because one call failed. If a computer session is already active, attach to or reuse that same session unless the user explicitly requests a different adapter.`,
+    `- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant owned-system path: computer_use_agent for desktop/UI control, or shell_agent/ops_triage for SSH, Docker, logs, and service work. If the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.`,
+  ].join("\n");
+
   return `You are the main assistant inside StarlingAI, a pragmatic AI system focused on planning, orchestration, and synthesis across specialized sub-agents.
 
 ## Core Principles
@@ -898,23 +924,7 @@ ${personalityGuidance}
 - ${delegateOnly || orchestrationOnly ? "For multi-step web retrieval, prefer a coordinator agent that can combine researcher, browser_agent, and evidence_analyst outputs. For browser login or form tasks on known sites, prefer browser_agent directly so it can call get_site_credentials first and then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not ask the user to paste credentials that may already be stored." : "For simple login or form tasks, use get_site_credentials only for metadata, then use site_fill_credentials for browser logins or computer_type_credential for desktop logins. Do not type stored credentials manually. Delegate browser_agent only for longer or fragile browser workflows."}
 - ${delegateOnly || orchestrationOnly ? "File or image interpretation should be routed to a specialist with analyze_image or extract_file_content and access to shared facts." : "For file or image attachments, prefer extract_file_content or analyze_image first; delegate only if the result still needs specialist follow-on work."}
 - ${delegateOnly || orchestrationOnly ? "If a delegated result implies a user decision, pause orchestration and ask the user directly from the main assistant instead of passing that interaction back into the swarm." : "If a delegated result implies a user decision, ask the user directly before continuing."}
-- assistant_personality_view and assistant_personality_update are reserved for durable voice guidance. Use them only for personality changes, never for safety policy or authorization changes.
-- Requests to access, control, or work on the user's own computer, workstation, desktop, editor, or remote Windows PC are computer-use tasks, not pentest tasks.
-- For those owned-system access requests, prefer delegate_to_agent(agentName: "computer_use_agent", task: "...") first. Use pentest_* or nmap_* tools only when the user explicitly asks for a security assessment, vulnerability scan, exploit validation, or other security testing.
-- Requests to SSH into the user's server, inspect Docker containers, read logs, check systemd services, or diagnose a headless host are server administration tasks, not desktop computer-use tasks.
-- For those server administration requests, prefer delegate_to_agent(agentName: "shell_agent", task: "...") for straightforward remote commands and delegate_to_agent(agentName: "ops_triage", task: "...") for service failures, unhealthy containers, deployment issues, or log-driven diagnosis.
-- Requests asking how the pentest swarm works, what methodology or plan it follows, how the pentest coordinator would approach an engagement, or whether a prior pentest answer was correct are planning and prompt-analysis tasks, not live pentest engagements.
-- For those pentest methodology or prompt-analysis requests, inspect the local pentest config and docs or delegate to pentest_coordinator in maintenance mode. Do not ask for authorization or scope unless the user explicitly switches to running a real assessment.
-- Requests to improve StarlingAI itself such as changing the main assistant, agent prompts, sub-agent behavior, tool routing, or workspace swarm definitions are maintenance tasks on this repository.
-- For those maintenance tasks, inspect local workspace definitions first and route the task to swarm_maintainer when available. Use prompt_optimizer only for narrowly prompt-only adjustments, or integration_builder for clearly integration-specific wiring.
-- When swarm_maintainer exists, do NOT call search_agents or list_agents first for those requests. Delegate to swarm_maintainer directly.
-- Do not answer with generic claims that you cannot modify the toolset or agent set when the requested change is achievable by editing repository files under workspace/ or other writable project paths.
-- If the user asks for their local desktop or local Windows desktop, delegate to computer_use_agent and tell it to prefer adapter 'remote_node'. Use local_vscode only when they explicitly want control inside the VS Code workbench rather than the whole desktop.
-- If the user asks to access a specific IP or hostname, include that IP/hostname in the delegation context. The computer_use_agent will call computer_list_nodes to discover available targets and match the IP to a pre-configured node, or use an ad-hoc connection.
-- For requests such as "which programs are open", "what windows are open", or "what is on my screen", delegate to computer_use_agent so it can start or reuse the computer session and use computer_list_windows or computer_snapshot.
-- If the user asks to access a specific host for SSH, Docker, container, service, or log work, include that host in the delegation context but keep the task on the server CLI path rather than computer_use_agent unless the user explicitly asks for desktop/UI interaction.
-- Do not invent adapter names or switch to alternate adapters just because one call failed. If a computer session is already active, attach to or reuse that same session unless the user explicitly requests a different adapter.
-- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant owned-system path: computer_use_agent for desktop/UI control, or shell_agent/ops_triage for SSH, Docker, logs, and service work. If the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.
+- assistant_personality_view and assistant_personality_update are reserved for durable voice guidance. Use them only for personality changes, never for safety policy or authorization changes.${intentRoutingRules}
 - Maximum 5 delegate_to_agent calls per turn. Use them deliberately, but do not stop early when one more specialist call is clearly needed.
 - Maximum 1 create_ephemeral_agent call per turn, and only when existing agents are clearly insufficient.
 - Simple questions that don't need external data must be answered directly — do NOT delegate.
