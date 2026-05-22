@@ -126,7 +126,7 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The current `v0.10.0` codebase implements the swarm vision through **Stage 13** (procedural skill library), layering federated swarms (Stage 11) and open interoperability (Stage 12) on top of the Stage 1–9 foundation. Cross-cutting platform work — plugin SDK, OpenTelemetry tracing, cost governance, and optional multi-user auth — rounds out the current line (see the table and notes below).
+The current `v0.11.0` codebase implements the swarm vision through **Stage 13** (procedural skill library), layering federated swarms (Stage 11) and open interoperability (Stage 12) on top of the Stage 1–9 foundation. Cross-cutting platform work — plugin SDK, OpenTelemetry tracing, cost governance, and optional multi-user auth — rounds out the current line (see the table and notes below).
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
