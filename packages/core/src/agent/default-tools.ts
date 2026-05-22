@@ -13,6 +13,11 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // skills (same Tier 1, no-approval profile as memory_store). No-ops gracefully
   // when skillLibrary.enabled is false.
   "record_skill",
+  // Just-in-time planning context: one read-only call that aggregates the user
+  // model, working-memory facts, long-term memory, recent sessions, and skills —
+  // so the planner can hydrate context before delegating instead of the prompt
+  // always carrying it.
+  "recall_context",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [

@@ -107,7 +107,7 @@ const EVIDENCE_VALIDATION_STATUSES = new Set(["unverified", "tentative", "valida
  * cross-agent memory propagation in any 2+ level swarm
  * (audit session b4fba9c4, May 2026).
  */
-function deriveSharedSessionId(sessionId: string): string {
+export function deriveSharedSessionId(sessionId: string): string {
   let current = sessionId;
   while (current.startsWith("sub:")) {
     const inner = current.slice("sub:".length);

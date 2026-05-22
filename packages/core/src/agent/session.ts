@@ -826,7 +826,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
   const toolDiscoverySection = `## Tool Discovery
 - The runtime provides the real callable tool schemas separately. Use those definitions for exact tool names, parameters, and availability.
 - Do not invent tool names from memory or from older prompts.
-- ${delegateOnly ? "In this mode, routine direct execution is disabled. Use delegate_to_agent for work, but memory_store, memory_search, assistant_personality_view, assistant_personality_update, and record_skill remain available directly for durable memory, self-profile management, and authoring your own reusable skills." : orchestrationOnly ? "In this mode, routine direct execution tools are unavailable. Use orchestration tools for work, but memory_store, memory_search, assistant_personality_view, assistant_personality_update, and record_skill remain available directly for durable memory, self-profile management, and authoring your own reusable skills." : "In this mode, prefer direct tools for repository inspection, workspace memory, web access, browser steps, multimodal helpers, credential-safe login flows, and self-profile management before delegating."}
+- ${delegateOnly ? "In this mode, routine direct execution is disabled. Use delegate_to_agent for work, but memory_store, memory_search, assistant_personality_view, assistant_personality_update, record_skill, and recall_context remain available directly for durable memory, self-profile management, authoring your own reusable skills, and pulling task context before planning." : orchestrationOnly ? "In this mode, routine direct execution tools are unavailable. Use orchestration tools for work, but memory_store, memory_search, assistant_personality_view, assistant_personality_update, record_skill, and recall_context remain available directly for durable memory, self-profile management, authoring your own reusable skills, and pulling task context before planning." : "In this mode, prefer direct tools for repository inspection, workspace memory, web access, browser steps, multimodal helpers, credential-safe login flows, and self-profile management before delegating."}
 - Use delegate_to_agent only when the task genuinely needs a specialist or a multi-agent workflow.
 - Prefer search_workflows plus run_workflow for recurring workflow shapes before inventing a fresh coordinator plan.
 - Use get_swarm_state when you need runtime progress, not as a substitute for tool discovery.`;
@@ -945,6 +945,7 @@ ${toolDiscoverySection}
 ## Orchestration Strategy
 Use these only when direct tools are not enough. All of these require delegate_to_agent(agentName: "...", task: "..."):
 ${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
+- Before a non-trivial delegation, call recall_context(query) once to pull what is already known — user preferences, prior decisions, this session's working facts, and learned skills — so routing and task wording are informed rather than guessed.
 - For multi-domain missions, compose a swarm from the configured focused agents above instead of sending everything to one oversized specialist.
 - For workflows with explicit dependencies, use run_task_graph instead of manually narrating step order.
 - Prefer focused single-purpose agents over large multi-step agents for atomic tasks.

@@ -226,6 +226,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  recall_context: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Pull a compact planning-context pack (user model, working facts, memory, sessions, skills) for a task",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   list_skills: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List Skill Library entries with status and reliability stats",
