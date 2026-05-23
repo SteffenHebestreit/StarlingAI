@@ -621,6 +621,9 @@ export const SiteCredentialSchema = z.object({
   passwordSelector: z.string().optional(),
   submitSelector: z.string().optional(),
   notes: z.string().optional(),                     // human-readable reminder
+  // Usernames permitted to use this credential. Empty/unset = shared (all
+  // users). Enforced against the authenticated user before any credential read.
+  allowedUsers: z.array(z.string()).default([]),
 });
 
 export const SitesSchema = z.record(SiteCredentialSchema);  // keyed by hostname
