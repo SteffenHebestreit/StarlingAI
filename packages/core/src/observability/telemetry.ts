@@ -81,7 +81,12 @@ function emitLlmUsage(event: AuditEvent, agentName: string): void {
   const data = event.data;
   const usage = extractUsage(data["usage"]);
   if (!usage || usage.totalTokens <= 0) return;
-  const model = readModel(data);
+  let model = readModel(data);
+  // turn_performance events don't carry the model; fall back to the configured
+  // primary so orchestrator usage is attributed to a model rather than "unknown".
+  if (model === "unknown" && agentName === "orchestrator") {
+    model = getConfig().agents.defaults.model.primary || "unknown";
+  }
   const cost = estimateCostUsd(model, usage.promptTokens, usage.completionTokens);
   const ts = nsTimestamp(event.timestamp);
   emit(
