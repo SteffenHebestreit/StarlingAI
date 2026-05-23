@@ -35,6 +35,7 @@ import { loadPlugins, watchPluginsDirectory, stopPluginWatcher } from "./plugin/
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeGraphDb } from "./db/neo4j.js";
 import { initGraphSchema } from "./db/graph-schema.js";
+import { initVectorStore, closeVectorStore } from "./db/vector-store.js";
 import { startGraphJobs } from "./runtime/graph-jobs.js";
 import { loadPersistedSessions } from "./agent/tool-dev-session.js";
 import { loadPersistedGaps } from "./agent/self-improve.js";
@@ -99,6 +100,7 @@ import "./tools/self-improve-tools.js";
 import "./tools/graph.js";
 import "./tools/timeseries.js";
 import "./tools/research-scratch.js";
+import "./tools/rag.js";
 import "./tools/sql.js";
 import "./tools/spreadsheet.js";
 import "./tools/pdf-forms.js";
@@ -157,6 +159,11 @@ export async function main() {
   // Check LLM provider health
   await initProviders();
   await syncModelEndpointRuntimeStatus();
+
+  // Initialize the unified pgvector semantic store (probes the embedding model
+  // for its dimension, so it must run after providers). Re-attempts lazily on
+  // first use if the model is not ready yet; no-op without pgvector.
+  await initVectorStore();
 
   // Validate approval routing configuration
   syncApprovalRuntimeStatus();
@@ -355,6 +362,7 @@ export async function main() {
     stopTimeseriesTelemetry();
     await shutdownEphemeralStore();
     await closeGraphDb();
+    await closeVectorStore();
     stopAllCronJobs();
     stopAllReminders();
     stopAllTimers();

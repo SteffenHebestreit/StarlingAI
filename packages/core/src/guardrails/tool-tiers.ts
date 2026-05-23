@@ -538,6 +538,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  rag_ingest: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Chunk + embed large text/attachments into the pgvector RAG store for later retrieval",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  rag_search: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Semantic search over previously ingested RAG documents (pgvector)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  rag_forget: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Delete this session's ingested RAG documents from the pgvector store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   graph_upsert_entity: {
     tier: ToolTier.ONE_WRITE,
     description: "Create or update a node in the MemGraph knowledge graph",

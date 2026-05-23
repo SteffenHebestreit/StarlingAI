@@ -278,7 +278,10 @@ services:
 
   # ── PostgreSQL (audit logs) ───────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    # pgvector image = stock PostgreSQL 16 + the `vector` extension (drop-in;
+    # same PGDATA layout, so the existing volume upgrades in place). Backs the
+    # unified semantic/RAG vector store (db/vector-store.ts).
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       - POSTGRES_DB=starlingai
