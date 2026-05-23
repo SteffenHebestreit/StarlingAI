@@ -238,7 +238,7 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("improve StarlingAI itself");
     expect(guidance?.prompt).toContain("Treat this as swarm maintenance inside the current repository");
     expect(guidance?.prompt).toContain("You MUST use the delegate_to_agent tool with agentName='swarm_maintainer'");
-    expect(guidance?.prompt).toContain("Do NOT call search_agents or list_agents first");
+    expect(guidance?.prompt).toContain("Do NOT call search_agents, list_agents, search_workflows, or run_workflow first");
     expect(guidance?.prompt).toContain("swarm_maintainer");
     expect(guidance?.prompt).toContain("prompt_optimizer");
     expect(guidance?.prompt).toContain("Do NOT claim that you cannot modify the toolset or agent set");

@@ -4549,7 +4549,7 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("run_workflow");
   });
 
-  it("does not force run_workflow for workflow-authoring maintenance requests", async () => {
+  it("routes workflow-authoring maintenance requests through the maintainer instead of workflow execution", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
 
     let llmCallCount = 0;
@@ -4614,20 +4614,153 @@ describe("runtime delegated-loop regressions", () => {
       userMessage: "lass uns einen neuen workflow generieren, der per browser-agent http://n8n.k2o öffnet, credentials einfügt und danach die project-list öffnet",
     });
 
-    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(searchWorkflowsMock).not.toHaveBeenCalled();
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(streamMock).toHaveBeenCalledTimes(3);
     expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "workflow_required", details: "workflow_run_required_after_search" }),
     ]));
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "maintenance_misroute_rejected" }),
+    ]));
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
-    expect(toolMessages).toHaveLength(2);
-    expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
-    expect(toolMessages[1]?.content).toContain("swarm_maintainer created the new workflow definition.");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toContain("swarm_maintainer created the new workflow definition.");
 
     freshRuntime.unregisterTool("search_workflows");
     freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("routes scene-update maintenance requests to swarm_maintainer instead of workflow search", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("scene_update_workflow_search_1", "search_workflows", {
+          query: "apply_job scene n8n freelancermap credentials",
+          workflowType: "scene",
+          limit: 5,
+        });
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("scene_update_delegate_1", {
+          agentName: "swarm_maintainer",
+          task: "Update the existing apply_jobs scene so it uses stored credentials for n8n.k2o and freelancermap.com and applies to the next suitable row.",
+        });
+      }
+      return createTextStream("I routed the scene update to swarm_maintainer.");
+    });
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "Workflow catalog suggestions only",
+    }));
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "swarm_maintainer updated workspace/scenes/10-scenes.jsonc and verified the apply_jobs scene.",
+      metadata: {
+        agentName: "swarm_maintainer",
+        attemptedAgents: ["swarm_maintainer"],
+        delegationSucceeded: true,
+      },
+    }));
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "we should update the apply_job scene-> use stored credentials for n8n.k2o and freelancermap.com, check the n8n application table, then apply to the next fitting freelancermap row",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(searchWorkflowsMock).not.toHaveBeenCalled();
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "maintenance_misroute_rejected" }),
+    ]));
+
+    const toolMessages = session.getHistory().filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toContain("swarm_maintainer updated workspace/scenes/10-scenes.jsonc");
+
+    freshRuntime.unregisterTool("search_workflows");
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("resynthesizes narrated Tool Call final text instead of leaking it", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("workflow_search_then_narrated_tool_1", "search_workflows", {
+          query: "reusable workflow availability",
+          workflowType: "any",
+          limit: 5,
+        });
+      }
+      return createTextStream("[Tool Call] delegate_to_agent(agentName: \"swarm_maintainer\", task: \"Update apply_jobs\")");
+    });
+    completeMock.mockResolvedValueOnce({
+      content: "The previous response only narrated a tool call; no delegation executed in that text.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const searchWorkflowsMock = vi.fn(async () => ({
+      success: true,
+      output: "No workflows matched reusable workflow availability strongly enough.",
+      metadata: { workflowMatches: [] },
+    }));
+
+    freshRuntime.registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: searchWorkflowsMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Check the reusable workflow catalog for this note.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(searchWorkflowsMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(result.response).not.toContain("[Tool Call]");
+    expect(result.response).toContain("only narrated a tool call");
+
+    freshRuntime.unregisterTool("search_workflows");
   });
 
   it("does not reject credential follow-ups for workflow authoring with a workflow catalog check", async () => {

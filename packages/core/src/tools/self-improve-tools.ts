@@ -2,7 +2,7 @@
  * Self-Improvement Tools — agents use these to request new capabilities
  * and track the status of capability gaps.
  */
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, getAllTools, type ToolContext, type ToolResult } from "./registry.js";
 import {
   recordCapabilityGap,
   listCapabilityGaps,
@@ -10,6 +10,7 @@ import {
   buildToolProposalPrompt,
 } from "../agent/self-improve.js";
 import { getConfig } from "../config/loader.js";
+import { validateWorkspaceConfig } from "../config/validate-workspace.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:self-improve");
@@ -163,6 +164,79 @@ registerTool({
       success: true,
       output: `## Capability Gaps (${gaps.length})\n\n${lines.join("\n")}`,
       metadata: { count: gaps.length },
+    };
+  },
+});
+
+// ── swarm_validate ──────────────────────────────────────────────────────────
+
+registerTool({
+  name: "swarm_validate",
+  description:
+    "Validate self-authored swarm configuration (scenes, jobs, and sub-agent definitions) " +
+    "after editing the workspace shards. Re-reads config/ + workspace/ from disk, checks JSON " +
+    "syntax, schema conformance, and reference integrity (scenes → agents, jobs → scenes, " +
+    "agents → tools), and reports every problem. Run this BEFORE declaring a scene/job/agent " +
+    "change complete — it is the config-side equivalent of running tests on new tool code. " +
+    "Read-only: it never writes or applies anything.",
+  embeddingDescription:
+    "verify that a new or edited scene, job, workflow, or agent definition is valid; check swarm "
+    + "config for broken references and schema errors before applying; test self-authored agents",
+  costHint: "low",
+  latencyHint: "low",
+  parameters: { type: "object", properties: {} },
+  async execute(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const knownToolNames = new Set(getAllTools().map((handler) => handler.name));
+    const result = validateWorkspaceConfig(ctx.workspacePath, knownToolNames);
+
+    const { summary } = result;
+    const inventory = `Inventory: ${summary.subAgents} agents, ${summary.scenes} scenes, ${summary.jobs} jobs.`;
+
+    if (result.ok) {
+      const warnBlock = result.warnings.length > 0
+        ? `\n\n### Warnings (${result.warnings.length})\n` + result.warnings.map((w) => `- ${w}`).join("\n")
+        : "";
+      log.info({ ...summary, warnings: result.warnings.length }, "swarm_validate — passed");
+      return {
+        success: true,
+        output:
+          `## Swarm Config Valid ✓\n\n${inventory}\n\n`
+          + `JSON syntax, schema, and all references check out.${warnBlock}\n\n`
+          + `Apply the change with \`node scripts/sai.mjs config build\` (then reload).`,
+        metadata: { ok: true, ...summary, warnings: result.warnings.length },
+      };
+    }
+
+    const section = (title: string, items: string[]) =>
+      items.length > 0 ? `### ${title} (${items.length})\n` + items.map((i) => `- ${i}`).join("\n") : "";
+
+    const blocks = [
+      section("Parse errors", result.parseErrors),
+      section("Schema errors", result.schemaErrors),
+      section("Reference errors", result.referenceErrors),
+      section("Warnings", result.warnings),
+    ].filter(Boolean);
+
+    log.warn({
+      parseErrors: result.parseErrors.length,
+      schemaErrors: result.schemaErrors.length,
+      referenceErrors: result.referenceErrors.length,
+    }, "swarm_validate — failed");
+
+    return {
+      success: true, // the validation ran; the config is what failed
+      output:
+        `## Swarm Config INVALID ✗\n\n${inventory}\n\n`
+        + `Fix every problem below, then run swarm_validate again. Do NOT report the change as `
+        + `complete while these remain.\n\n`
+        + blocks.join("\n\n"),
+      metadata: {
+        ok: false,
+        parseErrors: result.parseErrors.length,
+        schemaErrors: result.schemaErrors.length,
+        referenceErrors: result.referenceErrors.length,
+        warnings: result.warnings.length,
+      },
     };
   },
 });

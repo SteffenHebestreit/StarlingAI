@@ -7,10 +7,12 @@
  */
 
 /** Matches literal tool-call markup that some models emit in plain text. */
-export const NARRATED_TOOL_TEXT_RE = /<tool_call>|<function=|<parameter=|\[Tool:/i;
+export const NARRATED_TOOL_TEXT_RE = /<tool_call>|<function=|<parameter=|\[Tool(?:\s+Call)?\s*(?::|\])/i;
+
+const NARRATED_TOOL_LINE_RE = /^\s*\[Tool(?:\s+Call)?\s*(?::|\])/i;
 
 /** Matches opening phrases that narrate tool execution steps. */
-export const EXECUTION_CHATTER_START_RE = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i found some useful information|let me fetch|let me search|now let me create|now i can)\b/i;
+export const EXECUTION_CHATTER_START_RE = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i found some useful information|let me fetch|let me search|now let me create)\b/i;
 
 /** Remove XML-style tool-call tags that some models emit in their text output. */
 export function stripNarratedToolTags(text: string): string {
@@ -36,7 +38,7 @@ export function sanitizeAssistantContent(value: string, hadToolCalls: boolean): 
 
   let cleaned = stripNarratedToolTags(raw)
     .split(/\r?\n/)
-    .filter((line) => !line.trim().startsWith("[Tool:"))
+    .filter((line) => !NARRATED_TOOL_LINE_RE.test(line))
     .join("\n")
     .trim();
 
@@ -72,7 +74,7 @@ export function sanitizeNonAssistantContent(content: string | null | undefined):
   for (const paragraph of cleanedParagraphs) {
     const containsToolTraceLine = paragraph
       .split(/\r?\n/)
-      .some((line) => line.trim().startsWith("[Tool:"));
+      .some((line) => NARRATED_TOOL_LINE_RE.test(line));
 
     if (containsToolTraceLine || EXECUTION_CHATTER_START_RE.test(paragraph)) {
       break;
@@ -87,7 +89,7 @@ export function sanitizeNonAssistantContent(content: string | null | undefined):
 
   return stripNarratedToolTags(raw)
     .split(/\r?\n/)
-    .filter((line) => !line.trim().startsWith("[Tool:"))
+    .filter((line) => !NARRATED_TOOL_LINE_RE.test(line))
     .join("\n")
     .trim();
 }

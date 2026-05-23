@@ -77,6 +77,14 @@ The hard boundary is secrets and privilege escalation. Stored credentials must n
 
 **Current status:** Partially implemented and intentionally guarded. Flow memory, proposal-based config changes, prompt refinement, agent evolution, and the **procedural Skill Library** (below) exist; privileged boundaries still remain outside autonomous control.
 
+#### Tested before applied
+
+Every self-authored artifact passes through a verification gate before it is treated as done — the swarm never ships an unchecked change:
+
+- **New tools** go through the `tool_developer` pipeline: `tool_dev_start` validates the code structure, `tool_dev_test` runs the implementation against ≥2 cases in the Docker sandbox, and `tool_dev_submit` is hard-gated on all tests passing plus human approval before the tool deploys as `selfdev__<name>`.
+- **New or edited scenes, jobs, and sub-agent definitions** go through `swarm_validate` (`config/validate-workspace.ts`): it re-reads the `config/` + `workspace/` shards straight from disk, checks JSON syntax, validates the merged result against the same Zod `ConfigSchema` the loader uses, and runs reference-integrity checks the schema cannot express — scenes → agents, jobs → scenes, agents → tools. `swarm_maintainer` is required to run it after any edit and resolve every reported error before reporting success. It is read-only; the change is applied only by the operator running `config build` and reloading.
+- **New skills** start as drafts and only graduate to `active` after they succeed in real use (see below) — a one-off lucky run never hardens into permanent guidance.
+
 #### Procedural memory: the self-authoring Skill Library
 
 The clearest realization of bounded self-improvement is the **Skill Library** (`packages/core/src/skills/`). A *skill* is a named, versioned **procedure** — how to accomplish a recurring task — stored as a portable `SKILL.md` (YAML frontmatter + Markdown body) under `.starlingai/skills/<slug>/`. Skills are pure guidance: no code, no credentials, no privilege. They cannot grant tools or alter tiers — the guardrail stack still governs every tool a skill suggests — which is exactly why they are a safe autonomous surface.

@@ -521,8 +521,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
         ? "You MUST use the delegate_to_agent tool with agentName='swarm_maintainer' immediately when that agent exists. Pass the full user request as the task."
         : "Inspect the local workspace definitions first and handle the change directly when your tool set allows it.",
       delegateMode
-        ? "Do NOT call search_agents or list_agents first for this class of request when swarm_maintainer exists. The specialist is already known."
-        : "Do not waste time on agent discovery for this class of request.",
+        ? "Do NOT call search_agents, list_agents, search_workflows, or run_workflow first for this class of request when swarm_maintainer exists. The specialist is already known, and scene/job changes are authoring work rather than workflow execution."
+        : "Do not waste time on agent or workflow discovery for this class of request.",
       delegateMode
         ? "Prefer swarm_maintainer for the full request; use prompt_optimizer for narrowly prompt-only work and integration_builder or qa_guard only when a more specific implementation specialist is clearly better."
         : "Inspect the local workspace definitions first. Prefer reading workspace/agents/*, workspace/scenes/*, and starlingai.example.json before answering.",

@@ -390,6 +390,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  swarm_validate: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Validate self-authored scenes, jobs, and agent definitions (read-only, no apply)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
 
   // ─── Tier 0: Real-time data feeds (free public APIs) ────────────────────
   get_weather: {
