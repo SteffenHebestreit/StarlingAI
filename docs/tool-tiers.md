@@ -115,7 +115,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `pdf_fill` | Fill form fields in an existing PDF and write the result to the workspace | None |
 | `spreadsheet_write` | Write tabular data to a spreadsheet file (xlsx, csv) in the workspace | None |
 | `metric_write` | Write rows to QuestDB time-series tables | None |
-| `agent_store_write` / `agent_store_delete` | Per-agent durable key-value store (Mongo/Postgres backed) | None |
+| `agent_store_write` / `agent_store_delete` | Per-agent durable key-value store (Redis/Postgres backed) | None |
 | `research_note` / `research_notes_clear` | Research scratchpad note write/clear | None |
 | `share_finding` / `share_evidence` | Publish a finding or evidence record to the shared swarm fact ledger | None |
 | `graph_upsert_entity` / `graph_relate` / `graph_delete_node` | Write to the MemGraph knowledge graph | None |

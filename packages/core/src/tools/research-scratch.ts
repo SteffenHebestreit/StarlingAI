@@ -5,8 +5,8 @@
  * context causes context overflow. The researcher writes many intermediate
  * results that only the writer agent needs at the end.
  *
- * Solution: Write findings to QuestDB (timeseries) or MongoDB (via ephemeral
- * store) as they are discovered. The writer agent reads them all at once only
+ * Solution: Write findings to QuestDB (timeseries) or the ephemeral store
+ * as they are discovered. The writer agent reads them all at once only
  * when composing the final output.
  *
  * Workflow:
@@ -16,7 +16,7 @@
  *   3. Optionally call research_notes_clear() to clean up
  *
  * Notes are scoped by sessionId + topic so parallel research threads don't mix.
- * Uses QuestDB when available, falls back to MongoDB ephemeral store.
+ * Uses QuestDB when available, falls back to the ephemeral store (Redis).
  */
 
 import { v4 as uuid } from "uuid";
@@ -87,7 +87,7 @@ registerTool({
       }
     }
 
-    // Fallback: MongoDB ephemeral store
+    // Fallback: ephemeral store (research-notes namespace → Redis)
     const noteId = uuid();
     const key = `${ctx.sessionId}:${topic}:${noteId}`;
     await _ephemeralPut({

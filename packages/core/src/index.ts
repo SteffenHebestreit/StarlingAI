@@ -162,7 +162,7 @@ export async function main() {
   // Connect configured MCP servers and bridge their tools
   await initMcpServers();
 
-  // Initialize ephemeral data stores (Redis, Postgres, MongoDB)
+  // Initialize ephemeral data stores (Redis, Postgres)
   await initEphemeralStore();
   registerEphemeralCleanupCron();
 

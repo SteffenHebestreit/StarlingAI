@@ -21,7 +21,6 @@ services:
       - SAI_MULTIMODAL_TTS_URL=${SAI_MULTIMODAL_TTS_URL:-http://host.docker.internal:5004}
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
       - REDIS_URL=redis://redis:6379
-      - MONGODB_URL=mongodb://mongo:27017/starlingai
       - MEMGRAPH_URL=bolt://memgraph:7687
       - MEMGRAPH_USER=memgraph
       - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-}
@@ -62,8 +61,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      mongo:
         condition: service_healthy
       memgraph:
         condition: service_healthy
@@ -372,25 +369,9 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── MongoDB (ephemeral agent data store) ────────────────────────────────────
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    volumes:
-      - gc-mongo-data:/data/db
-    networks:
-      - starlingai-internal
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
 volumes:
   gc-postgres-data:
   gc-redis-data:
-  gc-mongo-data:
   gc-memgraph-data:
   gc-questdb-data:
   gc-data:
