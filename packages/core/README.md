@@ -36,7 +36,7 @@ The source tree under `src/` is organized by concern. Each directory owns a runt
 | `personality/` | Main assistant system prompt storage and live editing |
 | `providers/` | LLM provider abstraction (Anthropic, OpenAI-compatible, LM Studio, Ollama); embedding provider; fallback logic; token counting |
 | `retrieval/` | RAG pipeline — chunking strategies, reranking (BM25 + semantic), citation assembly |
-| `runtime/` | Status snapshots, component health, job-trigger schedule, ephemeral store (Redis + Postgres + MongoDB), model-endpoint sync, graph jobs |
+| `runtime/` | Status snapshots, component health, job-trigger schedule, ephemeral store (Redis + Postgres), model-endpoint sync, graph jobs |
 | `swarm/` | Autonomous bidding engine, swarm bus (Redis Pub/Sub with in-process fallback), distributed locks, checkpoints, bidder worker |
 | `tools/` | ~40 built-in tools (filesystem, shell, SSH, web, computer-use, browser, workflow, etc.); tool registry; dynamic tool hot-loading |
 

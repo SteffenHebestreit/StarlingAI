@@ -1,6 +1,6 @@
 /**
  * Agent data store tools — read, write, and delete temporary data
- * across Redis, PostgreSQL, and MongoDB backends.
+ * across Redis and PostgreSQL backends.
  *
  * Agents use a logical namespace; the ephemeral store routes to the
  * correct backend automatically. All entries expire after 24 hours.
@@ -30,7 +30,7 @@ registerTool({
   name: "agent_store_write",
   description:
     "Store temporary data in the agent data store. Entries automatically expire after 24 hours. " +
-    "Data is routed to the appropriate backend (Redis, Postgres, or MongoDB) based on namespace.",
+    "Data is routed to the appropriate backend (Redis or Postgres) based on namespace.",
   parameters: {
     type: "object",
     properties: {

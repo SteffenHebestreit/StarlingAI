@@ -12,7 +12,6 @@ import { logAudit } from "../../audit/logger.js";
 import { createCronJob } from "../scheduler.js";
 import { redisBackend } from "./redis-backend.js";
 import { postgresBackend } from "./postgres-backend.js";
-import { mongoBackend } from "./mongo-backend.js";
 import {
   routeNamespace,
   DEFAULT_BACKEND,
@@ -40,7 +39,6 @@ const fallbackWarnings = new Set<string>();
 const backends: Record<EphemeralBackend, EphemeralBackendDriver> = {
   redis: redisBackend,
   postgres: postgresBackend,
-  mongo: mongoBackend,
 };
 
 function getDriver(namespace: string): { backend: EphemeralBackend; driver: EphemeralBackendDriver } {
@@ -103,8 +101,6 @@ function isBackendConfigured(backend: EphemeralBackend): boolean {
       return Boolean(process.env["REDIS_URL"]);
     case "postgres":
       return Boolean(process.env["DATABASE_URL"]);
-    case "mongo":
-      return Boolean(process.env["MONGODB_URL"]);
     default:
       return false;
   }

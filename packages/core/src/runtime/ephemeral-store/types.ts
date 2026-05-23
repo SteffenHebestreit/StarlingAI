@@ -4,15 +4,15 @@
  * Agents store working data here during task execution. All entries have
  * a 24-hour TTL and are purged by a nightly cleanup job.
  *
- * Three backends are supported: Redis (fast KV), PostgreSQL (structured),
- * and MongoDB (flexible documents). The frontend routes by namespace so
+ * Two backends are supported: Redis (fast KV) and PostgreSQL (structured
+ * records + JSON-string documents). The frontend routes by namespace so
  * agents never choose a backend directly.
  */
 
 // ── Namespace → backend routing ─────────────────────────────────────────────
 // Each namespace is pinned to a specific backend based on access patterns.
 
-export type EphemeralBackend = "redis" | "postgres" | "mongo";
+export type EphemeralBackend = "redis" | "postgres";
 
 export const NAMESPACE_ROUTES: Record<string, EphemeralBackend> = {
   // Redis: fast KV, locks, counters, iteration state, queues, leases
@@ -27,11 +27,12 @@ export const NAMESPACE_ROUTES: Record<string, EphemeralBackend> = {
   "test-results":        "postgres",
   "capability-gaps":     "postgres",
 
-  // MongoDB: flexible JSON documents, irregular artifacts
-  "tool-drafts":        "mongo",
-  "test-fixtures":      "mongo",
-  "sandbox-transcripts": "mongo",
-  "agent-artifacts":    "mongo",
+  // Postgres: irregular JSON documents stored as JSON strings in the value
+  // column (previously MongoDB — collapsed into Postgres to shed a service).
+  "tool-drafts":        "postgres",
+  "test-fixtures":      "postgres",
+  "sandbox-transcripts": "postgres",
+  "agent-artifacts":    "postgres",
 };
 
 /** Fallback backend when namespace is not explicitly routed */
