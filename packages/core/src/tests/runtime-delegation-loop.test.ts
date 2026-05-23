@@ -4052,6 +4052,56 @@ describe("runtime delegated-loop regressions", () => {
     expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
   });
 
+  it("releases workflow-catalog enforcement after one nudge instead of blocking into an empty answer", async () => {
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      // The model insists on direct delegation, skipping the catalog check on
+      // both the initial call and the post-nudge retry.
+      if (llmCallCount === 1 || llmCallCount === 2) {
+        return createDelegateToolCallStream(`wf_persist_${llmCallCount}`, {
+          agentName: "mission_coordinator",
+          task: "Run the audit export.",
+        });
+      }
+      return createTextStream("Here is the audit export result.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({ success: true, output: "audit export done" }));
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+    registerTool({
+      name: "search_workflows",
+      description: "Search reusable workflows.",
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(async () => ({ success: true, output: "no exact match" })),
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Find a reusable workflow or scene for the audit export and use the workflow catalog first.",
+    });
+
+    // Soft nudge, then trust the model — never a hard block into an empty answer.
+    expect(result.blocked).toBe(false);
+    expect(delegateExecuteMock).toHaveBeenCalled();
+    expect(result.response).toContain("audit export result");
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
+      expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_released" }),
+    ]));
+  });
+
   it("prefers reusable workflow execution for comparison-paper requests even without explicit workflow wording", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
       scenes: {
