@@ -2696,6 +2696,13 @@ export function buildModelVisibleToolResult(
     ].join("\n");
   }
 
+  // Informational capability directory the user explicitly asked for — relay it
+  // in full (generously capped) instead of the small generic fallback, so the
+  // model can list all agents rather than the first few.
+  if (toolName === "agent_catalog") {
+    return truncatePlainText(resultText, 12_000);
+  }
+
   return fallback;
 }
 
