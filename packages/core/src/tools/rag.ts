@@ -19,7 +19,7 @@ import {
   vectorSearch,
   vectorUpsertMany,
   vectorDeleteCollection,
-  isVectorStoreReady,
+  initVectorStore,
   type VectorUpsert,
 } from "../db/vector-store.js";
 import { isEmbeddingAvailable } from "../providers/embeddings.js";
@@ -104,7 +104,7 @@ registerTool({
     required: ["content"],
   },
   async execute(args, ctx): Promise<ToolResult> {
-    if (!isVectorStoreReady()) {
+    if (!(await initVectorStore())) {
       return { success: false, output: "", error: "RAG store unavailable (pgvector not ready). The text was not ingested; keep working with it inline or retry later." };
     }
     const content = String(args["content"] ?? "");
@@ -167,7 +167,7 @@ registerTool({
     required: ["query"],
   },
   async execute(args, ctx): Promise<ToolResult> {
-    if (!isVectorStoreReady()) {
+    if (!(await initVectorStore())) {
       return { success: false, output: "", error: "RAG store unavailable (pgvector not ready)." };
     }
     const query = String(args["query"] ?? "");
@@ -205,7 +205,7 @@ registerTool({
   description: "Delete this session's ingested RAG documents from the vector store (cleanup).",
   parameters: { type: "object", properties: {}, required: [] },
   async execute(_args, ctx): Promise<ToolResult> {
-    if (!isVectorStoreReady()) {
+    if (!(await initVectorStore())) {
       return { success: false, output: "", error: "RAG store unavailable (pgvector not ready)." };
     }
     const removed = await vectorDeleteCollection(RAG_COLLECTION, `session:${ctx.sessionId}:`);
