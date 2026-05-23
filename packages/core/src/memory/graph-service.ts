@@ -703,7 +703,7 @@ export async function graphBuildSimilarityLinks(newRecordIds?: string[]): Promis
     `, {
       ids: newRecordIds ?? [],
       cutoff: new Date(Date.now() - 86_400_000).toISOString(),
-    });
+    }, { write: true });
 
     const created = asInt(toPlainRecords(result ?? null as never)[0]?.["created"], 0);
     if (created > 0) log.info({ created }, "Similarity links built");
