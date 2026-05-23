@@ -3049,24 +3049,6 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let terminalSynthesisInstruction =
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalFinishReason = "max_tool_iterations";
-  const blockMissingWorkflowCatalogCheck = (): TurnOutput => blocked(
-    "This request required a workflow catalog check before delegation or a direct answer, but the model skipped the workflow tools.",
-    getTurnSwarmState(),
-    buildTurnPerformanceMetrics({
-      turnStartedAt,
-      firstModelResponseMs,
-      llmCalls,
-      llmTimeMs,
-      toolCallsRequested,
-      toolExecutionTimeMs,
-      lastPromptMetrics,
-      completionChars: 0,
-      finishReason: "missing_workflow_catalog_check",
-      blocked: true,
-      toolIterations: iterationCount,
-    }),
-  );
-
   // ── G33: Trajectory cache lookup ─────────────────────────────────────────
   // Before the first LLM call, check if we have a cached trajectory for a
   // semantically similar recent query.  If yes, inject it as extra system context
@@ -3617,23 +3599,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
-      return blocked(
-        "This turn already searched the workflow catalog and found reusable matches, but the model still skipped run_workflow.",
-        getTurnSwarmState(),
-        buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: 0,
-          finishReason: "missing_required_workflow_execution",
-          blocked: true,
-          toolIterations: iterationCount,
-        }),
-      );
+      // Nudged once: the model searched the catalog but chose a non-workflow
+      // path (e.g. direct delegation) anyway. Trust that choice rather than
+      // blocking into an empty answer — release and let the tool calls run.
+      workflowExecutionEnforcementPrompt = "";
+      guardrailEvents.push({ type: "workflow_required", details: "workflow_run_released_after_search" });
+      logAudit("guardrail_flagged", {
+        type: "workflow_run_released_after_search",
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        workflowMatches: workflowSearchMatches.slice(0, 3),
+      }, { sessionId: session.id, severity: "info" });
     }
 
     if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
@@ -3660,7 +3635,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
-      return blockMissingWorkflowCatalogCheck();
+      // Already nudged once this turn. The workflow-catalog check is a soft
+      // routing heuristic, not a hard gate — trust the model's tool calls
+      // instead of dead-ending into an empty answer. Let the requested tools
+      // (e.g. delegate_to_agent, rag_ingest/rag_search) execute.
+      workflowCatalogEnforcementPrompt = "";
+      guardrailEvents.push({ type: "workflow_required", details: "workflow_catalog_check_released" });
+      logAudit("guardrail_flagged", {
+        type: "workflow_catalog_check_released",
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+        reason: workflowCatalogSignal.reason,
+      }, { sessionId: session.id, severity: "info" });
     }
 
     const synthesisRequiredInHistory = collapsedHistory.some((message) => isForcedSynthesisSystemMessage(message));
