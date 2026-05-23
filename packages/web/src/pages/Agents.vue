@@ -1,0 +1,213 @@
+<template>
+  <div class="agents-page" style="height: 100%">
+    <header class="agents-page__header">
+      <div>
+        <h1 class="agents-page__title">Agent Catalog</h1>
+        <p class="agents-page__subtitle">
+          The specialist sub-agents the swarm can delegate to, and what each one does. This is the read-only
+          capability directory — model tuning and the routing lab live on the Settings → Agents page.
+        </p>
+      </div>
+    </header>
+
+    <section class="agents-page__panel">
+      <div class="agents-controls">
+        <div class="agents-controls__group agents-controls__group--grow">
+          <label class="agents-controls__label">Search</label>
+          <input
+            v-model="query"
+            type="search"
+            class="agents-controls__input"
+            placeholder="Filter by name, description, capability, or tag"
+          />
+        </div>
+        <span class="agents-count">{{ filtered.length }} / {{ store.agents.length }}</span>
+        <button class="agents-controls__refresh" @click="store.fetch()" :disabled="store.loading">
+          {{ store.loading ? "Loading…" : "Refresh" }}
+        </button>
+      </div>
+
+      <div v-if="store.error" class="agents-page__notice agents-page__notice--error">{{ store.error }}</div>
+      <div v-else-if="!store.agents.length && !store.loading" class="agents-page__notice">
+        No specialist agents are configured.
+      </div>
+      <div v-else-if="!filtered.length && query" class="agents-page__notice">
+        No agents match “{{ query }}”.
+      </div>
+
+      <div class="agents-list">
+        <article v-for="agent in filtered" :key="agent.name" class="agent-card">
+          <header class="agent-card__header">
+            <h3 class="agent-card__name">{{ agent.name }}</h3>
+            <span v-if="agent.model.primary" class="agent-card__model">{{ agent.model.primary.split('/').pop() }}</span>
+          </header>
+          <p class="agent-card__desc">{{ agent.description }}</p>
+          <div v-if="(agent.capabilities && agent.capabilities.length) || (agent.tags && agent.tags.length)" class="agent-card__meta">
+            <span v-for="c in agent.capabilities ?? []" :key="'c-' + c" class="agent-card__chip agent-card__chip--cap">{{ c }}</span>
+            <span v-for="t in agent.tags ?? []" :key="'t-' + t" class="agent-card__chip agent-card__chip--tag">{{ t }}</span>
+          </div>
+        </article>
+      </div>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, ref } from "vue";
+import { useAgentsStore } from "@/stores/agents";
+
+const store = useAgentsStore();
+const query = ref("");
+
+const filtered = computed(() => {
+  const q = query.value.trim().toLowerCase();
+  if (!q) return store.agents;
+  return store.agents.filter((a) => {
+    const hay = `${a.name} ${a.description} ${(a.capabilities ?? []).join(" ")} ${(a.tags ?? []).join(" ")}`.toLowerCase();
+    return hay.includes(q);
+  });
+});
+
+onMounted(() => { if (!store.agents.length) void store.fetch(); });
+</script>
+
+<style scoped>
+.agents-page {
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 10, 18, 0.92);
+  color: rgb(229 231 235);
+  overflow: hidden;
+}
+
+.agents-page__header {
+  padding: 1.25rem 1.5rem 0.75rem;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.18);
+}
+
+.agents-page__title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.25rem;
+}
+
+.agents-page__subtitle {
+  margin: 0;
+  font-size: 0.85rem;
+  color: rgb(156 163 175);
+  max-width: 56rem;
+}
+
+.agents-page__panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 1rem 1.5rem 1.5rem;
+  overflow: hidden;
+}
+
+.agents-page__notice {
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(156, 163, 175, 0.25);
+  background: rgba(31, 41, 55, 0.45);
+  color: rgb(209 213 219);
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+.agents-page__notice--error {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.25);
+  color: rgb(254 202 202);
+}
+
+.agents-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+.agents-controls__group { display: flex; align-items: center; gap: 0.4rem; }
+.agents-controls__group--grow { flex: 1 1 auto; min-width: 14rem; }
+.agents-controls__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgb(156 163 175);
+}
+.agents-controls__input {
+  appearance: none;
+  background: rgba(31, 41, 55, 0.6);
+  color: rgb(229 231 235);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  border-radius: 0.55rem;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  flex: 1 1 auto;
+}
+.agents-count { font-size: 0.78rem; color: rgb(156 163 175); }
+.agents-controls__refresh {
+  appearance: none;
+  background: rgba(168, 85, 247, 0.22);
+  color: rgb(243 232 255);
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  border-radius: 999px;
+  padding: 0.35rem 0.95rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.agents-controls__refresh:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.agents-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.agent-card {
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  background: rgba(15, 23, 42, 0.55);
+  border-radius: 0.85rem;
+  padding: 0.7rem 0.95rem 0.85rem;
+}
+.agent-card__header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-bottom: 0.25rem;
+}
+.agent-card__name {
+  margin: 0;
+  font-size: 0.98rem;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  color: rgb(243 232 255);
+}
+.agent-card__model {
+  font-size: 0.72rem;
+  color: rgb(156 163 175);
+  margin-left: auto;
+}
+.agent-card__desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: rgb(229 231 235);
+}
+.agent-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+.agent-card__chip {
+  font-size: 0.7rem;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid transparent;
+}
+.agent-card__chip--cap { background: rgba(34, 197, 94, 0.12); color: rgb(134 239 172); border-color: rgba(34, 197, 94, 0.28); }
+.agent-card__chip--tag { background: rgba(56, 189, 248, 0.12); color: rgb(186 230 253); border-color: rgba(56, 189, 248, 0.28); }
+</style>
