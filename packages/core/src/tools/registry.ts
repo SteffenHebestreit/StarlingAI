@@ -2,6 +2,7 @@ import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.j
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan } from "../observability/tracing.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 
 export interface ToolHandler {
   name: string;
@@ -83,6 +84,13 @@ export interface SwarmState {
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;
+  /**
+   * Authenticated user that owns this turn (the JWT subject / username), if any.
+   * Undefined in single-user / token mode (auth disabled). Tools use it to gate
+   * access to per-user resources (mail accounts, stored credentials, compute
+   * nodes) via guardResourceAccess — undefined means "no multi-user scoping".
+   */
+  userId?: string;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   onSubAgentProgress?: (event: {
@@ -535,7 +543,10 @@ export async function executeTool(
       let result: ToolResult;
       const runHandler = async (): Promise<ToolResult> => {
         try {
-          return await handler.execute(args, context);
+          // Make the owning user available to downstream clients (e.g. the
+          // mail-service HTTP client) for per-user resource access control,
+          // without threading userId through every call.
+          return await runWithRequestContext({ userId: context.userId }, () => handler.execute(args, context));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           return {
