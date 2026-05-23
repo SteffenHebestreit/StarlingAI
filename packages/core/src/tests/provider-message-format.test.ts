@@ -70,6 +70,9 @@ describe("normalizeMessagesForModel", () => {
     expect(create).toHaveBeenCalledWith({
       model: "text-embedding-qwen3-embedding-0.6b",
       input: ["hello"],
+      // Forced to avoid the OpenAI SDK's base64 default, which LM Studio
+      // mis-decodes into all-zero vectors.
+      encoding_format: "float",
     });
   });
 
