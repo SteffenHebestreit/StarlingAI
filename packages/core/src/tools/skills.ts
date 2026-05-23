@@ -115,7 +115,8 @@ registerTool({
   name: "list_skills",
   description:
     "List skills in the Skill Library with their status and reliability stats. "
-    + "Optionally filter by status (draft, active, archived).",
+    + "Optionally filter by status (draft, active, archived) and/or by agent — "
+    + "pass agent to see which learned procedures a specific specialist (e.g. shell_agent) routes through.",
   costHint: "low",
   latencyHint: "low",
   parameters: {
@@ -126,19 +127,26 @@ registerTool({
         enum: ["draft", "active", "archived"],
         description: "Optional status filter.",
       },
+      agent: {
+        type: "string",
+        description: "Optional agent name — return only skills whose 'agents' list includes this specialist.",
+      },
     },
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     if (!getConfig().skillLibrary.enabled) return disabledResult();
     const statusFilter = args["status"] ? String(args["status"]).trim() : undefined;
+    const agentFilter = args["agent"] ? String(args["agent"]).trim().toLowerCase() : undefined;
 
     const skills = listSkills(ctx.workspacePath, { includeArchived: true })
-      .filter((skill) => !statusFilter || skill.frontmatter.status === statusFilter);
+      .filter((skill) => !statusFilter || skill.frontmatter.status === statusFilter)
+      .filter((skill) => !agentFilter || skill.frontmatter.agents.some((a) => a.toLowerCase() === agentFilter));
 
     if (skills.length === 0) {
+      const scope = [statusFilter ? `status "${statusFilter}"` : "", agentFilter ? `agent "${args["agent"]}"` : ""].filter(Boolean).join(" + ");
       return {
         success: true,
-        output: statusFilter ? `No skills with status "${statusFilter}".` : "No skills in the library yet.",
+        output: scope ? `No skills match ${scope}.` : "No skills in the library yet.",
         metadata: { count: 0 },
       };
     }
@@ -146,12 +154,14 @@ registerTool({
     const lines = skills.map((skill) => {
       const { frontmatter, meta } = skill;
       const rate = meta.uses > 0 ? `${Math.round(skillSuccessRate(meta) * 100)}% / ${meta.uses}` : "untested";
-      return `- **${frontmatter.name}** \`${frontmatter.slug}\` [${frontmatter.status} v${frontmatter.version}] (${rate}) — ${frontmatter.whenToUse}`;
+      const agents = frontmatter.agents.length > 0 ? ` — agents: ${frontmatter.agents.join(", ")}` : "";
+      return `- **${frontmatter.name}** \`${frontmatter.slug}\` [${frontmatter.status} v${frontmatter.version}] (${rate}) — ${frontmatter.whenToUse}${agents}`;
     });
 
+    const heading = agentFilter ? `## Skills for "${args["agent"]}" (${skills.length})` : `## Skill Library (${skills.length})`;
     return {
       success: true,
-      output: `## Skill Library (${skills.length})\n\n${lines.join("\n")}`,
+      output: `${heading}\n\n${lines.join("\n")}`,
       metadata: { count: skills.length },
     };
   },
