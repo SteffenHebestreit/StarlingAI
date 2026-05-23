@@ -3902,24 +3902,24 @@ describe("runtime delegated-loop regressions", () => {
     expect(systemText).not.toContain("are NOT preloaded into this prompt");
   });
 
-  it("task-conditional prompt is on by default (intent-routing rules dropped from the base prompt)", async () => {
+  it("task-conditional prompt is off by default (intent-routing rules present in the base prompt)", async () => {
     const session = new AgentSession({ channel: "test", workspacePath: "/workspace" });
+    expect(session.getSystemPrompt()).toContain("are computer-use tasks, not pentest tasks");
+  });
+
+  it("taskConditionalPrompt=true drops the always-on intent-routing rules", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      agents: { mainAssistant: { toolMode: "orchestration_only" }, performance: { taskConditionalPrompt: true } },
+    });
+
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace" });
     const prompt = session.getSystemPrompt();
 
-    // The redundant always-on intent rules are gone (per-turn classifier covers them)...
+    // Opt-in lean mode: the redundant always-on intent rules are dropped...
     expect(prompt).not.toContain("are computer-use tasks, not pentest tasks");
     expect(prompt).not.toContain("route the task to swarm_maintainer when available");
     // ...but the rest of the base prompt is intact.
     expect(prompt).toContain("Tool Use Discipline");
-  });
-
-  it("taskConditionalPrompt=false restores the always-on intent-routing rules", async () => {
-    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
-      agents: { mainAssistant: { toolMode: "orchestration_only" }, performance: { taskConditionalPrompt: false } },
-    });
-
-    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace" });
-    expect(session.getSystemPrompt()).toContain("are computer-use tasks, not pentest tasks");
   });
 
   it("treats create_ephemeral_agent as a current-turn orchestration attempt for source-sensitive requests", async () => {
