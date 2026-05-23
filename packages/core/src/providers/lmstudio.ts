@@ -491,7 +491,12 @@ export class LMStudioProvider {
 
   async embed(texts: string[], model: string): Promise<Float32Array[]> {
     const modelId = this.parseModelId(model);
-    const response = await this.client.embeddings.create({ model: modelId, input: texts });
+    // Force `encoding_format: "float"`. The OpenAI SDK otherwise defaults to
+    // base64-encoded embeddings, and LM Studio's base64 payload is decoded by
+    // the SDK into all-zero vectors — silently breaking every semantic feature
+    // (agent routing, skill/memory retrieval, RAG). Requesting plain floats
+    // returns the real vectors.
+    const response = await this.client.embeddings.create({ model: modelId, input: texts, encoding_format: "float" });
     return response.data.map(d => new Float32Array(d.embedding));
   }
 
