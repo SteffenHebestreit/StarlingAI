@@ -107,7 +107,10 @@
       //   "port": 5900,
       //   "protocol": "vnc",
       //   "credentials": "vnc-password",
-      //   "label": "Windows PC (10.10.0.2)"
+      //   "label": "Windows PC (10.10.0.2)",
+      //   // Restrict this node to specific users (matches auth.users[].username).
+      //   // Empty/omitted = shared. Ignored when auth.enabled is false.
+      //   "allowedUsers": ["alice"]
       // }
       //,
       // ── Example: Windows PC via RDP ──
@@ -1069,8 +1072,28 @@
     }
   },
 
+  // ── Multi-user authentication (optional) ──────────────────────────────────
+  // Disabled by default = single-operator / token mode (the gateway prints a
+  // bootstrap admin token on startup). When enabled, login requires a username
+  // + password from users[] and the gateway issues a per-user JWT. The
+  // per-resource "allowedUsers" lists below (on sites, computerUse.nodes, and
+  // mail accounts in config/mail/accounts.json) are enforced against the
+  // logged-in user. While auth is disabled, every "allowedUsers" list is
+  // IGNORED and all resources are shared.
+  "auth": {
+    "enabled": false,
+    "users": [
+      // passwordHash is a bcrypt hash ("$2a$12$..."), never plaintext. Easiest:
+      // add users at runtime via the dashboard Users page (POST /api/auth/users),
+      // which hashes the password for you. role is "operator" or "viewer".
+      // { "username": "alice", "passwordHash": "$2a$12$REPLACE_WITH_BCRYPT_HASH", "displayName": "Alice", "role": "operator" },
+      // { "username": "bob",   "passwordHash": "$2a$12$REPLACE_WITH_BCRYPT_HASH", "displayName": "Bob",   "role": "operator" }
+    ]
+  },
+
   "sites": {
     "github.com": {
+      // Shared credential — no allowedUsers, so every authenticated user may use it.
       "username": "your-username",
       "password": "$GITHUB_PASSWORD",
       "loginUrl": "https://github.com/login"
@@ -1082,7 +1105,10 @@
       "urls": {
         "dashboard": "https://app.example.com/dashboard"
       },
-      "notes": "Use the local account rather than SSO."
+      "notes": "Use the local account rather than SSO.",
+      // Restrict this credential to specific users (matches auth.users[].username).
+      // Empty/omitted = shared. Ignored when auth.enabled is false.
+      "allowedUsers": ["alice"]
     }
   },
 

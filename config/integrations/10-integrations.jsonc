@@ -21,7 +21,8 @@
     "github.com": {
       "username": "your-username",
       "password": "$GITHUB_PASSWORD",
-      "loginUrl": "https://github.com/login"
+      "loginUrl": "https://github.com/login",
+      "allowedUsers": ["Steffen"]
     },
     "app.example.com": {
       "username": "ops@example.com",
@@ -30,7 +31,8 @@
       "urls": {
         "dashboard": "https://app.example.com/dashboard"
       },
-      "notes": "Use the local account rather than SSO."
+      "notes": "Use the local account rather than SSO.",
+      "allowedUsers": ["Steffen"]
     }
   },
   "approvalChannels": {
