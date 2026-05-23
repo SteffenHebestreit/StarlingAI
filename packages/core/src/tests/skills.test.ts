@@ -202,6 +202,33 @@ describe("skill library search + guidance", () => {
     expect(matches[0]?.skill.frontmatter.slug).toBe(reliable);
   });
 
+  it("surfaces an agent's own tagged skills on a weak task match (agent-scoped boost)", async () => {
+    const ws = workspace();
+    writeSkill(ws, {
+      name: "Remote Disk Cleanup",
+      description: "Free space on a remote host by clearing logs and caches.",
+      whenToUse: "When a server is low on disk space.",
+      procedure: "SSH in, run df -h, identify large files, then clear /var/log and apt caches.",
+      agents: ["shell_agent"],
+    });
+
+    // A query unrelated to the skill content → keyword base ≈ 0.
+    const query = "translate this document into French";
+    const slug = "remote-disk-cleanup";
+
+    // Without the agent hint, the unrelated skill is below threshold.
+    const without = await searchSkills(ws, query, {});
+    expect(without.some((m) => m.skill.frontmatter.slug === slug)).toBe(false);
+
+    // With the owning agent, the boost + relaxed threshold surfaces it.
+    const withAgent = await searchSkills(ws, query, { agent: "shell_agent" });
+    expect(withAgent.some((m) => m.skill.frontmatter.slug === slug)).toBe(true);
+
+    // A different (untagged) agent does not get the boost.
+    const otherAgent = await searchSkills(ws, query, { agent: "researcher" });
+    expect(otherAgent.some((m) => m.skill.frontmatter.slug === slug)).toBe(false);
+  });
+
   it("formats a Learned Procedures guidance block", async () => {
     const ws = workspace();
     writeSkill(ws, {

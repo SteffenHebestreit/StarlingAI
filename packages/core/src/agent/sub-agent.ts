@@ -1909,6 +1909,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const skillGuidance = config.skillLibrary.enabled
       ? await formatSkillGuidance(opts.workspacePath, sanitizedTask, {
           maxChars: Math.min(1_200, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+          // Agent-scoped: boost + surface procedures explicitly tagged for this
+          // specialist so its own learned skills reliably reach it.
+          agent: opts.agentName,
         })
       : "";
     const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
