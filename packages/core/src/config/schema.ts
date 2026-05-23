@@ -1253,12 +1253,15 @@ export const ConfigSchema = z.object({
        * rules (computer-use / server-ops / pentest-methodology / swarm-maintenance)
        * are dropped from the static system prompt — the per-turn classifier
        * already injects richer, more specific guidance for each of those intents
-       * only when it fires. Trims the base template. Default true — A/B'd live
-       * against qwen3.6-35b (May 2026): intent routing unchanged with the
-       * always-on bullets removed (e.g. server-ops still delegates correctly).
-       * Set false to restore the always-on intent rules.
+       * only when it fires. Trims the base template, BUT relies on the classifier
+       * catching the intent — and it misses untyped phrasings (a bare "run a
+       * shell command" or "code a website" with no ssh/docker keyword), leaving
+       * the orchestrator with no routing hint so it over-routes to the generic
+       * mission_coordinator. Default false (reverted May 2026 after that
+       * regression surfaced in live use); keep the always-on routing rules until
+       * the classifier covers those intents.
        */
-      taskConditionalPrompt: z.boolean().default(true),
+      taskConditionalPrompt: z.boolean().default(false),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.

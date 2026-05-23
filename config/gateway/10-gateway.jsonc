@@ -1,7 +1,12 @@
 {
   "agents": {
     "performance": {
-      "promptBudgetChars": 36000
+      "promptBudgetChars": 36000,
+      // Leaf sub-agent timeout. The 60s default is too short for slower local
+      // models (e.g. qwen3.6-35b research turns take 150s+); two timeouts trip
+      // the coordinator cascade-timeout and force partial synthesis. 240s lets
+      // sub-agents finish on this hardware.
+      "subAgentTurnSloMs": 240000
     }
   },
   "gateway": {

@@ -183,11 +183,9 @@ describe("AgentSession collapsed history", () => {
     const prompt = session.getSystemPrompt();
 
     expect(prompt).toContain("You are the main assistant inside StarlingAI");
-    // Intent-routing rules are task-conditional (taskConditionalPrompt default on):
-    // dropped from the always-on prompt; the per-turn classifier injects richer
-    // guidance for those intents only when they fire.
-    expect(prompt).not.toContain("computer-use tasks, not pentest tasks");
-    expect(prompt).not.toContain("Requests asking how the pentest swarm works");
+    // Intent-routing rules are always-on by default (taskConditionalPrompt off):
+    expect(prompt).toContain("computer-use tasks, not pentest tasks");
+    expect(prompt).toContain("Requests asking how the pentest swarm works");
     expect(prompt).toContain("Tool Use Discipline");
     expect(prompt).toContain("swarm_maintainer");
     expect(prompt).toContain("prefer delegate_to_agent(task: \"...\") without agentName first");
