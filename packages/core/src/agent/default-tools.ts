@@ -18,6 +18,12 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // so the planner can hydrate context before delegating instead of the prompt
   // always carrying it.
   "recall_context",
+  // Retrieval-augmented prompting for large inputs: offload a long message,
+  // pasted document, or attachment into the pgvector RAG store (rag_ingest) and
+  // pull back only the relevant chunks on demand (rag_search) instead of
+  // carrying the whole thing in context. No-op without pgvector.
+  "rag_ingest",
+  "rag_search",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [
