@@ -6,6 +6,7 @@
  *   sai setup                              Check prerequisites, generate .env secrets
  *   sai start [--pentest] ...              Build config + start Docker services
  *   sai stop  [--volumes]                  Stop services (optionally wipe data)
+ *   sai wipe  --yes                        Wipe runtime data in place (all DBs), keep containers
  *   sai config build                       Merge config/ + workspace/ → starlingai.json
  *   sai config split [--from <file>]       Decompose monolithic config into two zones
  *   sai token [--user X] [--role X] [--ttl X]  Generate dashboard JWT
@@ -43,6 +44,7 @@ switch (command) {
   case "setup":   await cmdSetup(); break;
   case "start":   await cmdStart(); break;
   case "stop":    await cmdStop(); break;
+  case "wipe":    await cmdWipe(); break;
   case "config":  await cmdConfig(); break;
   case "token":   await cmdToken(); break;
   case "health":  await cmdHealth(); break;
@@ -224,6 +226,64 @@ async function cmdStop() {
   }
 }
 
+async function cmdWipe() {
+  const { values } = parseArgs({
+    args: restArgs,
+    options: { yes: { type: "boolean", default: false } },
+    strict: false,
+  });
+  loadDotEnv();
+
+  hdr("Wipe StarlingAI runtime data (containers stay up; config + credentials untouched)");
+  info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings), QuestDB (telemetry + research notes), MemGraph (knowledge graph), and the audit-log mirror.");
+  if (!values.yes) {
+    warn("This permanently deletes that data. Re-run to proceed:  pnpm sai wipe --yes");
+    warn("For a full clean slate (volumes + flat-file memory/skills) use:  pnpm sai stop --volumes");
+    return;
+  }
+
+  const dcExec = (label, service, shellCmd) => {
+    try {
+      execSync(`docker compose exec -T ${service} ${shellCmd}`, { stdio: ["ignore", "pipe", "pipe"] });
+      ok(label);
+    } catch (err) {
+      const detail = (err.stderr?.toString() || err.message || "").split("\n").find(Boolean) || "unavailable";
+      warn(`${label} — skipped (${detail.slice(0, 120)})`);
+    }
+  };
+
+  // Redis — sessions, swarm shared memory, locks, ephemeral KV.
+  dcExec("Redis flushed", "redis", "redis-cli FLUSHALL");
+
+  // Postgres — split into two TRUNCATEs so a missing pgvector table (deferred
+  // init) does not abort wiping the always-present core tables.
+  dcExec(
+    "Postgres core tables truncated",
+    "postgres",
+    `psql -U starlingai -d starlingai -c "TRUNCATE TABLE audit_events, agent_data_store, scene_jobs RESTART IDENTITY"`,
+  );
+  dcExec(
+    "Postgres vector store truncated",
+    "postgres",
+    `psql -U starlingai -d starlingai -c "TRUNCATE TABLE vector_embeddings RESTART IDENTITY"`,
+  );
+
+  // QuestDB — routed through the gateway, which has network access + an HTTP
+  // client; dropped tables are recreated on the next write.
+  for (const tbl of ["llm_usage", "tool_latency", "sub_agent_run", "research_notes"]) {
+    dcExec(`QuestDB ${tbl} dropped`, "gateway", `sh -lc "wget -qO- 'http://questdb:9000/exec?query=DROP%20TABLE%20IF%20EXISTS%20${tbl}' || curl -s 'http://questdb:9000/exec?query=DROP%20TABLE%20IF%20EXISTS%20${tbl}'"`);
+  }
+
+  // MemGraph — drop every node + relationship.
+  dcExec("MemGraph cleared", "memgraph", `sh -lc "echo 'MATCH (n) DETACH DELETE n;' | mgconsole"`);
+
+  // On-disk audit-log mirror on the gateway data volume.
+  dcExec("Audit log mirror cleared", "gateway", `sh -lc ": > /data/audit.jsonl"`);
+
+  hdr("Runtime data wiped.");
+  info("Schemas are recreated lazily on next use; no restart required.");
+}
+
 async function cmdConfig() {
   if (subCommand === "build") {
     await run("node", ["scripts/config-layout.mjs", "build"]);
@@ -291,6 +351,9 @@ ${BOLD}Commands:${RESET}
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
   stop  [--volumes] [--strix-halo]   Stop services (--volumes wipes data)
+  wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
+                                     incl. pgvector, QuestDB, MemGraph, audit log)
+                                     while containers keep running; config kept
   config build                       Merge config/ + workspace/ → starlingai.json
   config split [source.json]         Decompose into two-zone layout
   token [--user X] [--role X]        Generate dashboard JWT
