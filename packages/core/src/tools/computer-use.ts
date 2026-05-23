@@ -14,6 +14,7 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { canAccessResource } from "../guardrails/resource-access.js";
 import { resolveSiteCredential } from "../credentials/sites.js";
 import {
   computerSessionManager,
@@ -367,13 +368,15 @@ registerTool({
     "Returns named nodes from computerUse.nodes and any single-entry adapters. " +
     "Use the node name in computer_session_start to connect to a specific machine.",
   parameters: { type: "object", properties: {} },
-  async execute(_args, _ctx) {
+  async execute(_args, ctx) {
     try {
       const cuCfg = requireEnabled();
+      const user = ctx.userId;
       const entries: { name: string; adapter: string; label: string; host?: string }[] = [];
 
-      // Named nodes
+      // Named nodes — hide nodes the requesting user may not use.
       for (const [name, node] of Object.entries(cuCfg.nodes ?? {})) {
+        if (!canAccessResource(user, node as { allowedUsers?: string[] })) continue;
         entries.push({
           name,
           adapter: (node as Record<string, unknown>).adapter as string,
@@ -384,10 +387,10 @@ registerTool({
 
       // Single-entry adapters (backward compat)
       const adapters = cuCfg.adapters ?? {};
-      if (adapters.remote_vnc) entries.push({ name: "(default)", adapter: "remote_vnc", label: "Default VNC", host: adapters.remote_vnc.host });
-      if (adapters.remote_rdp) entries.push({ name: "(default)", adapter: "remote_rdp", label: "Default RDP", host: adapters.remote_rdp.host });
-      if (adapters.remote_node) entries.push({ name: "(default)", adapter: "remote_node", label: adapters.remote_node.label || "Remote node", host: adapters.remote_node.baseUrl });
-      if (adapters.remote_ssh) entries.push({ name: "(default)", adapter: "remote_ssh", label: "Default SSH", host: adapters.remote_ssh.host });
+      if (adapters.remote_vnc && canAccessResource(user, adapters.remote_vnc as { allowedUsers?: string[] })) entries.push({ name: "(default)", adapter: "remote_vnc", label: "Default VNC", host: adapters.remote_vnc.host });
+      if (adapters.remote_rdp && canAccessResource(user, adapters.remote_rdp as { allowedUsers?: string[] })) entries.push({ name: "(default)", adapter: "remote_rdp", label: "Default RDP", host: adapters.remote_rdp.host });
+      if (adapters.remote_node && canAccessResource(user, adapters.remote_node as { allowedUsers?: string[] })) entries.push({ name: "(default)", adapter: "remote_node", label: adapters.remote_node.label || "Remote node", host: adapters.remote_node.baseUrl });
+      if (adapters.remote_ssh && canAccessResource(user, adapters.remote_ssh as { allowedUsers?: string[] })) entries.push({ name: "(default)", adapter: "remote_ssh", label: "Default SSH", host: adapters.remote_ssh.host });
       if (adapters.local_vscode) entries.push({ name: "(default)", adapter: "local_vscode", label: "Local VS Code" });
 
       if (entries.length === 0) {
@@ -456,8 +459,9 @@ registerTool({
       if (nodeId) {
         // ── Named node resolution ─────────────────────────────────────────
         const node = cuCfg.nodes?.[nodeId];
-        if (!node) {
-          const available = Object.keys(cuCfg.nodes ?? {});
+        if (!node || !canAccessResource(ctx.userId, node as { allowedUsers?: string[] })) {
+          // Treat a restricted node like an unknown one — do not leak existence.
+          const available = Object.keys(cuCfg.nodes ?? {}).filter((n) => canAccessResource(ctx.userId, cuCfg.nodes?.[n] as { allowedUsers?: string[] }));
           throw new Error(
             `Computer node '${nodeId}' not found. ` +
             (available.length > 0
@@ -1486,7 +1490,7 @@ registerTool({
         return fail("field must be 'username' or 'password'");
       }
 
-      const cred = resolveSiteCredential(hostname, ctx.sessionId);
+      const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
       if (!cred) {
         return fail(`No credentials found for '${hostname}'. Configure them in Settings → Site Credentials first.`);
       }

@@ -46,7 +46,7 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const cred = resolveSiteCredential(hostname, ctx.sessionId);
+    const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
     if (!cred) {
       return {
         success: false,
@@ -128,7 +128,7 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const cred = resolveSiteCredential(hostname, ctx.sessionId);
+    const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
     if (!cred) {
       return {
         success: false,

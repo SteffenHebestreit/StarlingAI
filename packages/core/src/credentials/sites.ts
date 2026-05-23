@@ -14,6 +14,7 @@ import { getCredential, setCredential, deleteCredential, listCredentialNames } f
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { canAccessResource } from "../guardrails/resource-access.js";
 
 const log = childLogger("credentials:sites");
 
@@ -24,6 +25,7 @@ const SITE_LOGIN_URL_KEY = (host: string) => `site:${host}:loginUrl`;
 const SITE_SELECTORS_KEY = (host: string) => `site:${host}:selectors`;
 const SITE_NOTES_KEY     = (host: string) => `site:${host}:notes`;
 const SITE_URLS_KEY      = (host: string) => `site:${host}:urls`;
+const SITE_ALLOWED_USERS_KEY = (host: string) => `site:${host}:allowedUsers`;
 
 export interface ResolvedSiteCredential {
   hostname: string;
@@ -48,13 +50,16 @@ export interface StoredSiteCredentialRecord {
   passwordSelector?: string;
   submitSelector?: string;
   notes?: string;
+  /** Usernames permitted to use this credential. Empty/unset = shared. */
+  allowedUsers?: string[];
 }
 
 // ─── Resolve credentials for a hostname ──────────────────────────────────────
 
 export function resolveSiteCredential(
   hostname: string,
-  sessionId?: string
+  sessionId?: string,
+  userId?: string,
 ): ResolvedSiteCredential | null {
   const host = normalizeHost(hostname);
 
@@ -63,6 +68,10 @@ export function resolveSiteCredential(
   const configMatch = findConfiguredSite(hostname, config.sites);
   if (configMatch) {
     const [matchedHost, configEntry] = configMatch;
+    if (!canAccessResource(userId, { allowedUsers: (configEntry as { allowedUsers?: string[] }).allowedUsers })) {
+      logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: matchedHost, source: "config" }, { sessionId, severity: "warn" });
+      return null;
+    }
     const password = resolvePasswordRef(configEntry.password, matchedHost);
     if (!password) {
       log.warn({ host: matchedHost }, "Site credential in config but password could not be resolved");
@@ -86,6 +95,10 @@ export function resolveSiteCredential(
   // 2. Check runtime credential store (API-managed)
   const stored = getStoredSiteCredentialRecord(host);
   if (stored) {
+    if (!canAccessResource(userId, { allowedUsers: stored.allowedUsers })) {
+      logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: stored.hostname, source: "store" }, { sessionId, severity: "warn" });
+      return null;
+    }
     const resolvedUsername = resolveStoredCredentialRef(stored.username, stored.hostname, "username");
     const resolvedPassword = resolveStoredCredentialRef(stored.password, stored.hostname, "password");
     if (!resolvedUsername || !resolvedPassword) {
@@ -120,6 +133,7 @@ export interface SiteCredentialInput {
   passwordSelector?: string;
   submitSelector?: string;
   notes?: string;
+  allowedUsers?: string[];
 }
 
 export function saveSiteCredential(hostname: string, input: SiteCredentialInput): void {
@@ -150,6 +164,11 @@ export function saveSiteCredential(hostname: string, input: SiteCredentialInput)
   } else {
     deleteCredential(SITE_NOTES_KEY(host));
   }
+  if (input.allowedUsers && input.allowedUsers.length > 0) {
+    setCredential(SITE_ALLOWED_USERS_KEY(host), JSON.stringify(input.allowedUsers));
+  } else {
+    deleteCredential(SITE_ALLOWED_USERS_KEY(host));
+  }
   log.info({ host }, "Site credential saved to store");
 }
 
@@ -161,6 +180,7 @@ export function deleteSiteCredential(hostname: string): void {
   deleteCredential(SITE_URLS_KEY(host));
   deleteCredential(SITE_SELECTORS_KEY(host));
   deleteCredential(SITE_NOTES_KEY(host));
+  deleteCredential(SITE_ALLOWED_USERS_KEY(host));
   log.info({ host }, "Site credential deleted from store");
 }
 
@@ -174,6 +194,14 @@ export function getStoredSiteCredentialRecord(hostname: string): StoredSiteCrede
 
   const selectors = parseJsonRecord(getCredential(SITE_SELECTORS_KEY(lookupHost)));
   const urls = parseJsonRecord(getCredential(SITE_URLS_KEY(lookupHost)));
+  const allowedUsersRaw = getCredential(SITE_ALLOWED_USERS_KEY(lookupHost));
+  let allowedUsers: string[] | undefined;
+  if (allowedUsersRaw) {
+    try {
+      const parsed = JSON.parse(allowedUsersRaw);
+      if (Array.isArray(parsed)) allowedUsers = parsed.map((u) => String(u));
+    } catch { /* ignore malformed */ }
+  }
   return {
     hostname: lookupHost,
     username,
@@ -184,6 +212,7 @@ export function getStoredSiteCredentialRecord(hostname: string): StoredSiteCrede
     passwordSelector: selectors["password"],
     submitSelector: selectors["submit"],
     notes: getCredential(SITE_NOTES_KEY(lookupHost)) ?? undefined,
+    allowedUsers,
   };
 }
 

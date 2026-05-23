@@ -34,6 +34,8 @@ const RemoteAdapterSchema = Joi.object({
     .optional(),
   reconnectAttempts: Joi.number().integer().min(0).default(3),
   reconnectDelayMs: Joi.number().integer().min(100).default(5000),
+  // Usernames permitted to use this node/adapter. Empty = shared (all users).
+  allowedUsers: Joi.array().items(Joi.string()).default([]),
 });
 
 const RemoteNodeAdapterSchema = Joi.object({
@@ -41,6 +43,7 @@ const RemoteNodeAdapterSchema = Joi.object({
   authToken: Joi.string().allow("").default(""),
   timeoutMs: Joi.number().integer().min(1000).default(15000),
   label: Joi.string().default("Remote desktop node"),
+  allowedUsers: Joi.array().items(Joi.string()).default([]),
 });
 
 const RemoteAccessServiceSchema = Joi.object({
@@ -66,6 +69,7 @@ const SshAdapterSchema = Joi.object({
   credentials: Joi.string().optional().description("Path to SSH private key or password (with authMethod='password')"),
   authMethod: Joi.string().valid("key", "password").default("key"),
   connectTimeoutMs: Joi.number().integer().min(1000).default(30000),
+  allowedUsers: Joi.array().items(Joi.string()).default([]),
 });
 
 const AdaptersSchema = Joi.object({
