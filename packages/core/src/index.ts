@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
 import { startCostAggregator, stopCostAggregator } from "./observability/cost.js";
+import { startTimeseriesTelemetry, stopTimeseriesTelemetry } from "./observability/telemetry.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
@@ -136,6 +137,10 @@ export async function main() {
   // Cost aggregator subscribes to audit events; safe to start unconditionally
   // (handler is a no-op when cost.enabled is false).
   startCostAggregator();
+
+  // Mirror system metrics (LLM usage/cost, tool latency, sub-agent runs) into
+  // QuestDB as durable time-series; no-op when QUESTDB_URL is unset.
+  startTimeseriesTelemetry();
 
   // Initialize Postgres audit sink (optional)
   await initPostgresAudit();
@@ -347,6 +352,7 @@ export async function main() {
     shutdownDynamicTools();
     stopPluginWatcher();
     stopCostAggregator();
+    stopTimeseriesTelemetry();
     await shutdownEphemeralStore();
     await closeGraphDb();
     stopAllCronJobs();
