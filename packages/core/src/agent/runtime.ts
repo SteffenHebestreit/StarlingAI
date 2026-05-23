@@ -2204,6 +2204,20 @@ async function enforceDelegateCoverage(
 
   if (!itemShortfall && !lengthShortfall) return finalResponse;
 
+  // A15: Action-task exemption. Delete, move, archive, send, and similar
+  // mutation tasks produce short confirmation responses that legitimately
+  // do not enumerate all evidence items — the evidence is an intermediate
+  // listing the agent fetched before acting, not the deliverable itself.
+  // Replacing a valid "I deleted 3 emails" confirmation with the raw email
+  // listing confuses the user and makes it look like nothing happened.
+  const ACTION_COMPLETION_RE =
+    /\b(deleted?|gelöscht|archiv(?:iert|ed?)|moved?|verschoben|sent|gesendet|forwarded?|weitergeleitet|replied?|beantwortet|created?|erstellt|cleared?|geleert|removed?|entfernt|marked?|markiert|emptied?|erfolgreich|successfully|abgeschlossen|erledigt|fertig)\b/i;
+  const TRUNCATION_CLAIM_QUICK_RE =
+    /\b(abgeschnitten|truncated|cut off|nicht sichtbar|cannot see)\b/i;
+  if (ACTION_COMPLETION_RE.test(finalResponse) && !TRUNCATION_CLAIM_QUICK_RE.test(finalResponse)) {
+    return finalResponse;
+  }
+
   // I14: Hallucinated-truncation detector. When the model's draft answer
   // CLAIMS the evidence is truncated, cut off, abgeschnitten, or "not
   // visible in my context" while substantial structured evidence is
@@ -2990,14 +3004,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     );
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.artifactSensitive);
+  const activeMainAssistantToolMode = effectiveToolMode ?? getConfig().agents.mainAssistant.toolMode;
+  const requiresSwarmMaintenanceDelegation = activeMainAssistantToolMode !== "hybrid"
+    && Boolean(initialDynamicGuidance?.swarmMaintenanceSensitive)
+    && allowedToolNameSet.has("delegate_to_agent");
   const requiresMaintenanceFollowUpDelegation = recentWorkflowAuthoringMaintenanceContext
     && (allowedToolNameSet.has("delegate_to_agent")
       || allowedToolNameSet.has("parallel_delegate")
       || allowedToolNameSet.has("run_task_graph")
       || allowedToolNameSet.has("create_ephemeral_agent"));
+  const requiresMaintenanceDelegation = requiresSwarmMaintenanceDelegation || requiresMaintenanceFollowUpDelegation;
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
   let maintenanceDelegationRetryUsed = false;
+  let maintenanceMisrouteRetryUsed = false;
   let maintenanceDelegationEnforcementPrompt = "";
   let unresolvedDelegationContinuationRetryUsed = false;
   let unresolvedDelegationEnforcementPrompt = "";
@@ -3366,7 +3386,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         requiresDelegatedResearch
         || requiresArtifactDelegation
         || workflowCatalogRequired
-        || requiresMaintenanceFollowUpDelegation
+        || requiresMaintenanceDelegation
       );
       const chunkSink = iterationCount === 0 && !suppressInitialInlineStreaming ? opts.onChunk : undefined;
       if (!chunkSink) {
@@ -3572,6 +3592,38 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       : false;
     if (workflowCatalogToolRequested) {
       workflowCatalogAttemptedThisTurn = true;
+    }
+
+    const maintenanceDelegationToolRequested = llmResponse.tool_calls.some((toolCall) =>
+      toolCall.name === "delegate_to_agent"
+      || toolCall.name === "parallel_delegate"
+      || toolCall.name === "run_task_graph"
+      || toolCall.name === "create_ephemeral_agent"
+    );
+    if (requiresSwarmMaintenanceDelegation && !maintenanceDelegationToolRequested && llmResponse.tool_calls.length > 0) {
+      if (!maintenanceMisrouteRetryUsed) {
+        maintenanceMisrouteRetryUsed = true;
+        maintenanceDelegationEnforcementPrompt = [
+          "COMPLIANCE CORRECTION: This is StarlingAI swarm maintenance or scene/job authoring, not a request to discover or execute reusable workflows.",
+          "Do NOT call search_workflows, run_workflow, search_agents, list_agents, or unavailable file-listing pseudo-tools for this request.",
+          "You MUST call delegate_to_agent now with agentName='swarm_maintainer' and pass the full user request as the task.",
+          "A workflow-search-only response is invalid for this turn.",
+        ].join(" ");
+        guardrailEvents.push({ type: "delegation_required", details: "maintenance_misroute_rejected" });
+        logAudit("guardrail_flagged", {
+          type: "maintenance_misroute_rejected",
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+          swarmMaintenanceSensitive: initialDynamicGuidance?.swarmMaintenanceSensitive ?? false,
+        }, { sessionId: session.id, severity: "warn" });
+        opts.onStatus?.({ phase: "guardrail", message: "This is a StarlingAI maintenance request, so I am routing it to the swarm maintainer instead of workflow discovery.", iteration: iterationCount });
+        continue;
+      }
+
+      guardrailEvents.push({ type: "delegation_required", details: "maintenance_misroute_released" });
+      logAudit("guardrail_flagged", {
+        type: "maintenance_misroute_released",
+        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+      }, { sessionId: session.id, severity: "info" });
     }
 
     if (approvedRunCandidateFollowUp && !workflowRunCompletedThisTurn && !approvedRunCandidateToolRequested) {
@@ -3783,7 +3835,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       };
       const unresolvedDelegatedActionInHistory = hasRecentUnresolvedDelegatedAction(session.getHistory());
       const promisedContinuationWithoutTools = looksLikeContinuationPromise(rawResponse);
-      const promisedMaintenanceExecutionWithoutTools = requiresMaintenanceFollowUpDelegation
+      const promisedMaintenanceExecutionWithoutTools = requiresMaintenanceDelegation
         && looksLikeMaintenanceExecutionPromise(rawResponse);
 
       if (!releasedAfterRoutingNudge && promisedMaintenanceExecutionWithoutTools) {

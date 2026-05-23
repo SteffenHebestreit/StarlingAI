@@ -311,6 +311,40 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  it("returns failure for future-action edit stubs after context gathering", () => {
+    const r = classifyDelegationResult(
+      "Now I have the full picture. Let me update the apply_jobs scene with the new specifications.",
+      "success",
+      {
+        toolCount: 5,
+        toolNames: ["read_file", "list_files", "read_shared_facts"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      { tags: ["prompts", "agents"] } as never,
+      "prompt_optimizer",
+      "Update the apply_jobs scene definition.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  it("keeps completed edit statements as success", () => {
+    const r = classifyDelegationResult(
+      "Now I have updated scenes/10-scenes.jsonc and verified the apply_jobs entry.",
+      "success",
+      {
+        toolCount: 6,
+        toolNames: ["read_file", "write_file", "read_file"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      { tags: ["swarm", "maintenance"] } as never,
+      "swarm_maintainer",
+      "Update the apply_jobs scene definition.",
+    );
+    expect(r).toBe<DelegationClassification>("success");
+  });
+
   it("does NOT flag coordinator_noop when terminalState is undefined (test mocks)", () => {
     // terminalState undefined → coordinator guard skipped (requires terminalState === "completed")
     // looksLikeFailureResult("Let me look that up.") → false, so weak=false → success

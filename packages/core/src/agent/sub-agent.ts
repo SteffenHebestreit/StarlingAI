@@ -667,6 +667,12 @@ function isMailInboxReadTask(task: string): boolean {
   return !writeIntent;
 }
 
+export function isExplicitUnreadMailInboxTask(task: string): boolean {
+  const normalized = task.toLowerCase();
+  if (!isMailInboxReadTask(normalized)) return false;
+  return /(unread|ungelesen|neu(?:e|en)?\s+(?:e-?mails?|nachrichten?)|new(?:est)?\s+(?:emails?|messages?|mail))/i.test(normalized);
+}
+
 export function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, task: string): string[] | undefined {
   if (!configuredTools) return configuredTools;
   if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
@@ -681,11 +687,12 @@ export function getEffectiveToolNames(agentName: string, configuredTools: string
 function buildTaskModeGuidance(agentName: string, task: string): string {
   if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
     if (agentName === "mail_agent" && isMailInboxReadTask(task)) {
+      const preferredReadTool = isExplicitUnreadMailInboxTask(task) ? "mail_list_unread" : "mail_search";
       return [
         "TASK MODE - QUICK INBOX CHECK.",
         "For this task, call a mail_* read tool immediately before writing any narrative.",
         "If the account is unspecified, call mail_list_accounts first.",
-        "Then prefer mail_list_unread or mail_search, and call mail_read only for the few messages you summarize.",
+        `Then prefer ${preferredReadTool}${preferredReadTool === "mail_search" ? " for broad inbox listings, date filters, and requests that include read mail" : " for explicit unread or new-mail checks"}, and call mail_read only for the few messages you summarize.`,
         "Do not draft, update, send, categorize, or delegate for this task.",
       ].join("\n");
     }
@@ -1387,14 +1394,14 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   const preview = result.slice(0, 600).trim();
   if (!preview) return false;
 
-  const startsLikePlanning = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
+  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
-  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create)\b/i.test(preview);
+  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create|update|modify|edit|write|patch|save)\b/i.test(preview);
   if (!planningAction) return false;
 
   const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
-  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|failed|error|could not|did not)\b/i.test(preview);
+  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|updated|modified|edited|wrote|written|saved|patched|failed|error|could not|did not)\b/i.test(preview);
   return !terminalMarker && (unresolvedMarker || preview.length <= 220);
 }
 
@@ -2684,7 +2691,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
     };
 
-    if (opts.agentName === "mail_agent" && isMailInboxReadTask(sanitizedTask)) {
+    if (opts.agentName === "mail_agent" && isExplicitUnreadMailInboxTask(sanitizedTask)) {
       const executeTrackedMailTool = async (toolName: string, args: Record<string, unknown>): Promise<import("../tools/registry.js").ToolResult> => {
         toolCount += 1;
         toolNames.push(toolName);

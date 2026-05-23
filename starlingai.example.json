@@ -831,16 +831,20 @@
 
   "scenes": {
     "apply_jobs": {
-      "description": "Run a browser-assisted application workflow for one approved freelance lead.",
-      "task": "Use web_task_coordinator to review one approved lead, gather any missing context, and delegate browser submission steps only when stored credentials exist for the target site and secure credential fill has been approved.",
+      "description": "Run one browser-assisted freelance application from the n8n application table.",
+      "task": "Use browser_agent to execute one iteration of the freelance application workflow. First call get_site_credentials for {{n8nSite}} and use its loginUrl, named URLs, selectors, and notes to log in and open the application table; if the table URL is available as a named URL, use it instead of guessing. Sort the application table by ranking from highest to lowest. Select the first row that is not already checked or applied and whose reason is not exactly or semantically 'low rating'. Open the job link from that row. If no eligible rows remain, stop and tell the user: 'Es gibt momentan keine passenden Projekte - komm spaeter wieder.' For an eligible job, log in to {{freelancermapSite}} with stored site credentials if needed. Use the application letter from the n8n row's reason column; if it is missing or unsuitable, write a concise tailored application letter based only on the job posting. Apply for the job through the platform flow. After exactly one job application attempt, stop, summarize the project, action taken, and any blocker, then ask the user whether to continue. Do not ask the user for a job lead; the lead source is the {{n8nSite}} application table. Never expose credential values; use site_fill_credentials for browser logins.",
       "webhookKey": "$SCENE_APPLY_JOBS_KEY",
-      "allowedAgents": ["web_task_coordinator", "browser_agent", "researcher", "summarizer"],
-      "humanInLoopSteps": ["site_fill_credentials", "mcp__playwright__browser_navigate"],
+      "allowedAgents": ["browser_agent", "summarizer"],
+      "humanInLoopSteps": ["site_fill_credentials", "browser_click", "browser_type"],
       "approvalChannel": "slack-approvals",
       "params": {
-        "minRating": {
-          "description": "Minimum lead rating to accept",
-          "default": "0.7"
+        "n8nSite": {
+          "description": "Stored site credential key for the internal n8n application table",
+          "default": "n8n.k2o"
+        },
+        "freelancermapSite": {
+          "description": "Stored site credential key for the external freelance platform",
+          "default": "freelancermap.com"
         }
       }
     },

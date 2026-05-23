@@ -188,6 +188,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `cron_remove` / `cron_list` | Remove or list scheduled cron jobs | Per-call | No |
 | `reminder_create` / `reminder_remove` / `timer_start` / `timer_cancel` | Reminder + timer scheduling | None | No |
 | `request_new_capability` / `list_capability_gaps` | Capability-gap signaling for the self-improvement loop | None | No |
+| `swarm_validate` | Validate self-authored scenes/jobs/agent definitions (JSON, schema, references) before applying — read-only | None | No |
 | `assistant_personality_update` | Update the persistent main-assistant personality profile | Per-call | No |
 | `mail_send_draft` | Send an approved mail draft (mail composition is otherwise Tier 1) | Per-call | No |
 | `site_fill_credentials` | Securely fill stored credentials into browser login fields | Per-call | No |
