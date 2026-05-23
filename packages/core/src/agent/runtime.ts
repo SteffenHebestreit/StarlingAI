@@ -2697,10 +2697,15 @@ export function buildModelVisibleToolResult(
   }
 
   // Informational capability directory the user explicitly asked for — relay it
-  // in full (generously capped) instead of the small generic fallback, so the
-  // model can list all agents rather than the first few.
+  // in full (generously capped) instead of the small generic fallback. The full
+  // list is below; explicitly tell the model not to abbreviate or claim
+  // truncation (the slow local model otherwise lists only the first few).
   if (toolName === "agent_catalog") {
-    return truncatePlainText(resultText, 12_000);
+    return [
+      "Complete specialist agent directory below — it is NOT truncated.",
+      "If the user asked which agents exist or what they can do, list EVERY entry below. Do NOT abbreviate, sample, summarize to a few, or claim the list was cut off.",
+      truncatePlainText(resultText, 12_000),
+    ].join("\n");
   }
 
   return fallback;
