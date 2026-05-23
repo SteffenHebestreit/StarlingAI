@@ -371,10 +371,9 @@ describe("config loader mutable overlay", () => {
     const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
     const webTaskCoordinator = workspaceRaw.subAgents?.["web_task_coordinator"];
 
-    expect(mainAssistantInstructions).toContain("Retrieved evidence always overrides prior assumptions");
-    expect(mainAssistantInstructions).toContain("Every factual claim must be supported by current-turn evidence");
-    expect(mainAssistantInstructions).toContain("Never name an official source, manufacturer, product page, URL, spec, quote, or numeric value unless it appears in the current evidence");
-    expect(mainAssistantInstructions).toContain("do not answer from memory first");
+    expect(mainAssistantInstructions).toContain("Retrieved evidence overrides prior assumptions");
+    expect(mainAssistantInstructions).toContain("Never state a source, manufacturer, URL, spec, or number that is not in the current evidence");
+    expect(mainAssistantInstructions).toContain("do NOT fabricate the gaps");
 
     expect(webTaskCoordinator?.systemPrompt).toContain("delegate directly to researcher unless browser interaction is actually required");
     expect(webTaskCoordinator?.systemPrompt).toContain("treat that evidence as authoritative for the turn");
@@ -397,8 +396,8 @@ describe("config loader mutable overlay", () => {
     const computerUseAgent = workspaceRaw.subAgents?.["computer_use_agent"];
     const computerUsePrompt = computerUseAgent?.systemPrompt ?? "";
 
-    expect(mainAssistantInstructions).toContain("SERVICE-FIRST ROUTING");
-    expect(mainAssistantInstructions).toContain("narrowest direct execution path");
+    expect(mainAssistantInstructions).toContain("networked-service API on a known host");
+    expect(mainAssistantInstructions).toContain("desktop/UI specialist only when visual interaction is genuinely required");
     expect(mainAssistantInstructions).not.toContain("LM STUDIO SHORTCUT");
     expect(mainAssistantInstructions).not.toContain("1234/v1/models");
 
