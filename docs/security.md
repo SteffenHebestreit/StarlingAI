@@ -70,6 +70,24 @@ The encrypted credential store holds secrets that should survive restarts but mu
 
 The store is read on startup and written on every change. The master key (`SAI_MASTER_KEY`) is the single point of trust — protect it as you would a root credential.
 
+## Per-User Resource Access (RBAC)
+
+When multi-user auth is enabled (`auth.enabled: true` with accounts in `auth.users[]`), shared resources can be bound to specific users with an **`allowedUsers`** list. The authenticated user (the JWT subject) is enforced against it before any access:
+
+| Resource | Where to set `allowedUsers` |
+|----------|-----------------------------|
+| Mail / calendar / contacts accounts | `config/mail/accounts.json` per account |
+| Stored site credentials | `sites.<host>` in `starlingai.json` (or the runtime credential store) |
+| Computer-use nodes | `computerUse.nodes.<name>` in `starlingai.json` |
+
+Semantics (backwards compatible):
+
+- **Empty / omitted** `allowedUsers` → the resource is **shared** (every authenticated user may use it).
+- **No requesting user** (auth disabled / single-operator token mode, or system/automated access such as inbound mail polling and scheduled jobs) → **unscoped**, access allowed. So the `allowedUsers` lists are inert until `auth.enabled` is true.
+- Otherwise → access is allowed only if the user's username appears in the list (compared case-insensitively).
+
+Enforcement is centralized: the gateway threads the authenticated user into tool execution and forwards it to the mail-service (`X-Sai-User` header); a restricted mail account returns 403 and a restricted node/credential is treated as not-found (no existence leak). See `guardrails/resource-access.ts` and the mail-service `account-access.ts`. Tool tiers, sandboxing, and approval gates remain global and are not affected by `allowedUsers`.
+
 ## Secret-Safe Login Automation
 
 Stored credentials are designed to stay out of the LLM context even when the swarm automates logins.

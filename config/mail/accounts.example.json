@@ -34,6 +34,7 @@
       "id": "personal",
       "address": "me@example.com",
       "displayName": "Personal",
+      "allowedUsers": ["alice"],
       "imap": {
         "host": "imap.example.com",
         "port": 993,
