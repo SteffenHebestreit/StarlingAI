@@ -1262,6 +1262,15 @@ export const ConfigSchema = z.object({
        * the classifier covers those intents.
        */
       taskConditionalPrompt: z.boolean().default(false),
+      /**
+       * Max chars of a single delegated agent's result that the orchestrator
+       * relays verbatim. Long deliverables (guides, reports) above this are
+       * truncated before the relay, cutting the user's answer off mid-way. The
+       * 10k default fits small context windows; raise it for models with a
+       * larger context so full deliverables come through (it is added to the
+       * relay prompt, so keep it within the model's context budget).
+       */
+      maxDelegatedResultChars: z.number().int().min(2_000).max(200_000).default(10_000),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
