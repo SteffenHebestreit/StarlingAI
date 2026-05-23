@@ -2741,11 +2741,37 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     : AbortSignal.any(allSignals);
 
   try {
-    return await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
+    const out = await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
+    return finalizeTurnOutput(out, sessionId);
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     deregisterSessionAbortController(sessionId);
   }
+}
+
+/**
+ * Turn invariant — a chat turn must never hand the user a blank response.
+ *
+ * Most terminals build a non-empty message, but some suppression paths (e.g. a
+ * tool call dropped as synthesis-required with no accompanying text, or an
+ * unexpected early return) can leave `response` empty. This single chokepoint
+ * on the runTurn boundary guarantees the user is never met with silence: an
+ * empty/whitespace response is replaced with a graceful, recoverable message
+ * and the occurrence is audited so the underlying cause stays visible.
+ *
+ * Non-empty responses pass through unchanged.
+ */
+export function finalizeTurnOutput(out: TurnOutput, sessionId: string): TurnOutput {
+  if (out.response && out.response.trim().length > 0) return out;
+  logAudit("guardrail_flagged", {
+    type: "empty_response_recovered",
+    blocked: out.blocked,
+    finishReason: out.performance?.finishReason ?? "unknown",
+  }, { sessionId, severity: "warn" });
+  return {
+    ...out,
+    response: "I wasn't able to produce a complete answer this turn. Please retry, or rephrase the request — breaking a complex task into smaller parts usually helps.",
+  };
 }
 
 async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal): Promise<TurnOutput> {
