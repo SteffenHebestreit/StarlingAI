@@ -3952,16 +3952,27 @@ registerTool({
       };
     }
 
+    // Keep the full-catalog dump compact enough to survive the tool-result relay
+    // cap (56 agents × a fat block overflows). Show capabilities only for small/
+    // filtered result sets; otherwise one tight line per agent (the first
+    // sentence of the description) and a hint to filter for detail.
+    const detailed = entries.length <= 15;
+    const firstSentence = (text: string): string => {
+      const clean = (text ?? "").replace(/\s+/g, " ").trim();
+      const dot = clean.indexOf(". ");
+      return (dot > 0 ? clean.slice(0, dot + 1) : clean).slice(0, detailed ? 220 : 120);
+    };
     const lines = entries.map(({ name, cfg }) => {
-      const desc = (cfg.description ?? "").replace(/\s+/g, " ").slice(0, 220);
-      const caps = (cfg.capabilities ?? []).slice(0, 8).join(", ");
+      const desc = firstSentence(cfg.description ?? "");
       const promotedTag = promoted[name] ? " (promoted)" : "";
+      const caps = detailed ? (cfg.capabilities ?? []).slice(0, 8).join(", ") : "";
       return `- **${name}**${promotedTag} — ${desc}${caps ? `\n  capabilities: ${caps}` : ""}`;
     });
 
+    const hint = detailed ? "" : "\n\n(Showing one line each — call agent_catalog with a `filter` to see full capabilities for a subset.)";
     return {
       success: true,
-      output: `${entries.length} specialist agent(s)${filter ? ` matching "${String(args["filter"])}"` : ""}:\n\n${lines.join("\n")}`,
+      output: `${entries.length} specialist agent(s)${filter ? ` matching "${String(args["filter"])}"` : ""}:\n\n${lines.join("\n")}${hint}`,
       metadata: { count: entries.length, agents: entries.map((e) => e.name) },
     };
   },
