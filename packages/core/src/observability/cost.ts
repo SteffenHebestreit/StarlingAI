@@ -347,6 +347,14 @@ function evictOldest(store: Map<string, unknown>): void {
 
 // ── Pricing ──────────────────────────────────────────────────────────────────
 
+/**
+ * Public pricing helper for the time-series telemetry emitter — prices a single
+ * usage record against the active rate card without touching aggregator state.
+ */
+export function estimateCostUsd(model: string, promptTokens: number, completionTokens: number): number {
+  return priceUsage(model, promptTokens, completionTokens, getConfig().cost);
+}
+
 function priceUsage(model: string, promptTokens: number, completionTokens: number, cfg: CostConfig): number {
   const card = cfg.models.length > 0 ? cfg.models : DEFAULT_RATE_CARD;
   for (const entry of card) {

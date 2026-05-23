@@ -4498,10 +4498,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       const toolStartedAt = Date.now();
       const result = await executeTool(tc.name, tc.arguments, toolContext);
+      const toolDurationMs = Date.now() - toolStartedAt;
       if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
         turnUsedSwarmTools = true;
       }
-      toolExecutionTimeMs += Date.now() - toolStartedAt;
+      toolExecutionTimeMs += toolDurationMs;
       const intervention = classifyToolIntervention({
         toolName: tc.name,
         success: result.success,
@@ -4516,6 +4517,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           success: result.success,
           error: result.error,
           outputChars: result.output.length,
+          durationMs: toolDurationMs,
           metadata: result.metadata,
           issueCode: intervention?.reasonCode,
           suspiciousReturn: result.success && Boolean(intervention),

@@ -1517,21 +1517,25 @@ export function createGateway() {
 
   // ── Cost governance (dashboard) ─────────────────────────────────────────
   // Both routes are read-only and surface aggregated token usage + estimated
-  // dollar spend pulled from the in-process cost aggregator.  When
-  // cost.enabled is false the aggregator stays idle and the endpoints
-  // return zeroed buckets — operators can still wire the dashboard up
-  // without committing to alerting.
+  // dollar spend.  The summary prefers the durable QuestDB `llm_usage` series
+  // (survives restarts, full history) and falls back to the in-process cost
+  // aggregator when QuestDB is unavailable or empty.  When cost.enabled is
+  // false the aggregator stays idle and the endpoints return zeroed buckets —
+  // operators can still wire the dashboard up without committing to alerting.
   app.get("/api/cost/summary", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const range = Math.min(90, Math.max(1, Number(c.req.query("range")) || 30));
-    const { getCostSummary } = await import("../observability/cost.js");
     const cfg = getConfig().cost;
+    const { getCostSummary } = await import("../observability/cost.js");
+    const { getCostSummaryFromTimeseries } = await import("../observability/telemetry.js");
+    const durable = await getCostSummaryFromTimeseries(range);
     return c.json({
       enabled: cfg.enabled,
       budgets: cfg.budgets,
-      summary: getCostSummary(range),
+      source: durable ? "questdb" : "memory",
+      summary: durable ?? getCostSummary(range),
     });
   });
 
