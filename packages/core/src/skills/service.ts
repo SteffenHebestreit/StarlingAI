@@ -43,7 +43,7 @@ const _skillEmbeddingCache = new Map<string, Float32Array>();
 export async function searchSkills(
   workspacePath: string,
   query: string,
-  opts: { limit?: number; includeArchived?: boolean } = {},
+  opts: { limit?: number; includeArchived?: boolean; agent?: string } = {},
 ): Promise<SkillMatch[]> {
   const skills = listSkills(workspacePath, { includeArchived: opts.includeArchived });
   if (skills.length === 0) return [];
@@ -54,6 +54,13 @@ export async function searchSkills(
   const semanticScores = await computeSemanticSkillScores(workspacePath, query, skills);
   const semanticAvailable = semanticScores.size > 0;
 
+  // Agent-scoped retrieval: a skill explicitly tagged for the running specialist
+  // (frontmatter.agents) gets a relevance boost and a relaxed inclusion
+  // threshold, so an agent's own procedures surface even on a looser task match.
+  const agentFilter = opts.agent?.trim().toLowerCase();
+  const isAgentTagged = (skill: Skill): boolean =>
+    !!agentFilter && skill.frontmatter.agents.some((a) => a.toLowerCase() === agentFilter);
+
   const limit = Math.max(1, Math.min(10, opts.limit ?? 4));
   return skills
     .map((skill) => {
@@ -62,15 +69,16 @@ export async function searchSkills(
       const base = combineScores(keyword.score, semanticScore, semanticAvailable);
       // Reliability boost: ±0.12 from rolling success rate once a skill has uses.
       const reliability = skill.meta.uses > 0 ? (skillSuccessRate(skill.meta) - 0.5) * 0.24 : 0;
+      const agentBoost = isAgentTagged(skill) ? 0.25 : 0;
       return {
         skill,
         keywordScore: keyword.score,
         semanticScore,
-        combinedScore: Math.max(0, base + reliability),
+        combinedScore: Math.max(0, base + reliability + agentBoost),
         matchedTerms: keyword.matchedTerms,
       } satisfies SkillMatch;
     })
-    .filter((candidate) => candidate.combinedScore >= 0.18)
+    .filter((candidate) => candidate.combinedScore >= (isAgentTagged(candidate.skill) ? 0.08 : 0.18))
     .sort((left, right) =>
       right.combinedScore - left.combinedScore
       || right.matchedTerms.length - left.matchedTerms.length
@@ -87,7 +95,7 @@ export async function searchSkills(
 export async function formatSkillGuidance(
   workspacePath: string,
   query: string,
-  opts: { limit?: number; maxChars?: number } = {},
+  opts: { limit?: number; maxChars?: number; agent?: string } = {},
 ): Promise<string> {
   return (await retrieveSkillGuidance(workspacePath, query, opts)).text;
 }
@@ -100,13 +108,14 @@ export async function formatSkillGuidance(
 export async function retrieveSkillGuidance(
   workspacePath: string,
   query: string,
-  opts: { limit?: number; maxChars?: number } = {},
+  opts: { limit?: number; maxChars?: number; agent?: string } = {},
 ): Promise<{ text: string; slugs: string[] }> {
   const config = getConfig();
   if (!config.skillLibrary.enabled) return { text: "", slugs: [] };
 
   const matches = await searchSkills(workspacePath, query, {
     limit: opts.limit ?? config.skillLibrary.maxInjected,
+    ...(opts.agent ? { agent: opts.agent } : {}),
   });
   if (matches.length === 0) return { text: "", slugs: [] };
 
