@@ -310,12 +310,13 @@ const allNavEntries: NavEntry[] = [
   },
   { kind: "leaf", to: "/memory", label: "Memory" },
   { kind: "leaf", to: "/skills", label: "Skills" },
+  { kind: "leaf", to: "/catalog", label: "Agents" },
   {
     kind: "group",
     label: "Manage",
     operatorOnly: true,
     items: [
-      { to: "/agents", label: "Agents", hint: "Sub-agent definitions" },
+      { to: "/agents", label: "Agent tuning", hint: "Models & routing" },
       { to: "/plugins", label: "Plugins", hint: "Third-party tools", operatorOnly: true },
       { to: "/mcp", label: "MCP", hint: "External servers + publish self", operatorOnly: true },
       { to: "/a2a", label: "A2A", hint: "Agent-to-Agent peers", operatorOnly: true },
