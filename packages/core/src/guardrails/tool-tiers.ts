@@ -28,6 +28,12 @@ interface ToolTierDef {
 // This map is the single source of truth — if a tool is not listed, it defaults to FOUR_BLOCKED
 const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   // ─── Tier 0: Read-only ───────────────────────────────────────────────────
+  agent_catalog: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Flat directory of all specialist sub-agents and their capabilities (answers 'what agents exist')",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   list_agents: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List available specialized sub-agents and their descriptions",

@@ -24,6 +24,10 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // carrying the whole thing in context. No-op without pgvector.
   "rag_ingest",
   "rag_search",
+  // Flat agent capability directory so the assistant can answer "what agents do
+  // you have / what can they do" without a semantic query (search_agents and
+  // list_agents both require one and never dump the catalog).
+  "agent_catalog",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [
