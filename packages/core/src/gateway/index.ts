@@ -1269,6 +1269,18 @@ export function createGateway() {
     return c.json({ status: "ready", sessions });
   });
 
+  // Deep subsystem self-checks (authed) — actively probe embeddings (non-zero
+  // vectors), pgvector, MemGraph, and QuestDB telemetry so SILENT degradation
+  // (e.g. all-zero embeddings) becomes visible instead of failing quietly.
+  // Kept off /healthz so the Docker liveness probe stays cheap and stable.
+  app.get("/api/health/subsystems", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const { runSubsystemChecks } = await import("../observability/health-checks.js");
+    const report = await runSubsystemChecks();
+    return c.json(report, report.healthy ? 200 : 503);
+  });
+
   // ── Role-based access control (Wave B) ───────────────────────────────────
   // Mutating verbs (POST/PUT/PATCH/DELETE) require the operator role by
   // default.  Viewers can read every dashboard endpoint but cannot mutate
