@@ -1130,6 +1130,23 @@ function hashAgentDocument(doc: string): string {
   return createHash("sha256").update(doc).digest("hex");
 }
 
+/**
+ * A cached embedding is degenerate if it is empty or all-zero — a sign the
+ * embedding pipeline was broken when it was written (e.g. base64 mis-decode).
+ * Such entries must be re-embedded rather than restored, so a stale cache can
+ * never silently degrade semantic search after a fix.
+ */
+function isDegenerateCachedVector(b64: string): boolean {
+  try {
+    const v = base64ToFloat32(b64);
+    if (v.length === 0) return true;
+    for (const x of v) { if (x !== 0) return false; }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 function float32ToBase64(v: Float32Array): string {
   return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64");
 }
@@ -1196,11 +1213,15 @@ async function _buildAgentIndexInner(
     currentDocs.set(name, { doc, hash: hashAgentDocument(doc), cfg });
   }
 
-  // Identify which agents actually need a new embedding
+  // Identify which agents actually need a new embedding. Re-embed when the
+  // document changed OR the cached vector is degenerate (empty / all-zero) — the
+  // latter self-heals a cache persisted across an embedding-pipeline change
+  // (e.g. the LM Studio base64→float fix) that would otherwise silently serve
+  // zero vectors and break semantic routing.
   const toEmbed: Array<{ name: string; doc: string }> = [];
   for (const [name, { doc, hash }] of currentDocs) {
     const cached = cachedAgents[name];
-    if (!cached || cached.hash !== hash) {
+    if (!cached || cached.hash !== hash || isDegenerateCachedVector(cached.vector)) {
       toEmbed.push({ name, doc });
     }
   }
