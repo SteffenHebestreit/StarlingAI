@@ -2887,6 +2887,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const toolContext: ToolContext = {
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
+    userId: session.userId,
     approvalCallback: resolvedApprovalCallback,
     inputCallback: opts.inputCallback,
     onSubAgentProgress: opts.onSubAgentProgress,

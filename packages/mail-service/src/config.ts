@@ -13,6 +13,9 @@ const MailAccountSchema = z.object({
   id: z.string().min(1),
   address: z.string().email(),
   displayName: z.string().min(1).optional(),
+  // Usernames permitted to use this account. Empty = shared (all users). The
+  // gateway enforces this against the authenticated user before any mail op.
+  allowedUsers: z.array(z.string()).default([]),
   imap: z.object({
     host: z.string().min(1),
     port: z.number().int().min(1).max(65535).default(993),
@@ -59,6 +62,7 @@ function resolveAccount(account: z.infer<typeof MailAccountSchema>): MailAccount
     id: account.id,
     address: account.address,
     displayName: account.displayName,
+    allowedUsers: account.allowedUsers,
     imap: {
       host: resolveEnvToken(account.imap.host),
       port: account.imap.port,

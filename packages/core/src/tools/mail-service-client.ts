@@ -7,6 +7,7 @@
  *  - error formatting that surfaces the upstream `error`/`message` field
  */
 import { getConfig } from "../config/loader.js";
+import { currentUserId } from "../runtime/request-context.js";
 import type { ToolResult } from "./registry.js";
 
 export interface MailServiceResponse<T = unknown> {
@@ -33,6 +34,10 @@ export async function callMailService<T>(
   init?: RequestInit,
 ): Promise<MailServiceResponse<T>> {
   const config = resolveMailConfig();
+  // Forward the owning user so the mail-service can enforce per-account access
+  // (allowedUsers). Undefined in single-user / auth-disabled mode → no header,
+  // mail-service treats the request as unscoped.
+  const userId = currentUserId();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
@@ -42,6 +47,7 @@ export async function callMailService<T>(
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...(config.authToken ? { Authorization: `Bearer ${config.authToken}` } : {}),
+        ...(userId ? { "X-Sai-User": userId } : {}),
         ...(init?.headers ?? {}),
       },
       signal: controller.signal,

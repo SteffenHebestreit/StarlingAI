@@ -9,6 +9,7 @@ import type { CategoryRecord, DraftRecord, MailAccountConfig, MailSummary } from
 import { DraftStore } from "./draft-store.js";
 import { calendarRoutes } from "./calendar-routes.js";
 import { contactsRoutes } from "./contacts-routes.js";
+import { accountAllowsUser, getAccount } from "./account-access.js";
 
 const SearchRequestSchema = z.object({
   accountIds: z.array(z.string()).optional(),
@@ -95,13 +96,8 @@ function buildSummary(parsed: Awaited<ReturnType<typeof EmailParser.parse>>, cat
   };
 }
 
-function getAccount(accounts: MailAccountConfig[], accountId: string): MailAccountConfig {
-  const account = accounts.find((entry) => entry.id === accountId);
-  if (!account) {
-    throw new HTTPException(404, { message: `Unknown account: ${accountId}` });
-  }
-  return account;
-}
+// Per-user account access (mail/calendar/contacts share accountAllowsUser +
+// getAccount from account-access.ts).
 
 /**
  * Build the mail-service Hono app.
@@ -131,21 +127,25 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.get("/health", (c) => c.json({ ok: true, accounts: opts.accounts.length }));
 
-  app.get("/api/accounts", (c) => c.json(opts.accounts.map((account) => ({
-    id: account.id,
-    address: account.address,
-    displayName: account.displayName,
-  }))));
+  app.get("/api/accounts", (c) => {
+    const user = c.req.header("x-sai-user");
+    return c.json(opts.accounts.filter((a) => accountAllowsUser(a, user)).map((account) => ({
+      id: account.id,
+      address: account.address,
+      displayName: account.displayName,
+      allowedUsers: account.allowedUsers ?? [],
+    })));
+  });
 
   app.get("/api/accounts/:accountId/mailboxes", async (c) => {
-    const account = getAccount(opts.accounts, c.req.param("accountId"));
+    const account = getAccount(opts.accounts, c.req.param("accountId"), c.req.header("x-sai-user"));
     const client = new MailAccountClient(account);
     return c.json(await client.listMailboxes());
   });
 
   app.post("/api/mailboxes", async (c) => {
     const body = MailboxCreateSchema.parse(await c.req.json());
-    const account = getAccount(opts.accounts, body.accountId);
+    const account = getAccount(opts.accounts, body.accountId, c.req.header("x-sai-user"));
     const client = new MailAccountClient(account);
     const mailbox = await client.createMailbox(body.path);
     return c.json(mailbox, 201);
@@ -153,7 +153,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.delete("/api/mailboxes", async (c) => {
     const body = MailboxDeleteSchema.parse(await c.req.json());
-    const account = getAccount(opts.accounts, body.accountId);
+    const account = getAccount(opts.accounts, body.accountId, c.req.header("x-sai-user"));
     const client = new MailAccountClient(account);
     const deleted = await client.deleteMailbox(body.path);
     return c.json(deleted);
@@ -161,9 +161,10 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.post("/api/messages/search", async (c) => {
     const body = SearchRequestSchema.parse(await c.req.json());
-    const targetAccounts = body.accountIds?.length
+    const user = c.req.header("x-sai-user");
+    const targetAccounts = (body.accountIds?.length
       ? opts.accounts.filter((account) => body.accountIds?.includes(account.id))
-      : opts.accounts;
+      : opts.accounts).filter((account) => accountAllowsUser(account, user));
 
     const summaries: MailSummary[] = [];
     for (const account of targetAccounts) {
@@ -182,7 +183,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.post("/api/messages/read", async (c) => {
     const body = ReadRequestSchema.parse(await c.req.json());
-    const account = getAccount(opts.accounts, body.accountId);
+    const account = getAccount(opts.accounts, body.accountId, c.req.header("x-sai-user"));
     const client = new MailAccountClient(account);
     const message = await client.readMessage(body.mailbox, body.uid);
     if (!message) {
@@ -208,7 +209,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
     const results: Array<Record<string, unknown>> = [];
     for (const [accountId, items] of grouped.entries()) {
-      const account = getAccount(opts.accounts, accountId);
+      const account = getAccount(opts.accounts, accountId, c.req.header("x-sai-user"));
       const client = new MailAccountClient(account);
       if (body.createDestination) {
         await client.createMailbox(body.destinationMailbox);
@@ -233,7 +234,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
     const results: Array<Record<string, unknown>> = [];
     for (const [accountId, items] of grouped.entries()) {
-      const account = getAccount(opts.accounts, accountId);
+      const account = getAccount(opts.accounts, accountId, c.req.header("x-sai-user"));
       const client = new MailAccountClient(account);
       for (const item of items) {
         const deleted = await client.deleteMessage(item.mailbox, item.uid, body.permanent);
@@ -265,10 +266,14 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
   app.get("/api/drafts/:draftId", async (c) => {
     const draft = await opts.store.getDraft(c.req.param("draftId"));
     if (!draft) return c.json({ error: "Draft not found" }, 404);
+    getAccount(opts.accounts, draft.accountId, c.req.header("x-sai-user")); // 403 if not owned
     return c.json(draft);
   });
 
   app.patch("/api/drafts/:draftId", async (c) => {
+    const existing = await opts.store.getDraft(c.req.param("draftId"));
+    if (!existing) return c.json({ error: "Draft not found" }, 404);
+    getAccount(opts.accounts, existing.accountId, c.req.header("x-sai-user")); // 403 if not owned
     const patch = DraftUpdateSchema.parse(await c.req.json());
     const draft = await opts.store.updateDraft(c.req.param("draftId"), patch);
     if (!draft) return c.json({ error: "Draft not found" }, 404);
@@ -279,7 +284,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
     const draft = await opts.store.getDraft(c.req.param("draftId"));
     if (!draft) return c.json({ error: "Draft not found" }, 404);
     if (draft.status === "sent") return c.json({ error: "Draft already sent" }, 409);
-    const account = getAccount(opts.accounts, draft.accountId);
+    const account = getAccount(opts.accounts, draft.accountId, c.req.header("x-sai-user"));
     await sendDraft(account, draft);
     const updated = await opts.store.markDraftSent(draft.id);
     return c.json(updated);

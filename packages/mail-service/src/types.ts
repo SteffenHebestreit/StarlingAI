@@ -26,6 +26,8 @@ export interface MailAccountConfig {
   id: string;
   address: string;
   displayName?: string;
+  /** Usernames permitted to use this account. Empty/unset = shared (all users). */
+  allowedUsers?: string[];
   imap: MailImapConfig;
   smtp: MailSmtpConfig;
   caldav?: DavCredentials;

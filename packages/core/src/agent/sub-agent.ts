@@ -1571,6 +1571,9 @@ export interface SubAgentRunOptions {
   context?: string;
   parentSessionId: string;
   workspacePath: string;
+  /** Authenticated user that owns the parent turn — propagated so sub-agents
+   * enforce the same per-user resource access (mail, credentials, compute). */
+  userId?: string;
   allowedAgents?: string[];
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -1969,6 +1972,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const toolContext: ToolContext = {
       sessionId: subSessionId,
       workspacePath: opts.workspacePath,
+      userId: opts.userId,
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
       allowedTools: effectiveToolNames,

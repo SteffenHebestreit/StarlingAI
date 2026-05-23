@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+import { canAccessResource, filterAccessibleResources } from "../guardrails/resource-access.js";
+
+/**
+ * Per-user resource ownership guard. Backwards-compatible: shared resources and
+ * single-user (auth-off) mode stay open; only an explicit allowedUsers list
+ * scopes access, and only when a requesting user is known.
+ */
+describe("canAccessResource", () => {
+  it("allows shared resources (no allowedUsers) for everyone", () => {
+    expect(canAccessResource("alice", {})).toBe(true);
+    expect(canAccessResource("alice", { allowedUsers: [] })).toBe(true);
+    expect(canAccessResource(undefined, { allowedUsers: [] })).toBe(true);
+    expect(canAccessResource("bob", undefined)).toBe(true);
+  });
+
+  it("allows when auth is disabled (no requesting user) even on a scoped resource", () => {
+    expect(canAccessResource(undefined, { allowedUsers: ["alice"] })).toBe(true);
+  });
+
+  it("enforces the allow-list when a user is known", () => {
+    expect(canAccessResource("alice", { allowedUsers: ["alice", "carol"] })).toBe(true);
+    expect(canAccessResource("bob", { allowedUsers: ["alice", "carol"] })).toBe(false);
+  });
+
+  it("compares usernames case-insensitively", () => {
+    expect(canAccessResource("Alice", { allowedUsers: ["alice"] })).toBe(true);
+    expect(canAccessResource("alice", { allowedUsers: ["ALICE"] })).toBe(true);
+  });
+
+  it("filters a resource list to the accessible subset", () => {
+    const accounts = [
+      { id: "shared", allowedUsers: [] },
+      { id: "alice-only", allowedUsers: ["alice"] },
+      { id: "bob-only", allowedUsers: ["bob"] },
+    ];
+    expect(filterAccessibleResources("alice", accounts).map((a) => a.id)).toEqual(["shared", "alice-only"]);
+    expect(filterAccessibleResources(undefined, accounts).map((a) => a.id)).toEqual(["shared", "alice-only", "bob-only"]);
+  });
+});
