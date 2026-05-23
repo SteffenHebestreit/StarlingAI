@@ -3906,6 +3906,67 @@ registerTool({
   },
 });
 
+// ─── agent_catalog ────────────────────────────────────────────────────────────
+// Flat capability directory — answers "what agents exist and what can they do".
+// Unlike search_agents/list_agents (semantic, query-required, never dump), this
+// enumerates the whole catalog. For discovery/answering, NOT for routing.
+
+registerTool({
+  name: "agent_catalog",
+  description:
+    "List ALL configured specialist sub-agents with their capabilities — a flat directory that answers "
+    + "\"what agents are available and what can each do\". Read-only and query-free (unlike search_agents / "
+    + "list_agents, which require a query and never dump the catalog). Use this to tell the user what the swarm "
+    + "can do; do NOT use it to route work (use delegate_to_agent / search_agents for routing). Optional `filter` "
+    + "narrows by a case-insensitive substring over name, description, capability, or tag.",
+  embeddingDescription:
+    "list all available agents and what they can do; full agent catalog or directory; which specialists exist; "
+    + "agent capabilities overview; alle Agenten auflisten, welche Agenten gibt es und was koennen sie",
+  parameters: {
+    type: "object",
+    properties: {
+      filter: { type: "string", description: "Optional case-insensitive substring to filter agents by name, description, capability, or tag." },
+    },
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const config = getConfig();
+    const promoted = readPromotedAgents(config.workspacePath);
+    const all: Record<string, import("../config/schema.js").SubAgentConfig> = { ...config.subAgents, ...promoted };
+    const filter = typeof args["filter"] === "string" ? args["filter"].trim().toLowerCase() : "";
+
+    const entries = Object.keys(all)
+      .filter((name) => name !== ctx.currentAgentName)
+      .sort()
+      .map((name) => ({ name, cfg: all[name]! }))
+      .filter(({ name, cfg }) => {
+        if (!filter) return true;
+        const hay = `${name} ${cfg.description ?? ""} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
+        return hay.includes(filter);
+      });
+
+    if (entries.length === 0) {
+      return {
+        success: true,
+        output: filter ? `No agents match "${String(args["filter"])}".` : "No specialist agents are configured.",
+        metadata: { count: 0 },
+      };
+    }
+
+    const lines = entries.map(({ name, cfg }) => {
+      const desc = (cfg.description ?? "").replace(/\s+/g, " ").slice(0, 220);
+      const caps = (cfg.capabilities ?? []).slice(0, 8).join(", ");
+      const promotedTag = promoted[name] ? " (promoted)" : "";
+      return `- **${name}**${promotedTag} — ${desc}${caps ? `\n  capabilities: ${caps}` : ""}`;
+    });
+
+    return {
+      success: true,
+      output: `${entries.length} specialist agent(s)${filter ? ` matching "${String(args["filter"])}"` : ""}:\n\n${lines.join("\n")}`,
+      metadata: { count: entries.length, agents: entries.map((e) => e.name) },
+    };
+  },
+});
+
 // ─── search_agents ────────────────────────────────────────────────────────────
 // Semantic discovery over agent capabilities — keeps orchestrator context small
 // when the agent registry grows large.
