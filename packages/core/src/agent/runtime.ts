@@ -2592,7 +2592,7 @@ export function buildModelVisibleToolResult(
       tableRowCount >= 4 || numberedListCount >= 5 || bulletListCount >= 8;
     const isLongDeliverable = cleaned.length > 2500 || looksStructured;
     const successEvidence = isLongDeliverable
-      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), 10_000)
+      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), getConfig().agents.performance.maxDelegatedResultChars)
       : evidence;
     const importantNote = isLongDeliverable
       ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
