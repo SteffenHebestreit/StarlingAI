@@ -10,7 +10,13 @@
       // Relay long deliverables (guides/reports) in full instead of cutting them
       // off at the 10k default. qwen3.6-35b has a large context window, so 24k
       // chars of deliverable fits the relay prompt.
-      "maxDelegatedResultChars": 24000
+      "maxDelegatedResultChars": 24000,
+      // Drop the 16 always-on intent-routing bullets from the base prompt and
+      // rely on the per-turn intent classifier (which injects richer, intent-
+      // specific guidance only when it fires). Safe to re-enable now that the
+      // embedding fix restored semantic agent search/classification — eval-gated
+      // with computer-use vs pentest and server-admin disambiguation cases.
+      "taskConditionalPrompt": true
     }
   },
   "gateway": {
