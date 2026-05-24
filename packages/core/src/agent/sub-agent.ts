@@ -629,6 +629,19 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "workspace_search",
 ]);
 
+/**
+ * Tools that observe or mutate LIVE, changing state — a browser page or a remote
+ * desktop. Their result is never safe to dedup/cache against an earlier identical
+ * call, because the state changes between calls: e.g. after site_fill_credentials
+ * submits a login, re-navigating to the same URL or re-snapshotting must fetch the
+ * NEW post-login page, not replay the stale pre-login form. Caching these makes a
+ * successful login look like it failed (and trips the blocked-iteration loop
+ * detector). The loop detector still catches genuinely stuck repeats.
+ */
+export function isLiveStateTool(name: string): boolean {
+  return name.startsWith("browser_") || name.startsWith("computer_");
+}
+
 function isApprovalGateFailure(text: string | undefined): boolean {
   if (!text) return false;
   return /\b(?:approval (?:timed out|expired|failed|was not granted|not granted|explicitly denied)|execution denied by user|requires human approval|no approval channel)\b/i.test(text);
@@ -3606,7 +3619,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
-        if (prev && prev.args === argsSig) {
+        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name)) {
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
