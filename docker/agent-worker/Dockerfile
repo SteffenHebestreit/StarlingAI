@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Dependencies
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/mail-service/package.json ./packages/mail-service/
 RUN pnpm install --no-frozen-lockfile
