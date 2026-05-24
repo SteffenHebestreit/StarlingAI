@@ -6,10 +6,11 @@ import {
   buildTrajectoryDigest,
   distillAndPersist,
   parseDistilledSkill,
+  parseSkillUpdateProposal,
   shouldDistill,
   type DistillTurnInput,
 } from "../skills/distiller.js";
-import { listSkills, writeSkill } from "../skills/store.js";
+import { getSkill, listSkills, writeSkill } from "../skills/store.js";
 import type { SwarmState } from "../tools/registry.js";
 
 function swarmStateFixture(): SwarmState {
@@ -93,6 +94,17 @@ describe("skill distiller — parsing", () => {
     expect(parseDistilledSkill('{"name": "x"}')).toBeNull();
     expect(parseDistilledSkill("no json here")).toBeNull();
   });
+
+  it("parses targeted update proposals", () => {
+    const parsed = parseSkillUpdateProposal(JSON.stringify({
+      action: "patch",
+      oldString: "2. Publish.",
+      newString: "2. Smoke test.\n3. Publish.",
+    }));
+    expect(parsed?.action).toBe("patch");
+    if (parsed?.action === "patch") expect(parsed.oldString).toBe("2. Publish.");
+    expect(parseSkillUpdateProposal('{"action":"skip","reason":"covered"}')?.action).toBe("skip");
+  });
 });
 
 describe("skill distiller — digest", () => {
@@ -153,7 +165,7 @@ describe("skill distiller — persist", () => {
     expect(skills[0]?.frontmatter.status).toBe("draft");
   });
 
-  it("skips distillation when an existing skill already covers the shape", async () => {
+  it("asks for an update instead of creating a duplicate when an existing skill covers the shape", async () => {
     const ws = workspace();
     writeSkill(ws, {
       name: "Nightly Database Backup Procedure",
@@ -174,7 +186,39 @@ describe("skill distiller — persist", () => {
     );
 
     expect(result).toBeNull();
-    expect(called).toBe(false); // deduped before the LLM call
+    expect(called).toBe(true); // patch/skip decision happens through the update prompt
     expect(listSkills(ws)).toHaveLength(1);
+  });
+
+  it("patches a loaded skill before authoring a new one", async () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Gateway Maintenance Runbook",
+      description: "Safely update StarlingAI gateway maintenance flows.",
+      whenToUse: "When a maintenance request changes runtime or scene behavior.",
+      procedure: "1. Inspect the canonical config/code owner.\n2. Apply the edit.\n3. Run focused validation.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    const fakeComplete = async (): Promise<string> => JSON.stringify({
+      action: "patch",
+      oldString: "1. Inspect the canonical config/code owner.\n2. Apply the edit.\n3. Run focused validation.",
+      newString: "1. Inspect the canonical config/code owner.\n2. Apply the edit.\n3. Run focused validation.\n4. Verify the deployed container/runtime actually contains the changed code.",
+    });
+
+    const result = await distillAndPersist(
+      turnInput(ws, {
+        objective: "update the gateway maintenance scene and verify the deployed runtime",
+        loadedSkillSlugs: [slug],
+      }),
+      fakeComplete,
+    );
+
+    expect(result).toBeNull();
+    expect(listSkills(ws)).toHaveLength(1);
+    const patched = getSkill(ws, slug)!;
+    expect(patched.frontmatter.version).toBe(2);
+    expect(patched.body).toContain("deployed container/runtime");
+    expect(patched.meta.patches).toBe(1);
   });
 });

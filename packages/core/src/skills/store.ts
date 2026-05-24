@@ -25,16 +25,20 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("skills:store");
 
 const SKILLS_SUBDIR = ".starlingai/skills";
+const SUPPORT_FILE_DIRS = new Set(["references", "templates", "scripts", "assets"]);
 
 // Field caps keep injected prompts bounded and disk footprints predictable.
 const MAX_NAME = 120;
@@ -43,12 +47,15 @@ const MAX_WHEN_TO_USE = 400;
 const MAX_BODY = 8_000;
 const MAX_LIST_ITEMS = 16;
 const MAX_LIST_ITEM = 60;
+const MAX_SUPPORT_FILE_CHARS = 100_000;
+const MAX_SUPPORT_FILE_BYTES = 1_048_576;
 
 // Naïve credential-pattern detector — refuse to persist a skill containing one.
 const CREDENTIAL_RE = /(?:password|secret|token|api[_-]?key|bearer|authorization)\s*[:=]\s*\S+/i;
 
-export type SkillStatus = "draft" | "active" | "archived";
+export type SkillStatus = "draft" | "active" | "stale" | "archived";
 export type SkillOrigin = "manual" | "agent" | "distilled";
+export type SkillSupportDir = "references" | "templates" | "scripts" | "assets";
 
 export interface SkillFrontmatter {
   /** Human-readable title. */
@@ -70,13 +77,21 @@ export interface SkillFrontmatter {
 export interface SkillMeta {
   slug: string;
   origin: SkillOrigin;
+  /** True when deterministic/background curation may retire/archive this skill. */
+  curatorManaged: boolean;
   createdAt: string;
   updatedAt: string;
+  views: number;
   uses: number;
   successes: number;
   failures: number;
+  patches: number;
+  lastViewedAt?: string;
   lastUsedAt?: string;
+  lastPatchedAt?: string;
   sourceSessionId?: string;
+  pinned: boolean;
+  archivedAt?: string;
   /** Cached embedding of the search document (number[] for JSON). */
   embedding?: number[];
 }
@@ -98,9 +113,19 @@ export interface WriteSkillInput {
   tools?: string[];
   status?: SkillStatus;
   origin?: SkillOrigin;
+  /** Opt this skill into deterministic lifecycle curation. Defaults to distilled-only. */
+  curatorManaged?: boolean;
   sourceSessionId?: string;
   /** Force a specific slug (e.g. when updating a known skill). */
   slug?: string;
+}
+
+export interface PatchSkillInput {
+  /** Defaults to SKILL.md. Support files must live under references/, templates/, scripts/, or assets/. */
+  filePath?: string;
+  oldString: string;
+  newString: string;
+  replaceAll?: boolean;
 }
 
 export class SkillCredentialError extends Error {
@@ -183,11 +208,7 @@ export function writeSkill(workspacePath: string, input: WriteSkillInput): Skill
     throw new Error("Skill requires a name, description, and procedure body");
   }
 
-  // Defence in depth: never persist a procedure that embeds a secret.
-  const composite = `${name}\n${description}\n${whenToUse}\n${body}`;
-  if (CREDENTIAL_RE.test(composite)) {
-    throw new SkillCredentialError();
-  }
+  assertNoCredential(`${name}\n${description}\n${whenToUse}\n${body}`);
 
   const existing = getSkill(workspacePath, slug);
   const now = new Date().toISOString();
@@ -224,19 +245,103 @@ export function writeSkill(workspacePath: string, input: WriteSkillInput): Skill
   const meta: SkillMeta = {
     slug,
     origin: existing?.meta.origin ?? input.origin ?? "manual",
+    curatorManaged: existing?.meta.curatorManaged ?? input.curatorManaged ?? (input.origin === "distilled"),
     createdAt: existing?.meta.createdAt ?? now,
     updatedAt: now,
+    views: existing?.meta.views ?? 0,
     uses: existing?.meta.uses ?? 0,
     successes: existing?.meta.successes ?? 0,
     failures: existing?.meta.failures ?? 0,
+    patches: existing?.meta.patches ?? 0,
+    lastViewedAt: existing?.meta.lastViewedAt,
     lastUsedAt: existing?.meta.lastUsedAt,
+    lastPatchedAt: existing?.meta.lastPatchedAt,
     sourceSessionId: existing?.meta.sourceSessionId ?? input.sourceSessionId,
+    pinned: existing?.meta.pinned ?? false,
+    archivedAt: status === "archived" ? (existing?.meta.archivedAt ?? now) : undefined,
     // Drop the cached embedding when content changes — service recomputes lazily.
     embedding: contentChanged ? undefined : existing?.meta.embedding,
   };
 
   persistSkill(workspacePath, frontmatter, body, meta);
   return { frontmatter, body, meta };
+}
+
+export function listSkillSupportFiles(workspacePath: string, slug: string): string[] {
+  const safe = slugifySkillName(slug);
+  const skillDir = resolve(skillsDir(workspacePath), safe);
+  const files: string[] = [];
+  for (const dirName of SUPPORT_FILE_DIRS) {
+    collectSupportFiles(resolve(skillDir, dirName), dirName, files);
+  }
+  return files.sort();
+}
+
+export function writeSkillSupportFile(
+  workspacePath: string,
+  slug: string,
+  filePath: string,
+  fileContent: string,
+): Skill {
+  validateSupportFileContent(filePath, fileContent);
+  const { skill, target } = resolveSupportFileTarget(workspacePath, slug, filePath);
+  const existing = existsSync(target) ? readFileSync(target, "utf-8") : undefined;
+  atomicWriteTextSync(target, fileContent);
+  if (existing !== fileContent) {
+    bumpSkillPatch(workspacePath, skill, true);
+  }
+  return getSkill(workspacePath, skill.frontmatter.slug) ?? skill;
+}
+
+export function removeSkillSupportFile(workspacePath: string, slug: string, filePath: string): Skill {
+  const { skill, target, relativePath } = resolveSupportFileTarget(workspacePath, slug, filePath);
+  if (!existsSync(target)) throw new Error(`Support file not found: ${relativePath}`);
+  unlinkSync(target);
+  bumpSkillPatch(workspacePath, skill, true);
+  return getSkill(workspacePath, skill.frontmatter.slug) ?? skill;
+}
+
+export function patchSkill(workspacePath: string, slug: string, input: PatchSkillInput): Skill {
+  if (!input.oldString) throw new Error("oldString is required");
+  if (input.newString === undefined || input.newString === null) throw new Error("newString is required");
+
+  const safe = slugifySkillName(slug);
+  const skill = getSkill(workspacePath, safe);
+  if (!skill) throw new Error(`Skill not found: ${safe}`);
+
+  const target = input.filePath
+    ? resolveSupportFileTarget(workspacePath, safe, input.filePath).target
+    : resolve(skillsDir(workspacePath), safe, "SKILL.md");
+  if (!existsSync(target)) throw new Error(`File not found: ${input.filePath ?? "SKILL.md"}`);
+
+  const raw = readFileSync(target, "utf-8");
+  const matchCount = countOccurrences(raw, input.oldString);
+  if (matchCount === 0) throw new Error("oldString was not found");
+  if (matchCount > 1 && input.replaceAll !== true) {
+    throw new Error("oldString matched more than once; set replaceAll=true or include more context");
+  }
+
+  const next = input.replaceAll === true
+    ? raw.split(input.oldString).join(input.newString)
+    : raw.replace(input.oldString, input.newString);
+  assertNoCredential(next);
+
+  if (input.filePath) {
+    validateSupportFileContent(input.filePath, next);
+    atomicWriteTextSync(target, next);
+    bumpSkillPatch(workspacePath, skill, true);
+    return getSkill(workspacePath, safe) ?? skill;
+  }
+
+  if (!next.replace(/^\uFEFF/, "").startsWith("---\n")) {
+    throw new Error("Patch would remove required SKILL.md frontmatter");
+  }
+  const parsed = parseSkillFile(next, safe);
+  if (!parsed.body.trim()) throw new Error("Patch would leave SKILL.md without a body");
+  parsed.frontmatter.version = skill.frontmatter.version + 1;
+  const patchedMeta = markSkillPatched(skill.meta, new Date().toISOString(), true);
+  persistSkill(workspacePath, parsed.frontmatter, parsed.body, patchedMeta);
+  return getSkill(workspacePath, safe) ?? { frontmatter: parsed.frontmatter, body: parsed.body, meta: patchedMeta };
 }
 
 /** Record the outcome of a skill that was retrieved and applied this turn. */
@@ -259,6 +364,14 @@ export function recordSkillOutcome(
   }
 
   persistSkill(workspacePath, skill.frontmatter, skill.body, skill.meta);
+}
+
+export function recordSkillViewed(workspacePath: string, slug: string): void {
+  const skill = getSkill(workspacePath, slug);
+  if (!skill) return;
+  skill.meta.views += 1;
+  skill.meta.lastViewedAt = new Date().toISOString();
+  persistSkillMeta(workspacePath, skill.meta);
 }
 
 export function setSkillEmbedding(workspacePath: string, slug: string, embedding: number[]): void {
@@ -322,6 +435,14 @@ export async function recordSkillOutcomeAsync(
   await persistSkillMetaAsync(workspacePath, skill.meta);
 }
 
+export async function recordSkillViewedAsync(workspacePath: string, slug: string): Promise<void> {
+  const skill = await readSkillAsync(workspacePath, slug);
+  if (!skill) return;
+  skill.meta.views += 1;
+  skill.meta.lastViewedAt = new Date().toISOString();
+  await persistSkillMetaAsync(workspacePath, skill.meta);
+}
+
 /** Async embedding cache — writes only the meta sidecar, fire-and-forget. */
 export async function setSkillEmbeddingAsync(
   workspacePath: string,
@@ -334,21 +455,38 @@ export async function setSkillEmbeddingAsync(
   await persistSkillMetaAsync(workspacePath, skill.meta);
 }
 
-export function setSkillStatus(workspacePath: string, slug: string, status: SkillStatus): void {
+export function setSkillStatus(workspacePath: string, slug: string, status: SkillStatus): boolean {
   const skill = getSkill(workspacePath, slug);
-  if (!skill) return;
+  if (!skill) return false;
+  if (status === "archived" && skill.meta.pinned) return false;
+  const now = new Date().toISOString();
   skill.frontmatter.status = status;
-  skill.meta.updatedAt = new Date().toISOString();
+  skill.meta.updatedAt = now;
+  skill.meta.archivedAt = status === "archived" ? (skill.meta.archivedAt ?? now) : undefined;
   persistSkill(workspacePath, skill.frontmatter, skill.body, skill.meta);
+  return true;
 }
 
-export function deleteSkill(workspacePath: string, slug: string): void {
+export function setSkillPinned(workspacePath: string, slug: string, pinned: boolean): boolean {
+  const skill = getSkill(workspacePath, slug);
+  if (!skill) return false;
+  skill.meta.pinned = pinned;
+  skill.meta.updatedAt = new Date().toISOString();
+  persistSkillMeta(workspacePath, skill.meta);
+  return true;
+}
+
+export function deleteSkill(workspacePath: string, slug: string): boolean {
   const safe = slugifySkillName(slug);
+  const skill = getSkill(workspacePath, safe);
+  if (skill?.meta.pinned) return false;
   const dir = resolve(skillsDir(workspacePath), safe);
   try {
     rmSync(dir, { recursive: true, force: true });
+    return true;
   } catch (err) {
     log.warn({ err, slug: safe }, "Failed to delete skill");
+    return false;
   }
 }
 
@@ -367,13 +505,31 @@ function persistSkill(
 ): void {
   const dir = resolve(skillsDir(workspacePath), frontmatter.slug);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(resolve(dir, "SKILL.md"), serializeSkillFile(frontmatter, body), "utf-8");
-  writeFileSync(resolve(dir, "skill.meta.json"), `${JSON.stringify(meta, null, 2)}\n`, "utf-8");
+  atomicWriteTextSync(resolve(dir, "SKILL.md"), serializeSkillFile(frontmatter, body));
+  persistSkillMeta(workspacePath, meta);
+}
+
+function persistSkillMeta(workspacePath: string, meta: SkillMeta): void {
+  const dir = resolve(skillsDir(workspacePath), meta.slug);
+  mkdirSync(dir, { recursive: true });
+  atomicWriteTextSync(resolve(dir, "skill.meta.json"), `${JSON.stringify(meta, null, 2)}\n`);
 }
 
 function fallbackMeta(slug: string): SkillMeta {
   const now = new Date().toISOString();
-  return { slug, origin: "manual", createdAt: now, updatedAt: now, uses: 0, successes: 0, failures: 0 };
+  return {
+    slug,
+    origin: "manual",
+    curatorManaged: false,
+    createdAt: now,
+    updatedAt: now,
+    views: 0,
+    uses: 0,
+    successes: 0,
+    failures: 0,
+    patches: 0,
+    pinned: false,
+  };
 }
 
 function coerceSkillMeta(raw: Partial<SkillMeta>, slug: string): SkillMeta {
@@ -381,13 +537,20 @@ function coerceSkillMeta(raw: Partial<SkillMeta>, slug: string): SkillMeta {
   return {
     slug,
     origin: raw.origin ?? "manual",
+    curatorManaged: typeof raw.curatorManaged === "boolean" ? raw.curatorManaged : raw.origin === "distilled",
     createdAt: raw.createdAt ?? fallback.createdAt,
     updatedAt: raw.updatedAt ?? fallback.updatedAt,
+    views: typeof raw.views === "number" ? raw.views : 0,
     uses: typeof raw.uses === "number" ? raw.uses : 0,
     successes: typeof raw.successes === "number" ? raw.successes : 0,
     failures: typeof raw.failures === "number" ? raw.failures : 0,
+    patches: typeof raw.patches === "number" ? raw.patches : 0,
+    lastViewedAt: raw.lastViewedAt,
     lastUsedAt: raw.lastUsedAt,
+    lastPatchedAt: raw.lastPatchedAt,
     sourceSessionId: raw.sourceSessionId,
+    pinned: raw.pinned === true,
+    archivedAt: raw.archivedAt,
     embedding: Array.isArray(raw.embedding) ? raw.embedding : undefined,
   };
 }
@@ -399,6 +562,123 @@ function readSkillMeta(workspacePath: string, slug: string): SkillMeta {
     return coerceSkillMeta(JSON.parse(readFileSync(metaFile, "utf-8")) as Partial<SkillMeta>, slug);
   } catch {
     return fallbackMeta(slug);
+  }
+}
+
+function assertNoCredential(content: string): void {
+  if (CREDENTIAL_RE.test(content)) throw new SkillCredentialError();
+}
+
+function validateSupportFileContent(filePath: string, content: string): void {
+  const bytes = Buffer.byteLength(content, "utf-8");
+  if (bytes > MAX_SUPPORT_FILE_BYTES) {
+    throw new Error(`Support file ${filePath} is too large (${bytes} bytes, max ${MAX_SUPPORT_FILE_BYTES})`);
+  }
+  if (content.length > MAX_SUPPORT_FILE_CHARS) {
+    throw new Error(`Support file ${filePath} is too large (${content.length} chars, max ${MAX_SUPPORT_FILE_CHARS})`);
+  }
+  assertNoCredential(content);
+}
+
+function resolveSupportFileTarget(
+  workspacePath: string,
+  slug: string,
+  filePath: string,
+): { skill: Skill; target: string; relativePath: string } {
+  const safe = slugifySkillName(slug);
+  const skill = getSkill(workspacePath, safe);
+  if (!skill) throw new Error(`Skill not found: ${safe}`);
+
+  const relativePath = normalizeSupportPath(filePath);
+  const skillDir = resolve(skillsDir(workspacePath), safe);
+  const target = resolve(skillDir, relativePath);
+  const rel = relative(skillDir, target);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error("Support file path escapes the skill directory");
+  }
+  return { skill, target, relativePath };
+}
+
+function normalizeSupportPath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/");
+  if (!normalized) throw new Error("filePath is required");
+  if (normalized.includes("\0")) throw new Error("filePath contains an invalid null byte");
+  if (normalized.startsWith("/") || isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized)) {
+    throw new Error("Support file path must be relative to the skill directory");
+  }
+
+  const parts = normalized.split("/").filter((part) => part.length > 0 && part !== ".");
+  if (parts.length < 2) throw new Error("Support file path must include a directory and filename");
+  if (parts.some((part) => part === "..")) throw new Error("Path traversal is not allowed in support file paths");
+  if (!SUPPORT_FILE_DIRS.has(parts[0]!)) {
+    throw new Error(`Support file must live under one of: ${[...SUPPORT_FILE_DIRS].sort().join(", ")}`);
+  }
+  return parts.join("/");
+}
+
+function collectSupportFiles(dir: string, prefix: string, files: string[]): void {
+  if (!existsSync(dir)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const path = resolve(dir, entry);
+    try {
+      const stat = statSync(path);
+      if (stat.isDirectory()) {
+        collectSupportFiles(path, `${prefix}/${entry}`, files);
+      } else if (stat.isFile()) {
+        files.push(`${prefix}/${entry}`);
+      }
+    } catch {
+      // Ignore unreadable support entries.
+    }
+  }
+}
+
+function countOccurrences(value: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let index = 0;
+  while (true) {
+    const found = value.indexOf(needle, index);
+    if (found === -1) return count;
+    count++;
+    index = found + needle.length;
+  }
+}
+
+function bumpSkillPatch(workspacePath: string, skill: Skill, dropEmbedding: boolean): void {
+  const next = markSkillPatched(skill.meta, new Date().toISOString(), dropEmbedding);
+  persistSkillMeta(workspacePath, next);
+}
+
+function markSkillPatched(meta: SkillMeta, now: string, dropEmbedding: boolean): SkillMeta {
+  return {
+    ...meta,
+    updatedAt: now,
+    patches: meta.patches + 1,
+    lastPatchedAt: now,
+    embedding: dropEmbedding ? undefined : meta.embedding,
+  };
+}
+
+function atomicWriteTextSync(filePath: string, content: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmp = resolve(dirname(filePath), `.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+  try {
+    writeFileSync(tmp, content, "utf-8");
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      // best-effort cleanup only
+    }
+    throw err;
   }
 }
 
@@ -452,7 +732,7 @@ export function parseSkillFile(
   const versionRaw = Number.parseInt(fm.scalar("version") || "1", 10);
   const statusRaw = fm.scalar("status");
   const status: SkillStatus =
-    statusRaw === "active" || statusRaw === "archived" || statusRaw === "draft"
+    statusRaw === "active" || statusRaw === "archived" || statusRaw === "draft" || statusRaw === "stale"
       ? statusRaw
       : "active";
 

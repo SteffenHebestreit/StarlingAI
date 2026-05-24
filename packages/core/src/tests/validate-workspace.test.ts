@@ -111,4 +111,33 @@ describe("validateWorkspaceConfig", () => {
     cleanup.push(repoRoot);
     expect(resolveConfigRoot(workspacePath)).toBe(repoRoot);
   });
+
+  it("validates a container-style mount (workspace contents at the path root, no config/)", () => {
+    // Mirrors agent/container-runner.ts: only the workspace dir is mounted, so
+    // agents/scenes/jobs sit directly under workspacePath with no sibling config/.
+    const dir = mkdtempSync(join(tmpdir(), "starlingai-validate-ctr-"));
+    cleanup.push(dir);
+    mkdirSync(join(dir, "agents"), { recursive: true });
+    mkdirSync(join(dir, "scenes"), { recursive: true });
+    mkdirSync(join(dir, "jobs"), { recursive: true });
+    writeFileSync(join(dir, "agents", "20-subagents.jsonc"), JSON.stringify({ subAgents: { researcher: AGENT } }));
+    writeFileSync(join(dir, "scenes", "10-scenes.jsonc"), JSON.stringify({ scenes: { daily: { description: "d", task: "t", allowedAgents: ["ghost"] } } }));
+    writeFileSync(join(dir, "jobs", "10-jobs.jsonc"), JSON.stringify({ jobs: { nightly: { description: "d", steps: [{ scene: "daily" }] } } }));
+
+    const result = validateWorkspaceConfig(dir, KNOWN_TOOLS);
+    // Found the shards despite the flat mount, and caught the bad agent ref.
+    expect(result.summary).toEqual({ subAgents: 1, scenes: 1, jobs: 1 });
+    expect(result.ok).toBe(false);
+    expect(result.referenceErrors.some((e) => e.includes("ghost"))).toBe(true);
+  });
+
+  it("fails loud (not a silent empty pass) when no shards are found", () => {
+    const dir = mkdtempSync(join(tmpdir(), "starlingai-validate-empty-"));
+    cleanup.push(dir);
+
+    const result = validateWorkspaceConfig(dir, KNOWN_TOOLS);
+    expect(result.ok).toBe(false);
+    expect(result.summary).toEqual({ subAgents: 0, scenes: 0, jobs: 0 });
+    expect(result.referenceErrors.some((e) => e.includes("No agent, scene, or job definitions"))).toBe(true);
+  });
 });

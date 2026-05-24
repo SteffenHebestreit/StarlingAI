@@ -478,6 +478,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  skill_manage: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create, patch, pin, archive, and maintain Skill Library procedures and support files",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   memory_promote: {
     tier: ToolTier.ONE_WRITE,
     description: "Promote session or agent memory into durable workspace memory",

@@ -2201,7 +2201,7 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const { listSkills, skillSuccessRate } = await import("../skills/store.js");
+      const { listSkillSupportFiles, listSkills, skillSuccessRate } = await import("../skills/store.js");
       const cfg = getConfig();
       const includeArchived = c.req.query("includeArchived") === "true";
       const statusFilter = c.req.query("status");
@@ -2226,12 +2226,20 @@ export function createGateway() {
         agents: s.frontmatter.agents,
         tools: s.frontmatter.tools,
         origin: s.meta.origin,
+        curatorManaged: s.meta.curatorManaged,
+        pinned: s.meta.pinned,
+        views: s.meta.views,
         uses: s.meta.uses,
         successes: s.meta.successes,
         failures: s.meta.failures,
+        patches: s.meta.patches,
         successRate: skillSuccessRate(s.meta),
         updatedAt: s.meta.updatedAt,
+        lastViewedAt: s.meta.lastViewedAt,
         lastUsedAt: s.meta.lastUsedAt,
+        lastPatchedAt: s.meta.lastPatchedAt,
+        archivedAt: s.meta.archivedAt,
+        supportFiles: listSkillSupportFiles(cfg.workspacePath, s.frontmatter.slug),
         body: s.body,
       }));
       return c.json({ total: records.length, records });
@@ -2248,7 +2256,7 @@ export function createGateway() {
       const cfg = getConfig();
       const slug = c.req.param("slug");
       if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
-      setSkillStatus(cfg.workspacePath, slug, "archived");
+      if (!setSkillStatus(cfg.workspacePath, slug, "archived")) return c.json({ error: "Skill is pinned and cannot be archived" }, 409);
       return c.json({ slug, status: "archived" });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -2263,7 +2271,7 @@ export function createGateway() {
       const cfg = getConfig();
       const slug = c.req.param("slug");
       if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
-      deleteSkill(cfg.workspacePath, slug);
+      if (!deleteSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill is pinned and cannot be deleted" }, 409);
       return c.json({ slug, deleted: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

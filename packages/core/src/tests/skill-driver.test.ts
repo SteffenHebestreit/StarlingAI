@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getSkill, listSkills, recordSkillOutcome, writeSkill } from "../skills/store.js";
+import { getSkill, listSkills, recordSkillOutcome, setSkillPinned, writeSkill } from "../skills/store.js";
 import { isPromotionEligible, runSkillImprovementSweep } from "../skills/driver.js";
 
 describe("skill improvement driver", () => {
@@ -23,6 +23,7 @@ describe("skill improvement driver", () => {
       description: "A procedure that keeps failing.",
       whenToUse: "Some niche failing case.",
       procedure: "Do the thing that rarely works in practice for this case.",
+      origin: "distilled",
     }).frontmatter.slug;
 
     // 1 success, 5 failures → 17% over 6 uses, below the 34% default floor.
@@ -42,12 +43,14 @@ describe("skill improvement driver", () => {
       description: "A procedure that works well.",
       whenToUse: "A common, well-understood case.",
       procedure: "Do the steps that reliably produce the right outcome here.",
+      origin: "distilled",
     }).frontmatter.slug;
     const untested = writeSkill(ws, {
       name: "Brand New Procedure",
       description: "Never been used yet.",
       whenToUse: "An unrelated brand-new case.",
       procedure: "Steps that have not been exercised in any real turn so far.",
+      origin: "distilled",
     }).frontmatter.slug;
 
     for (let i = 0; i < 6; i++) recordSkillOutcome(ws, reliable, "success");
@@ -65,12 +68,14 @@ describe("skill improvement driver", () => {
       description: "Run and verify the nightly database backup safely.",
       whenToUse: "When the nightly database backup must run and be verified.",
       procedure: "Snapshot the database, upload the archive, verify the checksum.",
+      origin: "distilled",
     }).frontmatter.slug;
     const weak = writeSkill(ws, {
       name: "Nightly Database Backup Procedure",
       description: "Run and verify the nightly database backup safely.",
       whenToUse: "When the nightly database backup must run and be verified.",
       procedure: "Snapshot the database, upload the archive, verify the checksum.",
+      origin: "distilled",
       slug: "nightly-database-backup-procedure-alt",
     }).frontmatter.slug;
 
@@ -96,5 +101,35 @@ describe("skill improvement driver", () => {
     const skill = getSkill(ws, slug)!;
     expect(skill.frontmatter.status).toBe("active");
     expect(isPromotionEligible(skill)).toBe(true);
+  });
+
+  it("does not auto-retire manual or pinned skills", () => {
+    const ws = workspace();
+    const manual = writeSkill(ws, {
+      name: "Manual Procedure",
+      description: "A user-authored procedure that should not be curated away.",
+      whenToUse: "When the user explicitly keeps this manual procedure.",
+      procedure: "Follow the manual runbook and keep it protected from automatic lifecycle changes.",
+      origin: "manual",
+    }).frontmatter.slug;
+    const pinned = writeSkill(ws, {
+      name: "Pinned Auto Procedure",
+      description: "An auto-created procedure protected by pinning.",
+      whenToUse: "When this pinned auto procedure applies.",
+      procedure: "Follow the protected auto-created runbook.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    for (let i = 0; i < 6; i++) {
+      recordSkillOutcome(ws, manual, "failure");
+      recordSkillOutcome(ws, pinned, "failure");
+    }
+    setSkillPinned(ws, pinned, true);
+
+    const result = runSkillImprovementSweep(ws);
+    expect(result.retired).not.toContain(manual);
+    expect(result.retired).not.toContain(pinned);
+    expect(getSkill(ws, manual)?.frontmatter.status).toBe("draft");
+    expect(getSkill(ws, pinned)?.frontmatter.status).toBe("draft");
   });
 });

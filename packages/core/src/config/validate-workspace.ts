@@ -12,6 +12,12 @@
  *
  * It is the config-side parallel to tool_dev_test: a gate the agent runs against
  * its own work before declaring success. It never writes anything.
+ *
+ * Mount-layout aware: in the gateway the repo root holds sibling config/ +
+ * workspace/ zones, but a spawned sub-agent container mounts ONLY the workspace
+ * directory (see agent/container-runner.ts). The directory resolver handles both,
+ * and an empty-inventory guard turns a path miss into a loud failure rather than
+ * a misleading empty pass.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -33,11 +39,24 @@ export interface WorkspaceValidationResult {
   summary: { subAgents: number; scenes: number; jobs: number };
 }
 
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** A directory "looks like" the workspace zone when it holds agent/scene/job shards. */
+function looksLikeWorkspaceZone(dir: string): boolean {
+  return isDir(join(dir, "agents")) || isDir(join(dir, "scenes")) || isDir(join(dir, "jobs"));
+}
+
 /**
  * Resolve the repo root that holds the `config/` and `workspace/` zones from a
  * sub-agent's workspacePath. Agents run with workspacePath pointing at the
- * `workspace/` directory, so the repo root is its parent; fall back to the path
- * itself when it already contains the zones (single-dir / test layouts).
+ * `workspace/` directory, so the repo root is usually its parent; fall back to
+ * the path itself for single-dir / container layouts.
  */
 export function resolveConfigRoot(workspacePath: string): string {
   const candidates = [
@@ -47,19 +66,35 @@ export function resolveConfigRoot(workspacePath: string): string {
   ].filter((value): value is string => Boolean(value));
 
   for (const candidate of candidates) {
-    if (existsSync(join(candidate, "config")) || existsSync(join(candidate, "workspace"))) {
+    if (isDir(join(candidate, "config")) || isDir(join(candidate, "workspace"))) {
       return candidate;
     }
   }
   return candidates[0] ?? workspacePath;
 }
 
-function isDir(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
+/**
+ * Decide which directories to read shards from, covering both deployment shapes:
+ *  - gateway in-process: <repoRoot>/config + <repoRoot>/workspace
+ *  - sub-agent container: only the workspace dir is mounted, with agents/scenes/
+ *    jobs sitting directly under workspacePath
+ */
+export function resolveShardDirs(workspacePath: string): { repoRoot: string; dirs: string[] } {
+  const repoRoot = resolveConfigRoot(workspacePath);
+  const dirs: string[] = [];
+
+  const configDir = join(repoRoot, "config");
+  if (isDir(configDir)) dirs.push(configDir);
+
+  // The workspace zone is whichever of these actually holds the shards.
+  for (const candidate of [join(repoRoot, "workspace"), workspacePath]) {
+    if (!dirs.includes(candidate) && looksLikeWorkspaceZone(candidate)) dirs.push(candidate);
   }
+  // Last resort: a literal workspace/ dir even if it doesn't hold shards yet.
+  const wsDir = join(repoRoot, "workspace");
+  if (dirs.length === 0 && isDir(wsDir)) dirs.push(wsDir);
+
+  return { repoRoot, dirs };
 }
 
 /** Sorted .json/.jsonc shard paths under a directory (recursive), like config-layout. */
@@ -95,20 +130,20 @@ function deepMerge(base: Record<string, unknown>, overlay: Record<string, unknow
 }
 
 /**
- * Read + merge the config/ and workspace/ shards under `repoRoot`, collecting
- * per-file parse errors instead of throwing. Returns the merged raw object.
+ * Read + merge shards from the given directories, collecting per-file parse
+ * errors instead of throwing. Paths in error messages are relative to repoRoot
+ * (so they read like "workspace/scenes/10-scenes.jsonc").
  */
-function mergeShards(repoRoot: string, parseErrors: string[]): Record<string, unknown> {
+function mergeShards(repoRoot: string, dirs: string[], parseErrors: string[]): Record<string, unknown> {
   let merged: Record<string, unknown> = {};
-  for (const zone of ["config", "workspace"]) {
-    const dir = join(repoRoot, zone);
-    if (!existsSync(dir) || !isDir(dir)) continue;
+  for (const dir of dirs) {
     for (const shardPath of collectShardPaths(dir)) {
       let parsed: unknown;
       try {
         parsed = JSON5.parse(readFileSync(shardPath, "utf8"));
       } catch (err) {
-        parseErrors.push(`${relative(repoRoot, shardPath).replace(/\\/g, "/")}: ${err instanceof Error ? err.message : String(err)}`);
+        const rel = relative(repoRoot, shardPath).replace(/\\/g, "/");
+        parseErrors.push(`${rel.startsWith("..") ? shardPath.replace(/\\/g, "/") : rel}: ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
       if (isPlainObject(parsed)) merged = deepMerge(merged, parsed);
@@ -124,13 +159,13 @@ function mergeShards(repoRoot: string, parseErrors: string[]): Record<string, un
  * rather than hard errors so validation never blocks on a deferred capability.
  */
 export function validateWorkspaceConfig(workspacePath: string, knownToolNames: Set<string>): WorkspaceValidationResult {
-  const repoRoot = resolveConfigRoot(workspacePath);
+  const { repoRoot, dirs } = resolveShardDirs(workspacePath);
   const parseErrors: string[] = [];
   const schemaErrors: string[] = [];
   const referenceErrors: string[] = [];
   const warnings: string[] = [];
 
-  const merged = mergeShards(repoRoot, parseErrors);
+  const merged = dirs.length > 0 ? mergeShards(repoRoot, dirs, parseErrors) : {};
 
   // Schema pass — same gate the loader applies, but collected rather than thrown.
   const result = ConfigSchema.safeParse(merged);
@@ -182,6 +217,14 @@ export function validateWorkspaceConfig(workspacePath: string, knownToolNames: S
         warnings.push(`agent "${agentName}" grants tool "${toolName}" that is not currently registered (dynamic, self-developed, or profile-gated?)`);
       }
     }
+  }
+
+  // Empty-inventory guard: a deployment always has agents. Zero of everything
+  // means we read the wrong directory, not that the config is valid — fail loud
+  // so a path miss never masquerades as a clean pass.
+  if (knownAgents.size === 0 && knownScenes.size === 0 && Object.keys(jobs).length === 0) {
+    const searched = dirs.length > 0 ? dirs.map((d) => d.replace(/\\/g, "/")).join(", ") : `(none found under ${repoRoot.replace(/\\/g, "/")})`;
+    referenceErrors.push(`No agent, scene, or job definitions were found. Searched: ${searched}. The workspace path may be wrong, or the shards are missing.`);
   }
 
   const ok = parseErrors.length === 0 && schemaErrors.length === 0 && referenceErrors.length === 0;

@@ -4,13 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   getSkill,
+  listSkillSupportFiles,
   listSkills,
   parseSkillFile,
+  patchSkill,
   recordSkillOutcome,
   recordSkillOutcomeAsync,
+  removeSkillSupportFile,
+  setSkillPinned,
   setSkillStatus,
   skillSuccessRate,
   SkillCredentialError,
+  writeSkillSupportFile,
   writeSkill,
 } from "../skills/store.js";
 import { formatSkillGuidance, searchSkills } from "../skills/service.js";
@@ -53,6 +58,9 @@ describe("skill library store", () => {
     expect(loaded?.frontmatter.agents).toEqual(["researcher", "source_verifier", "paper_author"]);
     expect(loaded?.body).toContain("source_verifier");
     expect(loaded?.meta.origin).toBe("agent");
+    expect(loaded?.meta.curatorManaged).toBe(false);
+    expect(loaded?.meta.pinned).toBe(false);
+    expect(loaded?.meta.patches).toBe(0);
   });
 
   it("bumps version on content change but preserves outcome stats", () => {
@@ -130,6 +138,65 @@ describe("skill library store", () => {
       }),
     ).toThrow(SkillCredentialError);
     expect(listSkills(ws)).toHaveLength(0);
+  });
+
+  it("patches SKILL.md in place and tracks patch metadata", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Release Checklist",
+      description: "Prepare a release safely.",
+      procedure: "1. Build the package.\n2. Publish the package.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    const patched = patchSkill(ws, slug, {
+      oldString: "2. Publish the package.",
+      newString: "2. Run smoke tests.\n3. Publish the package.",
+    });
+
+    expect(patched.frontmatter.version).toBe(2);
+    expect(patched.body).toContain("Run smoke tests");
+    expect(patched.meta.patches).toBe(1);
+    expect(patched.meta.lastPatchedAt).toBeTruthy();
+  });
+
+  it("writes and removes support files only under allowed skill subdirectories", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Provider Debugging",
+      description: "Diagnose provider failures.",
+      procedure: "Check config, reproduce the request, and verify the provider response.",
+    }).frontmatter.slug;
+
+    writeSkillSupportFile(ws, slug, "references/provider-errors.md", "# Provider Errors\n\nUse provider logs as evidence.");
+    expect(listSkillSupportFiles(ws, slug)).toEqual(["references/provider-errors.md"]);
+
+    patchSkill(ws, slug, {
+      filePath: "references/provider-errors.md",
+      oldString: "provider logs",
+      newString: "gateway and provider logs",
+    });
+    expect(getSkill(ws, slug)?.meta.patches).toBe(2);
+
+    removeSkillSupportFile(ws, slug, "references/provider-errors.md");
+    expect(listSkillSupportFiles(ws, slug)).toEqual([]);
+    expect(() => writeSkillSupportFile(ws, slug, "../escape.md", "nope")).toThrow(/traversal|relative|escapes/i);
+    expect(() => writeSkillSupportFile(ws, slug, "notes.md", "nope")).toThrow(/directory/i);
+    expect(() => writeSkillSupportFile(ws, slug, "references/secret.md", "api_key=abc123")).toThrow(SkillCredentialError);
+  });
+
+  it("prevents pinned skills from being archived or deleted through lifecycle APIs", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Precious Runbook",
+      description: "A user-protected runbook.",
+      procedure: "Keep these steps available and protected from lifecycle pruning.",
+    }).frontmatter.slug;
+
+    expect(setSkillPinned(ws, slug, true)).toBe(true);
+    expect(setSkillStatus(ws, slug, "archived")).toBe(false);
+    expect(getSkill(ws, slug)?.frontmatter.status).toBe("draft");
+    expect(getSkill(ws, slug)?.meta.pinned).toBe(true);
   });
 
   it("parses an externally authored minimal SKILL.md", () => {
