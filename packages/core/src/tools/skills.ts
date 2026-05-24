@@ -16,10 +16,13 @@ import { childLogger } from "../logger.js";
 import { searchSkills } from "../skills/service.js";
 import {
   getSkill,
+  listSkillHistory,
   listSkillSupportFiles,
   listSkills,
   patchSkill,
+  readSkillSupportFile,
   removeSkillSupportFile,
+  rollbackSkillHistory,
   setSkillPinned,
   setSkillStatus,
   writeSkillSupportFile,
@@ -183,7 +186,7 @@ registerTool({
 registerTool({
   name: "skill_manage",
   description:
-    "Create, patch, and maintain Skill Library procedures. Prefer patching an existing relevant skill "
+    "Create, patch, roll back, and maintain Skill Library procedures. Prefer patching an existing relevant skill "
     + "over creating a near-duplicate. Use write_file for references/, templates/, scripts/, or assets/ "
     + "support files. Use archive instead of hard delete; pinned skills cannot be archived by curation.",
   parameters: {
@@ -191,7 +194,7 @@ registerTool({
     properties: {
       action: {
         type: "string",
-        enum: ["create", "patch", "write_file", "remove_file", "archive", "pin", "unpin"],
+        enum: ["create", "patch", "write_file", "read_file", "remove_file", "history", "rollback", "archive", "pin", "unpin"],
         description: "Mutation to perform.",
       },
       name: { type: "string", description: "Skill slug/name. Required for all actions; create also uses it as the title." },
@@ -209,6 +212,7 @@ registerTool({
         description: "For patch/write_file/remove_file: optional support file path under references/, templates/, scripts/, or assets/. Omit for SKILL.md patch.",
       },
       fileContent: { type: "string", description: "For write_file: support file contents." },
+      historyId: { type: "string", description: "For rollback: optional history entry id. Defaults to the newest rollback-capable entry." },
     },
     required: ["action", "name"],
   },
@@ -291,6 +295,13 @@ registerTool({
         };
       }
 
+      if (action === "read_file") {
+        const filePath = String(args["filePath"] ?? "").trim();
+        if (!filePath) return { success: false, output: "", error: "filePath is required for read_file" };
+        const content = readSkillSupportFile(ctx.workspacePath, existing.frontmatter.slug, filePath);
+        return { success: true, output: content, metadata: { slug: existing.frontmatter.slug, filePath } };
+      }
+
       if (action === "remove_file") {
         const filePath = String(args["filePath"] ?? "").trim();
         if (!filePath) return { success: false, output: "", error: "filePath is required for remove_file" };
@@ -300,6 +311,33 @@ registerTool({
           success: true,
           output: `Support file removed: ${filePath} from ${skillRecordedOutput(skill)}`,
           metadata: { slug: skill.frontmatter.slug, filePath, supportFiles: listSkillSupportFiles(ctx.workspacePath, skill.frontmatter.slug) },
+        };
+      }
+
+      if (action === "history") {
+        const history = listSkillHistory(ctx.workspacePath, existing.frontmatter.slug);
+        const lines = history.slice(0, 10).map((entry) =>
+          `- ${entry.id} ${entry.action} ${entry.filePath} v${entry.versionBefore}->${entry.versionAfter} ${entry.createdAt}${entry.summary ? ` — ${entry.summary}` : ""}`,
+        );
+        return {
+          success: true,
+          output: lines.length > 0 ? `## Skill History: ${existing.frontmatter.slug}\n\n${lines.join("\n")}` : `No history for ${existing.frontmatter.slug}.`,
+          metadata: { slug: existing.frontmatter.slug, history },
+        };
+      }
+
+      if (action === "rollback") {
+        const historyId = args["historyId"] ? String(args["historyId"]).trim() : undefined;
+        const skill = rollbackSkillHistory(ctx.workspacePath, existing.frontmatter.slug, historyId);
+        logAudit("skill_rolled_back", {
+          slug: skill.frontmatter.slug,
+          historyId,
+          version: skill.frontmatter.version,
+        }, { sessionId: ctx.sessionId, severity: "warn" });
+        return {
+          success: true,
+          output: `Skill rolled back: ${skillRecordedOutput(skill)}`,
+          metadata: { slug: skill.frontmatter.slug, version: skill.frontmatter.version, patches: skill.meta.patches },
         };
       }
 

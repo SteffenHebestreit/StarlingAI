@@ -758,6 +758,23 @@ function resolveWorkflowApprovalCallback(
   );
 }
 
+function looksLikeApprovalBlockedWorkflowOutput(output: string): boolean {
+  return /(?:\b(?:approval (?:timed out|expired|was not granted|not granted|explicitly denied)|execution denied by user|requires human approval|no approval channel)\b|\[APPROVAL BLOCKED\])/i.test(output);
+}
+
+function looksLikeOperationalWorkflowBlocker(output: string): boolean {
+  const normalized = output.trim();
+  if (!normalized) return false;
+  if (/\b(?:no|without|keine?|ohne)\s+(?:current\s+)?blockers?\b/i.test(normalized)) return false;
+
+  return /(?:^|\n)\s*(?:status\s*:\s*)?(?:[!\-*> ]*)?(?:⚠️\s*)?(?:blocker|blocked)\b/i.test(normalized)
+    || /\b(?:no stored credentials|no credentials found|keine gespeicherten (?:anmeldedaten|credentials)|keine credentials|cannot log in|can't log in|kann sich nicht einloggen|kann nicht fortgesetzt werden)\b/i.test(normalized);
+}
+
+function workflowOutputIsBlocked(output: string): boolean {
+  return looksLikeApprovalBlockedWorkflowOutput(output) || looksLikeOperationalWorkflowBlocker(output);
+}
+
 function buildCoordinatorBootstrapProgressFailure(
   scene: SceneSummary,
   toolNames: string[] | undefined,
@@ -895,7 +912,8 @@ async function runSceneInline(
         : bootstrapResponse;
       const bootstrapBlocked = bootstrapRun.stats.outcome === "failure"
         || /^Sub-agent produced no final response\.?$/i.test(bootstrapResponse)
-        || Boolean(bootstrapProgressFailure);
+        || Boolean(bootstrapProgressFailure)
+        || workflowOutputIsBlocked(bootstrapResponse);
 
       finalizeWorkflowSwarmState(
         ctx,
@@ -930,16 +948,17 @@ async function runSceneInline(
       onSwarmState: ctx.onSwarmState,
     });
 
+    const resultBlocked = result.blocked || workflowOutputIsBlocked(result.response);
     finalizeWorkflowSwarmState(
       ctx,
       workflowTaskId,
-      result.blocked ? "blocked" : "completed",
+      resultBlocked ? "blocked" : "completed",
       result.response,
     );
 
     return {
       response: result.response,
-      blocked: result.blocked,
+      blocked: resultBlocked,
       toolCallsExecuted: result.toolCallsExecuted,
     };
   } finally {
@@ -1007,7 +1026,7 @@ async function runJobInline(
       toolCallsExecuted += result.toolCallsExecuted;
       executedSteps += 1;
 
-      if (result.blocked) {
+      if (result.blocked || workflowOutputIsBlocked(result.response)) {
         blocked = true;
         break;
       }

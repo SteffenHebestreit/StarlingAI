@@ -13,7 +13,7 @@ import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
-import type { AgentSession, SessionHistoryMessage } from "./session.js";
+import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -70,6 +70,8 @@ const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
 export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
+  userDisplayContent?: string;
+  userAttachments?: SessionTranscriptAttachment[];
   onChunk?: (text: string) => void;
   onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
@@ -273,6 +275,27 @@ function looksLikeRawSharedFactsDump(evidence: string): boolean {
   return false;
 }
 
+function looksLikeRawWorkspaceToolDump(evidence: string): boolean {
+  const trimmed = evidence.trim();
+  if (!trimmed) return false;
+  const compact = trimmed.replace(/\s+/g, " ").slice(0, 12_000);
+  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+20-subagents-general\.jsonc/i.test(compact)) {
+    return true;
+  }
+  if (/[{]\s*"(?:agents|subAgents)"\s*:\s*[{]/i.test(compact)
+    && /"systemPrompt"\s*:/i.test(compact)
+    && /"primary"\s*:\s*"lmstudio\//i.test(compact)) {
+    return true;
+  }
+  return /####\s+Tool Calls/i.test(trimmed)
+    && /\b(?:read_file|list_files|search_agents|agent_catalog)\b/i.test(trimmed)
+    && /\b(?:agents\/|10-core-agents\.jsonc|20-subagents-general\.jsonc|"subAgents"|"agents")\b/i.test(trimmed);
+}
+
+function formatRawWorkspaceToolDumpFailure(): string {
+  return "The delegated maintenance attempt only returned raw workspace/config read output and did not provide evidence of a completed write, validation, or config rebuild.";
+}
+
 /**
  * Reformat a raw shared-facts dump into a user-readable list. Strips the
  * `auto_<agent>_<tool>_<hash>:` keys and the `[agent/tool]` provenance tag
@@ -444,6 +467,7 @@ async function synthesizeSourceSensitiveEvidenceBackstop(
 function looksLikeWeakRecoveryEvidence(evidence: string): boolean {
   const trimmed = evidence.trim();
   if (!trimmed) return true;
+  if (looksLikeRawWorkspaceToolDump(trimmed)) return true;
   if (/^Sub-agent '[^']+' timed out/i.test(trimmed)) return true;
   if (/Partial progress before interruption:/i.test(trimmed)) return true;
   if (/^Recovered evidence snippets from completed tools:/im.test(trimmed)) return true;
@@ -459,10 +483,10 @@ function chooseBetterRecoveryEvidence(
   options?: { preferHigherScore?: boolean },
 ): { evidence: string; itemCount: number } | null {
   if (!delegateEvidence) return sharedFactsEvidence;
-  if (!sharedFactsEvidence) return delegateEvidence;
   if (looksLikeWeakRecoveryEvidence(delegateEvidence.evidence)) {
     return sharedFactsEvidence;
   }
+  if (!sharedFactsEvidence) return delegateEvidence;
 
   if (options?.preferHigherScore === false) {
     return delegateEvidence;
@@ -2074,6 +2098,7 @@ function findRecentDelegateEvidence(
     // failed" string as the final answer is worse than the generic
     // "no usable evidence" fallback.
     if (looksLikeProviderErrorEcho(evidence)) continue;
+    if (looksLikeRawWorkspaceToolDump(evidence)) continue;
     // Reject evidence whose every non-empty line is interrupted-sub-agent
     // scaffolding ("after finishing the current operation", "- Tool calls
     // executed: N", "- Iterations completed: N"). Without this, the
@@ -2496,9 +2521,14 @@ export function buildModelVisibleToolResult(
     const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
     const delegationOutcome = typeof metadata?.["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
     const hasInterruptedShape = /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(cleaned);
+    const rawWorkspaceToolDump = looksLikeRawWorkspaceToolDump(cleaned);
     const partialHasNoUsableEvidence = agentName !== "computer_use_agent"
       && delegationOutcome === "partial"
-      && (looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned) || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(cleaned)));
+      && (
+        rawWorkspaceToolDump
+        || looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned)
+        || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(cleaned))
+      );
     // A "partial" outcome whose surfaced content is just a regurgitated
     // provider/HTTP error (e.g. LM Studio HTTP 500 HTML page that the
     // soft-deadline synthesis quoted back) is not a useful partial — the
@@ -2510,7 +2540,8 @@ export function buildModelVisibleToolResult(
     const delegationPartial = delegationOutcome === "partial"
       && !partialIsProviderErrorEcho
       && !partialHasNoUsableEvidence;
-    const delegationFailed = delegationOutcome === "failure"
+    const delegationFailed = rawWorkspaceToolDump
+      || delegationOutcome === "failure"
       || partialIsProviderErrorEcho
       || partialHasNoUsableEvidence
       || (!delegationPartial && (
@@ -2558,7 +2589,7 @@ export function buildModelVisibleToolResult(
       return parts.join("\n");
     }
 
-    const partialEvidence = extractUsefulInterruptedDelegationEvidence(cleaned);
+    const partialEvidence = rawWorkspaceToolDump ? null : extractUsefulInterruptedDelegationEvidence(cleaned);
     // When the inner agent surfaced its full delegated specialist body via
     // the "Recovered delegated specialist body (full):" marker (Fix 2), the
     // partial evidence IS the actual completed sub-task answer — bump the
@@ -2566,7 +2597,9 @@ export function buildModelVisibleToolResult(
     // the parent only sees ~1.6 KB of a 13 KB completed answer.
     const partialEvidenceHasFullBody = /Recovered delegated specialist body \(full\):/i.test(cleaned);
     const partialEvidenceCap = partialEvidenceHasFullBody ? 12_000 : 1600;
-    const evidence = truncatePlainText(partialEvidence ?? cleaned, partialEvidenceCap);
+    const evidence = rawWorkspaceToolDump
+      ? formatRawWorkspaceToolDumpFailure()
+      : truncatePlainText(partialEvidence ?? cleaned, partialEvidenceCap);
     if (delegationFailed) {
       const parts = [
         `Delegated result from ${agentName} — TASK FAILED.`,
@@ -2858,7 +2891,18 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   }
 
   // ── Build message history ─────────────────────────────────────────────────
-  session.addMessage({ role: "user", content: userMessage });
+  const userMetadata: Record<string, unknown> = {};
+  if (opts.userDisplayContent?.trim()) {
+    userMetadata["displayContent"] = opts.userDisplayContent.trim();
+  }
+  if (opts.userAttachments?.length) {
+    userMetadata["attachments"] = opts.userAttachments;
+  }
+  session.addMessage({
+    role: "user",
+    content: userMessage,
+    ...(Object.keys(userMetadata).length > 0 ? { metadata: userMetadata } : {}),
+  });
   session.pruneTransientTurnSystemMessages();
   session.incrementTurn();
 

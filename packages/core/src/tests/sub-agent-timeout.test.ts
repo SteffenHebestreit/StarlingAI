@@ -244,6 +244,66 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("does not re-request approval-gated tools after approval expires", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-approval-loop-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        browser_agent: {
+          description: "Browser approval loop test agent",
+          systemPrompt: "Use the browser tools and report blockers plainly.",
+          tools: ["http_request"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "approval-1", name: "http_request", arguments: { url: "https://example.test/login" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "approval-2", name: "http_request", arguments: { url: "https://example.test/login" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "Login blocked because the required approval expired.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    const approvalCallback = vi.fn(() => Promise.reject(new Error("Tool 'http_request' approval timed out (no response within 5 min)")));
+
+    try {
+      await import("../tools/http-request.js");
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "browser_agent",
+        task: "Open the saved login page.",
+        parentSessionId: "parent-approval-loop",
+        workspacePath: tempDir,
+        approvalCallback,
+      });
+
+      expect(result.output).toContain("required approval expired");
+      expect(approvalCallback).toHaveBeenCalledTimes(1);
+      const secondCompletionTools = completeMock.mock.calls[1]?.[1] as Array<{ name: string }> | undefined;
+      expect(secondCompletionTools?.some((tool) => tool.name === "http_request")).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("injects shared findings before the sub-agent starts iterating", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-shared-facts-"));
     const configPath = join(tempDir, "starlingai.json");

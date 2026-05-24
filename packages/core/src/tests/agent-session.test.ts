@@ -351,6 +351,38 @@ describe("AgentSession collapsed history", () => {
     });
   });
 
+  it("uses user display content and attachment metadata in transcript entries", () => {
+    const session = new AgentSession({
+      channel: "webchat",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    session.addMessage({
+      role: "user",
+      content: "Image analysis (dashboard.png):\n\nLarge OCR text hidden from the visible transcript.",
+      metadata: {
+        displayContent: "📎 dashboard.png\nWhat is broken here?",
+        attachments: [{
+          filename: "dashboard.png",
+          contentType: "image/png",
+          previewMode: "image",
+          size: 1234,
+        }],
+      },
+    });
+
+    const transcript = session.toTranscript();
+    expect(transcript).toHaveLength(1);
+    expect(transcript[0]?.content).toBe("📎 dashboard.png\nWhat is broken here?");
+    expect(transcript[0]?.attachments).toEqual([{
+      filename: "dashboard.png",
+      contentType: "image/png",
+      previewMode: "image",
+      size: 1234,
+    }]);
+  });
+
   it("preserves assistant swarm state in transcript entries for reconnect hydration", () => {
     const session = new AgentSession({
       channel: "webchat",

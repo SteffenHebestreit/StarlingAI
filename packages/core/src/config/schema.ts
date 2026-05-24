@@ -203,6 +203,7 @@ export const GatewaySchema = z.object({
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
   turnTimeoutMs: z.number().int().min(30000).default(1800000), // 30 minutes
+  approvalTimeoutMs: z.number().int().min(60_000).max(3_600_000).default(300_000), // 5 minutes
   maxBodyBytes: z.number().int().min(1024).max(52_428_800).default(1_048_576), // 1 MB
   /** Publicly reachable base URL, used to construct approval callback URLs sent to external systems */
   publicUrl: z.string().url().optional(),

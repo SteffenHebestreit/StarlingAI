@@ -124,8 +124,13 @@ export interface GatewaySessionTranscriptMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
+  attachments?: ChatAttachment[];
   toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   swarmState?: SwarmState;
+}
+
+interface SendMessageOptions {
+  userMessageId?: string;
 }
 
 interface GatewayAuditEvent {
@@ -256,6 +261,11 @@ function cloneToolCalls(toolCalls: ChatMessage["toolCalls"]): ChatMessage["toolC
 function cloneAttachments(attachments: ChatMessage["attachments"]): ChatMessage["attachments"] {
   if (!attachments?.length) return undefined;
   return attachments.map((attachment) => ({ ...attachment }));
+}
+
+function attachmentsForRpc(attachments: ChatMessage["attachments"]): ChatMessage["attachments"] {
+  if (!attachments?.length) return undefined;
+  return attachments.map(({ dataUrl: _dataUrl, ...attachment }) => ({ ...attachment }));
 }
 
 function cloneGuardrailEvents(events: ChatMessage["guardrailEvents"]): ChatMessage["guardrailEvents"] {
@@ -671,6 +681,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     requestId: string;
     toolName: string;
     args: Record<string, unknown>;
+    timeoutMs?: number;
+    expiresAt?: string;
   }
 
   interface PendingInputRequest {
@@ -1501,7 +1513,10 @@ export const useGatewayStore = defineStore("gateway", () => {
       timestamp: new Date(message.timestamp),
       toolCalls: message.toolCalls,
       swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
-      attachments: (message.toolCalls ?? []).flatMap((toolCall) => extractToolAttachments(toolCall.name, toolCall.metadata)),
+      attachments: [
+        ...(message.attachments ?? []),
+        ...(message.toolCalls ?? []).flatMap((toolCall) => extractToolAttachments(toolCall.name, toolCall.metadata)),
+      ],
     })));
   }
 
@@ -1873,6 +1888,8 @@ export const useGatewayStore = defineStore("gateway", () => {
           requestId: String(data["requestId"]),
           toolName: String(data["toolName"]),
           args: (data["args"] ?? {}) as Record<string, unknown>,
+          timeoutMs: typeof data["timeoutMs"] === "number" ? data["timeoutMs"] : undefined,
+          expiresAt: typeof data["expiresAt"] === "string" ? String(data["expiresAt"]) : undefined,
         };
         notifications.pushLocalNotification({
           id: `approval:${approvalId}`,
@@ -2194,21 +2211,49 @@ export const useGatewayStore = defineStore("gateway", () => {
     return text;
   }
 
-  async function sendMessage(text: string, enableThinking?: boolean, displayContent?: string, attachments?: Array<{ filename: string; dataUrl: string }>): Promise<void> {
+  async function appendPendingUserMessage(content: string, attachments?: ChatAttachment[]): Promise<string> {
+    if (!currentSessionId.value) await createSession();
+
+    const id = crypto.randomUUID();
+    messages.value.push({
+      id,
+      role: "user",
+      content,
+      timestamp: new Date(),
+      attachments: cloneAttachments(attachments),
+    });
+    return id;
+  }
+
+  async function sendMessage(
+    text: string,
+    enableThinking?: boolean,
+    displayContent?: string,
+    attachments?: ChatAttachment[],
+    options: SendMessageOptions = {},
+  ): Promise<void> {
     if (pendingRequestId.value) {
       await supersedePendingTurn();
     }
 
     if (!currentSessionId.value) await createSession();
 
-    const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: displayContent ?? text,
-      timestamp: new Date(),
-      ...(attachments?.length && { attachments }),
-    };
-    messages.value.push(userMsg);
+    const displayText = displayContent ?? text;
+    const existingUserMessage = options.userMessageId
+      ? messages.value.find((message) => message.id === options.userMessageId && message.role === "user")
+      : undefined;
+    if (existingUserMessage) {
+      existingUserMessage.content = displayText;
+      existingUserMessage.attachments = cloneAttachments(attachments);
+    } else {
+      messages.value.push({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: displayText,
+        timestamp: new Date(),
+        attachments: cloneAttachments(attachments),
+      });
+    }
 
     const requestId = Math.random().toString(36).slice(2);
     pendingRequestId.value = requestId;
@@ -2234,6 +2279,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         sessionId: currentSessionId.value,
         message: text,
         requestId,
+        displayContent: displayText,
+        attachments: attachmentsForRpc(attachments),
         ...(enableThinking !== undefined && { enableThinking }),
       });
     } catch (error) {
@@ -2582,6 +2629,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     loadOlderCurrentSessionTranscript,
     createSession,
     loadScenes,
+    appendPendingUserMessage,
     sendMessage,
     rewindToMessage,
     convertFileToMarkdown,

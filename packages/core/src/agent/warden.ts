@@ -362,7 +362,7 @@ export function startWarden(): void {
 
     // ── Skill authoring accumulation (procedural-memory abuse detection) ───
     if (
-      (event.type === "skill_authored" || event.type === "skill_distilled" || event.type === "skill_patched") &&
+      (event.type === "skill_authored" || event.type === "skill_distilled" || event.type === "skill_patched" || event.type === "skill_rolled_back") &&
       event.sessionId
     ) {
       const hits = _skillAuthoringBySession.get(event.sessionId) ?? [];

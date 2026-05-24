@@ -13,8 +13,10 @@ import { getEmbeddingProvider } from "../providers/index.js";
 import { isEmbeddingAvailable } from "../providers/embeddings.js";
 import { childLogger } from "../logger.js";
 import {
+  listSkillSupportFiles,
   listSkills,
   recordSkillViewedAsync,
+  readSkillSupportFile,
   setSkillEmbeddingAsync,
   skillSuccessRate,
   type Skill,
@@ -65,7 +67,7 @@ export async function searchSkills(
   const limit = Math.max(1, Math.min(10, opts.limit ?? 4));
   return skills
     .map((skill) => {
-      const keyword = scoreSkillKeywordMatch(query, skill);
+      const keyword = scoreSkillKeywordMatch(workspacePath, query, skill);
       const semanticScore = semanticScores.get(skill.frontmatter.slug) ?? 0;
       const base = combineScores(keyword.score, semanticScore, semanticAvailable);
       // Reliability boost: ±0.12 from rolling success rate once a skill has uses.
@@ -109,7 +111,7 @@ export async function formatSkillGuidance(
 export async function retrieveSkillGuidance(
   workspacePath: string,
   query: string,
-  opts: { limit?: number; maxChars?: number; agent?: string } = {},
+  opts: { limit?: number; maxChars?: number; agent?: string; includeSupportFiles?: boolean } = {},
 ): Promise<{ text: string; slugs: string[] }> {
   const config = getConfig();
   if (!config.skillLibrary.enabled) return { text: "", slugs: [] };
@@ -132,7 +134,9 @@ export async function retrieveSkillGuidance(
     const { frontmatter, meta } = match.skill;
     const rate = meta.uses > 0 ? ` ${Math.round(skillSuccessRate(meta) * 100)}% over ${meta.uses}` : " new";
     const agents = frontmatter.agents.length > 0 ? ` agents: ${frontmatter.agents.join(", ")}.` : "";
-    const line = `- **${frontmatter.name}** (when: ${frontmatter.whenToUse}) [${rate.trim()}]:${agents} ${firstSteps(match.skill.body)}`;
+    const support = opts.includeSupportFiles === false ? "" : supportGuidanceSnippet(workspacePath, match.skill, query, 360);
+    let line = `- **${frontmatter.name}** (when: ${frontmatter.whenToUse}) [${rate.trim()}]:${agents} ${firstSteps(match.skill.body)}`;
+    if (support && total + line.length + support.length + 2 <= maxChars) line += ` ${support}`;
     if (total + line.length + 1 > maxChars) break;
     lines.push(line);
     slugs.push(frontmatter.slug);
@@ -157,7 +161,7 @@ function firstSteps(body: string): string {
 
 // ── Keyword scoring (mirrors workflow-catalog) ────────────────────────────────
 
-function scoreSkillKeywordMatch(query: string, skill: Skill): { score: number; matchedTerms: string[] } {
+function scoreSkillKeywordMatch(workspacePath: string, query: string, skill: Skill): { score: number; matchedTerms: string[] } {
   const queryTokens = tokenizeSearchText(query);
   const normalizedQuery = normalizeSearchText(query);
   if (queryTokens.length === 0) return { score: 0, matchedTerms: [] };
@@ -169,11 +173,13 @@ function scoreSkillKeywordMatch(query: string, skill: Skill): { score: number; m
     [...skill.frontmatter.tags, ...skill.frontmatter.agents, ...skill.frontmatter.tools].join(" "),
   );
   const bodyText = normalizeSearchText(skill.body).slice(0, 2_000);
+  const supportText = normalizeSearchText(supportSearchText(workspacePath, skill.frontmatter.slug, 2_000));
   const matchedTerms = new Set<string>();
 
   let score = 0;
   if (nameText.includes(normalizedQuery)) score += 1.15;
   else if (descriptionText.includes(normalizedQuery)) score += 0.95;
+  else if (supportText.includes(normalizedQuery)) score += 0.75;
 
   for (const token of queryTokens) {
     const variants = expandTokenVariants(token);
@@ -183,6 +189,7 @@ function scoreSkillKeywordMatch(query: string, skill: Skill): { score: number; m
     if (variants.some((v) => whenText.includes(v))) tokenScore = Math.max(tokenScore, 0.7);
     if (variants.some((v) => metaText.includes(v))) tokenScore = Math.max(tokenScore, 0.6);
     if (variants.some((v) => bodyText.includes(v))) tokenScore = Math.max(tokenScore, 0.42);
+    if (variants.some((v) => supportText.includes(v))) tokenScore = Math.max(tokenScore, 0.5);
     if (tokenScore > 0) {
       score += tokenScore;
       matchedTerms.add(token);
@@ -229,7 +236,7 @@ async function computeSemanticSkillScores(
     if (!queryVec) return new Map();
 
     const docKey = (skill: Skill): string =>
-      `${model}\x00${skill.frontmatter.slug}\x00${skill.frontmatter.version}`;
+      `${model}\x00${skill.frontmatter.slug}\x00${skill.frontmatter.version}\x00${skill.meta.patches}`;
 
     const uncached = skills.filter((skill) => {
       const cached = skill.meta.embedding;
@@ -240,7 +247,7 @@ async function computeSemanticSkillScores(
     });
 
     if (uncached.length > 0) {
-      const docs = uncached.map(buildSkillSearchDocument);
+      const docs = uncached.map((skill) => buildSkillSearchDocument(skill, workspacePath));
       const vectors = await provider.embed(docs, model);
       for (let i = 0; i < uncached.length; i++) {
         const vector = vectors[i];
@@ -265,7 +272,7 @@ async function computeSemanticSkillScores(
   }
 }
 
-export function buildSkillSearchDocument(skill: Skill): string {
+export function buildSkillSearchDocument(skill: Skill, workspacePath?: string): string {
   const fm = skill.frontmatter;
   return [
     `Skill: ${fm.name}`,
@@ -275,7 +282,46 @@ export function buildSkillSearchDocument(skill: Skill): string {
     fm.agents.length > 0 ? `Agents: ${fm.agents.join(", ")}` : "",
     fm.tools.length > 0 ? `Tools: ${fm.tools.join(", ")}` : "",
     `Procedure: ${skill.body.slice(0, 1_000)}`,
+    workspacePath ? supportSearchText(workspacePath, skill.frontmatter.slug, 1_000) : "",
   ].filter(Boolean).join("\n");
+}
+
+function supportSearchText(workspacePath: string, slug: string, maxChars: number): string {
+  const parts: string[] = [];
+  let total = 0;
+  for (const filePath of listSkillSupportFiles(workspacePath, slug)) {
+    if (total >= maxChars) break;
+    try {
+      const raw = readSkillSupportFile(workspacePath, slug, filePath).replace(/\s+/g, " ").trim();
+      const piece = `Support ${filePath}: ${raw.slice(0, Math.max(0, maxChars - total))}`;
+      parts.push(piece);
+      total += piece.length + 1;
+    } catch {
+      // Ignore unreadable support files during retrieval.
+    }
+  }
+  return parts.join("\n");
+}
+
+function supportGuidanceSnippet(workspacePath: string, skill: Skill, query: string, maxChars: number): string {
+  if (maxChars < 80) return "";
+  const queryTokens = tokenizeSearchText(query);
+  const candidates = listSkillSupportFiles(workspacePath, skill.frontmatter.slug)
+    .map((filePath) => {
+      try {
+        const raw = readSkillSupportFile(workspacePath, skill.frontmatter.slug, filePath).replace(/\s+/g, " ").trim();
+        const haystack = normalizeSearchText(`${filePath} ${raw}`);
+        const score = queryTokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0);
+        return { filePath, raw, score };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is { filePath: string; raw: string; score: number } => item !== null)
+    .sort((left, right) => right.score - left.score || left.filePath.localeCompare(right.filePath));
+  if (candidates.length === 0) return "";
+  const selected = candidates[0]!;
+  return truncate(`Support ${selected.filePath}: ${selected.raw}`, maxChars);
 }
 
 // ── Shared text helpers (kept local to avoid cross-module coupling) ────────────

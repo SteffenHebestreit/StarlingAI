@@ -153,7 +153,7 @@
               Open
             </button>
             <button
-              v-else-if="!att.isDirectory"
+              v-else-if="!att.isDirectory && (att.dataUrl || att.relativePath)"
               class="artifact-action"
               @click="downloadAttachment(att)"
             >
@@ -738,7 +738,7 @@ watch(
 );
 
 const imageAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) =>
-  Boolean(attachment.dataUrl?.startsWith("data:image/")) || attachment.previewMode === "image" || attachment.contentType?.startsWith("image/")
+  Boolean(attachment.dataUrl?.startsWith("data:image/") || attachment.dataUrl?.startsWith("blob:"))
 ));
 
 const artifactAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) => !imageAttachments.value.includes(attachment)));
@@ -771,6 +771,8 @@ function attachmentLabel(attachment: ChatAttachment): string {
       return "PDF artifact";
     case "audio":
       return "Audio artifact";
+    case "image":
+      return "Image attachment";
     case "mermaid":
       return "Mermaid diagram";
     case "markdown":
@@ -795,7 +797,7 @@ function formatAttachmentSize(bytes?: number): string {
 
 function isPreviewable(attachment: ChatAttachment): boolean {
   return Boolean(attachment.relativePath || attachment.externalUrl)
-    && ["html", "pdf", "text", "markdown", "json", "audio", "mermaid", "website"].includes(attachment.previewMode ?? "download");
+    && ["html", "pdf", "text", "markdown", "json", "audio", "image", "mermaid", "website"].includes(attachment.previewMode ?? "download");
 }
 
 function ensureMermaidInitialized(): void {
@@ -1051,6 +1053,11 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
     if (!attachment.relativePath) return;
 
     const { blob, filename } = await gateway.fetchWorkspaceArtifactBlob(attachment.relativePath, { disposition: "inline" });
+    if (attachment.previewMode === "image") {
+      lightboxUrl.value = URL.createObjectURL(blob);
+      return;
+    }
+
     if (attachment.previewMode === "mermaid") {
       const source = await blob.text();
       artifactPreview.value = {

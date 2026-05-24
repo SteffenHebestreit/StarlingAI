@@ -304,6 +304,77 @@ describe("rpc timeout cleanup", () => {
     expect(errorEvent).toBeUndefined();
   });
 
+  it("uses the configured webchat approval timeout and sends deadline metadata", async () => {
+    vi.useFakeTimers();
+
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-rpc-approval-timeout-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        jwtSecret: "t".repeat(32),
+        approvalTimeoutMs: 120_000,
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+  vi.resetModules();
+
+    let capturedApprovalCallback: ((toolName: string, args: Record<string, unknown>) => Promise<boolean>) | undefined;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(({ approvalCallback }: { approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean> }) => {
+        capturedApprovalCallback = approvalCallback;
+        return new Promise(() => {});
+      }),
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = {
+      readyState: 1,
+      send(payload: string) {
+        sent.push(JSON.parse(payload) as Record<string, unknown>);
+      },
+    };
+
+    try {
+      const [{ RpcConnection }, session] = await Promise.all([
+        import("../gateway/rpc.js"),
+        import("../agent/session.js"),
+      ]);
+
+      const active = session.createSession({ channel: "webchat" });
+      const connection = new RpcConnection(ws as never);
+
+      await connection.handleMessage(JSON.stringify({
+        id: "req-approval-timeout",
+        method: "chat.send",
+        params: {
+          sessionId: active.id,
+          requestId: "turn-approval-timeout",
+          message: "fill the saved login form",
+        },
+      }));
+
+      expect(capturedApprovalCallback).toBeDefined();
+      const approvalPromise = capturedApprovalCallback!("site_fill_credentials", { hostname: "n8n.k2o" });
+      const approvalRejection = approvalPromise.catch((err: unknown) => err);
+
+      const approvalEvent = sent.find((event) => event["type"] === "agent.approval_needed");
+      const approvalData = approvalEvent?.["data"] as Record<string, unknown> | undefined;
+      expect(approvalData?.["requestId"]).toBe("turn-approval-timeout");
+      expect(approvalData?.["timeoutMs"]).toBe(120_000);
+      expect(typeof approvalData?.["expiresAt"]).toBe("string");
+
+      await vi.advanceTimersByTimeAsync(120_000);
+  const rejection = await approvalRejection;
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).message).toContain("no response within 2 min");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports an in-flight request as active via gateway.status", async () => {
     vi.doMock("../agent/runtime.js", () => ({
       runTurn: vi.fn(() => new Promise(() => {})),
