@@ -19,6 +19,52 @@ import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("tool:credentials");
 
+// ── Login-form auto-location ──────────────────────────────────────────────────
+// LLM-supplied element refs go stale or are guessed wrong (especially by smaller
+// models), which made site_fill_credentials fail with "fields failed to fill" on
+// real login pages. We parse a fresh browser_snapshot to locate the username,
+// password, and submit elements ourselves, and use the LLM-supplied refs only as
+// a hint/fallback.
+
+interface SnapshotElement { role: string; name: string; ref: string; isPassword: boolean; line: number; }
+
+const INPUT_ROLES = new Set(["textbox", "searchbox", "combobox", "textfield", "input"]);
+const BUTTON_ROLES = new Set(["button", "link"]);
+const USERNAME_NAME_RE = /e-?mail|user|benutzer|login|anmeldename|username|konto|account/i;
+const PASSWORD_NAME_RE = /pass(word|wort)/i;
+const SUBMIT_NAME_RE = /sign\s*in|log\s*in|login|anmelden|einloggen|weiter|continue|submit|absenden|next/i;
+
+/** Parse a Playwright accessibility snapshot into {role, name, ref} elements. */
+export function parseSnapshotElements(snapshot: string): SnapshotElement[] {
+  const elements: SnapshotElement[] = [];
+  snapshot.split("\n").forEach((raw, idx) => {
+    const refMatch = raw.match(/\[ref=([A-Za-z0-9_]+)\]/);
+    if (!refMatch) return;
+    const role = (raw.match(/^\s*-\s*([A-Za-z]+)/)?.[1] ?? "").toLowerCase();
+    const name = raw.match(/"([^"]*)"/)?.[1] ?? "";
+    const isPassword = PASSWORD_NAME_RE.test(name) || /\btype\s*=\s*["']?password\b/i.test(raw);
+    elements.push({ role, name, ref: refMatch[1]!, isPassword, line: idx });
+  });
+  return elements;
+}
+
+/** Heuristically pick the username, password, and submit refs from snapshot elements. */
+export function pickLoginRefs(elements: SnapshotElement[]): { usernameRef?: string; passwordRef?: string; submitRef?: string } {
+  const inputs = elements.filter((el) => INPUT_ROLES.has(el.role));
+  const password = inputs.find((el) => el.isPassword) ?? inputs.find((el) => PASSWORD_NAME_RE.test(el.name));
+
+  let username = inputs.find((el) => !el.isPassword && USERNAME_NAME_RE.test(el.name));
+  if (!username && password) {
+    // The visible input directly before the password field is almost always the username.
+    const before = inputs.filter((el) => el.line < password.line && !el.isPassword);
+    username = before[before.length - 1];
+  }
+  if (!username) username = inputs.find((el) => !el.isPassword);
+
+  const submit = elements.find((el) => BUTTON_ROLES.has(el.role) && SUBMIT_NAME_RE.test(el.name));
+  return { usernameRef: username?.ref, passwordRef: password?.ref, submitRef: submit?.ref };
+}
+
 // ── get_site_credentials (redacted — never leaks secrets) ─────────────────────
 
 registerTool({
@@ -109,18 +155,18 @@ registerTool({
       },
       usernameRef: {
         type: "string",
-        description: "Element reference from browser_snapshot for the username / email input field",
+        description: "Optional hint: element reference from browser_snapshot for the username / email input. If omitted or wrong, the tool auto-locates the field from a fresh snapshot.",
       },
       passwordRef: {
         type: "string",
-        description: "Element reference from browser_snapshot for the password input field",
+        description: "Optional hint: element reference for the password input. If omitted or wrong, the tool auto-locates it from a fresh snapshot.",
       },
       submitRef: {
         type: "string",
-        description: "Optional: element reference for the submit / login button — will be clicked after filling",
+        description: "Optional hint: element reference for the submit / login button. If omitted, the tool auto-locates and clicks it after filling.",
       },
     },
-    required: ["hostname", "usernameRef", "passwordRef"],
+    required: ["hostname"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const hostname = String(args["hostname"] ?? "").trim();
@@ -137,53 +183,86 @@ registerTool({
       };
     }
 
-    const usernameRef = String(args["usernameRef"] ?? "").trim();
-    const passwordRef = String(args["passwordRef"] ?? "").trim();
-    const submitRef = args["submitRef"] ? String(args["submitRef"]).trim() : undefined;
+    const hintUsernameRef = args["usernameRef"] ? String(args["usernameRef"]).trim() : undefined;
+    const hintPasswordRef = args["passwordRef"] ? String(args["passwordRef"]).trim() : undefined;
+    const hintSubmitRef = args["submitRef"] ? String(args["submitRef"]).trim() : undefined;
 
-    if (!usernameRef || !passwordRef) {
-      return { success: false, output: "", error: "usernameRef and passwordRef are required (get them from a browser_snapshot)" };
+    // Auto-locate the login fields from a FRESH snapshot so we don't depend on
+    // (frequently stale or mis-guessed) LLM-supplied refs. The hints, when given,
+    // are tried first and the located refs are the fallback.
+    let located: { usernameRef?: string; passwordRef?: string; submitRef?: string } = {};
+    try {
+      const snapshot = await callPlaywrightTool("browser_snapshot", {});
+      located = pickLoginRefs(parseSnapshotElements(snapshot));
+    } catch (err) {
+      log.debug({ err, hostname: cred.hostname }, "site_fill_credentials: snapshot for auto-location failed; relying on supplied refs");
     }
 
-    // Get Playwright MCP connection
-    // Use callPlaywrightTool which properly checks isError from MCP results
-    // (raw callTool returns isError without throwing, masking fill failures)
+    const usernameRef = hintUsernameRef ?? located.usernameRef;
+    const passwordRef = hintPasswordRef ?? located.passwordRef;
+    const submitRef = hintSubmitRef ?? located.submitRef;
+
+    if (!usernameRef || !passwordRef) {
+      return {
+        success: false,
+        output: "",
+        error: "Could not locate the username and/or password field. Take a browser_snapshot of the login form and pass usernameRef/passwordRef explicitly.",
+      };
+    }
 
     logAudit("credential_fill", { hostname: cred.hostname, source: cred.source, target: "browser" }, { sessionId: ctx.sessionId });
 
     const results: string[] = [];
     let allOk = true;
 
-    // 1. Fill username
-    try {
-      await callPlaywrightTool("browser_type", { element: "username / email field", ref: usernameRef, text: cred.username });
-      results.push(`Username field (ref ${usernameRef}): filled ✓`);
-    } catch (err) {
-      allOk = false;
-      results.push(`Username field (ref ${usernameRef}): FAILED — ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // Fill a field by ref, retrying with the auto-located ref if the primary fails.
+    const fillField = async (label: string, primaryRef: string, fallbackRef: string | undefined, text: string): Promise<void> => {
+      try {
+        await callPlaywrightTool("browser_type", { element: label, ref: primaryRef, text });
+        results.push(`${label} (ref ${primaryRef}): filled ✓`);
+      } catch (primaryErr) {
+        if (fallbackRef && fallbackRef !== primaryRef) {
+          try {
+            await callPlaywrightTool("browser_type", { element: label, ref: fallbackRef, text });
+            results.push(`${label} (ref ${fallbackRef}, auto-located after hint failed): filled ✓`);
+            return;
+          } catch (fallbackErr) {
+            allOk = false;
+            results.push(`${label}: FAILED — ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+            return;
+          }
+        }
+        allOk = false;
+        results.push(`${label} (ref ${primaryRef}): FAILED — ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`);
+      }
+    };
 
-    // 2. Fill password
-    try {
-      await callPlaywrightTool("browser_type", { element: "password field", ref: passwordRef, text: cred.password });
-      results.push(`Password field (ref ${passwordRef}): filled ✓`);
-    } catch (err) {
-      allOk = false;
-      results.push(`Password field (ref ${passwordRef}): FAILED — ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // 1. Username, 2. Password (hint first, located ref as fallback)
+    await fillField("Username / email field", usernameRef, located.usernameRef, cred.username);
+    await fillField("Password field", passwordRef, located.passwordRef, cred.password);
 
-    // 3. Click submit (optional)
+    // 3. Click submit (hint first, located ref as fallback)
     if (submitRef) {
       try {
         await callPlaywrightTool("browser_click", { element: "submit / login button", ref: submitRef });
         results.push(`Submit button (ref ${submitRef}): clicked ✓`);
-      } catch (err) {
-        allOk = false;
-        results.push(`Submit button (ref ${submitRef}): FAILED — ${err instanceof Error ? err.message : String(err)}`);
+      } catch (primaryErr) {
+        if (located.submitRef && located.submitRef !== submitRef) {
+          try {
+            await callPlaywrightTool("browser_click", { element: "submit / login button", ref: located.submitRef });
+            results.push(`Submit button (ref ${located.submitRef}, auto-located): clicked ✓`);
+          } catch (fallbackErr) {
+            allOk = false;
+            results.push(`Submit button: FAILED — ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+          }
+        } else {
+          allOk = false;
+          results.push(`Submit button (ref ${submitRef}): FAILED — ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`);
+        }
       }
     }
 
-    log.info({ hostname: cred.hostname, allOk }, "site_fill_credentials completed");
+    log.info({ hostname: cred.hostname, allOk, autoLocated: !hintUsernameRef || !hintPasswordRef }, "site_fill_credentials completed");
 
     return {
       success: allOk,
@@ -195,7 +274,7 @@ registerTool({
         "Otherwise take a fresh browser_snapshot to verify the new page state before any further clicks.",
         "Do not re-click the submit button or wait for login-form text such as Sign in, Email, or Password unless a fresh snapshot shows the form is still awaiting submission.",
       ].join("\n"),
-      error: allOk ? undefined : "One or more fields failed to fill — check the refs from browser_snapshot",
+      error: allOk ? undefined : "One or more fields failed to fill even after auto-locating from a fresh snapshot — the login form may be inside an iframe or behind a cookie/consent overlay. Take a browser_snapshot and inspect the form, dismiss any overlay, then retry.",
       metadata: { hostname: cred.hostname, source: cred.source },
     };
   },
