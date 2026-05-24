@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch, onUnmounted } from "vue";
 import { useComputerStore, type ComputerMonitorInfo } from "../stores/computer";
+import { useFullscreen } from "../composables/useFullscreen";
 
 const computer = useComputerStore();
+
+const screenshotStage = ref<HTMLElement | null>(null);
+const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(screenshotStage);
 
 // Tick counter to force re-evaluation of age-based computed properties
 const _markerTick = ref(0);
@@ -204,11 +208,16 @@ async function copyClickCommand() {
 
     <!-- Screenshot viewer -->
     <div v-if="previewSessionId && screenshot" class="screenshot-viewer">
-      <h4>Live View — {{ previewSessionId.slice(0, 12) }}</h4>
+      <div class="live-view-header">
+        <h4>Live View — {{ previewSessionId.slice(0, 12) }}</h4>
+        <button class="btn-sm btn-fullscreen" :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" @click="toggleFullscreen">
+          {{ isFullscreen ? "⤡ Exit fullscreen" : "⤢ Fullscreen" }}
+        </button>
+      </div>
       <p class="screenshot-help">
         Live preview updates automatically. Click anywhere on the screenshot to inspect the mapped desktop coordinates.
       </p>
-      <div class="screenshot-stage" @click="inspectClick">
+      <div ref="screenshotStage" class="screenshot-stage" @click="inspectClick">
         <img
           ref="screenshotImage"
           :src="screenshot.dataUrl"
@@ -433,11 +442,41 @@ async function copyClickCommand() {
   font-size: 0.8rem;
 }
 
+.live-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.btn-fullscreen {
+  white-space: nowrap;
+}
+
 .screenshot-stage {
   position: relative;
   display: inline-block;
   max-width: 100%;
   cursor: crosshair;
+}
+
+/* When the stage is fullscreen, center the image on a dark backdrop. */
+.screenshot-stage:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  cursor: crosshair;
+}
+.screenshot-stage:fullscreen .screenshot-img {
+  max-width: 100vw;
+  max-height: 100vh;
+  width: auto;
+  height: auto;
+  border: none;
+  border-radius: 0;
 }
 
 .screenshot-img {
