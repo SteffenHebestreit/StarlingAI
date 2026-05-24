@@ -80,24 +80,16 @@ export function classifyToolIntervention(input: ToolInterventionInput): Interven
   }
 
   if (!input.success) {
-    if (/(timed out|timeout|stalled|killed|abort|aborted|cancelled|canceled)/i.test(normalizedError)) {
-      return {
-        reasonCode: "tool_timeout",
-        severity: "error",
-        toolName,
-        summary: `${toolName} appears stuck or timed out`,
-        detail: `The tool did not complete in time. You can stop this run, start a new one, or ask the agent to stop the external process with approval if something is still running.`,
-        actions: PROCESS_ACTIONS,
-      };
-    }
-
     if (/(approval|denied by user|requires human approval|no approval channel)/i.test(normalizedError)) {
+      const approvalTimedOut = /(timed out|timeout|expired)/i.test(normalizedError);
       return {
-        reasonCode: "approval_required",
+        reasonCode: approvalTimedOut ? "approval_timeout" : "approval_required",
         severity: "warn",
         toolName,
-        summary: `${toolName} needs approval`,
-        detail: `The agent could not complete ${toolName} without human approval. You can retry in a fresh run or ask the agent to perform the stop action and approve it when prompted.`,
+        summary: approvalTimedOut ? `${toolName} approval expired` : `${toolName} needs approval`,
+        detail: approvalTimedOut
+          ? `The agent waited for human approval to run ${toolName}, but no response arrived before the approval expired. Retry when an operator can approve the prompt.`
+          : `The agent could not complete ${toolName} without human approval. You can retry in a fresh run or ask the agent to perform the stop action and approve it when prompted.`,
         actions: [
           { kind: "new_session", label: "Start a new session" },
           {
@@ -106,6 +98,17 @@ export function classifyToolIntervention(input: ToolInterventionInput): Interven
             prompt: APPROVAL_STOP_PROMPT,
           },
         ],
+      };
+    }
+
+    if (/(timed out|timeout|stalled|killed|abort|aborted|cancelled|canceled)/i.test(normalizedError)) {
+      return {
+        reasonCode: "tool_timeout",
+        severity: "error",
+        toolName,
+        summary: `${toolName} appears stuck or timed out`,
+        detail: `The tool did not complete in time. You can stop this run, start a new one, or ask the agent to stop the external process with approval if something is still running.`,
+        actions: PROCESS_ACTIONS,
       };
     }
 

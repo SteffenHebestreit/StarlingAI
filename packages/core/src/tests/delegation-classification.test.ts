@@ -328,6 +328,34 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  it("returns failure for read-only raw config dumps when a maintenance edit was requested", () => {
+    const rawConfigDump = [
+      ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 20-subagents-general.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
+      "",
+      "{ \"subAgents\": { \"browser_agent\": { \"model\": { \"primary\": \"lmstudio/qwen3.6-35b-a3b\" }, \"systemPrompt\": \"You are a browser automation specialist.\" } } }",
+      "",
+      "#### Tool Calls",
+      "- list_files",
+      "- read_file",
+    ].join("\n");
+
+    const r = classifyDelegationResult(
+      rawConfigDump,
+      "partial",
+      {
+        toolCount: 5,
+        toolNames: ["list_files", "read_file", "read_file"],
+        terminalState: "completed",
+        outcome: "partial" as const,
+      },
+      { tags: ["prompts", "agents"] } as never,
+      "prompt_optimizer",
+      "Passe browser_agent und vision_browser_analyst auf lmstudio/qwen3.5-9b an.",
+    );
+
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   it("keeps completed edit statements as success", () => {
     const r = classifyDelegationResult(
       "Now I have updated scenes/10-scenes.jsonc and verified the apply_jobs entry.",

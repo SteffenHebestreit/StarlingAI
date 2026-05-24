@@ -4,13 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   getSkill,
+  listSkillHistory,
   listSkillSupportFiles,
   listSkills,
   parseSkillFile,
   patchSkill,
+  readSkillSupportFile,
   recordSkillOutcome,
   recordSkillOutcomeAsync,
   removeSkillSupportFile,
+  rollbackSkillHistory,
   setSkillPinned,
   setSkillStatus,
   skillSuccessRate,
@@ -160,6 +163,31 @@ describe("skill library store", () => {
     expect(patched.meta.lastPatchedAt).toBeTruthy();
   });
 
+  it("records patch history and rolls back SKILL.md without reusing old version numbers", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Release Rollback Checklist",
+      description: "Prepare a release safely with rollback coverage.",
+      procedure: "1. Build the package.\n2. Publish the package.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    patchSkill(ws, slug, {
+      oldString: "2. Publish the package.",
+      newString: "2. Run smoke tests.\n3. Publish the package.",
+    });
+    const history = listSkillHistory(ws, slug);
+    expect(history[0]?.action).toBe("patch");
+    expect(history[0]?.filePath).toBe("SKILL.md");
+
+    const rolledBack = rollbackSkillHistory(ws, slug, history[0]?.id);
+    expect(rolledBack.frontmatter.version).toBe(3);
+    expect(rolledBack.body).toContain("2. Publish the package.");
+    expect(rolledBack.body).not.toContain("Run smoke tests");
+    expect(rolledBack.meta.patches).toBe(2);
+    expect(listSkillHistory(ws, slug)[0]?.action).toBe("rollback");
+  });
+
   it("writes and removes support files only under allowed skill subdirectories", () => {
     const ws = workspace();
     const slug = writeSkill(ws, {
@@ -183,6 +211,26 @@ describe("skill library store", () => {
     expect(() => writeSkillSupportFile(ws, slug, "../escape.md", "nope")).toThrow(/traversal|relative|escapes/i);
     expect(() => writeSkillSupportFile(ws, slug, "notes.md", "nope")).toThrow(/directory/i);
     expect(() => writeSkillSupportFile(ws, slug, "references/secret.md", "api_key=abc123")).toThrow(SkillCredentialError);
+  });
+
+  it("can roll back support-file creation and removal", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Provider Rollback Debugging",
+      description: "Diagnose provider failures with reusable support notes.",
+      procedure: "Check config, reproduce the request, and verify provider response details.",
+    }).frontmatter.slug;
+
+    writeSkillSupportFile(ws, slug, "references/provider-errors.md", "Provider 429 means retry after backoff.");
+    expect(readSkillSupportFile(ws, slug, "references/provider-errors.md")).toContain("429");
+    rollbackSkillHistory(ws, slug);
+    expect(listSkillSupportFiles(ws, slug)).toEqual([]);
+
+    writeSkillSupportFile(ws, slug, "references/provider-errors.md", "Provider 429 means retry after backoff.");
+    removeSkillSupportFile(ws, slug, "references/provider-errors.md");
+    expect(listSkillSupportFiles(ws, slug)).toEqual([]);
+    rollbackSkillHistory(ws, slug);
+    expect(readSkillSupportFile(ws, slug, "references/provider-errors.md")).toContain("retry after backoff");
   });
 
   it("prevents pinned skills from being archived or deleted through lifecycle APIs", () => {
@@ -310,5 +358,23 @@ describe("skill library search + guidance", () => {
     expect(guidance).toContain("## Learned Procedures");
     expect(guidance).toContain("Source-Grounded Research Packet");
     expect(guidance).toContain("researcher");
+  });
+
+  it("matches and injects compact support-file snippets", async () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Provider Incident Runbook",
+      description: "Diagnose provider incidents from reusable evidence.",
+      whenToUse: "When a model provider behaves unexpectedly.",
+      procedure: "Check the provider config and reproduce the failing request.",
+    }).frontmatter.slug;
+    writeSkillSupportFile(ws, slug, "references/qwen-rate-limits.md", "Qwen 429 responses usually require exponential backoff and model availability checks.");
+
+    const matches = await searchSkills(ws, "qwen 429", { limit: 3 });
+    expect(matches[0]?.skill.frontmatter.slug).toBe(slug);
+
+    const guidance = await formatSkillGuidance(ws, "qwen 429 provider response", { maxChars: 1200 });
+    expect(guidance).toContain("Support references/qwen-rate-limits.md");
+    expect(guidance).toContain("exponential backoff");
   });
 });

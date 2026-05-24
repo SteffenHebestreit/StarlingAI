@@ -243,40 +243,32 @@
       </template>
     </SidePanel>
 
-    <!-- Human-in-the-loop approval banner -->
-    <Transition name="approval">
-      <div v-if="gateway.pendingApproval"
-           role="alertdialog" aria-live="assertive"
-           class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
-           style="background: rgba(15,12,30,0.97); border: 1px solid rgba(168,85,247,0.5); box-shadow: 0 0 24px rgba(168,85,247,0.25);">
-        <div class="px-5 py-4">
-          <div class="flex items-center gap-2 mb-2">
-            <span class="text-xs font-semibold tracking-widest uppercase"
-                  style="background: linear-gradient(90deg,#a855f7,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-              Approval Required
-            </span>
+    <Teleport to="body">
+      <Transition name="approval">
+        <div v-if="gateway.pendingApproval"
+             role="alertdialog" aria-live="assertive"
+             class="approval-banner">
+          <div class="approval-banner__header">
+            <span class="approval-banner__eyebrow">Approval Required</span>
+            <span v-if="approvalCountdownLabel" class="approval-banner__timer">{{ approvalCountdownLabel }}</span>
           </div>
-          <p class="text-sm text-gray-300 mb-1">
+          <p class="approval-banner__copy">
             The agent wants to call
-            <code class="text-purple-300 bg-purple-900/30 px-1.5 py-0.5 rounded font-mono text-xs">{{ gateway.pendingApproval.toolName }}</code>
+            <code class="approval-banner__tool">{{ gateway.pendingApproval.toolName }}</code>
             with these arguments:
           </p>
-          <pre class="text-xs text-gray-400 bg-gray-900/60 rounded-lg px-3 py-2 overflow-x-auto mb-4 max-h-36"
-               style="border: 1px solid rgba(168,85,247,0.2);">{{ JSON.stringify(gateway.pendingApproval.args, null, 2) }}</pre>
-          <div class="flex gap-3">
-            <button @click="approveAction(true)"
-                    class="btn-grad px-5 py-2 rounded-xl text-sm font-semibold">
+          <pre class="approval-banner__args">{{ JSON.stringify(gateway.pendingApproval.args, null, 2) }}</pre>
+          <div class="approval-banner__actions">
+            <button @click="approveAction(true)" class="btn-grad approval-banner__button">
               Approve
             </button>
-            <button @click="approveAction(false)"
-                    class="btn-ghost px-5 py-2 rounded-xl text-sm font-semibold"
-                    style="border-color: rgba(239,68,68,0.4); color: #f87171;">
+            <button @click="approveAction(false)" class="btn-ghost approval-banner__button approval-banner__button--deny">
               Deny
             </button>
           </div>
         </div>
-      </div>
-    </Transition>
+      </Transition>
+    </Teleport>
 
     <!-- Human-in-the-loop input request banner -->
     <Transition name="approval">
@@ -966,6 +958,31 @@ const thinkingMode = ref<boolean | undefined>(undefined);
 const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
 const previewModalUrl = ref<string | null>(null);
 const expandedMessageHistory = ref(false);
+const approvalNowMs = ref(Date.now());
+let approvalClockId: number | null = null;
+
+const approvalRemainingMs = computed(() => {
+  const expiresAt = gateway.pendingApproval?.expiresAt;
+  if (!expiresAt) return null;
+  const expiresAtMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresAtMs)) return null;
+  return Math.max(0, expiresAtMs - approvalNowMs.value);
+});
+
+const approvalCountdownLabel = computed(() => {
+  const remaining = approvalRemainingMs.value;
+  if (remaining === null) return "";
+  if (remaining <= 0) return "Expiring now";
+  return `Expires in ${formatApprovalCountdown(remaining)}`;
+});
+
+function formatApprovalCountdown(value: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(value / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
 
 const audioProgressPercent = computed(() => {
   if (audioDuration.value <= 0) return 0;
@@ -1196,11 +1213,6 @@ const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shell
 
 // ── Off-canvas side panel ───────────────────────────────────────────────
 const sidePanelOpen = ref(false);
-
-// Auto-open the panel when live content first becomes available
-watch(hasSidePanels, (nowHas, hadBefore) => {
-  if (nowHas && !hadBefore) sidePanelOpen.value = true;
-});
 
 // Aggregate previewable, non-image attachments from all messages in the session
 // Aggregate previewable and downloadable attachments from all messages in the session.
@@ -2712,16 +2724,24 @@ async function sendMessage() {
   if (pending.length > 0) {
     analysing.value = true;
     wakeStatus.value = `Analysing image${pending.length > 1 ? "s" : ""}…`;
+    let pendingUserMessageId: string | undefined;
     try {
-      const [analyses, dataUrls] = await Promise.all([
-        Promise.all(pending.map(p => gateway.analyzeImageFile(p.file))),
-        Promise.all(pending.map(p => fileToDataUrl(p.file))),
-      ]);
+      const dataUrls = await Promise.all(pending.map(p => fileToDataUrl(p.file)));
+      const attachments: ChatAttachment[] = pending.map((p, i) => ({
+        filename: p.filename,
+        dataUrl: dataUrls[i],
+        contentType: p.file.type || "image/*",
+        previewMode: "image",
+        size: p.file.size,
+      }));
+      pendingUserMessageId = await gateway.appendPendingUserMessage(displayContent, attachments);
+      const analyses = await Promise.all(pending.map(p => gateway.analyzeImageFile(p.file)));
       const imageContext = pending.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
-      const attachments = pending.map((p, i) => ({ filename: p.filename, dataUrl: dataUrls[i] }));
       const fullText = [imageContext, trimmedText].filter(Boolean).join("\n\n");
       wakeStatus.value = "";
-      await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments);
+      await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
+    } catch (error) {
+      wakeStatus.value = error instanceof Error ? error.message : String(error);
     } finally {
       analysing.value = false;
       for (const p of pending) URL.revokeObjectURL(p.previewUrl);
@@ -3178,6 +3198,9 @@ watch(compactComposer, () => {
 watch(inputText, () => {
   nextTick(() => { adjustComposerHeight(); });
 }, { flush: "post" });
+watch(() => gateway.pendingApproval?.approvalId, () => {
+  approvalNowMs.value = Date.now();
+});
 
 // Auto-speak: fires when a turn finishes (isLoading flips false → true → false)
 // and the speak-reply toggle is on and the user is in voice-input mode.
@@ -3206,9 +3229,16 @@ watch(() => gateway.connected, async (connected) => {
 
 onMounted(() => {
   adjustComposerHeight();
+  approvalClockId = window.setInterval(() => {
+    if (gateway.pendingApproval) approvalNowMs.value = Date.now();
+  }, 1_000);
 });
 
 onUnmounted(() => {
+  if (approvalClockId !== null) {
+    window.clearInterval(approvalClockId);
+    approvalClockId = null;
+  }
   stopSendAcknowledgementPlayback();
   stopProgressPlayback();
   stopReplySpeechPlayback({ resetPreview: true });
@@ -3237,6 +3267,114 @@ onUnmounted(() => {
 .approval-leave-to {
   opacity: 0;
   transform: translateY(8px);
+}
+
+.approval-banner {
+  position: fixed;
+  left: clamp(1rem, 4vw, 2rem);
+  right: clamp(1rem, 4vw, 2rem);
+  bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem));
+  z-index: 70;
+  max-width: 48rem;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: 1rem;
+  border: 1px solid rgba(168, 85, 247, 0.62);
+  background: rgba(13, 11, 26, 0.98);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(236, 72, 153, 0.08), 0 0 34px rgba(168, 85, 247, 0.26);
+  padding: 1rem;
+}
+
+.approval-banner__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.approval-banner__eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgb(216 180 254);
+}
+
+.approval-banner__timer {
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  background: rgba(120, 53, 15, 0.24);
+  color: rgb(253 230 138);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.55rem;
+}
+
+.approval-banner__copy {
+  margin-bottom: 0.5rem;
+  color: rgb(203 213 225);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.approval-banner__tool {
+  display: inline-block;
+  border-radius: 0.4rem;
+  background: rgba(88, 28, 135, 0.36);
+  color: rgb(216 180 254);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  padding: 0.1rem 0.38rem;
+}
+
+.approval-banner__args {
+  max-height: min(11rem, 28vh);
+  overflow: auto;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(168, 85, 247, 0.22);
+  background: rgba(2, 6, 23, 0.68);
+  color: rgb(148 163 184);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  margin-bottom: 0.85rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.approval-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.approval-banner__button {
+  min-width: 7rem;
+  border-radius: 0.75rem;
+  padding: 0.55rem 1.05rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.approval-banner__button--deny {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: rgb(248 113 113);
+}
+
+@media (max-width: 640px) {
+  .approval-banner {
+    bottom: max(4.75rem, calc(env(safe-area-inset-bottom) + 4.5rem));
+    padding: 0.85rem;
+  }
+
+  .approval-banner__header,
+  .approval-banner__actions {
+    align-items: stretch;
+  }
+
+  .approval-banner__button {
+    flex: 1 1 8rem;
+  }
 }
 
 .multimodal-action {

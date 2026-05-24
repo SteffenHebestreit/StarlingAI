@@ -12,6 +12,17 @@ describe("tool intervention classification", () => {
     expect(notice?.actions.some(action => action.kind === "request_approval")).toBe(true);
   });
 
+  it("classifies approval timeouts as approval notices", () => {
+    const notice = classifyToolIntervention({
+      toolName: "site_fill_credentials",
+      success: false,
+      error: "Tool 'site_fill_credentials' approval timed out (no response within 5 min)",
+    });
+    expect(notice?.reasonCode).toBe("approval_timeout");
+    expect(notice?.summary).toContain("approval expired");
+    expect(notice?.severity).toBe("warn");
+  });
+
   it("classifies empty successful results as suspicious returns", () => {
     const notice = classifyToolIntervention({
       toolName: "web_search",

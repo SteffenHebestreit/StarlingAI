@@ -52,7 +52,7 @@ vi.mock("../audit/logger.js", () => ({
 
 import { AgentSession, resetSessionsForTests } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
-import { runTurn } from "../agent/runtime.js";
+import { buildModelVisibleToolResult, runTurn } from "../agent/runtime.js";
 import { resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 
@@ -988,6 +988,31 @@ describe("runtime delegated-loop regressions", () => {
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(completeMock).not.toHaveBeenCalled();
+  });
+
+  it("wraps raw workspace config dumps as failed maintenance evidence", () => {
+    const rawConfigDump = [
+      ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 20-subagents-general.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
+      "",
+      "{ \"subAgents\": { \"browser_agent\": { \"model\": { \"primary\": \"lmstudio/qwen3.6-35b-a3b\" }, \"systemPrompt\": \"You are a browser automation specialist.\" } } }",
+      "",
+      "#### Tool Calls",
+      "- list_files",
+      "- read_file",
+    ].join("\n");
+
+    const visible = buildModelVisibleToolResult("delegate_to_agent", rawConfigDump, {
+      agentName: "prompt_optimizer",
+      attemptedAgents: ["swarm_maintainer", "coder", "prompt_optimizer"],
+      delegationSucceeded: true,
+      delegationOutcome: "partial",
+      terminalState: "completed",
+    });
+
+    expect(visible).toContain("TASK FAILED");
+    expect(visible).toContain("only returned raw workspace/config read output");
+    expect(visible).not.toContain(".starlingai/");
+    expect(visible).not.toContain("10-core-agents.jsonc");
   });
 
   it("uses workflow-execution evidence directly when the model tries another delegation after synthesis is required", async () => {

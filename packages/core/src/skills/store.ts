@@ -14,6 +14,8 @@
  * Layout (workspace-scoped, mirroring flow_memory / trajectory_cache):
  *   .starlingai/skills/<slug>/SKILL.md          ← portable Markdown + frontmatter
  *   .starlingai/skills/<slug>/skill.meta.json   ← outcome stats + embedding
+ *   .starlingai/skills/<slug>/skill.history.json ← bounded mutation history for rollback
+ *   .starlingai/skills/<slug>/{references,templates,scripts,assets}/... ← support files
  *
  * Security:
  * - Credential-shaped content is rejected before persistence (same RE family as
@@ -39,6 +41,8 @@ const log = childLogger("skills:store");
 
 const SKILLS_SUBDIR = ".starlingai/skills";
 const SUPPORT_FILE_DIRS = new Set(["references", "templates", "scripts", "assets"]);
+const HISTORY_FILE = "skill.history.json";
+const MAX_HISTORY_ENTRIES = 50;
 
 // Field caps keep injected prompts bounded and disk footprints predictable.
 const MAX_NAME = 120;
@@ -128,6 +132,22 @@ export interface PatchSkillInput {
   replaceAll?: boolean;
 }
 
+export type SkillHistoryAction = "write_skill" | "patch" | "write_file" | "remove_file" | "rollback";
+
+export interface SkillHistoryEntry {
+  id: string;
+  action: SkillHistoryAction;
+  filePath: "SKILL.md" | string;
+  createdAt: string;
+  versionBefore: number;
+  versionAfter: number;
+  previousExists: boolean;
+  nextExists: boolean;
+  previousContent?: string;
+  nextContent?: string;
+  summary?: string;
+}
+
 export class SkillCredentialError extends Error {
   constructor() {
     super("Skill content contains credential-shaped text and was rejected");
@@ -190,6 +210,10 @@ export function getSkill(workspacePath: string, slug: string): Skill | null {
     log.warn({ err, slug: safe }, "Failed to read skill");
     return null;
   }
+}
+
+export function listSkillHistory(workspacePath: string, slug: string): SkillHistoryEntry[] {
+  return readSkillHistory(workspacePath, slug).slice().reverse();
 }
 
 /**
@@ -263,7 +287,22 @@ export function writeSkill(workspacePath: string, input: WriteSkillInput): Skill
     embedding: contentChanged ? undefined : existing?.meta.embedding,
   };
 
+  const previousContent = existing && contentChanged ? readSkillMainFile(workspacePath, slug) : undefined;
+  const nextContent = serializeSkillFile(frontmatter, body);
   persistSkill(workspacePath, frontmatter, body, meta);
+  if (existing && contentChanged && previousContent !== undefined) {
+    appendSkillHistory(workspacePath, slug, {
+      action: "write_skill",
+      filePath: "SKILL.md",
+      versionBefore: existing.frontmatter.version,
+      versionAfter: frontmatter.version,
+      previousExists: true,
+      nextExists: true,
+      previousContent,
+      nextContent,
+      summary: "Updated skill procedure/frontmatter",
+    });
+  }
   return { frontmatter, body, meta };
 }
 
@@ -288,15 +327,43 @@ export function writeSkillSupportFile(
   const existing = existsSync(target) ? readFileSync(target, "utf-8") : undefined;
   atomicWriteTextSync(target, fileContent);
   if (existing !== fileContent) {
+    appendSkillHistory(workspacePath, skill.frontmatter.slug, {
+      action: "write_file",
+      filePath: normalizeSupportPath(filePath),
+      versionBefore: skill.frontmatter.version,
+      versionAfter: skill.frontmatter.version,
+      previousExists: existing !== undefined,
+      nextExists: true,
+      previousContent: existing,
+      nextContent: fileContent,
+      summary: existing === undefined ? "Created support file" : "Updated support file",
+    });
     bumpSkillPatch(workspacePath, skill, true);
   }
   return getSkill(workspacePath, skill.frontmatter.slug) ?? skill;
 }
 
+export function readSkillSupportFile(workspacePath: string, slug: string, filePath: string): string {
+  const { target, relativePath } = resolveSupportFileTarget(workspacePath, slug, filePath);
+  if (!existsSync(target)) throw new Error(`Support file not found: ${relativePath}`);
+  return readFileSync(target, "utf-8");
+}
+
 export function removeSkillSupportFile(workspacePath: string, slug: string, filePath: string): Skill {
   const { skill, target, relativePath } = resolveSupportFileTarget(workspacePath, slug, filePath);
   if (!existsSync(target)) throw new Error(`Support file not found: ${relativePath}`);
+  const existing = readFileSync(target, "utf-8");
   unlinkSync(target);
+  appendSkillHistory(workspacePath, skill.frontmatter.slug, {
+    action: "remove_file",
+    filePath: relativePath,
+    versionBefore: skill.frontmatter.version,
+    versionAfter: skill.frontmatter.version,
+    previousExists: true,
+    nextExists: false,
+    previousContent: existing,
+    summary: "Removed support file",
+  });
   bumpSkillPatch(workspacePath, skill, true);
   return getSkill(workspacePath, skill.frontmatter.slug) ?? skill;
 }
@@ -327,8 +394,20 @@ export function patchSkill(workspacePath: string, slug: string, input: PatchSkil
   assertNoCredential(next);
 
   if (input.filePath) {
-    validateSupportFileContent(input.filePath, next);
+    const relativePath = normalizeSupportPath(input.filePath);
+    validateSupportFileContent(relativePath, next);
     atomicWriteTextSync(target, next);
+    appendSkillHistory(workspacePath, skill.frontmatter.slug, {
+      action: "patch",
+      filePath: relativePath,
+      versionBefore: skill.frontmatter.version,
+      versionAfter: skill.frontmatter.version,
+      previousExists: true,
+      nextExists: true,
+      previousContent: raw,
+      nextContent: next,
+      summary: "Patched support file",
+    });
     bumpSkillPatch(workspacePath, skill, true);
     return getSkill(workspacePath, safe) ?? skill;
   }
@@ -341,7 +420,77 @@ export function patchSkill(workspacePath: string, slug: string, input: PatchSkil
   parsed.frontmatter.version = skill.frontmatter.version + 1;
   const patchedMeta = markSkillPatched(skill.meta, new Date().toISOString(), true);
   persistSkill(workspacePath, parsed.frontmatter, parsed.body, patchedMeta);
+  appendSkillHistory(workspacePath, safe, {
+    action: "patch",
+    filePath: "SKILL.md",
+    versionBefore: skill.frontmatter.version,
+    versionAfter: parsed.frontmatter.version,
+    previousExists: true,
+    nextExists: true,
+    previousContent: raw,
+    nextContent: serializeSkillFile(parsed.frontmatter, parsed.body),
+    summary: "Patched SKILL.md",
+  });
   return getSkill(workspacePath, safe) ?? { frontmatter: parsed.frontmatter, body: parsed.body, meta: patchedMeta };
+}
+
+export function rollbackSkillHistory(workspacePath: string, slug: string, historyId?: string): Skill {
+  const safe = slugifySkillName(slug);
+  const skill = getSkill(workspacePath, safe);
+  if (!skill) throw new Error(`Skill not found: ${safe}`);
+
+  const entries = readSkillHistory(workspacePath, safe);
+  const entry = historyId
+    ? entries.find((item) => item.id === historyId)
+    : entries.slice().reverse().find((item) => item.previousExists || item.filePath !== "SKILL.md");
+  if (!entry) throw new Error(historyId ? `History entry not found: ${historyId}` : "No rollback history is available");
+
+  if (entry.filePath === "SKILL.md") {
+    if (!entry.previousExists || entry.previousContent === undefined) throw new Error("Cannot roll back SKILL.md creation without prior content");
+    assertNoCredential(entry.previousContent);
+    const before = readSkillMainFile(workspacePath, safe);
+    const parsed = parseSkillFile(entry.previousContent, safe);
+    if (!parsed.body.trim()) throw new Error("History entry would leave SKILL.md without a body");
+    parsed.frontmatter.version = skill.frontmatter.version + 1;
+    const restored = serializeSkillFile(parsed.frontmatter, parsed.body);
+    const patchedMeta = markSkillPatched(skill.meta, new Date().toISOString(), true);
+    persistSkill(workspacePath, parsed.frontmatter, parsed.body, patchedMeta);
+    appendSkillHistory(workspacePath, safe, {
+      action: "rollback",
+      filePath: "SKILL.md",
+      versionBefore: skill.frontmatter.version,
+      versionAfter: parsed.frontmatter.version,
+      previousExists: before !== undefined,
+      nextExists: true,
+      previousContent: before,
+      nextContent: restored,
+      summary: `Rolled back ${entry.id}`,
+    });
+    return getSkill(workspacePath, safe) ?? { frontmatter: parsed.frontmatter, body: parsed.body, meta: patchedMeta };
+  }
+
+  const { target, relativePath } = resolveSupportFileTarget(workspacePath, safe, entry.filePath);
+  const before = existsSync(target) ? readFileSync(target, "utf-8") : undefined;
+  if (entry.previousExists) {
+    if (entry.previousContent === undefined) throw new Error("History entry has no previous support-file content");
+    validateSupportFileContent(relativePath, entry.previousContent);
+    atomicWriteTextSync(target, entry.previousContent);
+  } else if (existsSync(target)) {
+    unlinkSync(target);
+  }
+  appendSkillHistory(workspacePath, safe, {
+    action: "rollback",
+    filePath: relativePath,
+    versionBefore: skill.frontmatter.version,
+    versionAfter: skill.frontmatter.version,
+    previousExists: before !== undefined,
+    nextExists: entry.previousExists,
+    previousContent: before,
+    nextContent: entry.previousContent,
+    summary: `Rolled back ${entry.id}`,
+  });
+  bumpSkillPatch(workspacePath, skill, true);
+  return getSkill(workspacePath, safe) ?? skill;
 }
 
 /** Record the outcome of a skill that was retrieved and applied this turn. */
@@ -563,6 +712,71 @@ function readSkillMeta(workspacePath: string, slug: string): SkillMeta {
   } catch {
     return fallbackMeta(slug);
   }
+}
+
+function readSkillMainFile(workspacePath: string, slug: string): string | undefined {
+  const file = resolve(skillsDir(workspacePath), slugifySkillName(slug), "SKILL.md");
+  try {
+    return readFileSync(file, "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
+function readSkillHistory(workspacePath: string, slug: string): SkillHistoryEntry[] {
+  const safe = slugifySkillName(slug);
+  const file = resolve(skillsDir(workspacePath), safe, HISTORY_FILE);
+  if (!existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf-8")) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item) => coerceHistoryEntry(item)).filter((item): item is SkillHistoryEntry => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+function appendSkillHistory(
+  workspacePath: string,
+  slug: string,
+  entry: Omit<SkillHistoryEntry, "id" | "createdAt">,
+): SkillHistoryEntry {
+  const safe = slugifySkillName(slug);
+  const next: SkillHistoryEntry = {
+    id: `hist_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+    ...entry,
+  };
+  const entries = [...readSkillHistory(workspacePath, safe), next].slice(-MAX_HISTORY_ENTRIES);
+  const dir = resolve(skillsDir(workspacePath), safe);
+  atomicWriteTextSync(resolve(dir, HISTORY_FILE), `${JSON.stringify(entries, null, 2)}\n`);
+  return next;
+}
+
+function coerceHistoryEntry(value: unknown): SkillHistoryEntry | null {
+  if (!isRecord(value)) return null;
+  const id = typeof value["id"] === "string" ? value["id"] : "";
+  const action = typeof value["action"] === "string" ? value["action"] as SkillHistoryAction : "patch";
+  const filePath = typeof value["filePath"] === "string" ? value["filePath"] : "SKILL.md";
+  const createdAt = typeof value["createdAt"] === "string" ? value["createdAt"] : new Date(0).toISOString();
+  if (!id || !filePath) return null;
+  return {
+    id,
+    action,
+    filePath,
+    createdAt,
+    versionBefore: typeof value["versionBefore"] === "number" ? value["versionBefore"] : 1,
+    versionAfter: typeof value["versionAfter"] === "number" ? value["versionAfter"] : 1,
+    previousExists: value["previousExists"] === true,
+    nextExists: value["nextExists"] !== false,
+    previousContent: typeof value["previousContent"] === "string" ? value["previousContent"] : undefined,
+    nextContent: typeof value["nextContent"] === "string" ? value["nextContent"] : undefined,
+    summary: typeof value["summary"] === "string" ? value["summary"] : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertNoCredential(content: string): void {

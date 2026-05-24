@@ -1772,6 +1772,71 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   return !terminalMarker && (unresolvedMarker || preview.length <= 220);
 }
 
+const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstelle(?:n)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
+const WORKSPACE_MUTATION_CONTEXT_RE = /\b(?:starlingai|workspace|repo|repository|agent|agents|scene|scenes|job|jobs|workflow|workflows|config|configuration|prompt|prompts|tool|tools|model|routing|self[- ]?improvement|selbstverbesserung|konfiguration|modell|agenten|szene|szenen|wartung)\b/i;
+const WORKSPACE_MUTATION_TOOL_NAMES = new Set(["write_file", "edit_file", "create_dir", "delete_file", "shell_exec"]);
+const READ_ONLY_CONTEXT_TOOL_NAMES = new Set([
+  "read_file", "list_files", "workspace_search", "read_shared_facts", "search_agents", "agent_catalog", "git_status", "git_diff",
+]);
+
+function looksLikeWorkspaceMutationTask(
+  task: string,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  agentName: string,
+): boolean {
+  const text = task.trim();
+  if (!text || !WORKSPACE_MUTATION_TASK_RE.test(text)) return false;
+  const tags = new Set((agentCfg?.tags ?? []).map((tag) => tag.toLowerCase()));
+  const maintenanceAgent = agentName === "swarm_maintainer"
+    || tags.has("swarm")
+    || tags.has("maintenance")
+    || tags.has("selfimprovement")
+    || tags.has("agents")
+    || tags.has("prompts")
+    || tags.has("workflow");
+  return maintenanceAgent || WORKSPACE_MUTATION_CONTEXT_RE.test(text);
+}
+
+function hasWorkspaceMutationTool(stats: { toolNames: string[] } | undefined): boolean {
+  return (stats?.toolNames ?? []).some((toolName) => WORKSPACE_MUTATION_TOOL_NAMES.has(toolName));
+}
+
+function usedOnlyReadOnlyContextTools(stats: { toolCount: number; toolNames: string[] } | undefined): boolean {
+  const toolNames = stats?.toolNames ?? [];
+  return (stats?.toolCount ?? 0) > 0
+    && toolNames.length > 0
+    && toolNames.every((toolName) => READ_ONLY_CONTEXT_TOOL_NAMES.has(toolName));
+}
+
+function looksLikeRawWorkspaceConfigDump(result: string): boolean {
+  const text = result.trim();
+  if (!text) return false;
+  const compact = text.replace(/\s+/g, " ").slice(0, 12_000);
+  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+20-subagents-general\.jsonc/i.test(compact)) {
+    return true;
+  }
+  if (/[{]\s*"(?:agents|subAgents)"\s*:\s*[{]/i.test(compact)
+    && /"systemPrompt"\s*:/i.test(compact)
+    && /"primary"\s*:\s*"lmstudio\//i.test(compact)) {
+    return true;
+  }
+  return /####\s+Tool Calls/i.test(text)
+    && /\b(?:read_file|list_files|search_agents|agent_catalog)\b/i.test(text)
+    && /\b(?:agents\/|10-core-agents\.jsonc|20-subagents-general\.jsonc|"subAgents"|"agents")\b/i.test(text);
+}
+
+function looksLikeReadOnlyMutationMiss(
+  output: string,
+  task: string,
+  stats: { toolCount: number; toolNames: string[] } | undefined,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  agentName: string,
+): boolean {
+  if (!looksLikeWorkspaceMutationTask(task, agentCfg, agentName)) return false;
+  if (hasWorkspaceMutationTool(stats)) return false;
+  return usedOnlyReadOnlyContextTools(stats) || looksLikeRawWorkspaceConfigDump(output);
+}
+
 export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
@@ -1974,6 +2039,10 @@ export function classifyDelegationResult(
   }
 
   if (planningOnly) {
+    return "failure";
+  }
+
+  if (looksLikeReadOnlyMutationMiss(output, task, stats, agentCfg, agentName)) {
     return "failure";
   }
 

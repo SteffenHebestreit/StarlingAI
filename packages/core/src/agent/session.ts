@@ -71,8 +71,21 @@ export interface SessionTranscriptMessage {
   role: "system" | "user" | "assistant";
   content: string;
   timestamp: string;
+  attachments?: SessionTranscriptAttachment[];
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   swarmState?: SwarmState;
+}
+
+export interface SessionTranscriptAttachment {
+  filename: string;
+  relativePath?: string;
+  externalUrl?: string;
+  contentType?: string;
+  previewMode?: "image" | "html" | "pdf" | "text" | "markdown" | "json" | "audio" | "mermaid" | "website" | "download";
+  size?: number;
+  isDirectory?: boolean;
+  title?: string;
+  sourceTool?: string;
 }
 
 export interface SessionTranscriptPage {
@@ -471,11 +484,14 @@ export class AgentSession {
         continue;
       }
 
+      const transcriptContent = getTranscriptDisplayContent(message);
+      const attachments = getTranscriptAttachments(message.metadata);
       raw.push({
         id: `${this.id}:${index}`,
         role: message.role,
-        content: sanitizeTranscriptContent(message.role, message.content ?? "", false),
+        content: transcriptContent,
         timestamp: message.timestamp,
+        attachments,
         swarmState: message.role === "assistant" ? getTranscriptSwarmState(message.metadata) : undefined,
       });
       index += 1;
@@ -558,6 +574,43 @@ function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage
     return sum + Math.ceil(contentLength / 4);
   }, 0);
   return systemPromptTokens + toolSchemaTokens + historyTokens;
+}
+
+function getTranscriptDisplayContent(message: SessionHistoryMessage): string {
+  if (message.role === "user") {
+    const displayContent = message.metadata?.["displayContent"];
+    if (typeof displayContent === "string" && displayContent.trim()) {
+      return sanitizeTranscriptContent("user", displayContent, false);
+    }
+  }
+  return sanitizeTranscriptContent(message.role, message.content ?? "", false);
+}
+
+function getTranscriptAttachments(metadata?: Record<string, unknown>): SessionTranscriptAttachment[] | undefined {
+  const raw = metadata?.["attachments"];
+  if (!Array.isArray(raw)) return undefined;
+
+  const attachments = raw.flatMap((entry): SessionTranscriptAttachment[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const source = entry as Record<string, unknown>;
+    const filename = typeof source["filename"] === "string" ? source["filename"].trim() : "";
+    if (!filename) return [];
+
+    const attachment: SessionTranscriptAttachment = { filename };
+    if (typeof source["relativePath"] === "string" && source["relativePath"].trim()) attachment.relativePath = source["relativePath"].trim();
+    if (typeof source["externalUrl"] === "string" && source["externalUrl"].trim()) attachment.externalUrl = source["externalUrl"].trim();
+    if (typeof source["contentType"] === "string" && source["contentType"].trim()) attachment.contentType = source["contentType"].trim();
+    if (typeof source["previewMode"] === "string" && source["previewMode"].trim()) {
+      attachment.previewMode = source["previewMode"].trim() as SessionTranscriptAttachment["previewMode"];
+    }
+    if (typeof source["size"] === "number" && Number.isFinite(source["size"])) attachment.size = source["size"];
+    if (source["isDirectory"] === true) attachment.isDirectory = true;
+    if (typeof source["title"] === "string" && source["title"].trim()) attachment.title = source["title"].trim();
+    if (typeof source["sourceTool"] === "string" && source["sourceTool"].trim()) attachment.sourceTool = source["sourceTool"].trim();
+    return [attachment];
+  });
+
+  return attachments.length > 0 ? attachments : undefined;
 }
 
 function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState | undefined {

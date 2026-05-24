@@ -14,6 +14,7 @@ import {
   resolveSession,
   listSessions,
 } from "../agent/session.js";
+import type { SessionTranscriptAttachment } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
@@ -27,6 +28,11 @@ import { subscribeToNotifications } from "../runtime/notifications.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 
 const log = childLogger("gateway:rpc");
+
+function formatApprovalTimeout(timeoutMs: number): string {
+  if (timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000} min`;
+  return `${Math.round(timeoutMs / 1000)} s`;
+}
 
 export type RpcMethod =
   | "chat.send"
@@ -86,6 +92,32 @@ const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
 
 interface RpcConnectionCloseOptions {
   abortInFlightTurns?: boolean;
+}
+
+function normalizeChatAttachmentMetadata(raw: unknown): SessionTranscriptAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const attachments = raw.flatMap((entry): SessionTranscriptAttachment[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const source = entry as Record<string, unknown>;
+    const filename = typeof source["filename"] === "string" ? source["filename"].trim() : "";
+    if (!filename) return [];
+
+    const attachment: SessionTranscriptAttachment = { filename };
+    if (typeof source["relativePath"] === "string" && source["relativePath"].trim()) attachment.relativePath = source["relativePath"].trim();
+    if (typeof source["externalUrl"] === "string" && source["externalUrl"].trim()) attachment.externalUrl = source["externalUrl"].trim();
+    if (typeof source["contentType"] === "string" && source["contentType"].trim()) attachment.contentType = source["contentType"].trim();
+    if (typeof source["previewMode"] === "string" && source["previewMode"].trim()) {
+      attachment.previewMode = source["previewMode"].trim() as SessionTranscriptAttachment["previewMode"];
+    }
+    if (typeof source["size"] === "number" && Number.isFinite(source["size"])) attachment.size = source["size"];
+    if (source["isDirectory"] === true) attachment.isDirectory = true;
+    if (typeof source["title"] === "string" && source["title"].trim()) attachment.title = source["title"].trim();
+    if (typeof source["sourceTool"] === "string" && source["sourceTool"].trim()) attachment.sourceTool = source["sourceTool"].trim();
+    return [attachment];
+  });
+
+  return attachments.length > 0 ? attachments : undefined;
 }
 
 /**
@@ -413,6 +445,8 @@ export class RpcConnection {
       case "chat.send": {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
         let message = String(params["message"] ?? "");
+        const displayContent = typeof params["displayContent"] === "string" ? String(params["displayContent"]).trim() : undefined;
+        const userAttachments = normalizeChatAttachmentMetadata(params["attachments"]);
         const requestId = String(params["requestId"] ?? randomUUID());
         const enableThinkingRaw = params["enableThinking"];
         const enableThinking: boolean | undefined =
@@ -618,6 +652,8 @@ export class RpcConnection {
         runTurn({
           session,
           userMessage: message,
+          userDisplayContent: displayContent,
+          userAttachments,
           signal: ac.signal,
           allowedAgents: effectiveAllowedAgents,
           humanInLoopSteps,
@@ -694,17 +730,22 @@ export class RpcConnection {
           },
           approvalCallback: async (toolName, args) => {
             const approvalId = randomUUID();
-            this.sendEvent({ type: "agent.approval_needed", data: { requestId, toolName, args, approvalId } });
+            const approvalTimeoutMs = getConfig().gateway.approvalTimeoutMs;
+            const expiresAt = new Date(Date.now() + approvalTimeoutMs).toISOString();
+            this.sendEvent({
+              type: "agent.approval_needed",
+              data: { requestId, toolName, args, approvalId, timeoutMs: approvalTimeoutMs, expiresAt },
+            });
 
             return new Promise<boolean>((resolve, reject) => {
-              // Reject after 60 s if the user does not respond — produces a
+              // Reject if the user does not respond — produces a
               // distinguishable error rather than a silent false ("denied by user")
-              // so the tool-timeout intervention fires instead of approval_required.
+              // so the approval-timeout intervention can explain what happened.
               const timeout = setTimeout(() => {
                 this.pendingApprovals.delete(approvalId);
                 log.warn({ approvalId, toolName }, "Approval timed out — denying");
-                reject(new Error(`Tool '${toolName}' approval timed out (no response within 60 s)`));
-              }, 60_000);
+                reject(new Error(`Tool '${toolName}' approval timed out (no response within ${formatApprovalTimeout(approvalTimeoutMs)})`));
+              }, approvalTimeoutMs);
               this.pendingApprovals.set(approvalId, { resolve, reject, timeout });
             });
           },

@@ -2194,9 +2194,14 @@ export function createGateway() {
   });
 
   // ── Skill Library inspector ───────────────────────────────────────────────
-  // GET  /api/skills            — list skills (filter by status/query)
-  // POST /api/skills/:slug/archive — archive a skill
-  // DELETE /api/skills/:slug    — delete a skill
+  // GET  /api/skills                 — list skills (filter by status/query)
+  // GET  /api/skills/:slug/history   — inspect mutation history
+  // POST /api/skills/:slug/patch     — exact-string patch SKILL.md/support file
+  // POST /api/skills/:slug/rollback  — restore a history entry
+  // POST /api/skills/:slug/support-file — write support file
+  // GET/DELETE /api/skills/:slug/support-file?filePath=... — read/remove support file
+  // POST /api/skills/:slug/archive   — archive a skill
+  // DELETE /api/skills/:slug         — delete a skill
   app.get("/api/skills", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -2243,6 +2248,145 @@ export function createGateway() {
         body: s.body,
       }));
       return c.json({ total: records.length, records });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/skills/:slug/history", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, listSkillHistory } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      return c.json({ slug, history: listSkillHistory(cfg.workspacePath, slug) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/patch", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json() as Record<string, unknown>; } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    try {
+      const { getSkill, patchSkill } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const oldString = typeof body["oldString"] === "string" ? body["oldString"] : "";
+      const newString = typeof body["newString"] === "string" ? body["newString"] : undefined;
+      if (!oldString || newString === undefined) return c.json({ error: "oldString and newString are required" }, 400);
+      const skill = patchSkill(cfg.workspacePath, slug, {
+        oldString,
+        newString,
+        replaceAll: body["replaceAll"] === true,
+        filePath: typeof body["filePath"] === "string" ? body["filePath"] : undefined,
+      });
+      return c.json({ slug: skill.frontmatter.slug, version: skill.frontmatter.version, patches: skill.meta.patches });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/rollback", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    try {
+      const { getSkill, rollbackSkillHistory } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const historyId = typeof body["historyId"] === "string" ? body["historyId"] : undefined;
+      const skill = rollbackSkillHistory(cfg.workspacePath, slug, historyId);
+      return c.json({ slug: skill.frontmatter.slug, version: skill.frontmatter.version, patches: skill.meta.patches });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/support-file", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json() as Record<string, unknown>; } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    try {
+      const { getSkill, listSkillSupportFiles, writeSkillSupportFile } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const filePath = typeof body["filePath"] === "string" ? body["filePath"].trim() : "";
+      const fileContent = typeof body["fileContent"] === "string" ? body["fileContent"] : undefined;
+      if (!filePath || fileContent === undefined) return c.json({ error: "filePath and fileContent are required" }, 400);
+      const skill = writeSkillSupportFile(cfg.workspacePath, slug, filePath, fileContent);
+      return c.json({ slug: skill.frontmatter.slug, filePath, supportFiles: listSkillSupportFiles(cfg.workspacePath, skill.frontmatter.slug) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/skills/:slug/support-file", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, readSkillSupportFile } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const filePath = c.req.query("filePath")?.trim() ?? "";
+      if (!filePath) return c.json({ error: "filePath is required" }, 400);
+      return c.json({ slug, filePath, content: readSkillSupportFile(cfg.workspacePath, slug, filePath) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.delete("/api/skills/:slug/support-file", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, listSkillSupportFiles, removeSkillSupportFile } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const filePath = c.req.query("filePath")?.trim() ?? "";
+      if (!filePath) return c.json({ error: "filePath is required" }, 400);
+      const skill = removeSkillSupportFile(cfg.workspacePath, slug, filePath);
+      return c.json({ slug: skill.frontmatter.slug, filePath, supportFiles: listSkillSupportFiles(cfg.workspacePath, skill.frontmatter.slug) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/pin", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, setSkillPinned } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      setSkillPinned(cfg.workspacePath, slug, true);
+      return c.json({ slug, pinned: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/skills/:slug/unpin", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const { getSkill, setSkillPinned } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      setSkillPinned(cfg.workspacePath, slug, false);
+      return c.json({ slug, pinned: false });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

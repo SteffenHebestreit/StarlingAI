@@ -629,6 +629,20 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "workspace_search",
 ]);
 
+function isApprovalGateFailure(text: string | undefined): boolean {
+  if (!text) return false;
+  return /\b(?:approval (?:timed out|expired|failed|was not granted|not granted|explicitly denied)|execution denied by user|requires human approval|no approval channel)\b/i.test(text);
+}
+
+function buildApprovalRetryBlockedMessage(toolName: string, priorFailure: string): string {
+  const normalized = priorFailure.replace(/\s+/g, " ").trim();
+  return [
+    `Tool '${toolName}' is no longer available in this sub-agent run because its human approval gate was not satisfied.`,
+    normalized ? `Earlier approval result: ${normalized}` : "Earlier approval result: approval was not granted.",
+    "Do not retry this approval-gated tool in the same run. Report the blocker and ask the user to retry when they can approve the prompt.",
+  ].join(" ");
+}
+
 function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
   const orchestration = getConfig().orchestration;
   if (isCoordinatorAgent) {
@@ -2103,6 +2117,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let sufficiencyToolsStripped = false;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
+    const approvalBlockedTools = new Map<string, string>();
     let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
     // Track tools stripped by the evidence-cap mechanism so that blocked
     // calls to those tools are classified as "evidence_cap_enforced" rather
@@ -3444,6 +3459,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
+        const priorApprovalFailure = approvalBlockedTools.get(tc.name);
+        if (priorApprovalFailure) {
+          const blockedMessage = buildApprovalRetryBlockedMessage(tc.name, priorApprovalFailure);
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: blockedMessage,
+            skippedReason: "approval_gate_unresolved",
+          });
+          logAudit(
+            "sub_agent_tool_blocked",
+            { agentName: opts.agentName, tool: tc.name, reason: "approval_gate_unresolved" },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+          toolResults.push({
+            role: "tool",
+            content: blockedMessage,
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
+
         // Enforce tool allow-list
         if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
           log.warn({ agentName: opts.agentName, tool: tc.name }, "Sub-agent attempted disallowed tool");
@@ -3607,6 +3647,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           : (result.error?.trim()
               ? `Error: ${result.error}`
               : (result.output.trim() || "Error: unknown"));
+
+        if (!result.success && isApprovalGateFailure(result.error ?? resultContent)) {
+          const approvalFailure = result.error?.trim() || resultContent.replace(/^Error:\s*/i, "").trim();
+          approvalBlockedTools.set(tc.name, approvalFailure);
+          tools = tools.filter((tool) => tool.name !== tc.name);
+          resultContent += "\n\n[APPROVAL BLOCKED] Human approval was not granted for this sensitive action. Do not request the same approval-gated tool again in this run; report the blocker and ask the user to retry when they can approve it.";
+          logAudit(
+            "sub_agent_tool_blocked",
+            { agentName: opts.agentName, tool: tc.name, reason: "approval_gate_unresolved" },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+        }
 
         // Redact any secrets leaked into the tool output before the sub-agent sees it.
         const toolOutputScan = scanOutput(resultContent);

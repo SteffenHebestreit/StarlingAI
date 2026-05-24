@@ -756,6 +756,85 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  it("run_workflow marks browser-scene credential blockers as blocked", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        apply_jobs: {
+          description: "Run one browser-assisted freelance application from the n8n application table.",
+          task: "Use browser_agent to apply for one job from n8n.k2o and freelancermap.de.",
+          allowedAgents: ["browser_agent"],
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Operates the browser.",
+          tools: ["get_site_credentials", "browser_navigate", "browser_snapshot"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: [
+        "Zusammenfassung",
+        "",
+        "Projekt: Frontend Engineer",
+        "Status: ⚠️ Blocker - Keine gespeicherten Anmeldedaten für freelancermap.de",
+        "",
+        "Der Bewerbungsprozess kann nicht fortgesetzt werden.",
+      ].join("\n"),
+      stats: {
+        agentName: "browser_agent",
+        sessionId: "sub:workflow-scene:browser_agent:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 3,
+        toolNames: ["get_site_credentials", "browser_navigate", "browser_snapshot"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 8,
+        model: "lmstudio/qwen3.5-9b",
+        capabilities: ["browser"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(),
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      const result = await tool!.execute(
+        { name: "apply_jobs", workflowType: "scene" },
+        { sessionId: "workflow-scene", workspacePath: "/workspace", allowedAgents: ["browser_agent"] },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Workflow apply_jobs [scene] blocked via browser_agent bootstrap");
+      expect(result.metadata?.["blocked"]).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow uses the scene approval channel for bootstrap scenes when no interactive callback exists", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
@@ -858,6 +937,91 @@ describe("workflow catalog tools", () => {
         "credentialed_browser_approval",
         60_000,
       );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("run_workflow marks bootstrap scenes blocked when approval expires", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen3.5-9b" },
+        },
+      },
+      scenes: {
+        credentialed_browser_approval: {
+          description: "Open a known site and require approval before stored credentials are submitted.",
+          task: "Use browser_agent to open http://n8n.k2o and then call site_fill_credentials.",
+          allowedAgents: ["browser_agent"],
+          humanInLoopSteps: ["site_fill_credentials"],
+        },
+      },
+      subAgents: {
+        browser_agent: {
+          description: "Operates the browser.",
+          tools: ["site_fill_credentials", "browser_navigate", "browser_snapshot"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn();
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "Login blocked: Tool 'site_fill_credentials' approval timed out (no response within 5 min).",
+      stats: {
+        agentName: "browser_agent",
+        sessionId: "sub:workflow-scene:browser_agent:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 1,
+        toolNames: ["site_fill_credentials"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 8,
+        model: "lmstudio/qwen3.5-9b",
+        capabilities: ["browser"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }, _workflowTools] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+
+      const result = await tool!.execute(
+        {
+          name: "credentialed_browser_approval",
+          workflowType: "scene",
+        },
+        {
+          sessionId: "workflow-scene-approval-blocked",
+          workspacePath: "/workspace",
+          allowedAgents: ["browser_agent"],
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Workflow credentialed_browser_approval [scene] blocked");
+      expect(result.error).toContain("approval timed out");
+      expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+      expect(runTurnMock).not.toHaveBeenCalled();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -85,6 +85,7 @@ export type AuditEventType =
   | "skill_authored"
   | "skill_distilled"
   | "skill_patched"
+  | "skill_rolled_back"
   | "skill_outcome_recorded"
   | "skill_retired"
   | "skill_promoted_to_scene"
