@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc \
     novnc websockify \
-    supervisor \
+    supervisor iproute2 \
     wget curl ca-certificates gnupg \
     fonts-liberation fonts-dejavu \
     libasound2t64 libnspr4 libnss3 libxss1 libgbm1 xdg-utils \
@@ -50,12 +50,13 @@ stdout_logfile=/tmp/xvfb.log
 stderr_logfile=/tmp/xvfb-err.log
 
 [program:chrome]
-command=/usr/bin/google-chrome --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --disable-dev-shm-usage --remote-debugging-address=0.0.0.0 --remote-debugging-port=%(ENV_CDP_PORT)s --user-data-dir=/home/browser/profile --window-position=0,0 --window-size=1600,900 --start-maximized about:blank
+command=/usr/bin/google-chrome --no-sandbox --disable-gpu --disable-software-rasterizer --disable-crashpad --disable-breakpad --no-first-run --no-default-browser-check --disable-dev-shm-usage --remote-debugging-address=0.0.0.0 --remote-debugging-port=%(ENV_CDP_PORT)s --remote-allow-origins=* --user-data-dir=/home/browser/profile --window-position=0,0 --window-size=1600,900 --start-maximized about:blank
 user=browser
-environment=DISPLAY=":1"
+environment=DISPLAY=":1",HOME="/home/browser"
 autorestart=true
 priority=20
 startsecs=5
+startretries=10
 stdout_logfile=/tmp/chrome.log
 stderr_logfile=/tmp/chrome-err.log
 
