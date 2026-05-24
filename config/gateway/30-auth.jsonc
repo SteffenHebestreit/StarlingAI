@@ -1,0 +1,12 @@
+{
+  // Multi-user auth. Keep this ON durably so the login requirement survives a
+  // runtime-data wipe (the `auth.users[]` accounts themselves live in the
+  // mutable runtime config under /data, created via POST /api/auth/users — they
+  // are NOT committed here because a password hash is a secret). With enabled:true
+  // and zero users, a `sai token` operator JWT still works, so the operator can
+  // always bootstrap the first account; the dashboard username/password login
+  // becomes available once at least one user exists.
+  "auth": {
+    "enabled": true
+  }
+}
