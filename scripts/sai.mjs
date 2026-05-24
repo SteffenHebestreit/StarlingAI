@@ -46,6 +46,7 @@ switch (command) {
   case "stop":    await cmdStop(); break;
   case "wipe":    await cmdWipe(); break;
   case "config":  await cmdConfig(); break;
+  case "env-check": await cmdEnvCheck(); break;
   case "token":   await cmdToken(); break;
   case "health":  await cmdHealth(); break;
   case "dev":     await cmdDev(); break;
@@ -112,6 +113,11 @@ async function cmdStart() {
 
   if (!existsSync("starlingai.json")) { fail("starlingai.json not found after config build."); return; }
   ok("starlingai.json generated");
+
+  // Preflight: warn loudly about config "$VAR" references that .env does not
+  // satisfy, so a stored site/channel/webhook does not silently turn into
+  // "not found" at runtime. Warn-only — optional integrations may be unset.
+  await run("node", ["scripts/check-env-refs.mjs"]);
 
   // Workspace mount source (WSL path translation)
   process.env.SAI_WORKSPACE_MOUNT_SOURCE = resolveWorkspaceMount();
@@ -297,6 +303,12 @@ async function cmdConfig() {
   }
 }
 
+async function cmdEnvCheck() {
+  hdr("Env reference check");
+  // Pass through flags (e.g. --strict) after "env-check".
+  await run("node", ["scripts/check-env-refs.mjs", ...restArgs]);
+}
+
 async function cmdToken() {
   loadDotEnv();
   // Pass through all args after "token"
@@ -356,6 +368,7 @@ ${BOLD}Commands:${RESET}
                                      while containers keep running; config kept
   config build                       Merge config/ + workspace/ → starlingai.json
   config split [source.json]         Decompose into two-zone layout
+  env-check [--strict]               Report config $VAR refs not satisfied by .env
   token [--user X] [--role X]        Generate dashboard JWT
   health                             Check service health endpoints
   dev [gateway|web]                  Start development mode

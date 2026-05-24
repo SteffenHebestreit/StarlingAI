@@ -11,6 +11,14 @@ services:
     restart: unless-stopped
     ports:
       - "8765:8765"   # WebSocket + REST
+    # Load the full .env so every `$VAR` referenced by config (sites, channels,
+    # scene/job webhook keys, credential refs) resolves at runtime. Without this
+    # the gateway only sees the hand-listed `environment:` vars below, so any new
+    # `$VAR` in config silently resolves to empty (e.g. site "not found"). The
+    # explicit `environment:` entries still win over env_file for computed/infra
+    # values. Mirrors the mail-service, which already does this.
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
       - SAI_JWT_SECRET=${SAI_JWT_SECRET}
