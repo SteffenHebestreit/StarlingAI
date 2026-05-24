@@ -15,7 +15,14 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { searchSkills } from "../skills/service.js";
 import {
+  getSkill,
+  listSkillSupportFiles,
   listSkills,
+  patchSkill,
+  removeSkillSupportFile,
+  setSkillPinned,
+  setSkillStatus,
+  writeSkillSupportFile,
   writeSkill,
   skillSuccessRate,
   SkillCredentialError,
@@ -37,6 +44,10 @@ function toStringList(value: unknown): string[] {
     return value.split(",").map((item) => item.trim()).filter(Boolean);
   }
   return [];
+}
+
+function skillRecordedOutput(skill: ReturnType<typeof writeSkill>): string {
+  return `**${skill.frontmatter.name}** \`${skill.frontmatter.slug}\` [${skill.frontmatter.status} v${skill.frontmatter.version}]`;
 }
 
 // ── search_skills ─────────────────────────────────────────────────────────────
@@ -164,6 +175,156 @@ registerTool({
       output: `${heading}\n\n${lines.join("\n")}`,
       metadata: { count: skills.length },
     };
+  },
+});
+
+// ── skill_manage ─────────────────────────────────────────────────────────────
+
+registerTool({
+  name: "skill_manage",
+  description:
+    "Create, patch, and maintain Skill Library procedures. Prefer patching an existing relevant skill "
+    + "over creating a near-duplicate. Use write_file for references/, templates/, scripts/, or assets/ "
+    + "support files. Use archive instead of hard delete; pinned skills cannot be archived by curation.",
+  parameters: {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["create", "patch", "write_file", "remove_file", "archive", "pin", "unpin"],
+        description: "Mutation to perform.",
+      },
+      name: { type: "string", description: "Skill slug/name. Required for all actions; create also uses it as the title." },
+      description: { type: "string", description: "For create: one-paragraph summary of what the skill accomplishes." },
+      whenToUse: { type: "string", description: "For create: trigger condition for the procedure." },
+      procedure: { type: "string", description: "For create: Markdown procedure body." },
+      tags: { type: "array", items: { type: "string" }, description: "For create: optional topic tags." },
+      agents: { type: "array", items: { type: "string" }, description: "For create: specialist agents the procedure routes through." },
+      tools: { type: "array", items: { type: "string" }, description: "For create: tools the procedure relies on." },
+      oldString: { type: "string", description: "For patch: exact text to replace." },
+      newString: { type: "string", description: "For patch: replacement text; empty string deletes the match." },
+      replaceAll: { type: "boolean", description: "For patch: replace every match instead of requiring a unique match." },
+      filePath: {
+        type: "string",
+        description: "For patch/write_file/remove_file: optional support file path under references/, templates/, scripts/, or assets/. Omit for SKILL.md patch.",
+      },
+      fileContent: { type: "string", description: "For write_file: support file contents." },
+    },
+    required: ["action", "name"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    if (!getConfig().skillLibrary.enabled) return disabledResult();
+
+    const action = String(args["action"] ?? "").trim();
+    const name = String(args["name"] ?? "").trim();
+    if (!action || !name) return { success: false, output: "", error: "action and name are required" };
+
+    try {
+      if (action === "create") {
+        const description = String(args["description"] ?? "").trim();
+        const procedure = String(args["procedure"] ?? "").trim();
+        if (!description || !procedure) return { success: false, output: "", error: "description and procedure are required for create" };
+        const skill = writeSkill(ctx.workspacePath, {
+          name,
+          description,
+          whenToUse: args["whenToUse"] ? String(args["whenToUse"]).trim() : undefined,
+          procedure,
+          tags: toStringList(args["tags"]),
+          agents: toStringList(args["agents"]),
+          tools: toStringList(args["tools"]),
+          origin: "agent",
+          sourceSessionId: ctx.sessionId,
+        });
+        logAudit("skill_authored", {
+          slug: skill.frontmatter.slug,
+          name: skill.frontmatter.name,
+          version: skill.frontmatter.version,
+          origin: skill.meta.origin,
+          authoringAgent: ctx.currentAgentName ?? "orchestrator",
+        }, { sessionId: ctx.sessionId, severity: "info" });
+        return {
+          success: true,
+          output: `Skill created: ${skillRecordedOutput(skill)}`,
+          metadata: { slug: skill.frontmatter.slug, version: skill.frontmatter.version, status: skill.frontmatter.status },
+        };
+      }
+
+      const existing = getSkill(ctx.workspacePath, name);
+      if (!existing) return { success: false, output: "", error: `Skill not found: ${name}` };
+
+      if (action === "patch") {
+        const oldString = String(args["oldString"] ?? "");
+        if (!oldString) return { success: false, output: "", error: "oldString is required for patch" };
+        if (args["newString"] === undefined || args["newString"] === null) {
+          return { success: false, output: "", error: "newString is required for patch" };
+        }
+        const skill = patchSkill(ctx.workspacePath, existing.frontmatter.slug, {
+          oldString,
+          newString: String(args["newString"]),
+          replaceAll: args["replaceAll"] === true,
+          filePath: args["filePath"] ? String(args["filePath"]).trim() : undefined,
+        });
+        logAudit("skill_patched", {
+          slug: skill.frontmatter.slug,
+          filePath: args["filePath"] ? String(args["filePath"]) : "SKILL.md",
+          version: skill.frontmatter.version,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+        return {
+          success: true,
+          output: `Skill patched: ${skillRecordedOutput(skill)}`,
+          metadata: { slug: skill.frontmatter.slug, version: skill.frontmatter.version, patches: skill.meta.patches },
+        };
+      }
+
+      if (action === "write_file") {
+        const filePath = String(args["filePath"] ?? "").trim();
+        if (!filePath) return { success: false, output: "", error: "filePath is required for write_file" };
+        if (args["fileContent"] === undefined || args["fileContent"] === null) {
+          return { success: false, output: "", error: "fileContent is required for write_file" };
+        }
+        const skill = writeSkillSupportFile(ctx.workspacePath, existing.frontmatter.slug, filePath, String(args["fileContent"]));
+        logAudit("skill_patched", { slug: skill.frontmatter.slug, filePath }, { sessionId: ctx.sessionId, severity: "info" });
+        return {
+          success: true,
+          output: `Support file written: ${filePath} in ${skillRecordedOutput(skill)}`,
+          metadata: { slug: skill.frontmatter.slug, filePath, supportFiles: listSkillSupportFiles(ctx.workspacePath, skill.frontmatter.slug) },
+        };
+      }
+
+      if (action === "remove_file") {
+        const filePath = String(args["filePath"] ?? "").trim();
+        if (!filePath) return { success: false, output: "", error: "filePath is required for remove_file" };
+        const skill = removeSkillSupportFile(ctx.workspacePath, existing.frontmatter.slug, filePath);
+        logAudit("skill_patched", { slug: skill.frontmatter.slug, filePath, removed: true }, { sessionId: ctx.sessionId, severity: "info" });
+        return {
+          success: true,
+          output: `Support file removed: ${filePath} from ${skillRecordedOutput(skill)}`,
+          metadata: { slug: skill.frontmatter.slug, filePath, supportFiles: listSkillSupportFiles(ctx.workspacePath, skill.frontmatter.slug) },
+        };
+      }
+
+      if (action === "archive") {
+        const ok = setSkillStatus(ctx.workspacePath, existing.frontmatter.slug, "archived");
+        if (!ok) return { success: false, output: "", error: `Skill '${existing.frontmatter.slug}' is pinned and cannot be archived` };
+        return { success: true, output: `Skill archived: ${existing.frontmatter.slug}`, metadata: { slug: existing.frontmatter.slug, status: "archived" } };
+      }
+
+      if (action === "pin" || action === "unpin") {
+        setSkillPinned(ctx.workspacePath, existing.frontmatter.slug, action === "pin");
+        return {
+          success: true,
+          output: `Skill ${action === "pin" ? "pinned" : "unpinned"}: ${existing.frontmatter.slug}`,
+          metadata: { slug: existing.frontmatter.slug, pinned: action === "pin" },
+        };
+      }
+
+      return { success: false, output: "", error: `Unknown action '${action}'` };
+    } catch (err) {
+      if (err instanceof SkillCredentialError) {
+        return { success: false, output: "", error: "Skill rejected: the content contains credential-shaped text. Remove secrets and retry." };
+      }
+      return { success: false, output: "", error: err instanceof Error ? err.message : String(err) };
+    }
   },
 });
 

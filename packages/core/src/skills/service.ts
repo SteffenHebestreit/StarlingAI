@@ -14,6 +14,7 @@ import { isEmbeddingAvailable } from "../providers/embeddings.js";
 import { childLogger } from "../logger.js";
 import {
   listSkills,
+  recordSkillViewedAsync,
   setSkillEmbeddingAsync,
   skillSuccessRate,
   type Skill,
@@ -135,6 +136,7 @@ export async function retrieveSkillGuidance(
     if (total + line.length + 1 > maxChars) break;
     lines.push(line);
     slugs.push(frontmatter.slug);
+    void recordSkillViewedAsync(workspacePath, frontmatter.slug).catch(() => {});
     total += line.length + 1;
   }
 

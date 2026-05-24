@@ -4170,6 +4170,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           delegationCount: _turnDelegationCount,
           sharedFindings: sharedFindingsThisTurn,
           swarmState: getTurnSwarmState(),
+          loadedSkillSlugs: injectedSkillSlugs,
         }).catch(() => undefined);
         // G33 follow-up: positive signal — the injected cached trajectory
         // contributed to a successful answer. Pairs with `trajectory_cache_hit`

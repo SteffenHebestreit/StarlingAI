@@ -19,7 +19,7 @@ import { getChatProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { searchSkills } from "./service.js";
-import { writeSkill, SkillCredentialError } from "./store.js";
+import { getSkill, patchSkill, writeSkill, SkillCredentialError, type Skill } from "./store.js";
 import type { SwarmState } from "../tools/registry.js";
 
 const log = childLogger("skills:distiller");
@@ -41,6 +41,8 @@ export interface DistillTurnInput {
   delegationCount: number;
   sharedFindings: string[];
   swarmState?: SwarmState;
+  /** Skills injected/loaded for this turn; patch these before creating a new skill. */
+  loadedSkillSlugs?: string[];
 }
 
 export interface DistillGate {
@@ -58,6 +60,10 @@ export interface DistilledSkill {
   agents: string[];
   tools: string[];
 }
+
+export type SkillUpdateProposal =
+  | { action: "patch"; oldString: string; newString: string; filePath?: string; replaceAll?: boolean }
+  | { action: "skip"; reason?: string };
 
 /** Pure gating predicate — no config, no I/O. */
 export function shouldDistill(input: DistillTurnInput, gate: DistillGate): boolean {
@@ -87,16 +93,30 @@ export async function distillAndPersist(
   _recentObjectives.set(key, now);
   pruneRecent(now);
 
-  // Dedupe: if we already have a strong procedural match, don't author a twin.
-  try {
-    const existing = await searchSkills(input.workspacePath, objective, { limit: 1 });
-    if (existing[0] && existing[0].combinedScore >= DEDUPE_SCORE_THRESHOLD) return null;
-  } catch {
-    // Search failure is non-fatal — proceed with distillation.
-  }
-
   const trajectory = buildTrajectoryDigest(input);
   if (!trajectory) return null;
+
+  const updateCandidate = await findPatchCandidate(input, objective);
+  if (updateCandidate) {
+    try {
+      const raw = await complete(buildSkillUpdatePrompt(objective, trajectory, input.finalAnswer, updateCandidate));
+      const proposal = parseSkillUpdateProposal(raw);
+      if (proposal?.action === "patch") {
+        const patched = patchSkill(input.workspacePath, updateCandidate.frontmatter.slug, proposal);
+        logAudit("skill_patched", {
+          slug: patched.frontmatter.slug,
+          name: patched.frontmatter.name,
+          filePath: proposal.filePath ?? "SKILL.md",
+          sourceSessionId: input.sessionId,
+        }, { sessionId: input.sessionId, severity: "info" });
+        log.info({ slug: patched.frontmatter.slug }, "Patched an existing skill from a successful trajectory");
+      }
+      return null;
+    } catch (err) {
+      log.debug({ err, slug: updateCandidate.frontmatter.slug }, "Skill update proposal failed — skipping duplicate authoring");
+      return null;
+    }
+  }
 
   let proposal: DistilledSkill | null;
   try {
@@ -118,6 +138,7 @@ export async function distillAndPersist(
       agents: proposal.agents,
       tools: proposal.tools,
       origin: "distilled",
+      curatorManaged: true,
       status: "draft",
       sourceSessionId: input.sessionId,
     });
@@ -212,8 +233,57 @@ Respond with ONLY valid JSON:
 
 ## Constraints
 - NEVER include secrets, credentials, passwords, tokens, or API keys.
+- Prefer class-level reusable skills over narrow one-session artifacts.
+- Do not capture transient setup failures or negative claims like "tool X is broken". Capture the durable fix or retry pattern instead.
 - Keep the procedure under ~1500 characters and genuinely reusable.
 - If the task was trivial or too one-off to generalize, respond with: {"skip": true}`;
+}
+
+export function buildSkillUpdatePrompt(
+  objective: string,
+  trajectory: string,
+  finalAnswer: string,
+  existing: Skill,
+): string {
+  return `You are maintaining StarlingAI's procedural Skill Library. A multi-step task succeeded and an existing skill appears to cover this class of work. Patch the existing skill if the run revealed a durable missing step, pitfall, routing rule, verification habit, or user-corrected workflow.
+
+## Completed objective
+${objective.slice(0, 800)}
+
+## Existing skill to update
+Slug: ${existing.frontmatter.slug}
+Name: ${existing.frontmatter.name}
+When to use: ${existing.frontmatter.whenToUse}
+
+SKILL.md body:
+${existing.body.slice(0, 2200)}
+
+## What the swarm actually did
+${trajectory.slice(0, 2000)}
+
+## Final answer (excerpt)
+${finalAnswer.slice(0, 800)}
+
+## Your job
+Prefer a targeted patch over creating a new skill. Add one concise missing step, pitfall, or verification rule. If the skill is already sufficient, skip.
+
+Respond with ONLY valid JSON, one of:
+
+\`\`\`json
+{"action":"patch","oldString":"exact text from SKILL.md","newString":"replacement text","replaceAll":false}
+\`\`\`
+
+or
+
+\`\`\`json
+{"action":"skip","reason":"already covered"}
+\`\`\`
+
+## Constraints
+- oldString must be copied exactly from the existing SKILL.md body or frontmatter.
+- NEVER include secrets, credentials, passwords, tokens, or API keys.
+- Do not persist transient setup failures, missing local binaries, unconfigured credentials, or negative claims like "tool X is broken". Capture the durable recovery pattern instead.
+- Keep the patch compact and reusable for future similar work.`;
 }
 
 export function parseDistilledSkill(content: string): DistilledSkill | null {
@@ -245,6 +315,47 @@ export function parseDistilledSkill(content: string): DistilledSkill | null {
     agents: toStringArray(raw["agents"]),
     tools: toStringArray(raw["tools"]),
   };
+}
+
+export function parseSkillUpdateProposal(content: string): SkillUpdateProposal | null {
+  const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i) ?? content.match(/(\{[\s\S]*\})/);
+  if (!jsonMatch || !jsonMatch[1]) return null;
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(jsonMatch[1]) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  if (raw["skip"] === true || raw["action"] === "skip") {
+    return { action: "skip", reason: typeof raw["reason"] === "string" ? raw["reason"] : undefined };
+  }
+  if (raw["action"] !== "patch") return null;
+  const oldString = typeof raw["oldString"] === "string" ? raw["oldString"] : "";
+  const newString = typeof raw["newString"] === "string" ? raw["newString"] : "";
+  if (!oldString) return null;
+  return {
+    action: "patch",
+    oldString,
+    newString,
+    filePath: typeof raw["filePath"] === "string" && raw["filePath"].trim() ? raw["filePath"].trim() : undefined,
+    replaceAll: raw["replaceAll"] === true,
+  };
+}
+
+async function findPatchCandidate(input: DistillTurnInput, objective: string): Promise<Skill | null> {
+  for (const slug of input.loadedSkillSlugs ?? []) {
+    const skill = getSkill(input.workspacePath, slug);
+    if (skill && skill.frontmatter.status !== "archived") return skill;
+  }
+  try {
+    const existing = await searchSkills(input.workspacePath, objective, { limit: 1 });
+    if (existing[0] && existing[0].combinedScore >= DEDUPE_SCORE_THRESHOLD) return existing[0].skill;
+  } catch {
+    // Search failure is non-fatal — proceed with fresh distillation.
+  }
+  return null;
 }
 
 function toStringArray(value: unknown): string[] {

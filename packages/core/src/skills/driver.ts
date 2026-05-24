@@ -70,6 +70,7 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
   // ── 1. Retire low performers ─────────────────────────────────────────────
   const live = listSkills(workspacePath); // excludes archived
   for (const skill of live) {
+    if (!isCuratorEligible(skill)) continue;
     if (skill.meta.uses < config.retireMinUses) continue;
     if (skillSuccessRate(skill.meta) >= config.retireBelowSuccessRate) continue;
     setSkillStatus(workspacePath, skill.frontmatter.slug, "archived");
@@ -93,7 +94,8 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
       if (archivedThisSweep.has(b.frontmatter.slug)) continue;
       if (skillOverlap(a, b) < DUPLICATE_OVERLAP_THRESHOLD) continue;
 
-      const weaker = weakerSkill(a, b);
+      const weaker = archivableDuplicate(a, b);
+      if (!weaker) continue;
       setSkillStatus(workspacePath, weaker.frontmatter.slug, "archived");
       archivedThisSweep.add(weaker.frontmatter.slug);
       result.merged.push(weaker.frontmatter.slug);
@@ -123,6 +125,10 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
 export function isPromotionEligible(skill: Skill): boolean {
   if (skill.frontmatter.status !== "active") return false;
   return skill.meta.uses >= PROMOTE_MIN_USES && skillSuccessRate(skill.meta) >= PROMOTE_MIN_SUCCESS_RATE;
+}
+
+export function isCuratorEligible(skill: Skill): boolean {
+  return skill.meta.curatorManaged && !skill.meta.pinned;
 }
 
 /**
@@ -167,6 +173,15 @@ function weakerSkill(a: Skill, b: Skill): Skill {
   if (rateA !== rateB) return rateA < rateB ? a : b;
   if (a.meta.uses !== b.meta.uses) return a.meta.uses < b.meta.uses ? a : b;
   return a.frontmatter.version <= b.frontmatter.version ? a : b;
+}
+
+function archivableDuplicate(a: Skill, b: Skill): Skill | null {
+  const aEligible = isCuratorEligible(a);
+  const bEligible = isCuratorEligible(b);
+  if (!aEligible && !bEligible) return null;
+  if (aEligible && !bEligible) return a;
+  if (!aEligible && bEligible) return b;
+  return weakerSkill(a, b);
 }
 
 function skillOverlap(a: Skill, b: Skill): number {
