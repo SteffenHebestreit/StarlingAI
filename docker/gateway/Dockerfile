@@ -3,9 +3,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
     && npm install -g pnpm@10.6.0
 WORKDIR /app
 
-# Dependencies — copy manifests first for layer caching
+# Dependencies — copy manifests + lockfile first for layer caching.
+# The lockfile MUST be copied so the in-container install resolves the SAME
+# dependency versions as the host/CI lockfile. Without it, pnpm re-resolves from
+# the manifests and a stale cached layer can serve an incompatible version (e.g.
+# a `docx` build whose v9 exports are missing), breaking `tsc` only inside Docker.
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
 COPY packages/mail-service/package.json ./packages/mail-service/
