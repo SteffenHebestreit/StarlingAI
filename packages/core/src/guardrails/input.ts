@@ -40,7 +40,16 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp; severity: "low"
 
 const SUSPICIOUS_REPETITION_THRESHOLD = 50; // same char repeated > N times
 
-export function checkInput(input: string): GuardrailResult {
+/**
+ * @param opts.trusted  The input is operator-authored, not untrusted user/channel
+ *   content — e.g. a scene/job task defined in config and triggered from the
+ *   dashboard. Prompt-injection patterns are then reported but NOT blocked (a
+ *   legitimate instruction like "Never expose credential values" matches the
+ *   credential-extraction heuristic). Length and repetition limits still apply,
+ *   and every execution-layer guardrail (tool tiers, approval gates, output
+ *   redaction) remains fully active when the workflow runs.
+ */
+export function checkInput(input: string, opts?: { trusted?: boolean }): GuardrailResult {
   const { promptInjectionBlock, maxInputLength } = getGuardrails();
 
   if (!input || input.trim().length === 0) {
@@ -81,6 +90,20 @@ export function checkInput(input: string): GuardrailResult {
       if (severity === "high") highestSeverity = "high";
       else if (severity === "medium" && highestSeverity !== "high") highestSeverity = "medium";
     }
+  }
+
+  // Operator-authored (trusted) input: report matches for visibility but never
+  // block — the injection scanner is for untrusted user/channel content, not the
+  // system's own configured scene/job task text.
+  if (opts?.trusted) {
+    return detected.length > 0
+      ? {
+          allowed: true,
+          reason: `Suspicious patterns noted in trusted input (not blocked): ${detected.join(", ")}`,
+          severity: highestSeverity,
+          detectedPatterns: detected,
+        }
+      : { allowed: true };
   }
 
   // High-severity patterns always block

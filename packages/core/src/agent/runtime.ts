@@ -2857,7 +2857,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   }
 
   // ── Input guardrail ───────────────────────────────────────────────────────
-  const inputCheck = checkInput(userMessage);
+  // Scene/job runs carry the operator-authored task text from config as the
+  // "message" (channel "scene"). That is trusted input, so the prompt-injection
+  // scanner flags but does not block it — otherwise a scene's own security
+  // instruction (e.g. "Never expose credential values") would hard-block the run
+  // with zero turns. Untrusted channels (chat, telegram, email, webhook, a2a, …)
+  // remain strictly blocked.
+  const trustedWorkflowInput = session.channel === "scene";
+  const inputCheck = checkInput(userMessage, { trusted: trustedWorkflowInput });
   if (!inputCheck.allowed) {
     const details = inputCheck.reason ?? "Prompt injection detected";
     logAudit("guardrail_blocked", { type: "input", reason: details, patterns: inputCheck.detectedPatterns }, {
