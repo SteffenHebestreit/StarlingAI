@@ -2491,6 +2491,17 @@ export const useGatewayStore = defineStore("gateway", () => {
     return `${restBaseUrl()}/api/workspace/preview?${params.toString()}`;
   }
 
+  // WebSocket URL for the authenticated noVNC proxy (browser-session handoff).
+  // The token rides in ?token= because a browser can't set headers on a WS
+  // handshake — the gateway verifies it pre-handshake.
+  function buildBrowserVncUrl(sessionId: string): string {
+    const parsed = new URL(normalizeGatewayWsUrl(wsUrl.value));
+    parsed.pathname = `/ws/browser-vnc/${encodeURIComponent(sessionId)}`;
+    parsed.search = token.value ? `?token=${encodeURIComponent(token.value)}` : "";
+    parsed.hash = "";
+    return parsed.toString();
+  }
+
   async function downloadSessionDebugMarkdown(sessionId: string): Promise<void> {
     try {
       const response = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/debug-markdown`);
@@ -2653,6 +2664,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     fetchWorkspaceArtifactBlob,
     downloadWorkspaceArtifact,
     buildWorkspacePreviewUrl,
+    buildBrowserVncUrl,
+    authorizedFetch,
     downloadSessionDebugMarkdown,
     downloadSessionAuditMarkdown,
     respondApproval,
