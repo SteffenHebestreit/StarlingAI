@@ -4049,6 +4049,14 @@ export function createGateway() {
 
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
 
+    // Run identity: an authenticated operator's dropdown run executes under THEIR
+    // username, so per-user RBAC-scoped resources (site credentials with
+    // allowedUsers, mail accounts) resolve exactly as if they ran the scene from
+    // chat. Webhook-key triggers have no user → fall back to the scene identity
+    // (which only resolves credentials that aren't user-scoped).
+    const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
+    const runUserId = triggeredBy?.username ?? `scene:${sceneName}`;
+
     // Read optional params from request body to apply template substitution
     let bodyParams: Record<string, string> = {};
     try {
@@ -4074,7 +4082,7 @@ export function createGateway() {
     const job = await createJob({
       sceneName,
       definitionType: "scene",
-      userId: `scene:${sceneName}`,
+      userId: runUserId,
       task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
@@ -4146,6 +4154,11 @@ export function createGateway() {
     const authed = (bearerToken && await verifyToken(bearerToken)) || webhookAuthorized;
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
 
+    // Run identity: authenticated operator → their username (per-user RBAC
+    // resolves their credentials); webhook key → synthetic job identity.
+    const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
+    const runUserId = triggeredBy?.username ?? `job:${jobName}`;
+
     let bodyParams: Record<string, string> = {};
     try {
       const body = await c.req.json<Record<string, unknown>>();
@@ -4166,7 +4179,7 @@ export function createGateway() {
     const queued = await createJob({
       sceneName: jobName,
       definitionType: "job",
-      userId: `job:${jobName}`,
+      userId: runUserId,
       steps,
       turnTimeoutMs,
     });
