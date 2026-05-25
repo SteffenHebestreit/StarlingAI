@@ -62,6 +62,12 @@ export type AuditEventType =
   | "computer_session_stop"
   | "computer_session_emergency_stop"
   | "computer_heartbeat_lost"
+  // Browser session — noVNC live preview + human handoff
+  | "browser_session_register"
+  | "browser_session_assist_requested"
+  | "browser_session_assist_resolved"
+  | "browser_session_assist_timeout"
+  | "browser_session_stop"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement

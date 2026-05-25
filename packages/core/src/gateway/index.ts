@@ -8,7 +8,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { resolve, basename, extname, sep } from "node:path";
 import JSON5 from "json5";
 import { z } from "zod";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, WebSocket } from "ws";
 import { ZipFile } from "yazl";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
@@ -69,6 +69,7 @@ import { getMcpConnections } from "../mcp/registry.js";
 import { handleMcpHttpRequest, shutdownMcpHttpSessions, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
 import { computerSessionManager } from "../agent/computer-session.js";
+import { browserSessionManager } from "../agent/browser-session.js";
 import { proposeConversationConfigChange } from "../agent/config-assistant.js";
 import {
   applyPromptChange,
@@ -4577,6 +4578,50 @@ export function createGateway() {
     return c.json(computerUse);
   });
 
+  // ── Browser-session routes (noVNC live preview + human handoff) ──────────────
+  // The live pixels travel over the authenticated WS proxy at /ws/browser-vnc/:id
+  // (wired in the upgrade dispatcher below); these REST routes carry the state:
+  // which sessions are live, which are waiting on a human, and the operator's
+  // "I solved it — continue" resolution.
+
+  // Tells the dashboard whether to offer the browser preview at all (a backend
+  // must be reachable) without leaking the internal target.
+  app.get("/api/browser-sessions/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ enabled: browserSessionManager.isEnabled() });
+  });
+
+  app.get("/api/browser-sessions", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(browserSessionManager.listSessions());
+  });
+
+  app.get("/api/browser-sessions/active", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(browserSessionManager.listActiveSessions());
+  });
+
+  app.get("/api/browser-sessions/:id", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const session = browserSessionManager.getSession(c.req.param("id"));
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    return c.json(session);
+  });
+
+  // Operator clicked "I solved it — continue" — unblocks the waiting agent.
+  app.post("/api/browser-sessions/:id/resolve-assist", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    const ok = browserSessionManager.resolveAssist(c.req.param("id"), user?.username ?? "operator");
+    if (!ok) return c.json({ error: "Session not found" }, 404);
+    return c.json({ ok: true });
+  });
+
   // ── REST chat endpoint (for simple integrations) ─────────────────────────
   app.post("/api/chat", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
@@ -4810,7 +4855,19 @@ export function createGateway() {
     }
   }
 
-  const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+  // Two WebSocket surfaces share the one HTTP server: the RPC channel at /ws and
+  // the noVNC proxy at /ws/browser-vnc/:id. Both use `noServer` and a single
+  // upgrade dispatcher below — a `server`-bound WSS with a fixed `path` would
+  // `abortHandshake` (destroy the socket) on any non-matching path, so the two
+  // surfaces can't each bind the same server with different paths.
+  const wss = new WebSocketServer({ noServer: true });
+  const vncWss = new WebSocketServer({
+    noServer: true,
+    // Echo a subprotocol so older noVNC clients (which require "binary") connect;
+    // newer clients offer none and we reply with none.
+    handleProtocols: (protocols: Set<string>) =>
+      (protocols.has("binary") ? "binary" : (protocols.values().next().value ?? false)),
+  });
 
   wss.on("connection", async (ws, req) => {
     const ip = req.socket.remoteAddress ?? "unknown";
@@ -4842,6 +4899,76 @@ export function createGateway() {
 
     ws.on("close", () => conn.close());
     ws.on("error", (err) => log.error({ err, connId: conn.connId }, "WS error"));
+  });
+
+  // ── noVNC proxy ──────────────────────────────────────────────────────────────
+  // The embedded @novnc client connects here; we authenticate the operator, then
+  // bridge raw RFB frames to websockify inside the browser-vnc container. This
+  // keeps port 6080 off the host — the live browser is reachable only *through*
+  // the gateway's auth.
+  vncWss.on("connection", (clientWs: WebSocket, req: IncomingMessage) => {
+    const target = browserSessionManager.getVncTarget();
+    if (!target) { clientWs.close(4404, "Browser preview not configured"); return; }
+
+    const protoHeader = (req.headers["sec-websocket-protocol"] as string | undefined) ?? "";
+    const protocols = protoHeader.split(",").map((s) => s.trim()).filter(Boolean);
+    const backendUrl = `ws://${target.host}:${target.port}${target.path}`;
+    const backendWs = new WebSocket(backendUrl, protocols.length ? protocols : undefined);
+
+    const queue: unknown[] = [];
+    const closeBoth = () => {
+      try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(); } catch { /* noop */ }
+      try { if (backendWs.readyState === WebSocket.OPEN || backendWs.readyState === WebSocket.CONNECTING) backendWs.close(); } catch { /* noop */ }
+    };
+
+    backendWs.on("open", () => {
+      for (const buf of queue) backendWs.send(buf as Buffer, { binary: true });
+      queue.length = 0;
+    });
+    backendWs.on("message", (data, isBinary) => {
+      if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary });
+    });
+    clientWs.on("message", (data, isBinary) => {
+      if (backendWs.readyState === WebSocket.OPEN) backendWs.send(data, { binary: isBinary });
+      else if (backendWs.readyState === WebSocket.CONNECTING) queue.push(data);
+    });
+
+    backendWs.on("close", closeBoth);
+    clientWs.on("close", closeBoth);
+    backendWs.on("error", (err) => { log.warn({ err, backendUrl }, "noVNC backend error"); closeBoth(); });
+    clientWs.on("error", () => closeBoth());
+  });
+
+  // ── WS upgrade dispatcher ────────────────────────────────────────────────────
+  // Routes the HTTP upgrade to the right WSS by path, after auth for the VNC
+  // surface (browsers can't set headers on a WS handshake, so the token rides in
+  // ?token=). Unknown paths are rejected so stray upgrades don't hang.
+  httpServer.on("upgrade", async (req, socket, head) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const pathname = url.pathname;
+
+    if (pathname === "/ws") {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      return;
+    }
+
+    if (pathname.startsWith("/ws/browser-vnc")) {
+      const ip = req.socket.remoteAddress ?? "unknown";
+      const token = url.searchParams.get("token") ?? extractBearerToken(req.headers["authorization"]);
+      const rl = checkAuthRateLimit(ip);
+      if (!rl.allowed) { socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n"); socket.destroy(); return; }
+      if (!token || !await verifyToken(token)) {
+        recordAuthFailure(ip);
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      clearAuthFailures(ip);
+      vncWss.handleUpgrade(req, socket, head, (ws) => vncWss.emit("connection", ws, req));
+      return;
+    }
+
+    socket.destroy();
   });
 
   return {
@@ -4884,8 +5011,12 @@ export function createGateway() {
         for (const client of wss.clients) {
           client.terminate();
         }
+        for (const client of vncWss.clients) {
+          client.terminate();
+        }
 
         wss.close();
+        vncWss.close();
         httpServer.close(() => resolve());
         httpServer.closeAllConnections?.();
       });
