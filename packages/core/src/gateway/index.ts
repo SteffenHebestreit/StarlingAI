@@ -39,7 +39,7 @@ import { getGuardrails, updateGuardrails, resetGuardrails } from "../guardrails/
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs } from "../agent/jobs.js";
-import { resolveApproval, getPendingApproval } from "../approval/store.js";
+import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
@@ -4183,6 +4183,15 @@ export function createGateway() {
   //          Body: { approved: boolean, secret: string }
   //          OR   Authorization: Bearer <secret>  +  body: { approved: boolean }
 
+  // Dashboard surface: list every pending approval so an authenticated operator
+  // can respond from the UI (not just via the Slack/webhook callback links).
+  // Covers detached scene/job runs triggered from the dropdown.
+  app.get("/api/approvals/pending", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json(listPendingApprovals());
+  });
+
   app.get("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
     const approved = c.req.query("approved") === "true";
@@ -4213,13 +4222,16 @@ export function createGateway() {
 
     const approved = Boolean(body["approved"]);
     const bodySecret = body["secret"] ? String(body["secret"]) : "";
-    const headerSecret = extractBearerToken(c.req.header("Authorization")) ?? "";
-    const secret = bodySecret || headerSecret;
+    const bearer = extractBearerToken(c.req.header("Authorization")) ?? "";
 
     const pending = getPendingApproval(id);
     if (!pending) return c.json({ error: "Approval request not found or already resolved" }, 404);
 
-    if (pending.secret && pending.secret !== secret) {
+    // Two ways to authorize: the channel secret (Slack/webhook callbacks), OR a
+    // valid operator JWT (the dashboard — so detached scene/job runs can be
+    // approved from the UI without knowing the per-approval secret).
+    const operatorAuthed = bearer && await verifyToken(bearer);
+    if (!operatorAuthed && pending.secret && pending.secret !== (bodySecret || bearer)) {
       return c.json({ error: "Invalid approval secret" }, 403);
     }
 

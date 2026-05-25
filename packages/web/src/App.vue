@@ -211,6 +211,10 @@
     <main class="relative z-10 flex-1 min-h-0 overflow-hidden">
       <RouterView />
     </main>
+
+    <!-- Global operator requests: approvals + live-browser handoff, reachable
+         from any page (e.g. for scenes/jobs started from the dropdown). -->
+    <OperatorRequestsDock v-if="gateway.connected" />
   </div>
 </template>
 
@@ -222,6 +226,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 import NavGroup, { type NavGroupItem } from "@/components/NavGroup.vue";
+import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
 
 const gateway = useGatewayStore();

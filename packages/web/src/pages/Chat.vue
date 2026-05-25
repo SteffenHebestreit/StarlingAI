@@ -146,7 +146,6 @@
           @open-archive="openInSessions"
         />
         <ShellSessionPanel v-if="shellStore.hasEntries" />
-        <BrowserSessionPanel v-if="browserStore.enabled && browserStore.activeSessions.length > 0" />
         <ComputerSessionPanel v-if="computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading" />
       </template>
 
@@ -901,7 +900,6 @@ import { useJobsStore } from "@/stores/jobs";
 import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
 import { useComputerStore } from "@/stores/computer";
-import { useBrowserStore } from "@/stores/browser";
 import { useShellStore } from "@/stores/shell";
 import type { GatewaySessionTranscriptMessage, InterventionAction } from "@/stores/gateway";
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
@@ -909,7 +907,6 @@ import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
-import BrowserSessionPanel from "@/components/BrowserSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
 import SidePanel from "@/components/SidePanel.vue";
 import type { ChatAttachment } from "@/stores/gateway";
@@ -922,7 +919,6 @@ const jobsStore = useJobsStore();
 const scenesStore = useScenesStore();
 const multimodalStore = useMultimodalStore();
 const computerStore = useComputerStore();
-const browserStore = useBrowserStore();
 const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
@@ -1213,7 +1209,7 @@ const showOptionsDropdown = computed(() => (
   || gateway.scenes.length > 0
   || configuredJobs.value.length > 0
 ));
-const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shellStore.hasEntries || computerStore.loading || computerStore.sessions.length > 0 || (browserStore.enabled && browserStore.activeSessions.length > 0) || gateway.isLoading);
+const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shellStore.hasEntries || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
 
 // ── Off-canvas side panel ───────────────────────────────────────────────
 const sidePanelOpen = ref(false);
