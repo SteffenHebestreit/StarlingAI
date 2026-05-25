@@ -26,6 +26,7 @@ import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
+import { browserSessionManager } from "./browser-session.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -1795,6 +1796,23 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const signal = opts.signal;
 
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+
+  // Surface a live, take-over-able browser preview for the whole browser_agent
+  // run (parity with the computer-use session preview). The session is stopped
+  // in the finally below; request_human_assist flips it to "needs help" on a
+  // CAPTCHA. Only when a browser-vnc backend is actually reachable.
+  let browserSessionId: string | undefined;
+  if (opts.agentName === "browser_agent" && browserSessionManager.isEnabled()) {
+    try {
+      browserSessionId = browserSessionManager.register({
+        agentName: opts.agentName,
+        parentSessionId: opts.parentSessionId,
+        runSessionId: subSessionId,
+      }).id;
+    } catch (err) {
+      log.warn({ err }, "Failed to register browser session for live preview");
+    }
+  }
 
   try {
 
@@ -4426,6 +4444,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    // Tear down the live browser preview for this run (also unblocks any
+    // still-pending human-assist wait with a "stopped" outcome).
+    if (browserSessionId) {
+      try { browserSessionManager.stop(browserSessionId, "run_ended"); } catch { /* best effort */ }
+    }
 
     // Clean up per-session search circuit-breaker state to avoid memory leaks.
     const clearSearch = await getSearchCleanup();

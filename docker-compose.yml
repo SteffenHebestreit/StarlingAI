@@ -259,28 +259,28 @@ services:
       start_period: 15s
 
   # ── Browser-VNC (headed browser for human-in-the-loop handoff) ─────────────
-  # Headed Chrome on a viewable VNC display + noVNC web client, for solving a
-  # reCAPTCHA mid-run and letting browser_agent continue. Opt-in profile.
-  # Start with: docker compose --profile browser-vnc up -d browser-vnc
-  # Then (test) open noVNC at http://localhost:6080/vnc.html (password = VNC_PASSWORD),
-  # and Chrome DevTools (CDP) is on :9222 for playwright-mcp --cdp-endpoint.
-  # The gateway noVNC proxy + playwright CDP wiring land in the next phases.
+  # Headed Chrome on a viewable VNC display + noVNC web client. This is the
+  # browser the swarm drives (Playwright MCP connects to its CDP on :9222) AND
+  # the one the operator can take over via the dashboard to solve a reCAPTCHA
+  # mid-run, after which browser_agent continues on the same page.
+  #
+  # Neither port is published to the host: the operator reaches noVNC through the
+  # gateway's authenticated proxy (/ws/browser-vnc/:id), and CDP (which has no
+  # auth) stays inside the Docker network. Two networks: starlingai-internal so
+  # the gateway can proxy noVNC, and starlingai-public so the headed Chrome can
+  # actually load external sites (internal is internet-isolated).
   browser-vnc:
     build:
       context: .
       dockerfile: docker/browser-vnc/Dockerfile
     image: starlingai/browser-vnc:dev
-    profiles:
-      - browser-vnc
     restart: unless-stopped
-    ports:
-      - "${BROWSER_NOVNC_HOST_PORT:-6080}:6080"   # noVNC web client (temporary direct access for testing)
-      - "${BROWSER_CDP_HOST_PORT:-9222}:9222"     # Chrome DevTools / CDP for Playwright
     environment:
       - SCREEN_GEOMETRY=${BROWSER_SCREEN_GEOMETRY:-1600x900x24}
       - VNC_PASSWORD=${VNC_PASSWORD:-starling}
     networks:
       - starlingai-internal
+      - starlingai-public
     healthcheck:
       test: ["CMD-SHELL", "ss -tlnp | grep -q 6080 && ss -tlnp | grep -q 9222"]
       interval: 15s
