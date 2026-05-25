@@ -63,14 +63,21 @@ export default defineConfig({
     alias: { "@": resolve(__dirname, "src") },
   },
   build: {
+    // es2022 enables top-level await, which @novnc/novnc uses for its WebCodecs
+    // H.264 capability probe. Supported by all current evergreen browsers.
+    target: "es2022",
     rollupOptions: {
       output: {
         manualChunks: {
           three: ["three"],
           markdown: ["marked", "dompurify"],
+          novnc: ["@novnc/novnc"],
         },
       },
     },
+  },
+  optimizeDeps: {
+    esbuildOptions: { target: "es2022" },
   },
   server: {
     port: 3001,
