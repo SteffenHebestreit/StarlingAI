@@ -81,10 +81,15 @@
   },
   "mcp": {
     "servers": {
+      // Connects to the headed browser-vnc Chrome over CDP instead of launching
+      // its own headless browser, so the browser the swarm drives is the same one
+      // the operator can take over in the dashboard (human reCAPTCHA handoff).
+      // On starlingai-public to reach browser-vnc:9222 (and the internet).
       "playwright": {
         "transport": "docker",
         "image": "mcp/playwright:latest",
-        "network": "bridge",
+        "network": "starlingai_starlingai-public",
+        "args": ["--cdp-endpoint", "http://browser-vnc:9222"],
         "autoStart": true
       },
       "filesystem": {

@@ -40,6 +40,11 @@ export interface BrowserSession {
   agentName: string;
   /** Orchestrator session that delegated the run, for cross-referencing. */
   parentSessionId?: string;
+  /**
+   * The sub-agent's own session id (`sub:<parent>:<agent>:<ts>`). Lets a tool
+   * running inside that sub-agent find *its* browser session from ToolContext.
+   */
+  runSessionId?: string;
   state: BrowserSessionState;
   /** Short, human-readable target page (e.g. "freelancermap.de login"). */
   page?: string;
@@ -85,12 +90,13 @@ class BrowserSessionManager extends EventEmitter {
   private _pending = new Map<BrowserSessionId, PendingAssist>();
 
   /** Register a browser run so the dashboard can surface a live preview for it. */
-  register(opts: { agentName: string; parentSessionId?: string; page?: string }): BrowserSession {
+  register(opts: { agentName: string; parentSessionId?: string; runSessionId?: string; page?: string }): BrowserSession {
     const now = Date.now();
     const session: BrowserSession = {
       id: randomUUID(),
       agentName: opts.agentName,
       ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+      ...(opts.runSessionId ? { runSessionId: opts.runSessionId } : {}),
       ...(opts.page ? { page: opts.page } : {}),
       state: "active",
       createdAt: now,
@@ -196,6 +202,14 @@ class BrowserSessionManager extends EventEmitter {
 
   getSession(sessionId: BrowserSessionId): BrowserSession | undefined {
     return this._sessions.get(sessionId);
+  }
+
+  /** Find the live (non-stopped) session owned by a given sub-agent run. */
+  getByRunSession(runSessionId: string): BrowserSession | undefined {
+    for (const s of this._sessions.values()) {
+      if (s.runSessionId === runSessionId && s.state !== "stopped") return s;
+    }
+    return undefined;
   }
 
   listSessions(): BrowserSession[] {

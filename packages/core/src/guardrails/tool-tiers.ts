@@ -750,6 +750,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  request_human_assist: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Pause and ask a human to take over the live browser to clear a CAPTCHA/verification, then resume",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   browser_click: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Click an element in the shared browser session",

@@ -61,6 +61,7 @@ import "../tools/http-request.js";
 import "../tools/git.js";
 import "../tools/messaging.js";
 import "../tools/ask-user.js";
+import "../tools/browser-assist.js";
 import "../tools/run-test-suite.js";
 import "../tools/log-stream.js";
 import "../tools/translate-text.js";
