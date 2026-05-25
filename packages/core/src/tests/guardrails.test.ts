@@ -33,6 +33,24 @@ describe("checkInput", () => {
     expect(r.allowed).toBe(false);
   });
 
+  it("does NOT block operator-authored (trusted) scene input but still reports it", () => {
+    // A scene's own security instruction matches the credential-extraction
+    // heuristic ("expose ... credential"); trusted input must run, not dead-end.
+    const sceneTask = "Apply for the job. Never expose credential values; use site_fill_credentials for browser logins.";
+    const untrusted = checkInput(sceneTask);
+    expect(untrusted.allowed).toBe(false); // untrusted user input is still blocked
+    expect(untrusted.detectedPatterns).toContain("extract_credentials");
+
+    const trusted = checkInput(sceneTask, { trusted: true });
+    expect(trusted.allowed).toBe(true); // operator-authored scene task runs
+    expect(trusted.detectedPatterns).toContain("extract_credentials"); // still reported for visibility
+  });
+
+  it("still blocks oversized trusted input (length is not injection-specific)", () => {
+    const r = checkInput("a".repeat(100001), { trusted: true });
+    expect(r.allowed).toBe(false);
+  });
+
   it("blocks invisible Unicode characters", () => {
     const r = checkInput("Hello\u200Bworld"); // zero-width space
     expect(r.detectedPatterns).toContain("zero_width_chars");
