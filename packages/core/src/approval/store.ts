@@ -96,6 +96,17 @@ export function resolveApproval(id: string, approved: boolean): boolean {
   return true;
 }
 
+/** List all currently-pending approvals (public-safe, no resolve fn / secret). */
+export function listPendingApprovals(): PendingApproval[] {
+  return [..._pending.values()].map((entry) => ({
+    id: entry.id,
+    toolName: entry.toolName,
+    args: entry.args,
+    sceneName: entry.sceneName,
+    createdAt: entry.createdAt,
+  }));
+}
+
 /** Return the public-safe metadata for a pending approval (no resolve fn). */
 export function getPendingApproval(id: string): PendingApproval | undefined {
   const entry = _pending.get(id);
