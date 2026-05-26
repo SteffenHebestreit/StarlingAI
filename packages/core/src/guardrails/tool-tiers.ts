@@ -756,22 +756,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  // Browser interactive tools no longer require approval on EVERY call — the
+  // gating per-click made browser_agent runs unusable (every navigation step
+  // waited on a human). Safety still comes from: (a) the live browser preview
+  // (operator can watch + emergency-stop), (b) request_human_assist for the
+  // CAPTCHA / verification handoff, and (c) per-scene humanInLoopSteps for the
+  // few clicks/typings a scene wants gated (e.g. the final application submit).
+  // Scenes opt IN to approval per tool via humanInLoopSteps; the tier no longer
+  // forces it OR-style.
   browser_click: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Click an element in the shared browser session",
-    requiresPerCallApproval: true,
+    requiresPerCallApproval: false,
     requiresSandbox: false,
   },
   browser_type: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Type text into a form element in the shared browser session",
-    requiresPerCallApproval: true,
+    requiresPerCallApproval: false,
     requiresSandbox: false,
   },
   browser_select_option: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Select an option in the shared browser session",
-    requiresPerCallApproval: true,
+    requiresPerCallApproval: false,
     requiresSandbox: false,
   },
 
