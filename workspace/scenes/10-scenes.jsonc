@@ -2,16 +2,19 @@
   "scenes": {
     "apply_jobs": {
       "description": "Run one browser-assisted freelance application from the n8n application table.",
-      "task": "Use browser_agent to execute one iteration of the freelance application workflow. First call get_site_credentials for {{n8nSite}} and use its loginUrl, named URLs, selectors, and notes to log in and open the application table; if the table URL is available as a named URL, use it instead of guessing. Sort the application table by ranking from highest to lowest. Select the first row that is not already checked or applied and whose reason is not exactly or semantically 'low rating'. If the table already exposes the job URL, navigate directly to it instead of clicking the table cell just to inspect it. Open the job link from that row. If no eligible rows remain, stop and tell the user: 'Es gibt momentan keine passenden Projekte - komm spaeter wieder.' For an eligible job, use the exact job URL host for platform credentials when visible; otherwise use {{freelancermapSite}}. Before attempting an external-platform login or application submit, call get_site_credentials for that exact freelance platform host. If those credentials are missing, stop immediately, summarize the selected project and blocker, and tell the user to add the host in StarlingAI Settings -> Site Credentials, not in n8n. Use the application letter from the n8n row's reason column; if it is missing or unsuitable, write a concise tailored application letter based only on the job posting. Apply for the job through the platform flow. After exactly one job application attempt, stop, summarize the project, action taken, and any blocker, then ask the user whether to continue. Do not ask the user for a job lead; the lead source is the {{n8nSite}} application table. Never expose credential values; use site_fill_credentials for browser logins.",
+      "task": "Use browser_agent to execute one iteration of the freelance application workflow. First call get_site_credentials for {{n8nSite}} and use its loginUrl, named URLs, selectors, and notes to log in and open the application table; if the table URL is available as a named URL, use it instead of guessing. Sort the application table by ranking from highest to lowest. IMPORTANT: do NOT loop on sorting — n8n data tables often open an inline cell editor when you click a column header instead of sorting. Try the rating column header AT MOST ONCE; if the rows do not visibly reorder, stop trying to sort and instead just read the rows already visible in the snapshot and pick the highest-rated eligible one directly. Select the first row that is not already checked or applied and whose reason is not exactly or semantically 'low rating'. If the table already exposes the job URL, navigate directly to it instead of clicking the table cell just to inspect it. Open the job link from that row. If no eligible rows remain, stop and tell the user: 'Es gibt momentan keine passenden Projekte - komm spaeter wieder.' For an eligible job, use the exact job URL host for platform credentials when visible; otherwise use {{freelancermapSite}}. Before attempting an external-platform login or application submit, call get_site_credentials for that exact freelance platform host. If those credentials are missing, stop immediately, summarize the selected project and blocker, and tell the user to add the host in StarlingAI Settings -> Site Credentials, not in n8n. Use the application letter from the n8n row's reason column; if it is missing or unsuitable, write a concise tailored application letter based only on the job posting. Apply for the job through the platform flow. After exactly one job application attempt, stop, summarize the project, action taken, and any blocker, then ask the user whether to continue. Do not ask the user for a job lead; the lead source is the {{n8nSite}} application table. Never expose credential values; use site_fill_credentials for browser logins.",
       "webhookKey": "$SCENE_APPLY_JOBS_KEY",
       "allowedAgents": [
         "browser_agent",
         "summarizer"
       ],
+      // Only the credential fill needs a human gate; routine clicks/typing run
+      // unattended so the agent can complete the flow without an approval on
+      // every step. The real human-in-the-loop moment is the freelancermap
+      // CAPTCHA, which browser_agent surfaces via request_human_assist (live
+      // browser in the dashboard). Watch progress in the Operator Requests dock.
       "humanInLoopSteps": [
-        "site_fill_credentials",
-        "browser_click",
-        "browser_type"
+        "site_fill_credentials"
       ],
       "approvalChannel": "slack-approvals",
       "params": {
