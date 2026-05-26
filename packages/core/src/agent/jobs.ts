@@ -105,6 +105,12 @@ interface SceneJobStore {
     result: { response: string; toolCallsExecuted: number; blocked: boolean; performance?: TurnPerformanceMetrics }
   ): Promise<void>;
   failJob(id: string, error: string): Promise<void>;
+  /**
+   * Remove a finished job from the store. Returns true if the row was deleted,
+   * false if no such job exists OR the job is still active (queued/running/
+   * cancelling) — callers must cancel an active job first.
+   */
+  deleteJob(id: string): Promise<boolean>;
   recoverStaleJobs(staleMs: number): Promise<number>;
   close(): Promise<void>;
   reset?(): Promise<void>;
@@ -253,6 +259,15 @@ export async function failJob(id: string, error: string): Promise<void> {
       sticky: true,
     });
   }
+}
+
+/**
+ * Delete a finished scene-job execution row from the store. Refuses to delete
+ * an active job (queued/running/cancelling) — cancel it first. Returns true on
+ * success, false if not found or still active.
+ */
+export async function deleteSceneJob(id: string): Promise<boolean> {
+  return (await getStore()).deleteJob(id);
 }
 
 export async function recoverStaleSceneJobs(staleMs = STALE_JOB_MS): Promise<number> {
@@ -416,6 +431,17 @@ class InMemorySceneJobStore implements SceneJobStore {
       lastEventAt: completedAt,
       lastEventType: "job_cancelled",
     }, job.status);
+  }
+
+  async deleteJob(id: string): Promise<boolean> {
+    const job = this.jobs.get(id);
+    if (!job) return false;
+    // Refuse to delete an active job — caller must cancel it first.
+    if (job.status === "queued" || job.status === "running" || job.status === "cancelling") {
+      return false;
+    }
+    this.jobs.delete(id);
+    return true;
   }
 
   async completeJob(
@@ -714,6 +740,19 @@ class PostgresSceneJobStore implements SceneJobStore {
        WHERE id = $1`,
       [id, completedAt, reason, JSON.stringify(progress)]
     );
+  }
+
+  async deleteJob(id: string): Promise<boolean> {
+    // Only finished jobs are deletable. The status filter in the WHERE clause
+    // means the DELETE is a no-op if the job is still active — safer than a
+    // read-then-delete race.
+    const res = await this.pool.query(
+      `DELETE FROM scene_jobs
+       WHERE id = $1
+         AND status IN ('completed', 'failed', 'cancelled')`,
+      [id]
+    );
+    return (res.rowCount ?? 0) > 0;
   }
 
   async completeJob(
