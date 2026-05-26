@@ -7,6 +7,15 @@
       </div>
       <div class="jobs-page__actions">
         <button @click="refreshJobs" class="jobs-page__button">Refresh</button>
+        <button
+          v-if="finishedJobCount > 0"
+          class="jobs-page__button jobs-page__button--danger"
+          :disabled="clearingFinished"
+          :title="`Delete every finished run from the store (${finishedJobCount})`"
+          @click="clearFinished"
+        >
+          {{ clearingFinished ? "Clearing…" : `Clear finished (${finishedJobCount})` }}
+        </button>
       </div>
     </div>
 
@@ -69,7 +78,15 @@
           <div class="job-card__actions">
             <button v-if="isCancelable(job.status)" class="job-card__button job-card__button--warn" @click="scenesStore.cancel(job.id)">Cancel</button>
             <button class="job-card__button" @click="openJobSession(job.sessionId)">Open Session</button>
-            <button class="job-card__button" @click="scenesStore.dismissJob(job.id)">Dismiss</button>
+            <button
+              v-if="!isCancelable(job.status)"
+              class="job-card__button job-card__button--danger"
+              :disabled="deletingIds.has(job.id)"
+              title="Remove this run from the store (the session transcript is kept)"
+              @click="deleteRun(job.id)"
+            >
+              {{ deletingIds.has(job.id) ? "Deleting…" : "Delete" }}
+            </button>
           </div>
         </div>
 
@@ -132,6 +149,9 @@ const gateway = useGatewayStore();
 const scenesStore = useScenesStore();
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | SceneJob["status"]>("all");
+// Tracks per-row in-flight delete calls (button disabled state).
+const deletingIds = ref<Set<string>>(new Set());
+const clearingFinished = ref(false);
 
 // ── Scheduled cron triggers ──────────────────────────────────────────────────
 interface CronTrigger {
@@ -220,6 +240,39 @@ async function refreshJobs() {
     limit: statusFilter.value === "active" ? 100 : 200,
     status: serverStatusFilter.value,
   });
+}
+
+// Counts finished (non-active) jobs across the current local list, used by
+// the "Clear finished" page button.
+const finishedJobCount = computed(() =>
+  scenesStore.recentJobs.filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled").length
+);
+
+async function deleteRun(jobId: string) {
+  if (deletingIds.value.has(jobId)) return;
+  if (!confirm("Delete this run from the store? The session transcript is kept.")) return;
+  deletingIds.value = new Set(deletingIds.value).add(jobId);
+  try {
+    const r = await scenesStore.deleteRun(jobId);
+    if (!r.ok && r.error) alert(`Delete failed: ${r.error}`);
+  } finally {
+    const next = new Set(deletingIds.value);
+    next.delete(jobId);
+    deletingIds.value = next;
+  }
+}
+
+async function clearFinished() {
+  const n = finishedJobCount.value;
+  if (n === 0) return;
+  if (!confirm(`Delete all ${n} finished runs from the store? Session transcripts are kept. Active runs are not affected.`)) return;
+  clearingFinished.value = true;
+  try {
+    const r = await scenesStore.clearFinishedRuns();
+    if (r.failed > 0) alert(`Cleared ${r.deleted}, ${r.failed} could not be deleted (may have transitioned to active).`);
+  } finally {
+    clearingFinished.value = false;
+  }
 }
 
 async function openJobSession(sessionId: string) {
@@ -579,6 +632,27 @@ watch(statusFilter, () => {
 .job-card__button--warn {
   border-color: rgba(245, 158, 11, 0.24);
   color: #fde68a;
+}
+
+.job-card__button--danger {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: #fca5a5;
+}
+.job-card__button--danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.1);
+}
+.job-card__button--danger:disabled,
+.jobs-page__button--danger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.jobs-page__button--danger {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: #fca5a5;
+}
+.jobs-page__button--danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.1);
 }
 
 .job-card__progress {

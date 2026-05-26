@@ -38,7 +38,7 @@ import {
 import { getGuardrails, updateGuardrails, resetGuardrails } from "../guardrails/store.js";
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent } from "../agent/sub-agent.js";
-import { createJob, cancelJob, getJob as getExecutionJob, listJobs } from "../agent/jobs.js";
+import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
@@ -4287,6 +4287,25 @@ export function createGateway() {
     const job = await cancelJob(jobId);
     if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
     return c.json({ ok: true, job });
+  });
+
+  // DELETE /api/scenes/jobs/:jobId — remove a finished scene-job execution row
+  // from the store (operator cleanup of completed/failed/cancelled runs). The
+  // store rejects deletion of active jobs (queued/running/cancelling) — cancel
+  // them first; the session transcript itself is unaffected.
+  app.delete("/api/scenes/jobs/:jobId", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const jobId = c.req.param("jobId");
+    const existing = await getExecutionJob(jobId);
+    if (!existing) return c.json({ error: `Job not found: ${jobId}` }, 404);
+    if (existing.status === "queued" || existing.status === "running" || existing.status === "cancelling") {
+      return c.json({ error: `Cannot delete an active job (status=${existing.status}). Cancel it first.` }, 409);
+    }
+    const deleted = await deleteSceneJob(jobId);
+    if (!deleted) return c.json({ error: `Job could not be deleted (it may have transitioned back to active or already been removed).` }, 409);
+    return c.json({ ok: true, deletedJobId: jobId });
   });
 
   // ── Channel webhook endpoints (no auth — use their own verification) ────────

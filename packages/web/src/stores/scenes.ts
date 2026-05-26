@@ -286,6 +286,52 @@ export const useScenesStore = defineStore("scenes", () => {
     }
   }
 
+  /**
+   * Server-side delete of a finished scene-job execution row. The gateway
+   * refuses to delete an active job (status 409); cancel it first. Removes the
+   * entry from recentJobs on success so the UI reflects it immediately.
+   */
+  async function deleteRun(jobId: string): Promise<{ ok: boolean; error?: string }> {
+    runError.value = null;
+    try {
+      const res = await globalThis.fetch(restUrl(`/api/scenes/jobs/${encodeURIComponent(jobId)}`), {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        const msg = body.error ?? `HTTP ${res.status}`;
+        runError.value = msg;
+        return { ok: false, error: msg };
+      }
+      stopPolling(jobId);
+      recentJobs.value = recentJobs.value.filter((entry) => entry.id !== jobId);
+      return { ok: true };
+    } catch (e) {
+      const msg = String(e);
+      runError.value = msg;
+      return { ok: false, error: msg };
+    }
+  }
+
+  /**
+   * Delete every locally-known FINISHED job in one pass — convenience for
+   * clearing accumulated completed/failed/cancelled rows. Active jobs are
+   * left alone. Returns counts.
+   */
+  async function clearFinishedRuns(): Promise<{ deleted: number; failed: number }> {
+    const targets = recentJobs.value
+      .filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled")
+      .map((j) => j.id);
+    let deleted = 0;
+    let failed = 0;
+    for (const id of targets) {
+      const r = await deleteRun(id);
+      if (r.ok) deleted++; else failed++;
+    }
+    return { deleted, failed };
+  }
+
   async function cancel(jobId: string): Promise<SceneJob | null> {
     runError.value = null;
     try {
@@ -336,6 +382,8 @@ export const useScenesStore = defineStore("scenes", () => {
     run,
     runJob,
     cancel,
+    deleteRun,
+    clearFinishedRuns,
     dismissJob,
   };
 });
