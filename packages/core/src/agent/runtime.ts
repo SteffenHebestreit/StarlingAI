@@ -3465,6 +3465,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         llmResponse = continued.response;
         llmCalls += continued.additionalCalls;
         llmTimeMs += continued.additionalTimeMs;
+        if (continued.runawayInlineArtifact) {
+          // Orchestrator inlined a giant code block instead of delegating to
+          // an artifact-writing specialist. We stopped the length-continuation
+          // loop early so the partial doesn't balloon further, but the
+          // partial itself is still going out — flag it so the scorecard
+          // doesn't claim a clean turn.
+          guardrailEvents.push({ type: "runaway_inline_artifact", details: `orchestrator inlined ${llmResponse.content?.length ?? 0} chars of code instead of delegating` });
+          logAudit("guardrail_flagged", {
+            type: "runaway_inline_artifact",
+            completionChars: llmResponse.content?.length ?? 0,
+            iteration: iterationCount,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }
       }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
@@ -5521,16 +5534,50 @@ function appendNonDuplicatedContinuation(existing: string, continuation: string)
   return `${existing}${continuation}`;
 }
 
+/**
+ * Recognise the "model is dumping a giant artifact inline as a chat code
+ * block" failure mode. Observed live: orchestrator falls back to writing the
+ * full HTML in chat when a delegated content_writer fails to call write_file,
+ * the response hits the token cap mid-document, and the length-continuation
+ * loop stitches it back together — eventually a 50 KB cut-off chat reply
+ * with no artifact persisted anywhere.
+ *
+ * Heuristic: a single ```html / ```javascript / ```css / ```vue fence with
+ * a body larger than INLINE_ARTIFACT_FENCE_BYTES, OR the unclosed-fence
+ * shape that happens when the cap fires mid-block. Plain prose, even very
+ * long, isn't flagged; tutorial answers with multiple small snippets aren't
+ * flagged.
+ */
+const INLINE_ARTIFACT_FENCE_BYTES = 5000;
+const INLINE_ARTIFACT_LANGS = ["html", "javascript", "js", "ts", "tsx", "jsx", "css", "vue", "svelte", "xml"];
+
+export function looksLikeRunawayInlineArtifact(content: string): boolean {
+  if (content.length < INLINE_ARTIFACT_FENCE_BYTES) return false;
+  const fenceRe = /```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)(?:```|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRe.exec(content)) !== null) {
+    const lang = (match[1] ?? "").toLowerCase();
+    const body = match[2] ?? "";
+    if (!INLINE_ARTIFACT_LANGS.includes(lang)) continue;
+    if (body.length >= INLINE_ARTIFACT_FENCE_BYTES) return true;
+    // Cap fired mid-fence → the regex's `|$` branch matched; the body
+    // length reflects everything from the opener to EOF, so the size
+    // check above already covers it. No extra logic needed.
+  }
+  return false;
+}
+
 async function continueLengthLimitedResponse(
   provider: ChatProvider,
   baseMessages: readonly LLMMessage[],
   initialResponse: LLMResponse,
   signal: AbortSignal,
   onChunk?: (text: string) => void,
-): Promise<{ response: LLMResponse; additionalCalls: number; additionalTimeMs: number }> {
+): Promise<{ response: LLMResponse; additionalCalls: number; additionalTimeMs: number; runawayInlineArtifact: boolean }> {
   let response: LLMResponse = { ...initialResponse, tool_calls: [...initialResponse.tool_calls] };
   let additionalCalls = 0;
   let additionalTimeMs = 0;
+  let runawayInlineArtifact = false;
 
   for (let attempt = 0; attempt < MAX_LENGTH_CONTINUATION_ATTEMPTS; attempt += 1) {
     if (response.finishReason !== "length" || response.tool_calls.length > 0 || signal.aborted) {
@@ -5539,6 +5586,15 @@ async function continueLengthLimitedResponse(
 
     const partialContent = response.content ?? "";
     if (!partialContent.trim()) {
+      break;
+    }
+
+    // If the partial already looks like a runaway inline-artifact dump,
+    // stop stitching. Continuing would just append more lines of the same
+    // truncated HTML; the user is better served by a visible failure than
+    // a 50 KB cut-off chat reply that pretends to be a working app.
+    if (looksLikeRunawayInlineArtifact(partialContent)) {
+      runawayInlineArtifact = true;
       break;
     }
 
@@ -5572,7 +5628,7 @@ async function continueLengthLimitedResponse(
     };
   }
 
-  return { response, additionalCalls, additionalTimeMs };
+  return { response, additionalCalls, additionalTimeMs, runawayInlineArtifact };
 }
 
 function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly LLMMessage[]): {
