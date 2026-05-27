@@ -2,6 +2,7 @@ import "dotenv/config";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
 import { startCostAggregator, stopCostAggregator } from "./observability/cost.js";
 import { startTimeseriesTelemetry, stopTimeseriesTelemetry } from "./observability/telemetry.js";
+import { logSecretHygiene } from "./observability/secret-hygiene.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
@@ -128,6 +129,12 @@ const log = childLogger("main");
 export async function main() {
   log.info("StarlingAI starting...");
   const embeddedSceneWorkerEnabled = process.env["SAI_DISABLE_EMBEDDED_SCENE_WORKER"] !== "1";
+
+  // Surface missing/weak/placeholder secrets before they break things downstream
+  // (JWT signing falls back to a random per-boot secret; the credential store
+  // throws on first use). One warning per finding so the operator can fix and
+  // restart without parsing exceptions.
+  logSecretHygiene();
 
   // Load and validate config
   const config = loadConfig();
