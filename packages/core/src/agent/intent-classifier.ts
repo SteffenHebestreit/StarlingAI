@@ -62,9 +62,31 @@ export const PRODUCT_RECOMMENDATION_PATTERNS = [
   /\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b[\s\S]{0,120}\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b/,
 ];
 
+// Noun shared between the two ordering patterns. Includes English and German
+// vocabulary plus learning-content artifacts (fragekatalog, quiz, lernkartei,
+// vollsimulation, etc.) that previously slipped through and got
+// misclassified as pure "search online" tasks.
+const ARTIFACT_NOUN_SUBPATTERN = (
+  "(?:downloadable|download|artifact|artifacts|artefakt|artefakte|datei|file|" +
+  "html\\s?page|html-seite|static\\s+site|website|webseite|blog|" +
+  "how[- ]?to|anleitung|guide|svg|diagramm|grafik|grafiken|" +
+  // Learning / training deliverables (the German "kannst du mir einen
+  // Fragekatalog erstellen" pattern that derailed routing on first attempt):
+  "fragekatalog|fragenkatalog|katalog|quiz|quizze|vollsimulation|simulation|" +
+  "lernmaterial|lernmaterialien|lernkartei|lernkarten|karteikarten|" +
+  "uebung|uebungen|übung|übungen|uebungsfragen|übungsfragen|" +
+  "study\\s+guide|exam\\s+questions|flash\\s?cards?|question\\s+catalog|" +
+  "learning\\s+materials?|practice\\s+questions?)"
+);
+const ARTIFACT_VERB_SUBPATTERN = (
+  "(?:generate|create|build|make|write|render|export|save|" +
+  "erstell(?:e|en)?|generier(?:e|en)?|speicher(?:e|n)?|exportier(?:e|en)?|" +
+  "schreib(?:e|en)?|bau(?:e|en)?)"
+);
+
 export const ARTIFACT_DELIVERABLE_PATTERNS = [
-  /\b(downloadable|download|artifact|artifacts|artefakt|artefakte|datei|file|html\s?page|html-seite|static\s+site|website|webseite|blog|how[- ]?to|anleitung|guide|svg|diagramm|grafik|grafiken)\b[\s\S]{0,140}\b(generate|create|build|make|write|render|export|save|erstell(?:e|en)?|generier(?:e|en)?|speicher(?:e|n)?|exportier(?:e|en)?)\b/,
-  /\b(generate|create|build|make|write|render|export|save|erstell(?:e|en)?|generier(?:e|en)?|speicher(?:e|n)?|exportier(?:e|en)?)\b[\s\S]{0,140}\b(downloadable|download|artifact|artifacts|artefakt|artefakte|datei|file|html\s?page|html-seite|static\s+site|website|webseite|blog|how[- ]?to|anleitung|guide|svg|diagramm|grafik|grafiken)\b/,
+  new RegExp(`\\b${ARTIFACT_NOUN_SUBPATTERN}\\b[\\s\\S]{0,140}\\b${ARTIFACT_VERB_SUBPATTERN}\\b`),
+  new RegExp(`\\b${ARTIFACT_VERB_SUBPATTERN}\\b[\\s\\S]{0,140}\\b${ARTIFACT_NOUN_SUBPATTERN}\\b`),
   /\b(artifact|artifacts|artefakt|artefakte)\b[\s\S]{0,80}\b(see|view|visible|anzeigen|sehen|sichtbar|download|downloadable)\b/,
 ];
 
@@ -342,9 +364,16 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const selfCapabilityQuestion =
     SELF_CAPABILITY_QUESTION_PATTERNS.some((pattern) => pattern.test(normalized))
     && SELF_CAPABILITY_REFERENCE_TERMS.some((term) => normalized.includes(term));
-  const sourceSensitiveByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
-    || WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term))
+  // Split the source-sensitive signal into the two intents it actually
+  // conflates: explicit verification (cite/validate/verify, product
+  // recommendations needing evidence) vs. a simple "look it up" request.
+  // Both still need web access, but only the verification half should
+  // force the SOURCE-SENSITIVE DELEGATION routing prefix that routes
+  // tasks to source_verifier-class agents.
+  const sourceVerificationByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
     || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized));
+  const webLookupByTerm = WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
+  const sourceSensitiveByTerm = sourceVerificationByTerm || webLookupByTerm;
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
@@ -383,8 +412,18 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   // Either review path overrides freshness/source sensitivity — the user
   // already pasted the state, we don't need to fetch fresh sources.
   const inlineReview = localServerConfigReview || inlineAnalyticalContent;
+  // Research-then-create: an artifact-creation request that asked the agent
+  // to "search online" / "look it up" but did NOT ask for explicit
+  // verification, citation, or product recommendation. Keeping
+  // sourceSensitive=true here routes the whole job through source_verifier,
+  // which has no creation tools and BLOCKS — observed live in session
+  // 006ca6bf turn 1 ("kannst du mir einen Fragekatalog … erstellen? Suche
+  // online …"). Relax so the bidding system can pick an
+  // artifact-and-research-capable agent (mission_coordinator, researcher +
+  // content_writer chain, etc.) instead.
+  const researchThenCreate = artifactSensitive && webLookupByTerm && !sourceVerificationByTerm;
   const freshnessSensitive = (inlineReview || selfCapabilityQuestion) ? false : freshnessSensitiveByTerm;
-  const sourceSensitive = inlineReview ? false : sourceSensitiveByTerm;
+  const sourceSensitive = (inlineReview || researchThenCreate) ? false : sourceSensitiveByTerm;
 
   const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent };
   if (!Object.values(flags).some(Boolean)) return null;
