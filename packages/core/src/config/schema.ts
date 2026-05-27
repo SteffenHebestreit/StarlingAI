@@ -452,7 +452,11 @@ export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   baseUrl: OptionalEndpointUrlSchema.default(""),
   api: z.enum(["qwen-compatible", "openai-compatible"]).default("openai-compatible"),
-  model: z.string().min(1).default("tts-1"),
+  // Empty string is a meaningful value: on qwen-compatible it tells the
+  // runtime to skip the /load_model preflight (use whatever the upstream
+  // already has loaded); on openai-compatible the runtime falls back to
+  // "tts-1" when this is empty. See sendSingleTtsRequest in multimodal.ts.
+  model: z.string().default("tts-1"),
   defaultLanguage: z.string().min(2).default("English"),
   defaultSpeaker: z.string().min(1).default("alloy"),
   defaultVoiceId: z.string().min(1).optional(),
