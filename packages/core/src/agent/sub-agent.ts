@@ -926,6 +926,35 @@ function looksLikeHallucinatedDelegationSummary(content: string): boolean {
   return completionClaim && referencedAgents.length >= 2;
 }
 
+/**
+ * Detect the specific failure mode where a sub-agent's model exhausts its
+ * completion budget without ever emitting a callable tool call.
+ *
+ * Observed live with content_writer + qwen3.6-35b-a3b for HTML SPA artifact
+ * tasks: the model attempts to put the entire 30 KB document into a single
+ * `write_file(content=...)` argument; the tool-call JSON outgrows the 8192
+ * completion-token cap; the provider can't parse the truncated call and
+ * returns empty content + empty tool_calls. The sub-agent then exits with
+ * `iterations: 0, toolCount: 0, completionTokens >= maxTokens, output:
+ * "Sub-agent produced no final response."` — and previously got recorded as
+ * "completed/success" because the semantic-outcome heuristic only looked for
+ * "not found / unable to / error:" in the empty-ish output.
+ *
+ * Caller already gates on `toolCount === 0`, so this only fires when no tool
+ * ran at all.
+ */
+export function looksLikeExhaustedBudgetNoTool(output: string, stats: SubAgentExecutionStats): boolean {
+  const trimmed = output.trim();
+  // Canonical "model returned empty content" marker, or any trivially empty answer.
+  const triviallyEmpty = trimmed.length < 60 || trimmed === "Sub-agent produced no final response.";
+  if (!triviallyEmpty) return false;
+  // Real signal that the model actually tried — a few thousand completion tokens
+  // burned but no usable content reached the caller. 1500 is well above any
+  // legitimate "the model decided this question had no answer" response, which
+  // would normally cost <300 tokens.
+  return stats.usage.completionTokens >= 1500;
+}
+
 function rejectSuspiciousNoToolOutput(
   opts: SubAgentRunOptions,
   stats: SubAgentExecutionStats,
@@ -948,6 +977,17 @@ function rejectSuspiciousNoToolOutput(
     reason = "emitted narrated tool-call text without executing any tool calls";
   } else if (looksLikeUnsupportedScanClaim(output)) {
     reason = "reported scan blocking or HTTP findings without executing any tool calls";
+  } else if (looksLikeExhaustedBudgetNoTool(output, stats)) {
+    // Qwen failure mode: the model tries to inline a large artifact (HTML/JS/CSS)
+    // as a single huge write_file argument. The tool-call JSON exceeds the 8192
+    // completion-token cap, the provider can't parse the truncated call, and
+    // returns empty content + empty tool_calls. Previously this was misclassified
+    // as `outcome: "success", terminalState: "completed"` because the
+    // semantic-outcome regex didn't match the canonical
+    // "Sub-agent produced no final response." string. Now it's a real failure
+    // so the orchestrator surfaces it instead of inlining the artifact as a
+    // chat code block.
+    reason = "exhausted completion budget without calling any tool — the model likely tried to inline a large artifact instead of using a focused write_file/generate_website call";
   }
 
   if (!reason) return null;

@@ -1504,20 +1504,43 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function mapTranscriptMessages(transcript: GatewaySessionTranscriptMessage[]): ChatMessage[] {
-    return normalizeHydratedMessages(transcript.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.role === "assistant"
-        ? mergeFinalAssistantContent(message.content, "", message.toolCalls)
-        : message.content,
-      timestamp: new Date(message.timestamp),
-      toolCalls: message.toolCalls,
-      swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
-      attachments: [
+    // Dedupe attachments across the entire transcript. The runtime now pins
+    // the consolidated artifact list onto the final assistant message of each
+    // turn, but the iteration messages still carry tool-call metadata that
+    // would otherwise re-extract the same artifact cards. Walk transcript
+    // newest → oldest and skip any artifact already attributed upstream so
+    // each artifact appears exactly once (preferentially on the final
+    // synthesis message, which is the natural "here's what I made" surface).
+    const seenKeys = new Set<string>();
+    const attachmentKey = (att: ChatAttachment): string =>
+      [att.relativePath ?? "", att.dataUrl ?? "", att.externalUrl ?? "", att.filename, att.sourceTool ?? ""].join("::");
+
+    const reversed = transcript.slice().reverse();
+    const mappedReversed = reversed.map((message) => {
+      const candidate: ChatAttachment[] = [
         ...(message.attachments ?? []),
         ...(message.toolCalls ?? []).flatMap((toolCall) => extractToolAttachments(toolCall.name, toolCall.metadata)),
-      ],
-    })));
+      ];
+      const attachments: ChatAttachment[] = [];
+      for (const att of candidate) {
+        const key = attachmentKey(att);
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        attachments.push(att);
+      }
+      return {
+        id: message.id,
+        role: message.role,
+        content: message.role === "assistant"
+          ? mergeFinalAssistantContent(message.content, "", message.toolCalls)
+          : message.content,
+        timestamp: new Date(message.timestamp),
+        toolCalls: message.toolCalls,
+        swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
+        attachments,
+      };
+    });
+    return normalizeHydratedMessages(mappedReversed.reverse());
   }
 
   function hydrateTranscript(transcript: GatewaySessionTranscriptMessage[]) {
