@@ -40,6 +40,62 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).not.toContain("generate_svg, write_file");
   });
 
+  it("recognises German learning-content artifact nouns (Fragekatalog, Quiz, Lernkartei, Vollsimulation)", () => {
+    // Each of these phrases derailed routing in session 006ca6bf because the
+    // artifact noun wasn't in the original pattern list — without
+    // artifactSensitive set, the "Suche online" qualifier flipped the request
+    // to source-sensitive and routed it to source_verifier (a verification-
+    // only agent with no creation tools), which BLOCKED.
+    for (const phrase of [
+      "kannst du mir einen Fragekatalog zum auswendig lernen erstellen?",
+      "erstelle ein Quiz mit 20 Fragen zu Software-Architektur",
+      "bau mir eine Vollsimulation für die iSAQB-Prüfung",
+      "create a study guide with practice questions for the AWS exam",
+      "generate flashcards for the German driver's licence theory test",
+    ]) {
+      const guidance = buildDynamicTurnGuidance(phrase, "orchestration_only");
+      expect(guidance?.artifactSensitive, `phrase: ${phrase}`).toBe(true);
+    }
+  });
+
+  it("relaxes source-sensitive routing for research-then-create requests (artifact + 'search online')", () => {
+    // This is the exact session 006ca6bf turn 1 message. The user wants an
+    // artifact created, not a verification of pre-existing facts; the bidding
+    // system needs to be free to pick mission_coordinator / content_writer
+    // rather than being forced to source_verifier by the SOURCE-SENSITIVE
+    // DELEGATION prefix.
+    const guidance = buildDynamicTurnGuidance(
+      "kannst du mir einen Fragekatalog zum auswendig lernen erstellen?\nSuche online nach aktuellsten Inhalten",
+      "orchestration_only",
+    );
+    expect(guidance).not.toBeNull();
+    expect(guidance?.artifactSensitive).toBe(true);
+    expect(guidance?.sourceSensitive).toBe(false);
+  });
+
+  it("keeps source-sensitive routing when artifact creation explicitly asks for verification", () => {
+    // Regression boundary: when the request DOES include explicit
+    // verify/cite/validate language, the SOURCE-SENSITIVE prefix is still
+    // load-bearing (the deliverable needs verified facts).
+    const guidance = buildDynamicTurnGuidance(
+      "Erstelle einen Fragekatalog zur Java-Programmierung — alle Antworten müssen offizielle Quellen zitieren und verifiziert werden.",
+      "orchestration_only",
+    );
+    expect(guidance?.artifactSensitive).toBe(true);
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("keeps source-sensitive routing for plain 'search online' requests with no artifact intent", () => {
+    // Regression: relaxation must require BOTH artifactSensitive AND
+    // web-lookup; a pure lookup with no artifact verb stays source-sensitive.
+    const guidance = buildDynamicTurnGuidance(
+      "suche online nach der genauen entfernung vom flughafen heraklion zum hotel",
+      "orchestration_only",
+    );
+    expect(guidance?.artifactSensitive ?? false).toBe(false);
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
   it("adds mission-coordinator guidance for source-grounded papers and reports", () => {
     const guidance = buildDynamicTurnGuidance("Write a short paper comparing MCP, A2A, and AG-UI using official sources and the latest specifications.", "orchestration_only");
 
