@@ -8,21 +8,36 @@
       // Vision LLM — same model as the primary, Qwen 3.6 is multimodal (vision + tool calling).
       // visionTimeoutMs is separate from timeoutMs (which is for the file-to-markdown service)
       // because local LLM inference on large screenshots can take well over 60 s.
-      "visionModel": "lmstudio/qwen3.6-35b-a3b",
+      "visionModel": "lmstudio/qwen/qwen3.6-35b-a3b",
       "visionTimeoutMs": 120000
     },
+    // Speech-to-text. baseUrl comes from SAI_MULTIMODAL_STT_URL at runtime.
+    // Default backend assumption: Qwen3-ASR from tts-stt-playground
+    // (https://github.com/SteffenHebestreit/tts-stt-playground) on its
+    // default port 5002. That service exposes a custom POST /transcribe with
+    // multipart `audio` field — no /v1/audio/transcriptions endpoint — so we
+    // pin `api: "transcribe-only"` to skip the OpenAI-style attempt and
+    // avoid the wasted 404 round-trip every transcription would otherwise
+    // incur. Switch to "openai-compatible" for whisper-cpp-style endpoints,
+    // or "auto" if the upstream supports both surfaces.
     "stt": {
       "baseUrl": "",
-      "api": "auto",
+      "api": "transcribe-only",
       "model": "whisper-1",
       "timeoutMs": 60000
     },
+    // Text-to-speech. baseUrl comes from SAI_MULTIMODAL_TTS_URL at runtime.
+    // Default backend assumption: Qwen3-TTS from tts-stt-playground on its
+    // default port 5004. That service uses the qwen-compatible surface
+    // (POST /tts with JSON {text, lang, speaker, instruct}, /voices, /models,
+    // /clone, /voices/save for voice cloning). Switch to "openai-compatible"
+    // when targeting OpenAI's /v1/audio/speech format instead.
     "tts": {
       "baseUrl": "",
-      "api": "openai-compatible",
-      "model": "tts-1",
+      "api": "qwen-compatible",
+      "model": "",
       "defaultLanguage": "English",
-      "defaultSpeaker": "alloy",
+      "defaultSpeaker": "Vivian",
       "defaultQuality": "medium",
       "timeoutMs": 60000
     },
