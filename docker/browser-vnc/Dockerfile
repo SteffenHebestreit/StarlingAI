@@ -79,8 +79,15 @@ startretries=30
 stdout_logfile=/tmp/cdp-proxy.log
 stderr_logfile=/tmp/cdp-proxy-err.log
 
+# No VNC password — the only path to :6080 is through the gateway's
+# `/ws/browser-vnc/:id` proxy, which validates a JWT before upgrading the
+# socket. Port 6080 is never published to the host (compose declares no
+# ports), so x11vnc is reachable only from inside the docker network the
+# gateway already gates. Adding a VNC password on top would just deadlock
+# the noVNC client (websockify passes raw RFB; the frontend never gets the
+# password) — the symptom is the dashboard sitting at "connecting" forever.
 [program:x11vnc]
-command=/usr/bin/x11vnc -display :1 -rfbauth /etc/x11vnc.pass -forever -shared -rfbport %(ENV_VNC_PORT)s -noxdamage -repeat
+command=/usr/bin/x11vnc -display :1 -nopw -forever -shared -rfbport %(ENV_VNC_PORT)s -noxdamage -repeat
 autorestart=true
 priority=30
 stdout_logfile=/tmp/x11vnc.log
@@ -123,12 +130,11 @@ server {
 }
 NGINX
 
-# Entrypoint: (re)generate the VNC password from $VNC_PASSWORD, then run supervisord.
+# Entrypoint: run supervisord. No VNC password setup — see x11vnc supervisord
+# block above for why. $VNC_PASSWORD is accepted but ignored.
 RUN cat <<'ENTRY' > /usr/local/bin/entrypoint.sh
 #!/bin/sh
 set -e
-x11vnc -storepasswd "${VNC_PASSWORD:-starling}" /etc/x11vnc.pass >/dev/null 2>&1
-chmod 644 /etc/x11vnc.pass
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/browser.conf
 ENTRY
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh

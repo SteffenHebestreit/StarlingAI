@@ -24,6 +24,10 @@ export const useBrowserStore = defineStore("browser", () => {
   const gateway = useGatewayStore();
 
   const enabled = ref(false);
+  // `reachable` mirrors a live TCP probe against the websockify port. The panel
+  // uses this to show "backend unreachable" instead of letting the noVNC client
+  // sit at "connecting" forever when the browser-vnc container is down.
+  const reachable = ref(false);
   const sessions = ref<BrowserSession[]>([]);
   const observedSessionId = ref<string | null>(null);
   const loading = ref(false);
@@ -36,10 +40,12 @@ export const useBrowserStore = defineStore("browser", () => {
   async function fetchConfig() {
     try {
       const res = await gateway.authorizedFetch("/api/browser-sessions/config");
-      const body = await res.json() as { enabled?: boolean };
+      const body = await res.json() as { enabled?: boolean; reachable?: boolean };
       enabled.value = body.enabled === true;
+      reachable.value = body.reachable === true;
     } catch {
       enabled.value = false;
+      reachable.value = false;
     }
   }
 
@@ -92,9 +98,14 @@ export const useBrowserStore = defineStore("browser", () => {
 
   function startPolling() {
     if (pollTimer) return;
+    let ticks = 0;
     pollTimer = setInterval(() => {
       if (!gateway.connected) return;
       void fetchSessions();
+      // Refresh reachability roughly every 10s (every 5th tick). Cheap TCP
+      // probe on the gateway side; keeps the dashboard honest when the
+      // browser-vnc container restarts or goes away.
+      if (ticks++ % 5 === 0) void fetchConfig();
     }, POLL_INTERVAL_MS);
   }
 
@@ -123,6 +134,7 @@ export const useBrowserStore = defineStore("browser", () => {
 
   return {
     enabled,
+    reachable,
     sessions,
     activeSessions,
     awaitingAssist,

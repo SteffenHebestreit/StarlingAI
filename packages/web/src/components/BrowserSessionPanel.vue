@@ -9,8 +9,9 @@ const browser = useBrowserStore();
 const vncStage = ref<HTMLElement | null>(null);
 const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(vncStage);
 
-type VncStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
+type VncStatus = "idle" | "connecting" | "connected" | "disconnected" | "error" | "auth_required";
 const vncStatus = ref<VncStatus>("idle");
+const vncDetail = ref<string>("");
 const resolving = ref(false);
 
 const sessions = computed(() => browser.sessions);
@@ -20,9 +21,24 @@ const needsAssist = computed(() => observed.value?.state === "assist_requested")
 
 let rfb: RFB | null = null;
 
-function onConnect() { vncStatus.value = "connected"; }
-function onDisconnect() { vncStatus.value = "disconnected"; }
-function onSecurityFailure() { vncStatus.value = "error"; }
+function onConnect() { vncStatus.value = "connected"; vncDetail.value = ""; }
+function onDisconnect(ev: Event) {
+  const detail = (ev as CustomEvent<{ clean?: boolean; reason?: string }>).detail;
+  vncStatus.value = "disconnected";
+  vncDetail.value = detail?.reason || "";
+}
+function onSecurityFailure(ev: Event) {
+  const detail = (ev as CustomEvent<{ status?: number; reason?: string }>).detail;
+  vncStatus.value = "error";
+  vncDetail.value = detail?.reason || `security failure (status ${detail?.status ?? "?"})`;
+}
+// If x11vnc is ever (re)configured to require a password, RFB will fire this
+// instead of `connect` and otherwise hang silently. Surfacing it as a status
+// makes the misconfig visible instead of presenting "connecting" forever.
+function onCredentialsRequired() {
+  vncStatus.value = "auth_required";
+  vncDetail.value = "browser-vnc is asking for credentials — disable VNC password (the gateway already authenticates)";
+}
 
 function teardown() {
   if (rfb) {
@@ -30,6 +46,7 @@ function teardown() {
       rfb.removeEventListener("connect", onConnect);
       rfb.removeEventListener("disconnect", onDisconnect);
       rfb.removeEventListener("securityfailure", onSecurityFailure);
+      rfb.removeEventListener("credentialsrequired", onCredentialsRequired);
       rfb.disconnect();
     } catch { /* already gone */ }
     rfb = null;
@@ -45,6 +62,13 @@ function connect() {
     vncStatus.value = "idle";
     return;
   }
+  // Don't open a doomed WebSocket when the gateway already told us the
+  // backend port is down — that's the original "connecting forever" trap.
+  if (!browser.reachable) {
+    vncStatus.value = "error";
+    vncDetail.value = "browser-vnc container not reachable on the docker network";
+    return;
+  }
   vncStatus.value = "connecting";
   try {
     const client = new RFB(vncStage.value, browser.buildVncUrl(id), { shared: true });
@@ -55,6 +79,7 @@ function connect() {
     client.addEventListener("connect", onConnect);
     client.addEventListener("disconnect", onDisconnect);
     client.addEventListener("securityfailure", onSecurityFailure);
+    client.addEventListener("credentialsrequired", onCredentialsRequired);
     rfb = client;
   } catch {
     vncStatus.value = "error";
@@ -77,9 +102,11 @@ async function resolveAssist() {
 }
 
 // Reconnect whenever the observed session changes or the feature toggles on.
-// flush:"post" so the stage element is in the DOM before we attach RFB.
+// Reachability is included so the panel auto-recovers when the backend comes
+// back online (e.g. after a browser-vnc restart). flush:"post" so the stage
+// element is in the DOM before we attach RFB.
 watch(
-  () => [observedId.value, browser.enabled] as const,
+  () => [observedId.value, browser.enabled, browser.reachable] as const,
   () => { void nextTick(connect); },
   { flush: "post" },
 );
@@ -124,7 +151,8 @@ onUnmounted(teardown);
     <div v-if="observedId" class="live-view-header">
       <h4>
         Live Browser
-        <span class="vnc-status" :class="vncStatus">{{ vncStatus }}</span>
+        <span class="vnc-status" :class="vncStatus" :title="vncDetail">{{ vncStatus }}</span>
+        <span v-if="vncDetail" class="vnc-detail">{{ vncDetail }}</span>
       </h4>
       <button class="btn-sm btn-fullscreen" :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" @click="toggleFullscreen">
         {{ isFullscreen ? "⤡ Exit fullscreen" : "⤢ Fullscreen" }}
@@ -253,6 +281,13 @@ onUnmounted(teardown);
 .vnc-status.connected { color: #4caf50; }
 .vnc-status.connecting { color: #ff9800; }
 .vnc-status.error { color: #f44336; }
+.vnc-status.auth_required { color: #f44336; }
+
+.vnc-detail {
+  font-size: 0.7rem;
+  color: var(--color-text-muted, #888);
+  font-weight: normal;
+}
 
 .btn-fullscreen { white-space: nowrap; }
 

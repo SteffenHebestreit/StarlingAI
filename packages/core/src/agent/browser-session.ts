@@ -19,6 +19,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import net from "node:net";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
@@ -251,6 +252,32 @@ class BrowserSessionManager extends EventEmitter {
   /** Whether the browser preview/handoff is available (a backend is configured). */
   isEnabled(): boolean {
     return this.getVncTarget() !== null;
+  }
+
+  /**
+   * Live TCP probe — is the websockify port actually accepting connections?
+   * Distinct from `isEnabled()` (which only confirms a target URL is set). The
+   * dashboard uses this so the panel can show "backend unreachable" instead of
+   * sitting at "connecting" while browser-vnc is down or starting up. Used by
+   * the subsystem health check for the same reason.
+   */
+  async pingBackend(timeoutMs = 1500): Promise<boolean> {
+    const target = this.getVncTarget();
+    if (!target) return false;
+    return new Promise<boolean>((resolve) => {
+      const sock = new net.Socket();
+      let settled = false;
+      const done = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        try { sock.destroy(); } catch { /* noop */ }
+        resolve(ok);
+      };
+      sock.setTimeout(timeoutMs, () => done(false));
+      sock.once("error", () => done(false));
+      sock.once("connect", () => done(true));
+      try { sock.connect(target.port, target.host); } catch { done(false); }
+    });
   }
 
   /** Reset for tests. */

@@ -15,6 +15,7 @@ import { isEmbeddingAvailable, computeQueryEmbedding } from "../providers/embedd
 import { initVectorStore, vectorStoreDimension } from "../db/vector-store.js";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import { isQuestDbAvailable, questQuery } from "../db/questdb.js";
+import { browserSessionManager } from "../agent/browser-session.js";
 
 const log = childLogger("health-checks");
 
@@ -109,6 +110,23 @@ async function checkTelemetry(): Promise<SubsystemCheck> {
   }
 }
 
+/**
+ * browser-vnc is opt-in (no env, no probe). When configured but the websockify
+ * port can't be reached, the noVNC dashboard panel hangs at "connecting" — same
+ * silent-failure class as the embedding zero-vector bug, so it belongs here.
+ */
+async function checkBrowserVnc(): Promise<SubsystemCheck> {
+  // Opt-in: when the operator explicitly disables the feature
+  // (BROWSER_VNC_WS_URL=""), that's a correctly-configured state — report ok.
+  if (!browserSessionManager.isEnabled()) {
+    return { name: "browser_vnc", status: "ok", detail: "browser preview disabled by config" };
+  }
+  const ok = await browserSessionManager.pingBackend();
+  return ok
+    ? { name: "browser_vnc", status: "ok", detail: "websockify reachable" }
+    : { name: "browser_vnc", status: "degraded", detail: "browser-vnc container unreachable on its websockify port" };
+}
+
 /** Run all subsystem probes in parallel and aggregate. */
 export async function runSubsystemChecks(): Promise<SubsystemHealth> {
   const checks = await Promise.all([
@@ -116,6 +134,7 @@ export async function runSubsystemChecks(): Promise<SubsystemHealth> {
     checkVectorStore(),
     checkGraph(),
     checkTelemetry(),
+    checkBrowserVnc(),
   ]);
   const healthy = checks.every((c) => c.status !== "unavailable");
   const degraded = checks.some((c) => c.status === "degraded");
