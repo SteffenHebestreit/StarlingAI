@@ -4633,7 +4633,11 @@ export function createGateway() {
   app.get("/api/browser-sessions/config", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json({ enabled: browserSessionManager.isEnabled() });
+    const enabled = browserSessionManager.isEnabled();
+    // Probe the backend only when the feature is configured at all — saves a
+    // pointless TCP attempt when the env var is empty.
+    const reachable = enabled ? await browserSessionManager.pingBackend() : false;
+    return c.json({ enabled, reachable });
   });
 
   app.get("/api/browser-sessions", async (c) => {

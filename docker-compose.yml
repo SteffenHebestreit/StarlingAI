@@ -9,6 +9,12 @@ services:
       target: runtime
     image: starlingai/gateway:dev
     restart: unless-stopped
+    # Cap RSS so a runaway agent loop / large attachment / leak can't OOM the
+    # whole host. Tune via SAI_GATEWAY_MEM_LIMIT (default 4g) if scenes touching
+    # big payloads start getting killed (look for exit 137 in `docker logs
+    # gateway`).
+    mem_limit: ${SAI_GATEWAY_MEM_LIMIT:-4g}
+    memswap_limit: ${SAI_GATEWAY_MEM_LIMIT:-4g}
     ports:
       - "8765:8765"   # WebSocket + REST
     # Load the full .env so every `$VAR` referenced by config (sites, channels,
@@ -122,6 +128,10 @@ services:
       dockerfile: docker/web/Dockerfile
     image: starlingai/web:dev
     restart: unless-stopped
+    # nginx + static SPA; 256m is generous. Cap prevents a runaway proxy buffer
+    # from competing with the gateway for host memory. Tune via SAI_WEB_MEM_LIMIT.
+    mem_limit: ${SAI_WEB_MEM_LIMIT:-256m}
+    memswap_limit: ${SAI_WEB_MEM_LIMIT:-256m}
     ports:
       - "3001:3000"   # Host 3001 → container 3000 (3000 already in use on host)
     networks:
@@ -145,13 +155,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - ENABLED_TOOLS=file_converter
-      # qwen3.6-35b-a3b is used as a text model through the provider.
+      # qwen/qwen3.6-35b-a3b is used as a text model through the provider.
       # Keep LLM-enhanced image conversion disabled unless a real vision-capable model is loaded.
       - FTMD_MARKITDOWN_ENABLE_LLM=false
       # Provider configuration for file conversion features that rely on text-only model access.
       - FTMD_OPENAI_BASE_URL=${FTMD_OPENAI_BASE_URL:-http://host.docker.internal:1234/v1}
       - FTMD_OPENAI_API_KEY=${FTMD_OPENAI_API_KEY:-lm-studio}
-      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen3.6-35b-a3b}
+      # Bare LM Studio model id (no provider prefix — this hits LM Studio's API directly).
+      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen/qwen3.6-35b-a3b}
       - LOG_LEVEL=${FASTAPI_MCP_TEMPLATE_LOG_LEVEL:-INFO}
     networks:
       - starlingai-internal
@@ -264,11 +275,17 @@ services:
   # the one the operator can take over via the dashboard to solve a reCAPTCHA
   # mid-run, after which browser_agent continues on the same page.
   #
-  # Neither port is published to the host: the operator reaches noVNC through the
-  # gateway's authenticated proxy (/ws/browser-vnc/:id), and CDP (which has no
-  # auth) stays inside the Docker network. Two networks: starlingai-internal so
-  # the gateway can proxy noVNC, and starlingai-public so the headed Chrome can
-  # actually load external sites (internal is internet-isolated).
+  # SECURITY — DO NOT PUBLISH PORTS 6080 OR 9222 TO THE HOST. x11vnc inside this
+  # container runs with `-nopw` (no VNC password) because the only path that's
+  # supposed to reach it goes through the gateway's `/ws/browser-vnc/:id` proxy,
+  # which enforces JWT auth. Publishing 6080:6080 would expose an
+  # unauthenticated VNC server to anything that can reach the host. CDP on
+  # 9222 has no auth either — also keep it docker-internal. If you need local
+  # debugging access, tunnel through the gateway instead.
+  #
+  # Two networks: starlingai-internal so the gateway can proxy noVNC, and
+  # starlingai-public so the headed Chrome can actually load external sites
+  # (internal is internet-isolated).
   browser-vnc:
     build:
       context: .
