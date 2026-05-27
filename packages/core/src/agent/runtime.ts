@@ -3476,8 +3476,28 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             type: "runaway_inline_artifact",
             completionChars: llmResponse.content?.length ?? 0,
             iteration: iterationCount,
+            finishReason: "length",
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         }
+      } else if (
+        llmResponse.tool_calls.length === 0
+        && typeof llmResponse.content === "string"
+        && looksLikeRunawayInlineArtifact(llmResponse.content)
+      ) {
+        // Same shape as the length-continuation case, but the model finished
+        // cleanly within the completion budget. Observed live in session
+        // 006ca6bf turn 12:49: completionChars=40857, finishReason="stop",
+        // toolCallsRequested=0 — the orchestrator dumped 40 KB of HTML into
+        // chat in one shot and the scorecard reported a clean turn. Flag it
+        // here so the audit catches both finishReason="length" AND
+        // finishReason="stop" variants of the same failure.
+        guardrailEvents.push({ type: "runaway_inline_artifact", details: `orchestrator inlined ${llmResponse.content.length} chars of code in one shot instead of delegating` });
+        logAudit("guardrail_flagged", {
+          type: "runaway_inline_artifact",
+          completionChars: llmResponse.content.length,
+          iteration: iterationCount,
+          finishReason: llmResponse.finishReason ?? "stop",
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
