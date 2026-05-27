@@ -5415,16 +5415,95 @@ function selectPersistableSwarmState(
 }
 
 function persistAssistantTurnState(session: AgentSession, content: string, swarmState?: SwarmState): void {
-  if (swarmState) {
-    session.addMessage({
-      role: "assistant",
-      content,
-      metadata: { swarmState: structuredClone(swarmState) },
-    });
+  // Pull all artifacts produced during the current turn (since the last user
+  // message) onto the final assistant message. The frontend already extracts
+  // artifacts from each tool call's metadata on the iteration messages, but
+  // (a) those intermediate messages can be pruned by history trimming over
+  // long sessions, and (b) the final synthesis message is the durable
+  // "here's what I made for you" surface — having attachments live there
+  // keeps the artifact list reachable as long as the message itself exists.
+  const attachments = collectTurnArtifactAttachments(session);
+  const metadata: Record<string, unknown> = {};
+  if (swarmState) metadata["swarmState"] = structuredClone(swarmState);
+  if (attachments.length > 0) metadata["attachments"] = attachments;
+
+  if (Object.keys(metadata).length > 0) {
+    session.addMessage({ role: "assistant", content, metadata });
     return;
   }
-
   session.addMessage({ role: "assistant", content });
+}
+
+/**
+ * Walk the current turn's tool-role messages (since the last user message) and
+ * extract every artifact reference into a normalized `SessionTranscriptAttachment`
+ * list. Recurses into nested `artifacts[]` arrays (the shape used by
+ * `delegate_to_agent` to bubble sub-agent artifacts back up). Dedupes by the
+ * fields that the transcript builder also uses, so the final-message
+ * attachments don't get duplicated when a single artifact bubbles through
+ * multiple delegation hops.
+ */
+export function collectTurnArtifactAttachments(session: AgentSession): Array<Record<string, unknown>> {
+  const history = session.getHistory();
+  const attachments: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+
+  type RawMessage = { role: string; metadata?: Record<string, unknown> };
+  // Walk backwards from the end until we hit the user message that opened
+  // this turn. We only want artifacts from THIS turn — not from previously
+  // persisted assistant turns.
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i] as unknown as RawMessage;
+    if (msg.role === "user") break;
+    if (msg.role !== "tool") continue;
+    if (!msg.metadata || typeof msg.metadata !== "object") continue;
+    extractArtifactsFromMetadata(msg.metadata, attachments, seen);
+  }
+  return attachments;
+}
+
+function extractArtifactsFromMetadata(
+  metadata: Record<string, unknown>,
+  out: Array<Record<string, unknown>>,
+  seen: Set<string>,
+): void {
+  const filename = typeof metadata["filename"] === "string" ? metadata["filename"].trim() : "";
+  const outputPath = typeof metadata["outputPath"] === "string" ? metadata["outputPath"].trim() : "";
+  const externalUrl = typeof metadata["externalUrl"] === "string" ? metadata["externalUrl"].trim() : "";
+
+  if (filename || outputPath || externalUrl) {
+    const key = [outputPath, externalUrl, filename, typeof metadata["sourceTool"] === "string" ? metadata["sourceTool"] : ""].join("::");
+    if (!seen.has(key)) {
+      seen.add(key);
+      // A `filename` is required by the transcript builder. Derive one when
+      // only a path is available. `pop()` can yield an empty string for a
+      // trailing-slash path (e.g. "subdir/") — fall back to the raw path
+      // so the transcript builder never sees an empty filename.
+      const derivedFilename = filename
+        || (outputPath ? (outputPath.split("/").pop() || outputPath) : "")
+        || externalUrl;
+      const entry: Record<string, unknown> = { filename: derivedFilename };
+      if (outputPath) entry["relativePath"] = outputPath;
+      if (externalUrl) entry["externalUrl"] = externalUrl;
+      if (typeof metadata["contentType"] === "string") entry["contentType"] = metadata["contentType"];
+      if (typeof metadata["previewMode"] === "string") entry["previewMode"] = metadata["previewMode"];
+      if (typeof metadata["size"] === "number") entry["size"] = metadata["size"];
+      else if (typeof metadata["bytes"] === "number") entry["size"] = metadata["bytes"];
+      if (metadata["isDirectory"] === true) entry["isDirectory"] = true;
+      if (typeof metadata["title"] === "string" && metadata["title"]) entry["title"] = metadata["title"];
+      if (typeof metadata["sourceTool"] === "string" && metadata["sourceTool"]) entry["sourceTool"] = metadata["sourceTool"];
+      out.push(entry);
+    }
+  }
+
+  const nested = metadata["artifacts"];
+  if (Array.isArray(nested)) {
+    for (const item of nested) {
+      if (item && typeof item === "object") {
+        extractArtifactsFromMetadata(item as Record<string, unknown>, out, seen);
+      }
+    }
+  }
 }
 
 function appendNonDuplicatedContinuation(existing: string, continuation: string): string {
