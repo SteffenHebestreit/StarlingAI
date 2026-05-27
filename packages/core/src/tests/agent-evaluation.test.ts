@@ -44,7 +44,7 @@ describe("agent evaluation harness", () => {
         iterations: 1,
         usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
         maxIterations: 4,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["analysis"],
       },
     }));

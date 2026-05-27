@@ -133,7 +133,7 @@ describe("config loader mutable overlay", () => {
       agents: {
         defaults: {
           model: {
-            primary: "lmstudio/qwen3.6-35b-a3b"
+            primary: "lmstudio/qwen/qwen3.6-35b-a3b"
           }
         }
       }
@@ -178,7 +178,7 @@ describe("config loader mutable overlay", () => {
       const config = configLoader.loadConfig();
       const compiledPath = join(tempDir, "starlingai.json");
 
-      expect(config.agents.defaults.model.primary).toBe("lmstudio/qwen3.6-35b-a3b");
+      expect(config.agents.defaults.model.primary).toBe("lmstudio/qwen/qwen3.6-35b-a3b");
       expect(config.agents.mainAssistant.toolMode).toBe("delegate_only");
       expect(config.agents.mainAssistant.customInstructions).toBe("Prefer terse checklists unless the user asks for depth.");
       expect(config.agents.rateLimit.requestsPerMinute).toBe(15);

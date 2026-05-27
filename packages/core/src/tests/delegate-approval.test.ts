@@ -111,7 +111,7 @@ describe("delegate_to_agent approval propagation", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -169,7 +169,7 @@ describe("delegate_to_agent approval propagation", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -279,7 +279,7 @@ describe("delegate_to_agent approval propagation", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {

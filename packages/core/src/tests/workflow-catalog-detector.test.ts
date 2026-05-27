@@ -49,7 +49,7 @@ const ACTION_REQUIRED_INFRA_SCENE = {
 describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
   it("does NOT trip on a passive German question that pastes infra config", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -68,7 +68,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("does NOT confirm-route 'wie konfiguriere ich X' (no imperative action verb)", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -82,7 +82,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("CONFIRM-routes 'apply the terraform change' (action verb + topic)", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -96,7 +96,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("CONFIRM-routes German 'kubernetes-rollout ausrollen'", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -109,7 +109,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("returns 'uncertain_match' for ambiguous topic without action verb when scene requires it", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -129,7 +129,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("never trips when no scene has triggers declared (opt-in)", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: {
         no_triggers_scene: {
           description: "I have no triggers and should never trip the guardrail.",
@@ -148,7 +148,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("still trips on explicit workflow request even without triggers", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: {},
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
@@ -161,7 +161,7 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
 
   it("uncertain_match guidance asks the user instead of forcing routing", async () => {
     writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: {
         // 'playbook' is in the topic vocabulary but NOT in the action-verb set,
         // so the requiresActionVerb gate can be exercised cleanly.

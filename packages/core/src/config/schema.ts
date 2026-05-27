@@ -38,7 +38,7 @@ export const ProvidersSchema = z.object({
 });
 
 export const ModelConfigSchema = z.object({
-  primary: z.string().max(200).default("lmstudio/qwen3.6-35b-a3b"),
+  primary: z.string().max(200).default("lmstudio/qwen/qwen3.6-35b-a3b"),
   fallback: z.string().max(200).optional(),
   cloudFallback: z.string().max(200).optional(),
   /** Override the provider's baseUrl for this specific model (e.g. a different LM Studio instance or vLLM endpoint). Falls back to the provider's configured baseUrl when omitted. */
@@ -59,12 +59,23 @@ export const ModelConfigSchema = z.object({
   /** Optional API key for the dedicated embedding endpoint. */
   embeddingApiKey: z.string().optional(),
   /** Enable or disable extended reasoning for LM Studio chat models that support
-   *  chat_template_kwargs.enable_thinking (for example Qwen3.5 and Gemma 4).
-   *  true / false → sends chat_template_kwargs: { enable_thinking: <value> }
-   *  undefined → no thinking parameter sent (model default).
-   *  Qwen keeps its special sampling auto-tuning unless explicitly overridden;
-   *  other models retain their configured sampling values. */
-  enableThinking: z.boolean().optional(),
+   *  chat_template_kwargs.enable_thinking (for example Qwen3.5/3.6 and Gemma 4).
+   *  Defaults to `false` — thinking off — because the newer Qwen builds default
+   *  to thinking-ON in the model template, which makes simple tool-driven runs
+   *  burn the entire completion budget on `<think>` blocks before producing
+   *  the first tool call. Opt agents back in by setting `enableThinking: true`
+   *  when the work genuinely needs multi-step reasoning (mission coordinators,
+   *  source verifiers, evidence reconciliation).
+   *  true  → sends chat_template_kwargs: { enable_thinking: true } + Qwen
+   *          recommended sampling (temp 0.6, top_p 0.95) unless explicitly overridden.
+   *  false → sends chat_template_kwargs: { enable_thinking: false } + Qwen
+   *          non-thinking sampling (temp 0.7, top_p 0.8) unless overridden.
+   *
+   *  NOTE FOR LITERAL CONSTRUCTION: this field is no longer optional in the
+   *  parsed output type (`z.infer<typeof ModelConfigSchema>`). Code/tests that
+   *  build a ModelConfig object inline (not via `.parse()`) MUST include
+   *  `enableThinking` explicitly — the default only applies on schema parse. */
+  enableThinking: z.boolean().default(false),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as

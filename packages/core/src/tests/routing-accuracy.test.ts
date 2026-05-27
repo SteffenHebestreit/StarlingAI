@@ -16,7 +16,7 @@ import { join } from "node:path";
 // Representative subset of agents from starlingai.json, focusing on the
 // routing-relevant fields (description, capabilities, tags, tools).
 const ROUTING_FIXTURE = {
-  agents: { defaults: { model: { primary: "lmstudio/qwen3.5-9b" } } },
+  agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
   subAgents: {
     researcher: {
       description: "Finds facts, documentation, and public information on the web. Collects citation-grade primary sources for papers and reports. Summarizes sources.",

@@ -54,6 +54,7 @@ describe("normalizeMessagesForModel", () => {
         contextWindow: 32768,
         temperature: 0.3,
         maxTokens: 1024,
+        enableThinking: false,
       },
     );
 
