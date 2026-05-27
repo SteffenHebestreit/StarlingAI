@@ -1396,7 +1396,7 @@ describe("gateway HTTP bridge", () => {
       },
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {

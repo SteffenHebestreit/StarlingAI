@@ -203,7 +203,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -301,7 +301,7 @@ describe("search_agents tool", () => {
       agents: {
         defaults: {
           model: {
-            primary: "lmstudio/qwen3.5-9b",
+            primary: "lmstudio/qwen/qwen3.5-9b",
             embeddingModel: "lmstudio/text-embedding-qwen3-embedding-0.6b",
           },
         },
@@ -363,7 +363,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -407,7 +407,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -450,7 +450,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -501,7 +501,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -545,7 +545,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -589,7 +589,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -644,7 +644,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -695,7 +695,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -746,7 +746,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -797,7 +797,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -854,7 +854,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -927,7 +927,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents,
@@ -995,7 +995,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents,
@@ -1044,7 +1044,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -1121,7 +1121,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -1164,7 +1164,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -1224,7 +1224,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -1274,7 +1274,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -1338,7 +1338,7 @@ describe("search_agents tool", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {

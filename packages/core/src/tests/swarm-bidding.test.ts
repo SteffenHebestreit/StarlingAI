@@ -50,7 +50,7 @@ describe("swarm autonomous bidding", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -105,7 +105,7 @@ describe("swarm autonomous bidding", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {
@@ -172,7 +172,7 @@ describe("swarm autonomous bidding", () => {
     writeFileSync(configPath, JSON.stringify({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       subAgents: {

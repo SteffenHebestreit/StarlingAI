@@ -3700,7 +3700,7 @@ registerTool({
       },
       model: {
         type: "object",
-        description: "Optional model override. primary MUST be an exact configured model identifier (e.g. \"lmstudio/qwen3.6-35b-a3b\" or \"lmstudio/qwen3.5-9b\") — do NOT invent model names. Omit model entirely to use the system default.",
+        description: "Optional model override. primary MUST be an exact configured model identifier (e.g. \"lmstudio/qwen/qwen3.6-35b-a3b\" or \"lmstudio/qwen/qwen3.5-9b\") — do NOT invent model names. Omit model entirely to use the system default.",
         properties: {
           primary: { type: "string" },
           temperature: { type: "number" },

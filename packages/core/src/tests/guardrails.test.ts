@@ -143,13 +143,17 @@ describe("tool-tiers", () => {
     expect(getToolTier("export_evidence_ledger").requiresPerCallApproval).toBe(false);
   });
 
-  it("keeps browser mutation tools and credential injection approval-gated", () => {
+  it("keeps credential injection approval-gated; browser mutation tools run without per-call approval", () => {
+    // browser_click/type/select_option are Tier 2 but execute without an
+    // approval prompt each turn — the user has to stay productive when the
+    // agent is driving the live browser.
     expect(getToolTier("browser_click").tier).toBe(ToolTier.TWO_EXECUTE);
-    expect(getToolTier("browser_click").requiresPerCallApproval).toBe(true);
-    expect(getToolTier("browser_type").requiresPerCallApproval).toBe(true);
-    // get_site_credentials is now read-only (no secrets exposed)
+    expect(getToolTier("browser_click").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("browser_type").requiresPerCallApproval).toBe(false);
+    expect(getToolTier("browser_select_option").requiresPerCallApproval).toBe(false);
+    // get_site_credentials is read-only (no secrets exposed).
     expect(getToolTier("get_site_credentials").requiresPerCallApproval).toBe(false);
-    // The new credential injection tools require approval
+    // Credential injection tools still require approval — they reveal secrets.
     expect(getToolTier("site_fill_credentials").requiresPerCallApproval).toBe(true);
     expect(getToolTier("computer_type_credential").requiresPerCallApproval).toBe(true);
   });

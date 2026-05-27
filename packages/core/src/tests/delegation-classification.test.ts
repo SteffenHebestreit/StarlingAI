@@ -332,7 +332,7 @@ describe("classifyDelegationResult — D14", () => {
     const rawConfigDump = [
       ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 20-subagents-general.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
       "",
-      "{ \"subAgents\": { \"browser_agent\": { \"model\": { \"primary\": \"lmstudio/qwen3.6-35b-a3b\" }, \"systemPrompt\": \"You are a browser automation specialist.\" } } }",
+      "{ \"subAgents\": { \"browser_agent\": { \"model\": { \"primary\": \"lmstudio/qwen/qwen3.6-35b-a3b\" }, \"systemPrompt\": \"You are a browser automation specialist.\" } } }",
       "",
       "#### Tool Calls",
       "- list_files",
@@ -350,7 +350,7 @@ describe("classifyDelegationResult — D14", () => {
       },
       { tags: ["prompts", "agents"] } as never,
       "prompt_optimizer",
-      "Passe browser_agent und vision_browser_analyst auf lmstudio/qwen3.5-9b an.",
+      "Passe browser_agent und vision_browser_analyst auf lmstudio/qwen/qwen3.5-9b an.",
     );
 
     expect(r).toBe<DelegationClassification>("failure");

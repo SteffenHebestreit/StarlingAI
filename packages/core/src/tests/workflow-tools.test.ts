@@ -21,7 +21,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -86,7 +86,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -165,7 +165,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -230,7 +230,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -303,7 +303,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       // NOTE: no `scenes` section at all — the job below references a scene
@@ -360,7 +360,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -393,7 +393,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "success",
         terminalState: "completed",
@@ -447,7 +447,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -481,7 +481,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "success",
         terminalState: "completed",
@@ -552,7 +552,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -589,7 +589,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "success",
         terminalState: "completed",
@@ -650,7 +650,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -691,7 +691,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 8,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["browser"],
         outcome: "success",
         terminalState: "completed",
@@ -760,7 +760,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -801,7 +801,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 8,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["browser"],
         outcome: "success",
         terminalState: "completed",
@@ -839,7 +839,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       approvalChannels: {
@@ -887,7 +887,7 @@ describe("workflow catalog tools", () => {
           iterations: 1,
           usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
           maxIterations: 8,
-          model: "lmstudio/qwen3.5-9b",
+          model: "lmstudio/qwen/qwen3.5-9b",
           capabilities: ["browser"],
           outcome: "success",
           terminalState: "completed",
@@ -946,7 +946,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -982,7 +982,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 8,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["browser"],
         outcome: "success",
         terminalState: "completed",
@@ -1031,7 +1031,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -1065,7 +1065,7 @@ describe("workflow catalog tools", () => {
         iterations: 7,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "partial",
         terminalState: "completed",
@@ -1114,7 +1114,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -1163,7 +1163,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "success",
         terminalState: "completed",
@@ -1220,7 +1220,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -1250,7 +1250,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "failure",
         terminalState: "completed",
@@ -1294,7 +1294,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -1324,7 +1324,7 @@ describe("workflow catalog tools", () => {
         iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 6,
-        model: "lmstudio/qwen3.5-9b",
+        model: "lmstudio/qwen/qwen3.5-9b",
         capabilities: ["coordination"],
         outcome: "success",
         terminalState: "completed",
@@ -1369,7 +1369,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
@@ -1424,7 +1424,7 @@ describe("workflow catalog tools", () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
-          model: { primary: "lmstudio/qwen3.5-9b" },
+          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
         },
       },
       scenes: {
