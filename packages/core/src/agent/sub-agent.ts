@@ -2145,6 +2145,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // newly-granted budget is also spent.
     let lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
     let lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
+    // When the operator explicitly set --timeout N (any non-zero value via
+    // turnTimeoutOverrideMs), they have already declared a budget for this
+    // turn. Suppress the pause-and-ask handoff entirely so we don't pester
+    // them halfway through a run they pre-authorized. Their own timeout
+    // catches the run when it actually expires.
+    const operatorPreAuthorizedBudget =
+      opts.turnTimeoutOverrideMs !== undefined && opts.turnTimeoutOverrideMs > DEFAULT_SOFT_THRESHOLD_MS;
     // When the operator answers "stop", we set this so the next loop
     // iteration goes straight to attemptTimeoutSynthesis instead of
     // making another LLM call.
@@ -2972,6 +2979,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // unannounced upstream timeout).
       if (
         !lrgOperatorStop
+        && !operatorPreAuthorizedBudget
         && !longRunningGenerationManager.isUnbounded(subSessionId)
         && (
           (Date.now() - runStartedAt) > lrgWallThresholdMs
