@@ -544,12 +544,32 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   delegate_to_agent: 3,
   swarm_delegate: 3,
   create_ephemeral_agent: 1,
-  write_file: 3,
-  export_workspace_artifact: 3,
-  generate_document: 2,
+  // Path-keyed cap (see PATH_KEYED_WRITE_TOOLS below). For these tools the
+  // cap is per `(tool, path)` rather than per `tool`, so a content_writer
+  // building a 4-file website doesn't get blocked at the 3rd file. The
+  // number here is the soft TOTAL cap as a backstop; session 2d810e7d
+  // (2026-05-28) showed an honest 4-file write blocked at file 4 under
+  // the old flat cap of 3.
+  write_file: 12,
+  edit_file: 12,
+  generate_document: 4,
   generate_website: 2,
+  generate_docx: 4,
+  generate_pptx: 4,
+  generate_pdf: 4,
+  export_workspace_artifact: 4,
   bundle_artifact_zip: 2,
 };
+
+// For these tools the cap is enforced per-(tool, path) so writing N
+// different files only counts as 1 call against each path. A real loop
+// (same path written repeatedly) still trips the cap at PER_PATH_CAP.
+const PATH_KEYED_WRITE_TOOLS = new Set<string>([
+  "write_file", "edit_file",
+  "generate_document", "generate_docx", "generate_pptx", "generate_pdf",
+  "export_workspace_artifact",
+]);
+const PER_PATH_WRITE_CAP = 2;
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
@@ -2169,6 +2189,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const idempotentCallCache = new Map<string, { result: string; success: boolean; callCount: number }>();
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
+    // Per-(tool, path) counters for path-keyed write tools. A real loop
+    // rewrites the same path; a legitimate multi-file project hits distinct
+    // paths. Counting per-path lets us catch the loop without blocking a
+    // 4-file website build at file 3.
+    const perWritePathCount = new Map<string, number>();
     let workflowPassthroughOutput: string | null = null;
     // Observability: per-tool byte totals for context-budget runaway detection
     const bytesByTool = new Map<string, number>();
@@ -3675,9 +3700,45 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         toolNames.push(tc.name);
 
-        // Per-tool call cap — prevent wasteful loops on a single tool
+        // Per-tool call cap — prevent wasteful loops on a single tool.
+        // For path-keyed write tools, the primary cap is per-(tool, path):
+        // writing 4 distinct files only counts once against each path. The
+        // total per-tool cap is still enforced as a backstop against
+        // runaway-with-different-paths.
         const priorCount = perToolCallCount.get(tc.name) ?? 0;
         const toolCap = resolveSubAgentToolCap(tc.name, isCoordinatorAgent);
+        const writePath = PATH_KEYED_WRITE_TOOLS.has(tc.name)
+          ? (() => {
+            const raw = tc.arguments?.["path"] ?? tc.arguments?.["output_file"] ?? tc.arguments?.["filename"];
+            return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+          })()
+          : null;
+        if (writePath !== null) {
+          const pathKey = `${tc.name}:${writePath}`;
+          const pathCount = perWritePathCount.get(pathKey) ?? 0;
+          if (pathCount >= PER_PATH_WRITE_CAP) {
+            log.warn(
+              { agentName: opts.agentName, tool: tc.name, path: writePath, count: pathCount, cap: PER_PATH_WRITE_CAP },
+              "Sub-agent exceeded per-path write cap (same path rewritten too many times)",
+            );
+            emitSubAgentToolAudit({
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "done",
+              args: tc.arguments,
+              toolCallId: tc.id,
+              errorText: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${PER_PATH_WRITE_CAP} per path). Move on to a different path or finalize.`,
+              skippedReason: "per_path_write_cap",
+            });
+            toolResults.push({
+              role: "tool",
+              content: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${PER_PATH_WRITE_CAP} per path). Move on to a different path or finalize.`,
+              tool_call_id: tc.id,
+            });
+            continue;
+          }
+          perWritePathCount.set(pathKey, pathCount + 1);
+        }
         if (toolCap !== undefined && priorCount >= toolCap) {
           log.warn(
             { agentName: opts.agentName, tool: tc.name, count: priorCount, cap: toolCap },

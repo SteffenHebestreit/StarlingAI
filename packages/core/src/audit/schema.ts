@@ -110,6 +110,8 @@ export type AuditEventType =
   | "task_checkpoint_resumed"
   | "task_checkpoint_completed"
   | "delegate_agent_pinned"
+  | "delegation_routing_filtered_artifact_incapable"
+  | "delegation_bidding_filtered_artifact_incapable"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health
