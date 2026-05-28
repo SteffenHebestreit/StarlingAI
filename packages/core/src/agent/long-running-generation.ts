@@ -190,21 +190,22 @@ class LongRunningGenerationManager extends EventEmitter {
         if (r && r.state === "pending") {
           r.state = "resolved";
           r.resolvedAt = Date.now();
-          r.resolvedOutcome = "timeout";
+          r.resolvedOutcome = defaultOutcome;
           r.updatedAt = r.resolvedAt;
         }
         logAudit("long_running_generation_timeout", {
           requestId: request.id,
           agentName: opts.agentName,
           runSessionId: opts.runSessionId,
-          defaultOutcome,
+          appliedOutcome: defaultOutcome,
         }, { sessionId: opts.parentSessionId, severity: "warn" });
-        log.warn({ requestId: request.id, defaultOutcome }, "Long-running generation request timed out");
-        // The runtime treats `timeout` and `defaultOutcome` as the same
-        // resolution path but reports `timeout` in the audit so the
-        // operator can see why their long run ended.
-        if (pending) pending.resolve("timeout");
-        else resolve("timeout");
+        log.warn({ requestId: request.id, appliedOutcome: defaultOutcome }, "Long-running generation request timed out — applying defaultOutcome");
+        // The audit row still uses long_running_generation_timeout so the
+        // dashboard shows the operator didn't respond in time, but the
+        // caller receives defaultOutcome ("continue" when the operator
+        // pre-authorized an unbounded run, "stop" otherwise).
+        if (pending) pending.resolve(defaultOutcome);
+        else resolve(defaultOutcome);
       }, waitTimeoutMs);
       timer.unref?.();
       this._pending.set(request.id, { resolve, timer, defaultOutcome });

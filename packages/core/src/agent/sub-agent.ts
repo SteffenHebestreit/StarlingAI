@@ -2979,7 +2979,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // unannounced upstream timeout).
       if (
         !lrgOperatorStop
-        && !operatorPreAuthorizedBudget
         && !longRunningGenerationManager.isUnbounded(subSessionId)
         && (
           (Date.now() - runStartedAt) > lrgWallThresholdMs
@@ -2994,6 +2993,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           elapsedMs: Date.now() - runStartedAt,
           completionTokens: usage.completionTokens,
           iterations,
+          // When the operator pre-authorized the run with --timeout N, the
+          // handoff still fires (so they see the run in the dock and can
+          // stop it if they want) but the default outcome on no-response is
+          // "continue" instead of "stop" — the run grants itself another
+          // round of budget and keeps going.
+          ...(operatorPreAuthorizedBudget ? { defaultOutcome: "continue" as const } : {}),
         });
         if (lrgOutcome === "continue") {
           lrgWallThresholdMs += DEFAULT_CONTINUE_GRANT_MS;
