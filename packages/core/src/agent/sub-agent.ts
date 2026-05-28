@@ -4139,6 +4139,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             },
             { sessionId: subSessionId, severity: "warn" },
           );
+          // Break out of the iteration loop immediately — letting qwen do
+          // one more "thinking-mode" pass with tools stripped burns 50–100 s
+          // generating ~5 k completion tokens that boil down to a 134-char
+          // dead-end (session 8a0c2be3, 2026-05-28: tool_loop_detected fired
+          // at 7 s, sub_agent_completed at 103 s — 96 s of pure waste). The
+          // post-loop synthesis pass below still gets one shot at producing
+          // a final answer from history.
+          break;
         }
       } else {
         consecutiveBlockedToolIterations = 0;
