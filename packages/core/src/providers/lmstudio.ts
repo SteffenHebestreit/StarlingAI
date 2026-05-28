@@ -251,6 +251,39 @@ export class LMStudioProvider {
     this.lastError = error instanceof Error ? error.message : String(error);
   }
 
+  // The OpenAI SDK's `timeout` option has been observed not to fire when
+  // LM Studio holds the HTTP connection open without sending data (we saw a
+  // single `complete()` call run for 20 min past a 5-min SDK timeout). This
+  // wrapper composes the caller's signal with a setTimeout-based abort so
+  // every attempt has a true wall-clock ceiling we control.
+  private withHardTimeout<T>(
+    parentSignal: AbortSignal | undefined,
+    timeoutMs: number,
+    fn: (combinedSignal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const ac = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let parentListener: (() => void) | undefined;
+
+    if (parentSignal?.aborted) {
+      ac.abort(parentSignal.reason);
+    } else if (parentSignal) {
+      parentListener = () => ac.abort(parentSignal.reason);
+      parentSignal.addEventListener("abort", parentListener, { once: true });
+    }
+
+    timer = setTimeout(() => {
+      ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
+    };
+
+    return fn(ac.signal).finally(cleanup);
+  }
+
   async verifyToolCallSupport(modelId: string): Promise<boolean> {
     try {
       const testMessages: ChatCompletionMessageParam[] = [
@@ -321,7 +354,7 @@ export class LMStudioProvider {
     while (attempt < maxAttempts) {
       const startedAt = Date.now();
       try {
-        const response = await this.client.chat.completions.create(
+        const response = await this.withHardTimeout(signal, this.requestTimeoutMs + 5000, (s) => this.client.chat.completions.create(
           {
             model: modelId,
             messages: openAIMessages,
@@ -340,8 +373,8 @@ export class LMStudioProvider {
               extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
             }),
           } as Parameters<typeof this.client.chat.completions.create>[0],
-          { signal }
-        ) as ChatCompletion;
+          { signal: s }
+        )) as ChatCompletion;
 
         const choice = response.choices[0];
         if (!choice) throw new Error("Empty response from OpenAI-compatible provider");
@@ -411,7 +444,20 @@ export class LMStudioProvider {
       }
     }
 
-    const stream = await this.client.chat.completions.create(
+    // The hardTimeout here only guards the initial `create()` call (opening
+    // the HTTP stream). Per-chunk inactivity is enforced below so a hung
+    // mid-stream connection can't tie up the turn indefinitely.
+    const streamAc = new AbortController();
+    let streamParentListener: (() => void) | undefined;
+    if (signal?.aborted) {
+      streamAc.abort(signal.reason);
+    } else if (signal) {
+      streamParentListener = () => streamAc.abort(signal.reason);
+      signal.addEventListener("abort", streamParentListener, { once: true });
+    }
+
+    const createStream = this.client.chat.completions.create.bind(this.client.chat.completions);
+    const stream = await this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, (s) => createStream(
       {
         model: modelId,
         messages: openAIMessages,
@@ -430,17 +476,29 @@ export class LMStudioProvider {
         }),
         stream: true,
         stream_options: { include_usage: true },
-      } as Parameters<typeof this.client.chat.completions.create>[0],
-      { signal }
-    ) as Stream<ChatCompletionChunk>;
+      } as Parameters<typeof createStream>[0],
+      { signal: s }
+    )) as Stream<ChatCompletionChunk>;
 
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
     let collectedFinishReason: string | undefined;
     let collectedUsage: StreamChunk["usage"] | undefined;
     const startedAt = Date.now();
 
+    // Per-chunk inactivity timer: if the provider stops sending data for
+    // longer than the configured request timeout, abort the stream.
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const armInactivity = () => {
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        streamAc.abort(new Error(`LLM stream stalled (no chunk in ${this.requestTimeoutMs}ms)`));
+      }, this.requestTimeoutMs);
+    };
+    armInactivity();
+
     try {
       for await (const chunk of stream) {
+        armInactivity();
         // Usage arrives in a final chunk with empty choices (stream_options.include_usage)
         if (chunk.usage) {
           collectedUsage = {
@@ -483,6 +541,9 @@ export class LMStudioProvider {
       this.recordRequestFailure(startedAt, err);
       log.error({ err, model: modelId }, "OpenAI-compatible streaming failed");
       throw new Error(`OpenAI-compatible stream failed (model: ${modelId}): ${String(err)}`);
+    } finally {
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
+      if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
     }
 
     this.recordRequestSuccess(startedAt);

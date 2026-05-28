@@ -107,7 +107,10 @@ describe("normalizeMessagesForModel", () => {
         temperature: 0.2,
         extra_body: { chat_template_kwargs: { enable_thinking: true } },
       }),
-      { signal: undefined },
+      // The provider wraps every call in a hard-timeout AbortController and
+      // hands the combined signal to the SDK, so the second arg always carries
+      // a real AbortSignal — never literal `undefined`.
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 });

@@ -3081,7 +3081,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // "coordinator_noop", "failure", and "infrastructure_failure"
         // all continue to the next candidate.
         attempt.status = "failed";
-        taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
+        // When the sub-agent just narrated intent ("I'll create…", "Let me
+        // start…") without calling any write/generate/exec tool, pasting that
+        // narrative back to the orchestrator as the error message is actively
+        // misleading — it reads like a partial answer and pushes the
+        // orchestrator into retrying with the same wording. Replace it with a
+        // structured reason that names what was missing so the orchestrator
+        // can adjust its next move.
+        const narrativeOnly = classification === "failure" && looksLikePlanningOnlyResult(output);
+        if (narrativeOnly) {
+          const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
+            /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
+          );
+          const expectedHint = expectedTools.length > 0
+            ? ` Expected the agent to call one of: ${expectedTools.slice(0, 4).join(", ")}.`
+            : "";
+          taskState.error = `Sub-agent '${candidate}' returned a narrative-only result (started planning, never executed any work tool).${expectedHint} Restate the task as a single direct instruction naming the concrete deliverable, or pick a different specialist.`;
+        } else {
+          taskState.error = output.trim().slice(0, 4000) || summarizeText(output);
+        }
         taskState.status = "failed";
         lastFailureWasInfrastructure = classification === "infrastructure_failure";
         publishSwarmState(ctx);
@@ -3089,7 +3107,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           sessionId: ctx.sessionId,
           taskId,
           agentName: candidate,
-          data: { reason: "weak_result" },
+          data: { reason: narrativeOnly ? "narrative_only" : "weak_result" },
         });
         announceAgentCapability({
           sessionId: ctx.sessionId,
