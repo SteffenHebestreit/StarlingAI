@@ -1761,15 +1761,29 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   const preview = result.slice(0, 600).trim();
   if (!preview) return false;
 
-  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
+  // Openers that signal "the model started narrating intent". Both English
+  // and German because qwen mirrors the user's language; session 6b3f2123
+  // showed an entire 3 KB planning loop in German ("Ich werde…", "Lass mich
+  // einen anderen Ansatz wählen", "Stattdessen…", "Letztendlich…") that the
+  // English-only regex missed entirely.
+  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to|ich werde|ich erstelle|ich nutze|ich verwende|ich entscheide|ich w(?:ä|ae)hle|ich versuche|ich muss|lass mich|stattdessen|letztendlich|allerdings|aufgrund|der (?:beste|pragmatischste|einfachste) ansatz|da (?:es sich|ich|write_file|das))\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
-  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create|update|modify|edit|write|patch|save)\b/i.test(preview);
+  // English keywords stay strictly bounded so we don't false-match across
+  // unrelated words. German verb stems are matched as a stem-prefix (no
+  // trailing \b) because conjugated forms like "erstellen" / "erstelle" /
+  // "verwende" all need to match the same `erstell` / `verwend` stem.
+  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create|update|modify|edit|write|patch|save)\b|\b(erstell|schreib|verwend|nutz|aufteil|zusammenf(?:ü|ue)hr|umgeh|brauch|w(?:ä|ae)hl|entscheid)\w*/i.test(preview);
   if (!planningAction) return false;
 
-  const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
-  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|updated|modified|edited|wrote|written|saved|patched|failed|error|could not|did not)\b/i.test(preview);
-  return !terminalMarker && (unresolvedMarker || preview.length <= 220);
+  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|updated|modified|edited|wrote|written|saved|patched|failed|error|could not|did not)\b|\b(abgeschlossen|fertig|erfolgreich|geschrieben|gespeichert|fehlgeschlagen|nicht m(?:ö|oe)glich)/i.test(preview);
+  // No length gate. The earlier `preview.length <= 220 || unresolvedMarker`
+  // condition was meant to avoid flagging short legitimate narration, but
+  // by accepting only short results it missed long planning loops — the
+  // exact failure mode we want to catch. If the final assistant message
+  // opens with planning narrative AND no terminal marker is present, the
+  // agent narrated instead of executing regardless of how verbose it got.
+  return !terminalMarker;
 }
 
 const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstelle(?:n)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
@@ -3810,13 +3824,25 @@ registerTool({
         grantedTools: tools,
         rejectedTools: rejected,
         reasons: policyIssues,
+        suggestedTools: semanticToolMatches,
       }, { sessionId: ctx.sessionId, severity: "warn", channel: "agent-factory" });
+
+      // When the model omitted the tools field entirely, the bare
+      // "must have at least one valid tool" reject is unactionable — the
+      // model has no way to know what to add. Splice in the semantic
+      // routing matches we already computed so the next attempt has a
+      // concrete starting list. Session 6b3f2123 showed this exact dead
+      // end: routing identified write_file as the top match, but the
+      // error never surfaced it.
+      const suggestionHint = requestedTools.length === 0 && semanticToolMatches.length > 0
+        ? ` You omitted the tools array. Reissue with tools: [${semanticToolMatches.slice(0, 4).map((t) => `"${t}"`).join(", ")}] — the routing layer ranked these as the best fit for your task.`
+        : "";
 
       return {
         success: false,
         output: "",
-        error: policyIssues.join(" "),
-        metadata: { agentName, rejectedTools: rejected, grantedTools: tools },
+        error: policyIssues.join(" ") + suggestionHint,
+        metadata: { agentName, rejectedTools: rejected, grantedTools: tools, suggestedTools: semanticToolMatches },
       };
     }
 

@@ -242,8 +242,8 @@ registerTool({
 
 registerTool({
   name: "write_file",
-  description: "Write content to a file within the workspace. Creates file and parent directories if needed.",
-  embeddingDescription: "Write, save, create, or persist a file with given content. Datei schreiben, speichern, erstellen, sichern. Write code, documents, reports, generated output. Neue Datei anlegen.",
+  description: "Write content to a file within the workspace. No size limit on writes — pass the full content in one call, even for large files (50+ KB single-page apps, multi-thousand-line scripts, full reports). Do NOT split a single deliverable across multiple write_file calls or fabricate workarounds for a non-existent size cap. Creates the file and parent directories if needed; overwrites if the file exists.",
+  embeddingDescription: "Write, save, create, or persist a file with given content. Datei schreiben, speichern, erstellen, sichern. Write code, documents, reports, generated output. Neue Datei anlegen. No size limit — keine Größenbeschränkung; bei großen Deliverables einen einzigen Aufruf mit dem kompletten Inhalt.",
   costHint: "low",
   latencyHint: "low",
   parameters: {
