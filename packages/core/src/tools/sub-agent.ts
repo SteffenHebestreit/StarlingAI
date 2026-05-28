@@ -1720,6 +1720,18 @@ async function findReusableSessionEvidence(
   ctx: ToolContext,
   agentCfg?: { tools?: string[]; capabilities?: string[] },
 ): Promise<{ output: string; factCount: number; partialCount: number } | null> {
+  // If the task asks for an artifact (write/create/erstelle/...) and this
+  // agent has artifact-producing tools, do NOT short-circuit on cached
+  // research evidence — the cached facts won't satisfy the deliverable.
+  // Session 2d810e7d (2026-05-28) reused research findings as a "success"
+  // for content_writer asked to build a multi-file website, so the website
+  // never got written.
+  if (
+    WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())
+    && (agentCfg?.tools ?? []).some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))
+  ) {
+    return null;
+  }
   if (!isResearchLikeDelegation(candidate, request.task, request.routingQuery, agentCfg)) {
     return null;
   }
@@ -1786,7 +1798,7 @@ function looksLikePlanningOnlyResult(result: string): boolean {
   return !terminalMarker;
 }
 
-const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstelle(?:n)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
+const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|build|generate|produce|draft|compose|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstell(?:e|en)?|erzeug(?:e|en|ung)?|generier(?:e|en)?|bau(?:e|en)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
 const WORKSPACE_MUTATION_CONTEXT_RE = /\b(?:starlingai|workspace|repo|repository|agent|agents|scene|scenes|job|jobs|workflow|workflows|config|configuration|prompt|prompts|tool|tools|model|routing|self[- ]?improvement|selbstverbesserung|konfiguration|modell|agenten|szene|szenen|wartung)\b/i;
 const WORKSPACE_MUTATION_TOOL_NAMES = new Set(["write_file", "edit_file", "create_dir", "delete_file", "shell_exec"]);
 const READ_ONLY_CONTEXT_TOOL_NAMES = new Set([
@@ -1907,6 +1919,37 @@ function looksLikeArtifactDeliverableMiss(
   }
 
   return true;
+}
+
+// Routing-time gate. If the task asks for a deliverable (write/create/edit/
+// erstelle/...) the candidate agent must be able to either produce one
+// directly (artifact tool) or fan out via a productive coordinator tool.
+// Without this gate, swarm routing was sending CPSA-F "erzeuge mir eine
+// Lernwebsite" to `quality_supervisor` (session 2d810e7d, 2026-05-28) — a
+// read/audit-only agent that has no write_file/edit_file/shell_exec — and
+// the agent narrated a review of nothing while burning the delegation
+// budget.
+export function agentCfgCanFulfillArtifactTask(
+  task: string,
+  cfg: { tools?: string[] } | undefined,
+): boolean {
+  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  if (!cfg) return true; // unknown agent — let the downstream attempt fail loudly rather than silently filtering
+  const tools = cfg.tools ?? [];
+  return tools.some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))
+    || tools.some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
+}
+
+function agentCanFulfillArtifactTask(
+  agentName: string,
+  task: string,
+  _ctx: ToolContext,
+): boolean {
+  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  const config = getConfig();
+  const promotedAgents = readPromotedAgents(config.workspacePath);
+  const cfg = config.subAgents[agentName] ?? promotedAgents[agentName];
+  return agentCfgCanFulfillArtifactTask(task, cfg);
 }
 
 export function looksLikeFailureResult(result: string): boolean {
@@ -2859,7 +2902,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // Run first for all undirected delegations — deterministic, uses
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
-        const routingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
+        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
+        // Drop candidates that cannot produce the deliverable the task asks
+        // for. See agentCanFulfillArtifactTask for the regression context.
+        const routingCandidates = allRoutingCandidates.filter((cand) =>
+          agentCanFulfillArtifactTask(cand.name, request.task, ctx)
+        );
+        if (routingCandidates.length === 0 && allRoutingCandidates.length > 0) {
+          logAudit("delegation_routing_filtered_artifact_incapable", {
+            taskTitle: title,
+            droppedAgents: allRoutingCandidates.map((c) => c.name),
+          }, { sessionId: ctx.sessionId });
+        }
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
@@ -2907,7 +2961,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // not represented in the static catalog.
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
-        const bids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        const bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request.task, ctx));
+        if (bids.length === 0 && rawBids.length > 0) {
+          logAudit("delegation_bidding_filtered_artifact_incapable", {
+            taskTitle: title,
+            droppedAgents: rawBids.map((b) => b.agentName),
+          }, { sessionId: ctx.sessionId });
+        }
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
         bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
         if (shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold)) {
