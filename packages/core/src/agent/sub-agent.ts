@@ -27,6 +27,13 @@ import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurre
 import { createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
+import {
+  longRunningGenerationManager,
+  DEFAULT_SOFT_THRESHOLD_MS,
+  DEFAULT_SOFT_THRESHOLD_TOKENS,
+  DEFAULT_CONTINUE_GRANT_MS,
+  DEFAULT_CONTINUE_GRANT_TOKENS,
+} from "./long-running-generation.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -2133,6 +2140,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
     // soft-deadline synthesis at most once per sub-agent run.
     let softDeadlineSynthesisAttempted = false;
+    // Long-running generation thresholds. Each `continue` grant from the
+    // operator bumps these up so the next prompt fires only after the
+    // newly-granted budget is also spent.
+    let lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
+    let lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
+    // When the operator answers "stop", we set this so the next loop
+    // iteration goes straight to attemptTimeoutSynthesis instead of
+    // making another LLM call.
+    let lrgOperatorStop = false;
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
     const toolNames: string[] = [];
@@ -2947,6 +2963,44 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     }
 
     while (iterations < maxIterations) {
+      // Long-running-generation handoff. When this run has burned past
+      // the soft thresholds (wall time OR completion tokens), pause and
+      // ask the operator whether to keep going, get more budget, or
+      // synthesize what's been collected. Stops asking once the operator
+      // grants `unbounded`. See long-running-generation.ts for the
+      // rationale (session 00e55867 lost a half-built website to an
+      // unannounced upstream timeout).
+      if (
+        !lrgOperatorStop
+        && !longRunningGenerationManager.isUnbounded(subSessionId)
+        && (
+          (Date.now() - runStartedAt) > lrgWallThresholdMs
+          || usage.completionTokens > lrgTokenThreshold
+        )
+      ) {
+        const lrgOutcome = await longRunningGenerationManager.requestContinuation({
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+          reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
+          elapsedMs: Date.now() - runStartedAt,
+          completionTokens: usage.completionTokens,
+          iterations,
+        });
+        if (lrgOutcome === "continue") {
+          lrgWallThresholdMs += DEFAULT_CONTINUE_GRANT_MS;
+          lrgTokenThreshold += DEFAULT_CONTINUE_GRANT_TOKENS;
+        } else if (lrgOutcome === "stop" || lrgOutcome === "timeout") {
+          // Operator (or fallback timer) asked us to stop. Mark the run
+          // for synthesis on the next iteration — reuses the existing
+          // timeout-synthesis path so collected evidence is relayed.
+          lrgOperatorStop = true;
+          turnTimeoutReached = true;
+        }
+        // "unbounded" → the manager's _unboundedRuns set was updated;
+        // this branch is now a no-op for the rest of the run.
+      }
+
       // I11: Pre-emptive soft-deadline synthesis.
       // The hard `turnTimeoutMs` deadline triggers `attemptTimeoutSynthesis`
       // with only ~5s of grace, which is not enough on a 35B local model
@@ -4490,6 +4544,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     if (browserSessionId) {
       try { browserSessionManager.stop(browserSessionId, "run_ended"); } catch { /* best effort */ }
     }
+    // Resolve any pending long-running-generation prompt for this run so
+    // the dashboard's pending list doesn't keep showing it after the run
+    // has already finished.
+    try { longRunningGenerationManager.stop(subSessionId, "run_ended"); } catch { /* best effort */ }
 
     // Clean up per-session search circuit-breaker state to avoid memory leaks.
     const clearSearch = await getSearchCleanup();

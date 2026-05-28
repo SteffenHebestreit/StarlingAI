@@ -1,0 +1,304 @@
+/**
+ * Long-running-generation handoff — pause an agent that's productively
+ * burning a lot of budget and ask the operator whether to keep going.
+ *
+ * Context: some legitimate tasks (deep research, generating a full
+ * interactive learning website, large multi-file refactors) need many
+ * minutes of inference and many thousands of completion tokens. The
+ * default sub-agent timeout is set conservatively to catch runaway loops,
+ * so productive long runs hit the wall and lose their work. Session
+ * 00e55867 showed the failure live: content_writer had already produced
+ * 21 KB of CSS + 21 KB of JS over 24 minutes and was working on the HTML
+ * when the upstream model request timed out — the operator never had a
+ * chance to extend the budget.
+ *
+ * The manager surfaces a `long_running_generation` request to the
+ * dashboard's OperatorRequestsDock when a sub-agent crosses a soft
+ * threshold (wall time OR accumulated completion tokens). The dashboard
+ * shows the agent name, what it's been doing, current usage, and three
+ * actions:
+ *
+ *   - `continue`  → +N minutes / +M tokens of budget for this run only.
+ *   - `unbounded` → stop asking for this run; let it finish naturally.
+ *   - `stop`      → synthesize from what's been collected and end.
+ *
+ * If the operator doesn't respond within DEFAULT_LRG_TIMEOUT_MS, the
+ * default action fires (configurable per-call; defaults to `stop` so
+ * idle runs don't burn forever).
+ *
+ * The whole thing is opt-in: the sub-agent only calls into the manager
+ * when the soft threshold is crossed AND the agent hasn't already been
+ * granted `unbounded` for this run.
+ */
+
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
+
+const log = childLogger("agent:long-running");
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type LongRunningRequestId = string;
+export type LongRunningOutcome = "continue" | "unbounded" | "stop" | "timeout";
+export type LongRunningState = "pending" | "resolved" | "stopped";
+
+export interface LongRunningRequest {
+  id: LongRunningRequestId;
+  /** Sub-agent name (content_writer, researcher, …). */
+  agentName: string;
+  /** Parent (orchestrator) session id, so the dashboard can correlate. */
+  parentSessionId?: string;
+  /** The sub-agent's own session id. */
+  runSessionId: string;
+  /** Short human-readable summary the dashboard shows verbatim. */
+  reason: string;
+  state: LongRunningState;
+  /** Wall time the run has burned so far, ms. */
+  elapsedMs: number;
+  /** Completion tokens the run has burned so far. */
+  completionTokens: number;
+  /** Iteration index when the request was raised. */
+  iterations: number;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt?: number;
+  resolvedOutcome?: LongRunningOutcome;
+}
+
+// ── Defaults ──────────────────────────────────────────────────────────────────
+
+/** Default soft thresholds; only one needs to cross to fire a request. */
+export const DEFAULT_SOFT_THRESHOLD_MS = 3 * 60 * 1000;        // 3 minutes wall time
+export const DEFAULT_SOFT_THRESHOLD_TOKENS = 8_000;             // accumulated completion tokens
+/** Default wait for the operator to respond before falling back to `stop`. */
+const DEFAULT_LRG_TIMEOUT_MS = 5 * 60 * 1000;                   // 5 minutes
+/** Default budget granted by a single `continue` response (per axis). */
+export const DEFAULT_CONTINUE_GRANT_MS = 5 * 60 * 1000;         // +5 minutes
+export const DEFAULT_CONTINUE_GRANT_TOKENS = 8_000;             // +8K completion tokens
+
+// ── Events ────────────────────────────────────────────────────────────────────
+
+export interface LongRunningEvents {
+  "lrg:requested": (request: LongRunningRequest) => void;
+  "lrg:resolved": (requestId: LongRunningRequestId, outcome: LongRunningOutcome, operator: string) => void;
+}
+
+// ── Manager ───────────────────────────────────────────────────────────────────
+
+interface PendingRequest {
+  resolve: (outcome: LongRunningOutcome) => void;
+  timer: ReturnType<typeof setTimeout>;
+  /** What the runtime falls back to if the operator never responds. */
+  defaultOutcome: LongRunningOutcome;
+}
+
+class LongRunningGenerationManager extends EventEmitter {
+  private _requests = new Map<LongRunningRequestId, LongRunningRequest>();
+  private _pending = new Map<LongRunningRequestId, PendingRequest>();
+  /** Run sessions that the operator has already granted `unbounded` to. */
+  private _unboundedRuns = new Set<string>();
+
+  /**
+   * Ask the operator whether to keep going. Resolves when the operator
+   * responds (`continue`, `unbounded`, `stop`) or when the wait times
+   * out (falls back to `defaultOutcome`, default `stop`).
+   *
+   * Caller is the sub-agent loop, AFTER it has confirmed the run has
+   * crossed a soft threshold AND has not previously been granted
+   * `unbounded` for this run.
+   */
+  requestContinuation(opts: {
+    agentName: string;
+    runSessionId: string;
+    parentSessionId?: string;
+    reason: string;
+    elapsedMs: number;
+    completionTokens: number;
+    iterations: number;
+    /** Operator-response timeout. Defaults to 5 min. */
+    waitTimeoutMs?: number;
+    /** Fallback outcome when the operator never responds. Defaults to "stop". */
+    defaultOutcome?: LongRunningOutcome;
+  }): Promise<LongRunningOutcome> {
+    // Short-circuit: once a run has been granted "unbounded", further
+    // threshold crossings on the same run are no-ops.
+    if (this._unboundedRuns.has(opts.runSessionId)) {
+      return Promise.resolve("unbounded");
+    }
+
+    // Idempotent on (runSessionId): if a prior request is still pending
+    // for this run, attach to the same wait instead of stacking N alerts.
+    const existing = [...this._requests.values()].find(
+      (r) => r.state === "pending" && r.runSessionId === opts.runSessionId,
+    );
+    if (existing) {
+      const pending = this._pending.get(existing.id);
+      if (pending) {
+        return new Promise((resolve) => {
+          const prior = pending.resolve;
+          pending.resolve = (outcome) => { prior(outcome); resolve(outcome); };
+        });
+      }
+    }
+
+    const now = Date.now();
+    const request: LongRunningRequest = {
+      id: randomUUID(),
+      agentName: opts.agentName,
+      runSessionId: opts.runSessionId,
+      ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+      reason: opts.reason,
+      state: "pending",
+      elapsedMs: opts.elapsedMs,
+      completionTokens: opts.completionTokens,
+      iterations: opts.iterations,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this._requests.set(request.id, request);
+
+    const defaultOutcome: LongRunningOutcome = opts.defaultOutcome ?? "stop";
+    const waitTimeoutMs = opts.waitTimeoutMs ?? DEFAULT_LRG_TIMEOUT_MS;
+
+    logAudit("long_running_generation_requested", {
+      requestId: request.id,
+      agentName: request.agentName,
+      runSessionId: request.runSessionId,
+      reason: request.reason,
+      elapsedMs: request.elapsedMs,
+      completionTokens: request.completionTokens,
+      iterations: request.iterations,
+      waitTimeoutMs,
+      defaultOutcome,
+    }, { sessionId: request.parentSessionId, severity: "warn" });
+    log.warn({
+      requestId: request.id,
+      agentName: opts.agentName,
+      runSessionId: opts.runSessionId,
+      elapsedMs: opts.elapsedMs,
+      completionTokens: opts.completionTokens,
+    }, "Long-running generation requested operator decision");
+    this.emit("lrg:requested", request);
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const pending = this._pending.get(request.id);
+        this._pending.delete(request.id);
+        const r = this._requests.get(request.id);
+        if (r && r.state === "pending") {
+          r.state = "resolved";
+          r.resolvedAt = Date.now();
+          r.resolvedOutcome = "timeout";
+          r.updatedAt = r.resolvedAt;
+        }
+        logAudit("long_running_generation_timeout", {
+          requestId: request.id,
+          agentName: opts.agentName,
+          runSessionId: opts.runSessionId,
+          defaultOutcome,
+        }, { sessionId: opts.parentSessionId, severity: "warn" });
+        log.warn({ requestId: request.id, defaultOutcome }, "Long-running generation request timed out");
+        // The runtime treats `timeout` and `defaultOutcome` as the same
+        // resolution path but reports `timeout` in the audit so the
+        // operator can see why their long run ended.
+        if (pending) pending.resolve("timeout");
+        else resolve("timeout");
+      }, waitTimeoutMs);
+      timer.unref?.();
+      this._pending.set(request.id, { resolve, timer, defaultOutcome });
+    });
+  }
+
+  /**
+   * Operator picked an action in the dashboard. Returns the request that
+   * was resolved so the caller can audit it, or null when the id is stale.
+   */
+  resolveRequest(
+    requestId: LongRunningRequestId,
+    outcome: "continue" | "unbounded" | "stop",
+    operator = "operator",
+  ): LongRunningRequest | null {
+    const request = this._requests.get(requestId);
+    if (!request || request.state !== "pending") return null;
+    const pending = this._pending.get(requestId);
+
+    request.state = "resolved";
+    request.resolvedAt = Date.now();
+    request.resolvedOutcome = outcome;
+    request.updatedAt = request.resolvedAt;
+
+    if (outcome === "unbounded") {
+      this._unboundedRuns.add(request.runSessionId);
+    }
+
+    logAudit("long_running_generation_resolved", {
+      requestId,
+      agentName: request.agentName,
+      runSessionId: request.runSessionId,
+      outcome,
+      operator,
+      waitedMs: request.resolvedAt - request.createdAt,
+    }, { sessionId: request.parentSessionId, severity: "info" });
+    log.info({ requestId, outcome, operator }, "Long-running generation request resolved");
+    this.emit("lrg:resolved", requestId, outcome, operator);
+
+    if (pending) {
+      clearTimeout(pending.timer);
+      this._pending.delete(requestId);
+      pending.resolve(outcome);
+    }
+    return request;
+  }
+
+  /** Stop awaiting any pending request for a given run (called when the run ends). */
+  stop(runSessionId: string, reason = "run_ended"): void {
+    for (const request of [...this._requests.values()]) {
+      if (request.runSessionId !== runSessionId || request.state !== "pending") continue;
+      const pending = this._pending.get(request.id);
+      request.state = "stopped";
+      request.updatedAt = Date.now();
+      logAudit("long_running_generation_stopped", {
+        requestId: request.id,
+        agentName: request.agentName,
+        runSessionId,
+        reason,
+      }, { sessionId: request.parentSessionId, severity: "info" });
+      if (pending) {
+        clearTimeout(pending.timer);
+        this._pending.delete(request.id);
+        pending.resolve(pending.defaultOutcome);
+      }
+    }
+  }
+
+  /** Has this run been granted unbounded budget? Cheap; suitable for the
+   *  per-iteration check in the sub-agent loop before deciding to ask. */
+  isUnbounded(runSessionId: string): boolean {
+    return this._unboundedRuns.has(runSessionId);
+  }
+
+  getRequest(requestId: LongRunningRequestId): LongRunningRequest | undefined {
+    return this._requests.get(requestId);
+  }
+
+  /** Pending requests, newest first. The dashboard polls this. */
+  listPending(): LongRunningRequest[] {
+    return [...this._requests.values()]
+      .filter((r) => r.state === "pending")
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** Reset for tests. */
+  resetForTests(): void {
+    for (const p of this._pending.values()) clearTimeout(p.timer);
+    this._pending.clear();
+    this._requests.clear();
+    this._unboundedRuns.clear();
+    this.removeAllListeners();
+  }
+}
+
+// Singleton
+export const longRunningGenerationManager = new LongRunningGenerationManager();
