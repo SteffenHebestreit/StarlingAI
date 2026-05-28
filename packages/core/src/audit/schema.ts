@@ -68,6 +68,11 @@ export type AuditEventType =
   | "browser_session_assist_resolved"
   | "browser_session_assist_timeout"
   | "browser_session_stop"
+  // Long-running generation — pause/resume on big sub-agent runs
+  | "long_running_generation_requested"
+  | "long_running_generation_resolved"
+  | "long_running_generation_timeout"
+  | "long_running_generation_stopped"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement
