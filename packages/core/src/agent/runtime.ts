@@ -1102,8 +1102,19 @@ export function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatal
   // (e.g. an unrelated DB-analysis job scoring 0.24 on two generic terms like
   // "inspection"/"analysis") deadlocks the turn: the model rightly refuses the
   // irrelevant workflow, produces nothing, and the user gets an empty answer.
-  // Require a strong score, or 3+ matched terms backed by a non-trivial score.
-  return topMatch.score >= 0.5 || (topMatch.matchedTerms.length >= 3 && topMatch.score >= 0.3);
+  //
+  // With keyword overlap the user's own words land in the workflow signature,
+  // so a moderate score is a real signal.
+  const hasKeywordOverlap = topMatch.matchedTerms.length > 0;
+  if (hasKeywordOverlap) {
+    return topMatch.score >= 0.5 || (topMatch.matchedTerms.length >= 3 && topMatch.score >= 0.3);
+  }
+  // Pure-semantic matches with NO keyword overlap need a much higher bar.
+  // Embedding similarity routinely produces 0.5–0.7 for unrelated topics
+  // (session b15e2099 forced apply_jobs at 0.65 against an unrelated
+  // CPSA-F learning-website request and burned 12 minutes of browser
+  // automation). Only force on a strong semantic-only match.
+  return topMatch.score >= 0.78;
 }
 
 function formatWorkflowExecutionPromptFromSearch(matches: WorkflowCatalogMatch[]): string {
