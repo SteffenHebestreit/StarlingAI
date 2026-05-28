@@ -6,6 +6,10 @@ import type { SwarmState } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
 const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}`);
+// Default stats include a realistic write_file call so artifact-task tests
+// (anything matching WORKSPACE_MUTATION_TASK_RE for an agent with artifact
+// tools) don't false-positive on the deliverable-miss classifier. Specific
+// tests override this when they want a failure path.
 const runSubAgentWithStatsMock = vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
   output: await runSubAgentMock(args),
   stats: {
@@ -13,9 +17,9 @@ const runSubAgentWithStatsMock = vi.fn(async (args: SubAgentRunOptions): Promise
     sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
     promptChars: 0,
     userContentChars: String(args.task ?? "").length,
-    toolCount: 0,
-    toolNames: [],
-    iterations: 0,
+    toolCount: 1,
+    toolNames: ["write_file"],
+    iterations: 1,
     usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     maxIterations: 5,
     model: "mock",
@@ -49,9 +53,9 @@ describe("swarm orchestration tools", () => {
         sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
         promptChars: 0,
         userContentChars: String(args.task ?? "").length,
-        toolCount: 0,
-        toolNames: [],
-        iterations: 0,
+        toolCount: 1,
+        toolNames: ["write_file"],
+        iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 5,
         model: "mock",
