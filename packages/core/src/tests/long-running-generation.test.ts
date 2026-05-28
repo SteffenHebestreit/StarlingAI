@@ -52,14 +52,27 @@ describe("longRunningGenerationManager", () => {
     expect(longRunningGenerationManager.listPending()).toHaveLength(0);
   });
 
-  it("falls back to defaultOutcome on operator-response timeout", async () => {
+  it("falls back to defaultOutcome 'stop' on operator-response timeout", async () => {
     const wait = longRunningGenerationManager.requestContinuation({
       ...buildRequest(),
       waitTimeoutMs: 20,
       defaultOutcome: "stop",
     });
-    await expect(wait).resolves.toBe("timeout");
-    // The request is no longer pending after the timer fires.
+    await expect(wait).resolves.toBe("stop");
+    expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+  });
+
+  it("falls back to defaultOutcome 'continue' on operator-response timeout for pre-authorized runs", async () => {
+    // When the operator pre-authorized the turn via --timeout N, the
+    // handoff still fires (operator sees it in the dock and can stop the
+    // run) but the default outcome on no-response is "continue" so the run
+    // grants itself another round of budget and keeps going.
+    const wait = longRunningGenerationManager.requestContinuation({
+      ...buildRequest(),
+      waitTimeoutMs: 20,
+      defaultOutcome: "continue",
+    });
+    await expect(wait).resolves.toBe("continue");
     expect(longRunningGenerationManager.listPending()).toHaveLength(0);
   });
 
