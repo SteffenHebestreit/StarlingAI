@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useOperatorRequestsStore, type PendingApproval } from "../stores/operatorRequests";
+import { useOperatorRequestsStore, type PendingApproval, type PendingLongRunning } from "../stores/operatorRequests";
 import { useBrowserStore } from "../stores/browser";
 import BrowserSessionPanel from "./BrowserSessionPanel.vue";
 
@@ -12,11 +12,16 @@ const showBrowser = ref(false);
 
 const browserSessions = computed(() => (browser.enabled ? browser.activeSessions : []));
 const assistCount = computed(() => browser.awaitingAssist.length);
-const totalCount = computed(() => requests.approvals.length + assistCount.value);
+const longRunningCount = computed(() => requests.longRunning.length);
+const totalCount = computed(() => requests.approvals.length + assistCount.value + longRunningCount.value);
 
 // The dock is present whenever there's something to act on: a pending approval,
-// or a live browser session (so the operator can always reach / watch it).
-const visible = computed(() => requests.approvals.length > 0 || browserSessions.value.length > 0);
+// a paused long-running sub-agent, or a live browser session.
+const visible = computed(() =>
+  requests.approvals.length > 0
+  || browserSessions.value.length > 0
+  || longRunningCount.value > 0,
+);
 
 // A CAPTCHA handoff is urgent — pop the dock and the live browser open so the
 // operator sees the "your help is needed" prompt without hunting for it.
@@ -27,6 +32,12 @@ watch(assistCount, (n, prev) => {
   }
 });
 
+// A paused long-running run is also urgent — the operator's answer is on the
+// critical path of the sub-agent. Pop the dock open the moment one shows up.
+watch(longRunningCount, (n, prev) => {
+  if (n > prev && n > 0) open.value = true;
+});
+
 // First time there's anything to do, expand the dock.
 watch(visible, (now, before) => {
   if (now && !before) open.value = true;
@@ -35,6 +46,17 @@ watch(visible, (now, before) => {
 function approvalSummary(a: PendingApproval): string {
   const host = a.args && typeof a.args["hostname"] === "string" ? String(a.args["hostname"]) : "";
   return host ? `${a.toolName} · ${host}` : a.toolName;
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m${seconds.toString().padStart(2, "0")}s` : `${seconds}s`;
+}
+
+function longRunningSummary(r: PendingLongRunning): string {
+  return `${r.agentName} · ${formatElapsed(r.elapsedMs)} · ${r.completionTokens.toLocaleString()} tokens · ${r.iterations} iter`;
 }
 </script>
 
@@ -64,6 +86,22 @@ function approvalSummary(a: PendingApproval): string {
           <div class="approval-actions">
             <button class="btn-approve" :disabled="requests.isResponding(a.id)" @click="requests.respond(a.id, true)">Approve</button>
             <button class="btn-deny" :disabled="requests.isResponding(a.id)" @click="requests.respond(a.id, false)">Deny</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Paused long-running sub-agents waiting for "keep going / stop" -->
+      <div v-if="requests.longRunning.length" class="dock-section">
+        <div class="dock-section-title">Long-running runs</div>
+        <div v-for="r in requests.longRunning" :key="r.id" class="lrg-card">
+          <div class="lrg-info">
+            <span class="lrg-summary">{{ longRunningSummary(r) }}</span>
+            <span class="lrg-reason">{{ r.reason }}</span>
+          </div>
+          <div class="lrg-actions">
+            <button class="btn-continue" :disabled="requests.isResponding(r.id)" @click="requests.respondLongRunning(r.id, 'continue')">+5 min</button>
+            <button class="btn-unbounded" :disabled="requests.isResponding(r.id)" @click="requests.respondLongRunning(r.id, 'unbounded')">Run unbounded</button>
+            <button class="btn-stop" :disabled="requests.isResponding(r.id)" @click="requests.respondLongRunning(r.id, 'stop')">Stop now</button>
           </div>
         </div>
       </div>
@@ -188,7 +226,8 @@ function approvalSummary(a: PendingApproval): string {
 .approval-scene { font-size: 0.7rem; color: #888; }
 .approval-actions { display: flex; gap: 0.3rem; flex-shrink: 0; }
 
-.btn-approve, .btn-deny, .btn-open-browser {
+.btn-approve, .btn-deny, .btn-open-browser,
+.btn-continue, .btn-unbounded, .btn-stop {
   font-size: 0.75rem;
   padding: 0.3rem 0.6rem;
   border-radius: 6px;
@@ -199,7 +238,31 @@ function approvalSummary(a: PendingApproval): string {
 .btn-approve:hover:not(:disabled) { background: #5cca5e; }
 .btn-deny { border-color: #f44336; background: transparent; color: #f44336; }
 .btn-deny:hover:not(:disabled) { background: rgba(244,67,54,0.12); }
-.btn-approve:disabled, .btn-deny:disabled, .btn-open-browser:disabled { opacity: 0.5; cursor: default; }
+.btn-approve:disabled, .btn-deny:disabled, .btn-open-browser:disabled,
+.btn-continue:disabled, .btn-unbounded:disabled, .btn-stop:disabled { opacity: 0.5; cursor: default; }
+
+/* Long-running run cards — paused sub-agents waiting for "keep going / stop" */
+.lrg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #ffb300;
+  border-radius: 8px;
+  margin-bottom: 0.4rem;
+  background: rgba(255, 179, 0, 0.08);
+}
+.lrg-info { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.lrg-summary { font-family: monospace; font-size: 0.75rem; color: #eee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrg-reason { font-size: 0.72rem; color: #ffb300; }
+.lrg-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+.btn-continue { border-color: #4caf50; background: #4caf50; color: #06210a; font-weight: 600; }
+.btn-continue:hover:not(:disabled) { background: #5cca5e; }
+.btn-unbounded { border-color: #ffb300; background: transparent; color: #ffb300; font-weight: 600; }
+.btn-unbounded:hover:not(:disabled) { background: rgba(255, 179, 0, 0.15); }
+.btn-stop { border-color: #f44336; background: transparent; color: #f44336; }
+.btn-stop:hover:not(:disabled) { background: rgba(244, 67, 54, 0.12); }
 
 .browser-row {
   display: flex;
