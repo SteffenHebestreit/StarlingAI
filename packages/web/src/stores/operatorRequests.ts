@@ -16,13 +16,32 @@ export interface PendingApproval {
   createdAt: string;
 }
 
+export interface PendingLongRunning {
+  id: string;
+  agentName: string;
+  parentSessionId?: string;
+  runSessionId: string;
+  reason: string;
+  state: "pending" | "resolved" | "stopped";
+  elapsedMs: number;
+  completionTokens: number;
+  iterations: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type LongRunningOutcome = "continue" | "unbounded" | "stop";
+
 export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
   const gateway = useGatewayStore();
 
   const approvals = ref<PendingApproval[]>([]);
+  const longRunning = ref<PendingLongRunning[]>([]);
   const respondingIds = ref<Set<string>>(new Set());
 
   const hasApprovals = computed(() => approvals.value.length > 0);
+  const hasLongRunning = computed(() => longRunning.value.length > 0);
+  const hasAnyPending = computed(() => hasApprovals.value || hasLongRunning.value);
 
   async function fetchApprovals() {
     try {
@@ -30,6 +49,18 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
       const list = await res.json() as PendingApproval[];
       approvals.value = Array.isArray(list)
         ? [...list].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        : [];
+    } catch {
+      /* transient — keep last known state */
+    }
+  }
+
+  async function fetchLongRunning() {
+    try {
+      const res = await gateway.authorizedFetch("/api/long-running/active");
+      const list = await res.json() as PendingLongRunning[];
+      longRunning.value = Array.isArray(list)
+        ? [...list].sort((a, b) => a.createdAt - b.createdAt)
         : [];
     } catch {
       /* transient — keep last known state */
@@ -53,6 +84,22 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
     }
   }
 
+  async function respondLongRunning(id: string, outcome: LongRunningOutcome) {
+    respondingIds.value = new Set(respondingIds.value).add(id);
+    try {
+      await gateway.authorizedFetch(`/api/long-running/${encodeURIComponent(id)}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome }),
+      });
+      longRunning.value = longRunning.value.filter((r) => r.id !== id);
+    } finally {
+      const next = new Set(respondingIds.value);
+      next.delete(id);
+      respondingIds.value = next;
+    }
+  }
+
   function isResponding(id: string): boolean {
     return respondingIds.value.has(id);
   }
@@ -63,7 +110,9 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
   function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(() => {
-      if (gateway.connected) void fetchApprovals();
+      if (!gateway.connected) return;
+      void fetchApprovals();
+      void fetchLongRunning();
     }, POLL_INTERVAL_MS);
   }
 
@@ -79,6 +128,7 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
     (connected) => {
       if (connected) {
         void fetchApprovals();
+        void fetchLongRunning();
         startPolling();
       } else {
         stopPolling();
@@ -87,5 +137,16 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
     { immediate: true },
   );
 
-  return { approvals, hasApprovals, fetchApprovals, respond, isResponding };
+  return {
+    approvals,
+    longRunning,
+    hasApprovals,
+    hasLongRunning,
+    hasAnyPending,
+    fetchApprovals,
+    fetchLongRunning,
+    respond,
+    respondLongRunning,
+    isResponding,
+  };
 });
