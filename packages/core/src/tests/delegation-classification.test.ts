@@ -328,6 +328,73 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: session c903b401 (2026-05-28) showed the worst variant of
+  // the planning-but-never-execute failure: the model opened its message
+  // with a NON-planning sentence ("This is a substantial multi-section
+  // deliverable...") and only THEN said "Let me build this..." — the
+  // anchored opener regex missed it entirely, classification returned
+  // "success", and the orchestrator hallucinated that the website file had
+  // been created. The fix doesn't rely on language patterns at all: when
+  // the agent had artifact-producing tools (write_file / generate_*) AND
+  // the task asks for a deliverable AND the agent didn't call any of them
+  // (or delegate, for coordinator-shaped agents), it's a failure.
+  it("returns failure when an agent with artifact tools narrates without producing", () => {
+    // The output opens with a NON-planning sentence ("This is a substantial…")
+    // so the language-pattern detector misses it. Only the tool-usage based
+    // detector can fire here: the agent had write_file + generate_document
+    // available, called only context tools, and didn't delegate.
+    const mockCoordinatorOutput =
+      "This is a substantial multi-section deliverable (full interactive learning website with 5 major topic areas, quiz functionality, dark/light mode, search, progress tracking). Let me build this as a complete single-file HTML application.";
+    const r = classifyDelegationResult(
+      mockCoordinatorOutput,
+      "success",
+      {
+        // Mirror the production audit: real sub-agents always call at
+        // least read_shared_facts at startup, so toolCount > 0 with only
+        // context tools is the genuine narrative-only signal.
+        toolCount: 2,
+        toolNames: ["read_shared_facts", "memory_search"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      {
+        tags: ["coordination"],
+        tools: [
+          "write_file", "generate_document", "delegate_to_agent",
+          "parallel_delegate", "memory_search", "read_shared_facts",
+        ],
+      } as never,
+      "mission_coordinator",
+      "Erstelle eine vollständige, interaktive Lernwebsite für die iSAQB CPSA-F Zertifizierung.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
+  // The same agent shape, but it DID delegate (e.g. to content_writer):
+  // don't flag it. The work might legitimately be happening downstream.
+  it("does NOT flag a coordinator that delegated but didn't write directly", () => {
+    const r = classifyDelegationResult(
+      "I delegated the learning website build to content_writer. The output is being prepared.",
+      "success",
+      {
+        toolCount: 2,
+        toolNames: ["read_shared_facts", "delegate_to_agent"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      {
+        tags: ["coordination"],
+        tools: [
+          "write_file", "generate_document", "delegate_to_agent",
+          "parallel_delegate", "memory_search", "read_shared_facts",
+        ],
+      } as never,
+      "mission_coordinator",
+      "Erstelle eine vollständige Lernwebsite für die CPSA-F Zertifizierung.",
+    );
+    expect(r).toBe<DelegationClassification>("success");
+  });
+
   // Regression: session 6b3f2123 (2026-05-28) produced a 3 KB German
   // planning loop ("Ich werde…", "Lass mich einen anderen Ansatz wählen",
   // "Stattdessen…", "Letztendlich…") that never called write_file. The

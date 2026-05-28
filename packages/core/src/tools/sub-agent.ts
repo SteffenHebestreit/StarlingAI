@@ -1851,6 +1851,64 @@ function looksLikeReadOnlyMutationMiss(
   return usedOnlyReadOnlyContextTools(stats) || looksLikeRawWorkspaceConfigDump(output);
 }
 
+// Tools that directly produce a user-visible deliverable. If the agent had
+// any of these AND the task asked for one AND the agent called none of them,
+// the agent narrated intent instead of executing — regardless of how the
+// output is phrased. This catches the failure mode where the model says
+// "Let me build this as a complete single-file HTML application" or "Die
+// Website wurde erstellt" but never actually called write_file.
+const ARTIFACT_PRODUCING_TOOLS = new Set([
+  "write_file", "edit_file", "create_dir",
+  "generate_document", "generate_website", "generate_docx", "generate_pptx", "generate_pdf",
+  "bundle_artifact_zip", "export_workspace_artifact",
+  "shell_exec",
+]);
+
+// Coordinators can also "produce" by delegating the work. If they called
+// none of these AND none of ARTIFACT_PRODUCING_TOOLS, they truly did
+// nothing useful.
+const PRODUCTIVE_COORDINATOR_TOOLS = new Set([
+  "delegate_to_agent", "parallel_delegate", "run_task_graph",
+  "run_workflow", "create_ephemeral_agent", "swarm_delegate",
+]);
+
+function looksLikeArtifactDeliverableMiss(
+  task: string,
+  stats: { toolCount: number; toolNames: string[] } | undefined,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+): boolean {
+  if (!agentCfg) return false;
+  // We can only fire this check when stats are present — without them we
+  // don't know which tools the agent actually called, and treating absent
+  // stats as "called nothing" would false-positive on every legacy test
+  // path that mocks runSubAgent without runSubAgentWithStats.
+  if (!stats) return false;
+  // Empty stats are a mock signal, not a production one. Real sub-agents
+  // always call at least read_shared_facts at startup, so toolCount = 0
+  // means the test harness didn't bother to populate stats. Don't fire on
+  // those — they would false-positive on every fallback-routing test.
+  if ((stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0) return false;
+  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
+
+  const availableArtifactTools = (agentCfg.tools ?? []).filter((t) => ARTIFACT_PRODUCING_TOOLS.has(t));
+  if (availableArtifactTools.length === 0) return false;
+
+  const calledTools = new Set(stats.toolNames ?? []);
+  const calledArtifact = [...calledTools].some((t) => ARTIFACT_PRODUCING_TOOLS.has(t));
+  if (calledArtifact) return false;
+
+  // If the agent could delegate (coordinator-shaped) and actually did,
+  // that's a legitimate alternative path — the work might still happen
+  // downstream. Don't flag it here.
+  const couldDelegate = (agentCfg.tools ?? []).some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
+  if (couldDelegate) {
+    const delegated = [...calledTools].some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
+    if (delegated) return false;
+  }
+
+  return true;
+}
+
 export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
@@ -2057,6 +2115,16 @@ export function classifyDelegationResult(
   }
 
   if (looksLikeReadOnlyMutationMiss(output, task, stats, agentCfg, agentName)) {
+    return "failure";
+  }
+
+  // Language-agnostic fallback: the agent had artifact-producing tools
+  // (write_file, generate_website, …) AND the task asks for a deliverable
+  // AND the agent called none of them AND, for coordinators, didn't
+  // delegate either. Catches "Let me build this as a complete single-file
+  // HTML application" / "Die Website wurde erstellt" / "This is a
+  // substantial deliverable…" — phrasings the planning-only regex misses.
+  if (looksLikeArtifactDeliverableMiss(task, stats, agentCfg)) {
     return "failure";
   }
 
@@ -3102,7 +3170,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // orchestrator into retrying with the same wording. Replace it with a
         // structured reason that names what was missing so the orchestrator
         // can adjust its next move.
-        const narrativeOnly = classification === "failure" && looksLikePlanningOnlyResult(output);
+        const narrativeOnly =
+          classification === "failure"
+          && (
+            looksLikePlanningOnlyResult(output)
+            || looksLikeArtifactDeliverableMiss(request.task, stats, agentCfg)
+          );
         if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
             /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
