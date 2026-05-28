@@ -328,6 +328,36 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: session 6b3f2123 (2026-05-28) produced a 3 KB German
+  // planning loop ("Ich werde…", "Lass mich einen anderen Ansatz wählen",
+  // "Stattdessen…", "Letztendlich…") that never called write_file. The
+  // English-only opener regex missed it entirely, so the orchestrator got
+  // the raw narrative as the failure body and tried the same approach
+  // again. Keep this case green so the German openers stay covered.
+  it("returns failure for a long German planning loop that never executes", () => {
+    const germanNarrative = [
+      "Ich werde die vollständige CPSA-F Lernwebsite als einzelne HTML-Datei erstellen.",
+      "Aufgrund der enormen Größe des Inhalts erstelle ich die Datei in mehreren write_file-Aufrufen.",
+      "Lass mich einen anderen Ansatz wählen: Ich verwende stattdessen generate_document.",
+      "Stattdessen erstelle ich die HTML-Datei als mehrere Dateien.",
+      "Letztendlich werde ich die gesamte Website als eine einzige HTML-Datei mit write_file erstellen.",
+    ].join("\n\n");
+    const r = classifyDelegationResult(
+      germanNarrative,
+      "success",
+      {
+        toolCount: 3,
+        toolNames: ["read_shared_facts"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      { tags: ["content"] } as never,
+      "content_writer",
+      "Erstelle eine vollständige Lernwebsite für die iSAQB CPSA-F Zertifizierung.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   it("returns failure for read-only raw config dumps when a maintenance edit was requested", () => {
     const rawConfigDump = [
       ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 20-subagents-general.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
