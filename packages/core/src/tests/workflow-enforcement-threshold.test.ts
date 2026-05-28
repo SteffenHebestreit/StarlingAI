@@ -28,4 +28,19 @@ describe("shouldRequireWorkflowExecutionAfterSearch", () => {
   it("returns false for no matches", () => {
     expect(shouldRequireWorkflowExecutionAfterSearch([])).toBe(false);
   });
+
+  it("does NOT force on pure-semantic match below the strong-semantic threshold", () => {
+    // Regression: session b15e2099 (2026-05-28) had apply_jobs (a freelance
+    // application scene) score 0.65 against an unrelated "create a CPSA-F
+    // learning website" request — pure semantic, zero keyword overlap. The
+    // old 0.5 floor forced run_workflow and burned 12 min of browser
+    // automation on the wrong workflow. With no keyword overlap, require
+    // a much higher semantic score (0.78+) before forcing.
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.65, [])])).toBe(false);
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.74, [])])).toBe(false);
+  });
+
+  it("still forces on a strong pure-semantic match", () => {
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.82, [])])).toBe(true);
+  });
 });
