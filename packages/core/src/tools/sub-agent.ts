@@ -1895,11 +1895,12 @@ function looksLikeArtifactDeliverableMiss(
   // stats as "called nothing" would false-positive on every legacy test
   // path that mocks runSubAgent without runSubAgentWithStats.
   if (!stats) return false;
-  // Empty stats are a mock signal, not a production one. Real sub-agents
-  // always call at least read_shared_facts at startup, so toolCount = 0
-  // means the test harness didn't bother to populate stats. Don't fire on
-  // those — they would false-positive on every fallback-routing test.
-  if ((stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0) return false;
+  // NOTE: do NOT skip on `toolCount === 0 && toolNames.length === 0`. The
+  // earlier "treat empty stats as a mock signal" shortcut let real
+  // production failures through: session 25f55376 (2026-05-28) had
+  // mission_coordinator generate 4096 tokens of "I'll write it in one go"
+  // narrative with literally zero tool calls and get marked as success.
+  // That is the strongest narrative-only signal we have; we must catch it.
   if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
 
   const availableArtifactTools = (agentCfg.tools ?? []).filter((t) => ARTIFACT_PRODUCING_TOOLS.has(t));

@@ -370,6 +370,36 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression: session 25f55376 (2026-05-28) had mission_coordinator
+  // generate 4096 tokens of "I'll write it in one go" narrative with
+  // toolCount: 0, toolNames: [], iterations: 0 and got marked success.
+  // The earlier "treat empty stats as a mock signal" shortcut let it
+  // through. A real agent with artifact tools that calls ZERO tools on a
+  // workspace-mutation task is the strongest narrative-only signal — must
+  // be a failure.
+  it("returns failure when an artifact-capable agent calls zero tools on a mutation task", () => {
+    const r = classifyDelegationResult(
+      "This is a substantial single-file deliverable with 7+ content sections, interactive quiz, dark/light theme, and accessibility features. I'll orchestrate this directly.\n\nLet me build the complete CPSA-F learning website. Given the size (~15KB+), I'll write it in one go.",
+      "success",
+      {
+        toolCount: 0,
+        toolNames: [],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      {
+        tags: ["coordination"],
+        tools: [
+          "write_file", "generate_document", "delegate_to_agent",
+          "parallel_delegate", "read_shared_facts", "share_finding",
+        ],
+      } as never,
+      "mission_coordinator",
+      "Erstelle eine vollständige Single-Page Lernwebsite als HTML-Datei zur Vorbereitung auf die iSAQB CPSA-F Zertifizierung.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   // The same agent shape, but it DID delegate (e.g. to content_writer):
   // don't flag it. The work might legitimately be happening downstream.
   it("does NOT flag a coordinator that delegated but didn't write directly", () => {
