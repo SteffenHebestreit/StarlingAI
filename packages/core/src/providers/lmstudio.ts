@@ -8,6 +8,22 @@ const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
 const MAX_PROVIDER_TIMEOUT_MS = 300_000;
 
+/**
+ * Thrown when a single LLM call exceeds its own wall-clock hard timeout (a hung
+ * or pathologically slow provider), as opposed to a transient network error or
+ * external cancellation. It is NON-RETRYABLE: retrying a hung provider just
+ * multiplies the wall-clock hang by the retry count (we observed a single
+ * sub-agent delegation hang ~20 min = 4 × a 5-min hard timeout because the
+ * retry loop treated the timeout abort as a transient error). Callers must
+ * surface it immediately so the orchestrator can fall back or synthesize.
+ */
+export class ProviderHardTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`LLM call exceeded hard timeout of ${timeoutMs}ms`);
+    this.name = "ProviderHardTimeoutError";
+  }
+}
+
 interface LMStudioProviderOptions {
   timeoutMs?: number;
   maxRetries?: number;
@@ -302,7 +318,7 @@ export class LMStudioProvider {
   // single `complete()` call run for 20 min past a 5-min SDK timeout). This
   // wrapper composes the caller's signal with a setTimeout-based abort so
   // every attempt has a true wall-clock ceiling we control.
-  private withHardTimeout<T>(
+  private async withHardTimeout<T>(
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
     fn: (combinedSignal: AbortSignal) => Promise<T>,
@@ -310,6 +326,7 @@ export class LMStudioProvider {
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let parentListener: (() => void) | undefined;
+    let timedOut = false;
 
     if (parentSignal?.aborted) {
       ac.abort(parentSignal.reason);
@@ -319,15 +336,24 @@ export class LMStudioProvider {
     }
 
     timer = setTimeout(() => {
+      timedOut = true;
       ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
     }, timeoutMs);
 
-    const cleanup = () => {
+    try {
+      return await fn(ac.signal);
+    } catch (err) {
+      // Distinguish OUR wall-clock timeout from an external/parent cancel so
+      // the retry loop can treat it as terminal (a hung provider must not be
+      // retried — see ProviderHardTimeoutError).
+      if (timedOut && !parentSignal?.aborted) {
+        throw new ProviderHardTimeoutError(timeoutMs);
+      }
+      throw err;
+    } finally {
       if (timer !== undefined) clearTimeout(timer);
       if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
-    };
-
-    return fn(ac.signal).finally(cleanup);
+    }
   }
 
   async verifyToolCallSupport(modelId: string): Promise<boolean> {
@@ -458,6 +484,13 @@ export class LMStudioProvider {
         };
       } catch (err: unknown) {
         this.recordRequestFailure(startedAt, err);
+        // A hard-timeout is terminal: retrying a hung/too-slow provider only
+        // multiplies the wall-clock hang (e.g. 4 × 5-min = 20-min delegation).
+        // Surface it immediately so the orchestrator can fall back or synthesize.
+        if (err instanceof ProviderHardTimeoutError) {
+          log.error({ attempt, timeoutMs: err.timeoutMs, model: modelId }, "OpenAI-compatible completion hit hard timeout — not retrying");
+          throw err;
+        }
         attempt++;
         if (signal?.aborted || attempt >= maxAttempts) {
           log.error({ err, attempt, model: modelId }, "OpenAI-compatible completion failed");
