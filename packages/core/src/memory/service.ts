@@ -7,7 +7,7 @@ import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
-import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
+import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 const log = childLogger("memory:service");
 
@@ -209,6 +209,28 @@ export async function searchMemoryRecords(
   if (normalizedQuery && isEmbeddingAvailable()) {
     try { queryVec = await computeQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
   }
+
+  // Backfill embeddings for candidates that have no stored vector — primarily
+  // session shared-facts and agent lessons, which (unlike durable workspace/user
+  // records) are not embedded on write. Without this they could only be matched
+  // lexically. We embed only the top text-scored candidates that are missing a
+  // vector, in ONE batched call, so all scopes become semantically retrievable
+  // at bounded cost.
+  if (queryVec) {
+    const SEMANTIC_BACKFILL_LIMIT = 24;
+    const missing = textScored
+      .filter((record) => !embeddings.has(record.id))
+      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+      .slice(0, SEMANTIC_BACKFILL_LIMIT);
+    if (missing.length > 0) {
+      const vectors = await computeTextEmbeddings(missing.map((r) => `${r.subject}\n${r.content}`));
+      for (let i = 0; i < missing.length; i++) {
+        const vec = vectors[i];
+        if (vec && vec.length === queryVec.length) embeddings.set(missing[i]!.id, vec);
+      }
+    }
+  }
+
   const embeddingScored = queryVec
     ? textScored.map((record) => {
         const vec = embeddings.get(record.id);
