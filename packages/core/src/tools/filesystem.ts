@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSy
 import { basename, resolve, extname, join } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
@@ -80,6 +80,21 @@ function guardPath(path: string, workspacePath: string): { safe: boolean; resolv
     return { safe: true, resolved };
   } catch {
     return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")) };
+  }
+}
+
+/**
+ * Guard for MUTATING file ops (write/edit/create/delete): roots the target
+ * under the workspace's `generated/` subfolder so agent output never clutters
+ * the config zone. Reads keep guardPath (workspace-wide). Returns the
+ * workspace-rooted relativePath (e.g. "generated/index.html") for artifacts.
+ */
+function guardWritePath(path: string, workspacePath: string): { safe: boolean; resolved: string; relativePath: string } {
+  try {
+    const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath);
+    return { safe: true, resolved, relativePath };
+  } catch {
+    return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path };
   }
 }
 
@@ -259,7 +274,7 @@ registerTool({
     const path = String(args["path"] ?? "");
     const content = String(args["content"] ?? "");
     const createDirs = Boolean(args["createDirs"] ?? true);
-    const { safe, resolved } = guardPath(path, ctx.workspacePath);
+    const { safe, resolved, relativePath } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) {
       return { success: false, output: "", error: "Path escapes workspace boundary" };
@@ -275,12 +290,11 @@ registerTool({
         mkdirSync(resolve(resolved, ".."), { recursive: true });
       }
       writeFileSync(resolved, content, "utf-8");
-      const relativePath = path.replace(/^\/?workspace\//i, "").replace(/\\/g, "/");
       const contentType = inferArtifactContentType(relativePath);
       const textPreview = buildArtifactTextPreview(content);
       return {
         success: true,
-        output: `File written: ${path} (${content.length} chars)`,
+        output: `File written: ${relativePath} (${content.length} chars)`,
         metadata: {
           artifactKind: "workspace_file",
           path,
@@ -319,7 +333,7 @@ registerTool({
     const path = String(args["path"] ?? "");
     const oldStr = String(args["old_string"] ?? "");
     const newStr = String(args["new_string"] ?? "");
-    const { safe, resolved } = guardPath(path, ctx.workspacePath);
+    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
@@ -369,7 +383,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardPath(path, ctx.workspacePath);
+    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
     if (!path.trim()) return { success: false, output: "", error: "path is required" };
@@ -403,7 +417,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardPath(path, ctx.workspacePath);
+    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
     if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };

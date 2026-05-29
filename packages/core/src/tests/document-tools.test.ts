@@ -38,7 +38,7 @@ describe("generate_document", () => {
     expect(result.success).toBe(true);
     expect(result.output).toContain("weekly-handoff.md");
 
-    const outputPath = join(tempDir, "weekly-handoff.md");
+    const outputPath = join(tempDir, "generated", "weekly-handoff.md");
     expect(existsSync(outputPath)).toBe(true);
     const content = readFileSync(outputPath, "utf8");
     expect(content).toContain("# Weekly Handoff");
@@ -54,7 +54,7 @@ describe("generate_document", () => {
     });
 
     expect(result.success).toBe(true);
-    const outputPath = join(tempDir, "exports", "release-brief.html");
+    const outputPath = join(tempDir, "generated", "exports", "release-brief.html");
     expect(existsSync(outputPath)).toBe(true);
     const content = readFileSync(outputPath, "utf8");
     expect(content).toContain("<!doctype html>");
@@ -105,7 +105,7 @@ describe("generate_document", () => {
     expect(result.success).toBe(true);
     expect(result.metadata).toMatchObject({
       artifactKind: "document",
-      outputPath: "artifacts/brief.md",
+      outputPath: "generated/artifacts/brief.md",
       filename: "brief.md",
       contentType: "text/markdown; charset=utf-8",
       previewMode: "markdown",
@@ -132,10 +132,10 @@ describe("generate_chart_html", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("reports/quarterly-revenue.html");
+    expect(result.output).toContain("generated/reports/quarterly-revenue.html");
     expect(result.metadata).toMatchObject({
       artifactKind: "chart_report",
-      outputPath: "reports/quarterly-revenue.html",
+      outputPath: "generated/reports/quarterly-revenue.html",
       contentType: "text/html; charset=utf-8",
       previewMode: "html",
       chartType: "line",
@@ -158,7 +158,7 @@ describe("generate_chart_html", () => {
       ],
     });
 
-    const outputPath = join(tempDir, "reports", "quarterly-revenue.html");
+    const outputPath = join(tempDir, "generated", "reports", "quarterly-revenue.html");
     expect(existsSync(outputPath)).toBe(true);
     const content = readFileSync(outputPath, "utf8");
     expect(content).toContain("Quarterly Revenue");
@@ -189,17 +189,17 @@ describe("generate_mermaid_diagram", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("artifacts/escalation-flow.mmd");
+    expect(result.output).toContain("generated/artifacts/escalation-flow.mmd");
     expect(result.metadata).toMatchObject({
       artifactKind: "diagram",
-      outputPath: "artifacts/escalation-flow.mmd",
+      outputPath: "generated/artifacts/escalation-flow.mmd",
       filename: "escalation-flow.mmd",
       contentType: "text/vnd.mermaid; charset=utf-8",
       previewMode: "mermaid",
       theme: "forest",
     });
 
-    const outputPath = join(tempDir, "artifacts", "escalation-flow.mmd");
+    const outputPath = join(tempDir, "generated", "artifacts", "escalation-flow.mmd");
     expect(existsSync(outputPath)).toBe(true);
     const content = readFileSync(outputPath, "utf8");
     expect(content).toContain('%%{init: { "theme": "forest" }}%%');
@@ -213,7 +213,7 @@ describe("generate_mermaid_diagram", () => {
     });
 
     expect(result.success).toBe(true);
-    const outputPath = join(tempDir, "existing-theme.mmd");
+    const outputPath = join(tempDir, "generated", "existing-theme.mmd");
     const content = readFileSync(outputPath, "utf8");
     expect(content.match(/%%\{init:/g)).toHaveLength(1);
     expect(content).toContain('"dark"');
@@ -236,7 +236,7 @@ describe("generate_pdf", () => {
     expect(result.output).toContain("board-brief.pdf");
     expect(fetchMock).not.toHaveBeenCalled();
 
-    const outputPath = join(tempDir, "briefs", "board-brief.pdf");
+    const outputPath = join(tempDir, "generated", "briefs", "board-brief.pdf");
     expect(existsSync(outputPath)).toBe(true);
     const bytes = readFileSync(outputPath);
     expect(bytes.subarray(0, 4).toString("utf8")).toBe("%PDF");

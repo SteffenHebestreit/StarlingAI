@@ -1828,11 +1828,23 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const isCoordinatorAgent = agentCfg.tools?.some((t: string) => COORDINATOR_TOOL_NAMES.includes(t)) ?? false;
   const leafDefaultMs = config.agents.performance?.subAgentTurnSloMs ?? 60_000;
   const coordinatorDefaultMs = Math.round(config.gateway.turnTimeoutMs * 0.85);
-  const defaultTimeoutMs = agentCfg.turnTimeoutMs ?? (isCoordinatorAgent ? coordinatorDefaultMs : leafDefaultMs);
-  const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentCfg.turnTimeoutMs === undefined
+  // Per-agent turnTimeoutMs is `number | "unbound" | undefined`. "unbound"
+  // disables the turn timeout entirely (no soft/hard deadline, no adaptive
+  // budget) for agents whose deliverable legitimately takes a long time — an
+  // explicit numeric caller override (turnTimeoutOverrideMs) still wins.
+  const agentTurnTimeout = agentCfg.turnTimeoutMs as number | "unbound" | undefined;
+  const agentUnbounded = agentTurnTimeout === "unbound";
+  const agentTurnTimeoutMs = typeof agentTurnTimeout === "number" ? agentTurnTimeout : undefined;
+  const defaultTimeoutMs = agentTurnTimeoutMs ?? (isCoordinatorAgent ? coordinatorDefaultMs : leafDefaultMs);
+  // No adaptive budget when the caller set an override or the agent declared an
+  // explicit budget (numeric or "unbound").
+  const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentTurnTimeout === undefined
     ? computeAdaptiveSubAgentTimeoutMs(opts.agentName, opts.workspacePath, defaultTimeoutMs)
     : null;
-  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? agentCfg.turnTimeoutMs ?? adaptiveTimeout?.timeoutMs ?? defaultTimeoutMs;
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs
+    ?? (agentUnbounded ? 0 : agentTurnTimeoutMs)
+    ?? adaptiveTimeout?.timeoutMs
+    ?? defaultTimeoutMs;
   const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;

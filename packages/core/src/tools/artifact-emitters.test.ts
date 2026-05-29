@@ -41,8 +41,8 @@ describe("Wave B artifact emitters", () => {
     expect(result.success).toBe(true);
     expect(result.metadata?.["artifactKind"]).toBe("image");
     expect(result.metadata?.["format"]).toBe("svg");
-    expect(result.metadata?.["outputPath"]).toBe("my-logo.svg");
-    const written = readFileSync(join(workspace, "my-logo.svg"), "utf8");
+    expect(result.metadata?.["outputPath"]).toBe("generated/my-logo.svg");
+    const written = readFileSync(join(workspace, "generated", "my-logo.svg"), "utf8");
     expect(written).toContain("<circle cx=\"50\"");
   });
 
@@ -55,7 +55,7 @@ describe("Wave B artifact emitters", () => {
     }, ctx());
 
     expect(result.success).toBe(true);
-    const written = readFileSync(join(workspace, "graphic.svg"), "utf8");
+    const written = readFileSync(join(workspace, "generated", "graphic.svg"), "utf8");
     expect(written).toContain('viewBox="0 0 200 80"');
     expect(written).toContain('<rect x="0"');
   });
@@ -83,7 +83,7 @@ describe("Wave B artifact emitters", () => {
     expect(typeof result.metadata?.["moduleCount"]).toBe("number");
     expect((result.metadata?.["moduleCount"] as number) % 4).toBe(1); // 4*v + 17
 
-    const svg = readFileSync(join(workspace, "qr.svg"), "utf8");
+    const svg = readFileSync(join(workspace, "generated", "qr.svg"), "utf8");
     expect(svg).toContain("<svg xmlns");
     expect(svg).toContain('shape-rendering="crispEdges"');
     expect(svg).toContain("<rect"); // contains finder/data rects
@@ -114,7 +114,7 @@ describe("Wave B artifact emitters", () => {
       data: "x", title: "Wi-Fi: Office", output_file: "qr.svg",
     }, ctx());
     expect(result.success).toBe(true);
-    const svg = readFileSync(join(workspace, "qr.svg"), "utf8");
+    const svg = readFileSync(join(workspace, "generated", "qr.svg"), "utf8");
     expect(svg).toContain("<title>Wi-Fi: Office</title>");
   });
 
@@ -140,7 +140,7 @@ describe("Wave B artifact emitters", () => {
     }, ctx());
 
     expect(result.success).toBe(true);
-    const ics = readFileSync(join(workspace, "cal.ics"), "utf8");
+    const ics = readFileSync(join(workspace, "generated", "cal.ics"), "utf8");
     expect(ics).toContain("BEGIN:VCALENDAR");
     expect(ics).toContain("X-WR-CALNAME:Team Standups");
     expect(ics).toContain("BEGIN:VEVENT");
@@ -165,7 +165,7 @@ describe("Wave B artifact emitters", () => {
     }, ctx());
 
     expect(result.success).toBe(true);
-    const ics = readFileSync(join(workspace, "cal.ics"), "utf8");
+    const ics = readFileSync(join(workspace, "generated", "cal.ics"), "utf8");
     expect(ics).toContain("DTSTART:20260423T120000Z");
     expect(ics).toContain("DTEND:20260423T130000Z");
   });
@@ -183,7 +183,7 @@ describe("Wave B artifact emitters", () => {
       output_file: "cal.ics",
     }, ctx());
     expect(result.success).toBe(true);
-    const ics = readFileSync(join(workspace, "cal.ics"), "utf8");
+    const ics = readFileSync(join(workspace, "generated", "cal.ics"), "utf8");
     expect(ics).toContain("SUMMARY:Q&A\\; with team\\, all hands");
     expect(ics).toContain("DESCRIPTION:Bring a backslash \\\\ and a comma\\, please.");
   });
@@ -194,7 +194,7 @@ describe("Wave B artifact emitters", () => {
       output_file: "cal.ics",
     }, ctx());
     expect(result.success).toBe(true);
-    const ics = readFileSync(join(workspace, "cal.ics"), "utf8");
+    const ics = readFileSync(join(workspace, "generated", "cal.ics"), "utf8");
     expect(ics).toMatch(/UID:evt-[a-z0-9-]+@starlingai/);
     expect(ics).toMatch(/DTSTAMP:\d{8}T\d{6}Z/);
   });
