@@ -62,6 +62,45 @@ describe("LMStudioProvider hard timeout", () => {
     expect(String(abortReason)).toMatch(/exceeded hard timeout/);
   });
 
+  it("does NOT retry a hard-timeout — a hung provider is attempted exactly once", async () => {
+    vi.useFakeTimers();
+    // maxRetries: 3 would normally allow 4 attempts. A hung provider must still
+    // be hit only ONCE, or the wall-clock hang is multiplied by the retry count
+    // (the live 20-min ≈ 4 × 5-min delegation bug).
+    const provider = new LMStudioProvider("http://localhost:1234/v1", "test", baseModelConfig, {
+      timeoutMs: 100,
+      maxRetries: 3,
+    });
+
+    let createCalls = 0;
+    (provider as unknown as { client: { chat: { completions: { create: unknown } } } }).client = {
+      chat: {
+        completions: {
+          create: (_body: unknown, opts: { signal: AbortSignal }) => new Promise((_, reject) => {
+            createCalls += 1;
+            opts.signal.addEventListener("abort", () => reject((opts.signal as AbortSignal & { reason?: unknown }).reason), { once: true });
+          }),
+        },
+      },
+    };
+
+    const callPromise = provider.complete([{ role: "user", content: "hi" }], []);
+    const settled = callPromise.then(
+      (value) => ({ ok: true as const, value }),
+      (err) => ({ ok: false as const, err: err as Error }),
+    );
+    // Advance far past several hard-timeout windows + retry delays.
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await settled;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.err.name).toBe("ProviderHardTimeoutError");
+      expect(result.err.message).toMatch(/exceeded hard timeout/);
+    }
+    expect(createCalls).toBe(1); // never retried
+  });
+
   it("propagates an externally-aborted signal without firing the hard timeout", async () => {
     vi.useFakeTimers();
     const provider = new LMStudioProvider("http://localhost:1234/v1", "test", baseModelConfig, {
