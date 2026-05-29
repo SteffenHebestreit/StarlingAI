@@ -686,7 +686,11 @@ export const SubAgentConfigSchema = z.object({
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all
   maxIterations: z.number().int().min(1).max(30).default(5), // hard cap on tool-call loops
-  turnTimeoutMs: z.number().int().min(1_000).max(1_800_000).optional(), // optional per-agent wall-clock turn timeout
+  // Optional per-agent wall-clock turn timeout. A number is the budget in ms.
+  // The literal "unbound" disables the turn timeout entirely (no soft/hard
+  // deadline, no adaptive budget) — for agents whose deliverable legitimately
+  // takes a long time to generate (e.g. a full site) and must not be cut off.
+  turnTimeoutMs: z.union([z.number().int().min(1_000).max(1_800_000), z.literal("unbound")]).optional(),
   maxConcurrent: z.number().int().min(1).max(20).optional(), // max simultaneous containers (default: 3)
   container: SubAgentContainerSchema.optional(),    // run in ephemeral Docker container
   /** GPU/compute resource requirements — used for GPU-aware routing. */

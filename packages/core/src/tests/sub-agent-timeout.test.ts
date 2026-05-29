@@ -1357,7 +1357,7 @@ describe("sub-agent turn timeouts", () => {
       expect(result.stats.terminalState).toBe("completed");
       expect(result.artifacts).toEqual([
         expect.objectContaining({
-          outputPath: "reports/protocol-comparison.md",
+          outputPath: "generated/reports/protocol-comparison.md",
           previewMode: "markdown",
           sourceTool: "generate_document",
         }),
@@ -1525,6 +1525,63 @@ describe("sub-agent turn timeouts", () => {
       );
       expect(startEvent).toBeDefined();
       expect(startEvent!.data.timeoutMs).toBeGreaterThan(60_000);
+    } finally {
+      unsubscribe();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("disables the turn timeout when an agent declares turnTimeoutMs: \"unbound\"", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-unbound-timeout-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        long_builder: {
+          description: "Long-running builder that must not be cut off",
+          systemPrompt: "Build the whole thing.",
+          tools: [],
+          maxIterations: 1,
+          turnTimeoutMs: "unbound",
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    completeMock.mockResolvedValue({
+      content: "built",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { subscribeToAudit } = await import("../audit/logger.js");
+    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeToAudit((event) => {
+      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "long_builder",
+        task: "Build a large deliverable.",
+        parentSessionId: "parent-unbound",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toBe("built");
+      // No internal abort signal is created when the turn timeout is unbound.
+      const passedSignal = completeMock.mock.calls[0]?.[2] as AbortSignal | undefined;
+      expect(passedSignal).toBeUndefined();
+      // The start audit omits timeoutMs entirely (no wall-clock deadline).
+      const startEvent = auditEvents.find(
+        (event) => event.type === "sub_agent_started" && event.data.agentName === "long_builder",
+      );
+      expect(startEvent).toBeDefined();
+      expect(startEvent!.data.timeoutMs).toBeUndefined();
     } finally {
       unsubscribe();
       rmSync(tempDir, { recursive: true, force: true });

@@ -3148,7 +3148,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // E18: Soft deadline — give the specialist 70% of its effective timeout so
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
-          const effective = ctx.turnTimeoutOverrideMs ?? agentCfg?.turnTimeoutMs ?? 60_000;
+          const raw = ctx.turnTimeoutOverrideMs ?? agentCfg?.turnTimeoutMs ?? 60_000;
+          // "unbound" (no numeric budget) → push the soft deadline effectively
+          // out of reach so it never fires for long-running agents.
+          const effective = typeof raw === "number" ? raw : Number.MAX_SAFE_INTEGER;
           return Date.now() + Math.floor(effective * 0.70);
         })(),
       };

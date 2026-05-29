@@ -3,7 +3,7 @@ import { dirname, extname } from "node:path";
 import { PDFDocument, StandardFonts, type PDFFont, rgb } from "pdf-lib";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:document-output");
 
@@ -504,7 +504,7 @@ function resolveOutputPath(input: {
   }
 
   try {
-    const { resolved, relativePath } = resolvePathWithinWorkspace(normalizedPath, input.workspacePath);
+    const { resolved, relativePath } = resolveWorkspaceWritePath(normalizedPath, input.workspacePath);
     return { success: true, resolved, relativePath };
   } catch {
     return { success: false, error: "output_file must be a relative path within the workspace" };

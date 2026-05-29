@@ -12,7 +12,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:artifact-emitters");
 
@@ -93,7 +93,7 @@ registerTool({
 
     let resolved: { resolved: string; relativePath: string };
     try {
-      resolved = resolvePathWithinWorkspace(outputPath, ctx.workspacePath);
+      resolved = resolveWorkspaceWritePath(outputPath, ctx.workspacePath);
     } catch {
       return fail("output_file must resolve inside the workspace");
     }
@@ -210,7 +210,7 @@ registerTool({
 
     let resolved: { resolved: string; relativePath: string };
     try {
-      resolved = resolvePathWithinWorkspace(outputPath, ctx.workspacePath);
+      resolved = resolveWorkspaceWritePath(outputPath, ctx.workspacePath);
     } catch {
       return fail("output_file must resolve inside the workspace");
     }
@@ -329,7 +329,7 @@ registerTool({
 
     let resolved: { resolved: string; relativePath: string };
     try {
-      resolved = resolvePathWithinWorkspace(outputPath, ctx.workspacePath);
+      resolved = resolveWorkspaceWritePath(outputPath, ctx.workspacePath);
     } catch {
       return fail("output_file must resolve inside the workspace");
     }

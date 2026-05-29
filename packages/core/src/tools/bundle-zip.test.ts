@@ -109,7 +109,7 @@ describe("bundle_artifact_zip", () => {
     expect(result.metadata?.["artifactKind"]).toBe("document");
     expect(result.metadata?.["previewMode"]).toBe("download");
 
-    const zipPath = join(workspace, "deliverable.zip");
+    const zipPath = join(workspace, "generated", "deliverable.zip");
     expect(isPkZip(zipPath)).toBe(true);
     expect(statSync(zipPath).size).toBeGreaterThan(0);
 
@@ -146,7 +146,7 @@ describe("bundle_artifact_zip", () => {
     expect(result.success).toBe(true);
     expect(result.metadata?.["entryCount"]).toBe(3);
 
-    const names = listZipEntryNames(join(workspace, "site.zip")).sort();
+    const names = listZipEntryNames(join(workspace, "generated", "site.zip")).sort();
     expect(names).toEqual([
       "website/about.html",
       "website/docs/intro.html",

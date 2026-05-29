@@ -83,7 +83,7 @@ describe("filesystem tools", () => {
     });
   });
 
-  it("marks write_file outputs as workspace artifacts", async () => {
+  it("roots write_file outputs under the generated/ subfolder, away from config", async () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("write_file");
 
@@ -96,7 +96,9 @@ describe("filesystem tools", () => {
     expect(result.metadata).toMatchObject({
       artifactKind: "workspace_file",
       path: "reports/recorder.md",
-      outputPath: "reports/recorder.md",
+      // Rooted one layer deeper so generated output never mixes with the
+      // config zone (agents/, jobs/, scenes/).
+      outputPath: "generated/reports/recorder.md",
       filename: "recorder.md",
       contentType: "text/markdown; charset=utf-8",
       previewMode: "text",
@@ -104,6 +106,26 @@ describe("filesystem tools", () => {
       size: 27,
       textPreview: "# Recorder Partial design.",
     });
+    // The file physically lives under generated/.
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(tempDir, "generated", "reports", "recorder.md"))).toBe(true);
+    expect(existsSync(join(tempDir, "reports", "recorder.md"))).toBe(false);
+  });
+
+  it("does not double-nest when the path already targets generated/", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("write_file");
+
+    const result = await tool!.execute({ path: "generated/site/index.html", content: "<h1>hi</h1>" }, {
+      sessionId: "session-write-idempotent",
+      workspacePath: tempDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata).toMatchObject({ outputPath: "generated/site/index.html" });
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(tempDir, "generated", "site", "index.html"))).toBe(true);
+    expect(existsSync(join(tempDir, "generated", "generated", "site", "index.html"))).toBe(false);
   });
 
   it("exports an existing folder as a downloadable archive artifact", async () => {

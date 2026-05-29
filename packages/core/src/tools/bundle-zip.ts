@@ -13,7 +13,7 @@ import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:bundle-zip");
 
@@ -174,7 +174,9 @@ registerTool({
 
     let resolvedOutput: { resolved: string; relativePath: string };
     try {
-      resolvedOutput = resolvePathWithinWorkspace(requestedOutput, ctx.workspacePath);
+      // The output archive is generated content → root it under generated/.
+      // The files/dirs being bundled (below) stay workspace-wide reads.
+      resolvedOutput = resolveWorkspaceWritePath(requestedOutput, ctx.workspacePath);
     } catch {
       return fail("output_file must resolve inside the workspace");
     }
