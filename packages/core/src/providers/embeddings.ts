@@ -1487,6 +1487,55 @@ export async function computeQueryEmbedding(text: string): Promise<Float32Array 
   return getOrComputeQueryEmbedding(text, _lastProvider, _embeddingModel);
 }
 
+/**
+ * Batched, cache-aware embedding for a set of texts (e.g. retrieval candidates
+ * that have no stored vector, such as session shared-facts or agent lessons).
+ * Cached vectors are returned from the same query-vector cache; every uncached
+ * text is embedded in a SINGLE provider.embed() call, so semantic retrieval for
+ * those scopes costs one batched request, not one call per record. Returns a
+ * parallel array (null where unavailable/failed). Empty/blank texts map to null.
+ */
+export async function computeTextEmbeddings(texts: string[]): Promise<Array<Float32Array | null>> {
+  const results: Array<Float32Array | null> = new Array(texts.length).fill(null);
+  if (!_available || !_lastProvider || !_embeddingModel || texts.length === 0) return results;
+  const model = _embeddingModel;
+
+  const toEmbed: Array<{ idx: number; text: string; cacheKey: string }> = [];
+  for (let i = 0; i < texts.length; i++) {
+    const normalized = normalizeSearchText(texts[i] ?? "");
+    if (!normalized) continue;
+    const cacheKey = `${model}::${normalized}`;
+    const cached = _queryVectorCache.get(cacheKey);
+    if (cached && Date.now() - cached.storedAt <= QUERY_VECTOR_CACHE_TTL_MS) {
+      results[i] = cached.vector;
+      continue;
+    }
+    if (cached) _queryVectorCache.delete(cacheKey);
+    toEmbed.push({ idx: i, text: texts[i] ?? "", cacheKey });
+  }
+
+  if (toEmbed.length > 0) {
+    try {
+      const vectors = await _lastProvider.embed(toEmbed.map((t) => t.text), model);
+      for (let k = 0; k < toEmbed.length; k++) {
+        const vec = vectors[k];
+        if (!vec) continue;
+        const { idx, cacheKey } = toEmbed[k]!;
+        results[idx] = vec;
+        _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec });
+      }
+      while (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
+        const oldestKey = _queryVectorCache.keys().next().value;
+        if (!oldestKey) break;
+        _queryVectorCache.delete(oldestKey);
+      }
+    } catch (err) {
+      recordEmbeddingFailure(err);
+    }
+  }
+  return results;
+}
+
 async function getOrComputeQueryEmbedding(
   text: string,
   provider: LMStudioProvider,
