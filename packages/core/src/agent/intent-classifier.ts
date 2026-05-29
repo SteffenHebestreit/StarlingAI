@@ -55,6 +55,16 @@ export const SOURCE_HINT_TERMS = [
   "validiere", "validieren", "verifiziere", "verifizieren", "prüfe", "pruefe",
 ];
 
+// An explicit "research …" / "recherchiere …" command is the user asking for
+// real, sourced research — not a from-memory answer. Honor it as source-
+// sensitive so the swarm verifies instead of stating stale pre-assumptions.
+// Matched as a leading imperative (or an explicit "research online" phrase) so
+// it does not fire on incidental mentions like "I did some research on X".
+export const RESEARCH_COMMAND_PATTERNS = [
+  /^\s*(please\s+|bitte\s+|kannst du\s+|could you\s+)?(research|recherchier\w*|recherche)\b/i,
+  /\b(research online|recherchiere online|search the web and|look (it|this|that) up online)\b/i,
+];
+
 export const PRODUCT_RECOMMENDATION_PATTERNS = [
   /\b(product suggestions?|component suggestions?|part suggestions?|module suggestions?|product recommendations?|component recommendations?)\b/,
   /\b(produkt(?:e|vorschl[äa]ge|empfehlungen)|bauteil(?:e|vorschl[äa]ge|empfehlungen)|modul(?:e|vorschl[äa]ge|empfehlungen))\b/,
@@ -371,7 +381,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   // force the SOURCE-SENSITIVE DELEGATION routing prefix that routes
   // tasks to source_verifier-class agents.
   const sourceVerificationByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
-    || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized));
+    || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))
+    || RESEARCH_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
   const webLookupByTerm = WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
   const sourceSensitiveByTerm = sourceVerificationByTerm || webLookupByTerm;
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))

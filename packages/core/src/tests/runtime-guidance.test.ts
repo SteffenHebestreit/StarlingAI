@@ -53,6 +53,18 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
   });
 
+  it("treats an explicit 'research ...' command as source-sensitive", () => {
+    const guidance = buildDynamicTurnGuidance("research the best llm to use to generate 3d models for 3d-printing", "orchestration_only");
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("does not treat an incidental mention of research as a research command", () => {
+    const guidance = buildDynamicTurnGuidance("yesterday I did some research on cats and want a haiku about it", "orchestration_only");
+    // No source/research command, no product recommendation → not source-sensitive.
+    expect(guidance?.sourceSensitive ?? false).toBe(false);
+  });
+
   it("treats downloadable HTML artifact requests as artifact deliverables", () => {
     const guidance = buildDynamicTurnGuidance("now generate a downloadable html page as a detailed how-to blog and generate artifacts we can see here", "orchestration_only");
 

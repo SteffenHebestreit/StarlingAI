@@ -1,63 +1,14 @@
-const SOURCE_SENSITIVE_DELEGATION_FOCUS_BUCKETS: Array<{
-  label: string;
-  patterns: RegExp[];
-}> = [
-  {
-    label: "manufacturer and product identity verification",
-    patterns: [
-      /\b(manufacturer|vendor|maker|brand|identity|who\s+makes|which\s+company|model|exact\s+identifier|part\s+number)\b/i,
-      /\bvendor[a-z0-9_-]*\b/i,
-    ],
-  },
-  {
-    label: "microphone and component suitability verification",
-    patterns: [
-      /\b(microphone|mic|mems|module|component|components|candidate|suitab(?:ility|le)|selection|recommend(?:ation)?s?|opinion)\b/i,
-    ],
-  },
-  {
-    label: "interface and signal-path verification",
-    patterns: [
-      /\b(interface|protocol|analog|digital|i2s|pdm|usb(?:-c)?|signal|output|input|pinout|adc|dac|connect(?:ion)?|wiring|esp32)\b/i,
-    ],
-  },
-  {
-    label: "array topology and layout planning",
-    patterns: [
-      /\b(array|layout|placement|circle|credit-?card|topology|schematic|pcb|footprint|enclosure|mechanical|put\s+all\s+of\s+it\s+together|connect\s+everything)\b/i,
-    ],
-  },
-  {
-    label: "power, battery, and charging design",
-    patterns: [
-      /\b(power|battery|charger|charging|lipo|pmic|buck|boost|sleep)\b/i,
-    ],
-  },
-  {
-    label: "supplier, pricing, and availability verification",
-    patterns: [
-      /\b(price|pricing|supplier|suppliers|availability|stock|mouser|digikey|lcsc|aliexpress|quote)\b/i,
-    ],
-  },
-  {
-    label: "firmware, storage, sync, and OTA design",
-    patterns: [
-      /\b(ota|sync|storage|sd|flash|firmware|wifi|wireless|upload|transcription\s+service)\b/i,
-    ],
-  },
-  {
-    label: "audio quality and transcription optimization",
-    patterns: [
-      /\b(audio\s+quality|quality|transcription|noise|snr|beamform(?:ing)?|acoustic|improvement|improve|best\s+quality)\b/i,
-    ],
-  },
-  {
-    label: "controls and user input design",
-    patterns: [
-      /\b(button|buttons|switch|record(?:\/on)?|user\s+input|control)\b/i,
-    ],
-  },
-];
+// Topic-agnostic verification focus. The previous implementation matched a
+// table of project-specific keyword buckets (microphone / i2s / lipo /
+// credit-card / OTA …) overfit to one past ESP32-mic build, which then injected
+// WRONG domain hints into unrelated research (e.g. "microphone and component
+// suitability verification" on a 3D-printing-LLM task — session 44ea5c21).
+// A single generic focus is always correct and never contaminates the slice
+// with a mistaken topic guess.
+const GENERIC_VERIFICATION_FOCUS =
+  "verify every concrete entity in this slice — products, part numbers, vendors/manufacturers, "
+  + "interfaces/protocols, specifications, prices, quantities, dates, and URLs — against an "
+  + "authoritative or vendor source before stating it as fact; report anything unverified as such";
 
 function formatCoordinatorFocusLines(focus: string | undefined): string[] {
   if (!focus) return [];
@@ -77,11 +28,7 @@ export function deriveSourceSensitiveDelegationFocus(task: string | undefined, c
     return undefined;
   }
 
-  const labels = SOURCE_SENSITIVE_DELEGATION_FOCUS_BUCKETS
-    .filter((bucket) => bucket.patterns.some((pattern) => pattern.test(normalizedTask)))
-    .map((bucket) => bucket.label);
-  const uniqueLabels = [...new Set(labels)];
-  return uniqueLabels.length > 0 ? uniqueLabels.slice(0, 3).join("; ") : undefined;
+  return GENERIC_VERIFICATION_FOCUS;
 }
 
 export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, label?: string, focus?: string): string {
