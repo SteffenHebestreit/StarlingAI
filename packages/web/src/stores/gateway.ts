@@ -60,6 +60,10 @@ export interface ChatMessage {
   swarmState?: SwarmState;
   usage?: TurnUsage;
   perf?: TurnPerf;
+  /** Main assistant chain-of-thought captured during the turn (collapsible in the UI). */
+  reasoning?: string;
+  /** Per-sub-agent chain-of-thought, surfaced behind a debug toggle. */
+  subAgentReasoning?: Array<{ agent: string; text: string }>;
 }
 
 export interface SwarmTaskAttempt {
@@ -661,6 +665,11 @@ export const useGatewayStore = defineStore("gateway", () => {
   const currentSessionTranscriptLoading = ref(false);
   const pendingRequestId = ref<string | null>(null);
   const streamingText = ref("");
+  // Live chain-of-thought for the in-flight turn. streamingReasoning is the
+  // main assistant's CoT; streamingSubAgentReasoning accumulates one entry per
+  // delegated sub-agent reasoning event (shown behind a debug toggle).
+  const streamingReasoning = ref("");
+  const streamingSubAgentReasoning = ref<Array<{ agent: string; text: string }>>([]);
   const liveSwarmState = ref<SwarmState | null>(null);
   const syntheticSwarmState = ref<SwarmState | null>(null);
   const selectedSwarmRunId = ref<string | null>(null);
@@ -1470,6 +1479,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (idx >= 0) messages.value.splice(idx, 1, errorMsg);
       else messages.value.push(errorMsg);
       streamingText.value = "";
+      streamingReasoning.value = "";
+      streamingSubAgentReasoning.value = [];
       pendingRequestId.value = null;
       pendingApproval.value = null;
       pendingInputRequest.value = null;
@@ -1493,6 +1504,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     currentSessionTranscriptNextBeforeMessageId.value = null;
     currentSessionTranscriptLoading.value = false;
     streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
     pendingRequestId.value = null;
     pendingApproval.value = null;
     pendingInputRequest.value = null;
@@ -1868,6 +1881,28 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    if (type === "agent.reasoning") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (data["requestId"] === pendingRequestId.value) {
+        notePendingTurnActivity();
+        isStreaming.value = true;
+        const text = String(data["text"] ?? "");
+        if (data["delegated"] === true) {
+          const agent = String(data["sourceAgent"] ?? "sub-agent");
+          const last = streamingSubAgentReasoning.value[streamingSubAgentReasoning.value.length - 1];
+          // Coalesce consecutive deltas from the same agent into one entry.
+          if (last && last.agent === agent) {
+            last.text += text;
+          } else {
+            streamingSubAgentReasoning.value.push({ agent, text });
+          }
+        } else {
+          streamingReasoning.value += text;
+        }
+      }
+      return;
+    }
+
     if (type === "agent.tool_start") {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
@@ -2052,10 +2087,16 @@ export const useGatewayStore = defineStore("gateway", () => {
             toolIterations: Number(rawPerf["toolIterations"] ?? 0),
             finishReason: String(rawPerf["finishReason"] ?? ""),
           } : undefined,
+          reasoning: streamingReasoning.value.trim() || undefined,
+          subAgentReasoning: streamingSubAgentReasoning.value.length > 0
+            ? streamingSubAgentReasoning.value.map((entry) => ({ ...entry }))
+            : undefined,
         };
         if (idx >= 0) messages.value.splice(idx, 1, finalMsg);
         else messages.value.push(finalMsg);
         streamingText.value = "";
+        streamingReasoning.value = "";
+        streamingSubAgentReasoning.value = [];
         pendingRequestId.value = null;
         isStreaming.value = false;
         clearTurnStallState();
@@ -2151,6 +2192,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
 
     streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
     pendingRequestId.value = null;
     pendingApproval.value = null;
     pendingInputRequest.value = null;
@@ -2281,6 +2324,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     const requestId = Math.random().toString(36).slice(2);
     pendingRequestId.value = requestId;
     streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
     pendingIntervention.value = null;
@@ -2642,6 +2687,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     scenes,
     messages,
     streamingText,
+    streamingReasoning,
+    streamingSubAgentReasoning,
     currentSessionSwarmRuns,
     swarmSessionHistory,
     selectedSwarmRunId,

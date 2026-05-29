@@ -119,6 +119,8 @@
               :message="msg"
               :is-streaming="msg.id === 'streaming'"
               :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
+              :streaming-reasoning="msg.id === 'streaming' ? gateway.streamingReasoning : undefined"
+              :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
               :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
               @rewind="handleRewind"
             />

@@ -118,6 +118,12 @@ export async function handleAguiStream(
         sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: text });
       },
 
+      onReasoning: (text) => {
+        // Chain-of-thought stream. Emitted as a distinct event so clients can
+        // render it in a collapsible "thinking" panel separate from the answer.
+        sseEvent(res, { type: "THINKING_TEXT_MESSAGE_CONTENT", messageId, delta: text });
+      },
+
       onToolCall: (toolCallId, name, args) => {
         sseEvent(res, { type: "TOOL_CALL_STARTED", toolCallId, toolCallName: name, parentMessageId: messageId, args });
       },

@@ -85,8 +85,28 @@
           </span>
           <span v-if="!isThinking" class="thinking-chevron">{{ thinkingOpen ? '▲' : '▼' }}</span>
         </div>
-        <div v-if="thinkingOpen || isThinking || (isStreaming && displayThinkingContent)" class="thinking-body">
+        <div v-if="thinkingOpen || isThinking" class="thinking-body">
           {{ displayThinkingContent }}
+        </div>
+      </div>
+
+      <!-- Sub-agent reasoning (debug) -->
+      <div v-if="subAgentReasoning.length" class="thinking-section thinking-section--subagent">
+        <div class="thinking-header" @click="subAgentReasoningOpen = !subAgentReasoningOpen">
+          <span class="thinking-toggle-label">
+            {{ subAgentReasoningOpen ? 'Hide' : 'Show' }} sub-agent thinking ({{ subAgentReasoning.length }})
+          </span>
+          <span class="thinking-chevron">{{ subAgentReasoningOpen ? '▲' : '▼' }}</span>
+        </div>
+        <div v-if="subAgentReasoningOpen" class="thinking-body">
+          <div
+            v-for="(entry, i) in subAgentReasoning"
+            :key="`subreason-${i}`"
+            class="subagent-reasoning__entry"
+          >
+            <div class="subagent-reasoning__agent">{{ entry.agent }}</div>
+            <div class="subagent-reasoning__text">{{ entry.text }}</div>
+          </div>
         </div>
       </div>
 
@@ -500,6 +520,10 @@ const props = defineProps<{
   message: ChatMessage;
   isStreaming?: boolean;
   streamingText?: string;
+  /** Live chain-of-thought for the in-flight turn (main assistant). */
+  streamingReasoning?: string;
+  /** Live per-sub-agent chain-of-thought for the in-flight turn. */
+  streamingSubAgentReasoning?: Array<{ agent: string; text: string }>;
   autoCollapse?: boolean;
 }>();
 
@@ -553,17 +577,33 @@ const streamingThinkingContent = computed(() => {
   const open = (openMatch?.[2] ?? "").trim();
   return [completed, open].filter(Boolean).join("\n\n");
 });
-const displayThinkingContent = computed(() => props.isStreaming
-  ? streamingThinkingContent.value
-  : thinkingContent.value);
+// Reasoning now arrives via the dedicated reasoning stream (message.reasoning
+// when finalized, props.streamingReasoning while live). Fall back to the
+// legacy inline-<think> parse for older transcripts / providers that still
+// embed thinking in the content.
+const displayThinkingContent = computed(() => {
+  if (props.isStreaming) {
+    return (props.streamingReasoning ?? "").trim() || streamingThinkingContent.value;
+  }
+  return (props.message.reasoning ?? "").trim() || thinkingContent.value;
+});
 
-// During streaming, detect an open <think> tag that hasn't closed yet
+// "Live thinking" indicator: reasoning tokens are arriving but the answer
+// hasn't started yet, OR an inline <think> tag is still open.
 const isThinking = computed(() => {
   if (!props.isStreaming) return false;
+  if ((props.streamingReasoning ?? "").trim() && !mainStreamingText.value.trim()) return true;
   const text = props.streamingText ?? "";
   const opens = (text.match(/<(thinking|think)>/gi) ?? []).length;
   const closes = (text.match(/<\/(thinking|think)>/gi) ?? []).length;
   return opens > closes;
+});
+
+// ── Sub-agent reasoning (debug toggle) ───────────────────────────────────────
+const subAgentReasoningOpen = ref(false);
+const subAgentReasoning = computed(() => {
+  if (props.isStreaming) return props.streamingSubAgentReasoning ?? [];
+  return props.message.subAgentReasoning ?? [];
 });
 
 const mainStreamingText = computed(() => {
@@ -1887,6 +1927,24 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   white-space: pre-wrap;
 }
+
+/* Sub-agent reasoning uses a cooler accent to distinguish it from the main
+   assistant's thinking. */
+.thinking-section--subagent {
+  border-left-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.04);
+}
+.thinking-section--subagent .thinking-header { color: #38bdf8; }
+.subagent-reasoning__entry { margin-bottom: 0.5rem; }
+.subagent-reasoning__entry:last-child { margin-bottom: 0; }
+.subagent-reasoning__agent {
+  font-style: normal;
+  font-weight: 600;
+  font-size: 0.7rem;
+  color: #7dd3fc;
+  margin-bottom: 0.2rem;
+}
+.subagent-reasoning__text { white-space: pre-wrap; }
 
 /* ── Content collapse ────────────────────────────────────────────────────────── */
 .message-content-wrapper { position: relative; }

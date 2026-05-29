@@ -32,6 +32,8 @@ export type AuditEventType =
   | "sub_agent_tool_call"
   | "sub_agent_tool_blocked"
   | "sub_agent_max_iterations"
+  | "sub_agent_reasoning"
+  | "agent_reasoning"
   | "parallel_delegate_started"
   | "turn_performance"
   | "scene_job_completed"

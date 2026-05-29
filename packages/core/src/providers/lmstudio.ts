@@ -59,6 +59,10 @@ export interface LLMToolDef {
 
 export interface LLMResponse {
   content: string | null;
+  /** Chain-of-thought / reasoning text, when the model exposes it (qwen
+   * thinking mode via LM Studio's `reasoning_content`, or inline `<think>`
+   * tags). Stripped out of `content` so the answer stays clean. */
+  reasoning?: string;
   tool_calls: Array<{
     id: string;
     name: string;
@@ -69,13 +73,55 @@ export interface LLMResponse {
 }
 
 export interface StreamChunk {
-  type: "text_delta" | "tool_call_start" | "tool_call_delta" | "done";
+  type: "text_delta" | "reasoning_delta" | "tool_call_start" | "tool_call_delta" | "done";
   content?: string;
   toolCallId?: string;
   toolName?: string;
   argumentsDelta?: string;
   finishReason?: string;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+}
+
+/**
+ * Split a model response into clean answer text and reasoning, handling both
+ * conventions LM Studio / vLLM use for qwen-style thinking models:
+ *  1. A dedicated `reasoning_content` field (preferred — passed in via `field`).
+ *  2. Inline `<think>...</think>` blocks embedded in the content.
+ * Returns the answer with any `<think>` blocks removed plus the merged
+ * reasoning text (field + inline). An unterminated `<think>` (the model ran
+ * out of tokens mid-thought) is treated as all-reasoning.
+ */
+export function splitReasoning(
+  rawContent: string | null | undefined,
+  field?: string | null,
+): { content: string | null; reasoning?: string } {
+  const reasoningParts: string[] = [];
+  if (typeof field === "string" && field.trim()) reasoningParts.push(field.trim());
+
+  let answer = typeof rawContent === "string" ? rawContent : "";
+  if (answer.includes("<think>")) {
+    // Extract every closed <think>…</think> block.
+    answer = answer.replace(/<think>([\s\S]*?)<\/think>/gi, (_m, inner: string) => {
+      if (inner.trim()) reasoningParts.push(inner.trim());
+      return "";
+    });
+    // Unterminated <think> with no closer: everything after it is reasoning.
+    const openIdx = answer.indexOf("<think>");
+    if (openIdx >= 0) {
+      const tail = answer.slice(openIdx + "<think>".length).trim();
+      if (tail) reasoningParts.push(tail);
+      answer = answer.slice(0, openIdx);
+    }
+  }
+
+  const reasoning = reasoningParts.join("\n\n").trim();
+  // If we extracted reasoning, `answer` is the de-thought remainder (may be
+  // empty → null). If we extracted nothing, leave the original content as-is.
+  if (!reasoning) {
+    return { content: typeof rawContent === "string" ? rawContent : null };
+  }
+  const cleaned = answer.trim();
+  return { content: cleaned.length > 0 ? cleaned : null, reasoning };
 }
 
 const GEMMA_INSTRUCTION_PREAMBLE = "Follow these instructions for the entire conversation.";
@@ -393,8 +439,15 @@ export class LMStudioProvider {
 
         this.recordRequestSuccess(startedAt);
 
+        // `reasoning_content` is an LM Studio / vLLM extension for thinking
+        // models — not in the OpenAI SDK types, so read it via a cast. Also
+        // strips any inline <think> blocks out of the answer content.
+        const reasoningField = (choice.message as { reasoning_content?: string }).reasoning_content;
+        const split = splitReasoning(choice.message.content, reasoningField);
+
         return {
-          content: choice.message.content ?? null,
+          content: split.content,
+          ...(split.reasoning ? { reasoning: split.reasoning } : {}),
           tool_calls: toolCalls,
           usage: {
             promptTokens: response.usage?.prompt_tokens ?? 0,
@@ -484,6 +537,9 @@ export class LMStudioProvider {
     let collectedFinishReason: string | undefined;
     let collectedUsage: StreamChunk["usage"] | undefined;
     const startedAt = Date.now();
+    // Inline <think> stripping for providers that stream reasoning inside the
+    // normal content field rather than a dedicated reasoning_content delta.
+    let insideThink = false;
 
     // Per-chunk inactivity timer: if the provider stops sending data for
     // longer than the configured request timeout, abort the stream.
@@ -511,8 +567,43 @@ export class LMStudioProvider {
         const delta = chunk.choices[0]?.delta;
         if (!delta) continue;
 
+        // Dedicated reasoning delta (LM Studio / vLLM thinking models). Not in
+        // the OpenAI SDK delta type, so read via a cast.
+        const reasoningDelta = (delta as { reasoning_content?: string }).reasoning_content;
+        if (reasoningDelta) {
+          yield { type: "reasoning_delta", content: reasoningDelta };
+        }
+
         if (delta.content) {
-          yield { type: "text_delta", content: delta.content };
+          // Some providers stream reasoning inline as <think>…</think> within
+          // the content field. Route those spans to reasoning_delta and only
+          // emit the de-thought remainder as answer text.
+          let text = delta.content;
+          while (text.length > 0) {
+            if (insideThink) {
+              const close = text.indexOf("</think>");
+              if (close === -1) {
+                if (text) yield { type: "reasoning_delta", content: text };
+                text = "";
+              } else {
+                const inner = text.slice(0, close);
+                if (inner) yield { type: "reasoning_delta", content: inner };
+                text = text.slice(close + "</think>".length);
+                insideThink = false;
+              }
+            } else {
+              const open = text.indexOf("<think>");
+              if (open === -1) {
+                if (text) yield { type: "text_delta", content: text };
+                text = "";
+              } else {
+                const before = text.slice(0, open);
+                if (before) yield { type: "text_delta", content: before };
+                text = text.slice(open + "<think>".length);
+                insideThink = true;
+              }
+            }
+          }
         }
 
         if (delta.tool_calls) {
