@@ -3808,6 +3808,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               content: `${cached.result}\n\n${cachedNote}`,
               tool_call_id: tc.id,
             });
+            // A cached *successful* result is a returned result, not a block.
+            // Session 39af10b8 (2026-05-29): content_writer re-called
+            // read_shared_facts 3× (1 real + 2 cached "no facts"), the cached
+            // repeats counted as blocked iterations, the loop detector
+            // stripped ALL tools at iteration 2, and the agent was killed
+            // before it ever reached write_file. Treat a cached-success
+            // return as progress so over-eager context re-checks don't trip
+            // the nuclear tool-strip. A cached *failure* stays "blocked" — an
+            // agent re-calling a genuinely failing tool IS stuck.
+            if (cached.success) executedToolThisIteration = true;
             continue;
           }
         }
@@ -3839,6 +3849,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             content: `${prev.result}\n\n${cachedNote}`,
             tool_call_id: tc.id,
           });
+          // See the ABA-dedup branch above: a cached-success return is
+          // progress, not a blocked iteration. Only a cached failure keeps
+          // counting toward the all-tools-stripped loop break.
+          if (prev.success) executedToolThisIteration = true;
           continue;
         }
 

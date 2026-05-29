@@ -127,6 +127,91 @@ describe("sub-agent research tool caps", () => {
     }
   });
 
+  it("does not strip tools when an agent re-calls an idempotent read before its write tool", async () => {
+    // Regression: session 39af10b8 (2026-05-29). content_writer re-called
+    // read_shared_facts 3× (1 real + 2 cached "no facts"). The cached repeats
+    // counted as blocked iterations, the loop detector stripped ALL tools at
+    // iteration 2, and the agent was killed before it ever reached write_file
+    // — so the website deliverable was never even attempted. A cached
+    // *successful* return is progress, not a block.
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        builder_agent: {
+          description: "Idempotent re-call regression agent",
+          systemPrompt: "Check context, then write the file.",
+          tools: ["read_file", "write_file"],
+          maxIterations: 8,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const writtenPaths: string[] = [];
+    const responses = [
+      buildToolCallResponse("read-1", "read_file", { path: "context.md" }),
+      buildToolCallResponse("read-2", "read_file", { path: "context.md" }),
+      buildToolCallResponse("read-3", "read_file", { path: "context.md" }),
+      buildToolCallResponse("write-1", "write_file", { path: "cpsa-f.html", content: "<!DOCTYPE html><html></html>" }),
+      {
+        content: "Website written to cpsa-f.html.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "Website written to cpsa-f.html.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "read_file",
+      description: "Read a workspace file.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "No shared facts available yet for this session." };
+      },
+    });
+    registerTool({
+      name: "write_file",
+      description: "Write a workspace file.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        writtenPaths.push(String(args.path ?? ""));
+        return {
+          success: true,
+          output: `Wrote ${args.path as string}.`,
+          metadata: { outputPath: String(args.path ?? ""), filename: String(args.path ?? "") },
+        };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "builder_agent",
+        task: "Erzeuge eine vollständige HTML-Lernwebsite und speichere sie mit write_file.",
+        parentSessionId: "parent-idempotent-recall",
+        workspacePath: "/workspace",
+      });
+
+      // The agent must have survived the redundant read_file calls and reached write_file.
+      expect(writtenPaths).toEqual(["cpsa-f.html"]);
+      expect(result.stats.toolNames).toContain("write_file");
+      expect(result.stats.terminalState).toBe("completed");
+    } finally {
+      unregisterTool("read_file");
+      unregisterTool("write_file");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   // QUARANTINED (DEVPLAN P0): the partial-progress relay no longer lists the tool names used. Output is
   // now "Sub-agent 'mission_coordinator' produced…" without "delegate_to_agent"/"share_finding". Confirm the
   // intended partial-progress message format, then update the assertions or restore the tool-name listing.
