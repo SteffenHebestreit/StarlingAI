@@ -119,6 +119,7 @@ export type AuditEventType =
   | "delegation_routing_filtered_research_incapable"
   | "delegation_bidding_filtered_research_incapable"
   | "delegation_explicit_redirected_research_incapable"
+  | "unverified_source_sensitive_answer_caveated"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health

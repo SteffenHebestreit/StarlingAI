@@ -412,7 +412,9 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await fresh.runTurn({
       session,
-      userMessage: "Research portable recorder MCU options.",
+      // Avoid a leading "research" command (now classified source-sensitive) —
+      // this test exercises the max-iteration synthesis mechanic, not routing.
+      userMessage: "Summarize portable recorder MCU options.",
       maxIterationsOverride: 1,
     });
 
@@ -738,7 +740,9 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "Research how StarlingAI can improve itself.",
+      // Avoid a leading "research" command (now classified source-sensitive) —
+      // this test exercises the next-turn-handoff rewrite, not routing.
+      userMessage: "Summarize how StarlingAI can improve itself.",
     });
 
     expect(result.blocked).toBe(false);
@@ -3140,9 +3144,8 @@ describe("runtime delegated-loop regressions", () => {
     expect(new Set(taskTexts).size).toBe(3);
     expect(taskTexts.join("\n")).toContain(userMessage);
     expect(taskTexts.join("\n")).toContain("Coordinator focus for this slice");
-    expect(taskTexts.join("\n")).toContain("manufacturer and product identity verification");
-    expect(taskTexts.join("\n")).toContain("supplier, pricing, and availability verification");
-    expect(taskTexts.join("\n")).toContain("array topology and layout planning");
+    // Topic-agnostic verification focus (replaced the overfit per-topic buckets).
+    expect(taskTexts.join("\n")).toContain("verify every concrete entity");
     expect(taskTexts.join("\n")).not.toContain("VendorX");
     expect(taskTexts.join("\n")).not.toContain("ST ZX-9000");
     expect(taskTexts.join("\n")).not.toContain("assuming I2S");

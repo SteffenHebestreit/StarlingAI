@@ -603,6 +603,32 @@ function hasRecentSparseSourceSensitiveMemoryReuse(
   return false;
 }
 
+/** Lightweight German detection to localize the unverified-answer caveat. */
+function answerLooksGerman(text: string): boolean {
+  const t = text.toLowerCase();
+  if (/[äöüß]/.test(t)) return true;
+  return /\b(ich|und|der|die|das|nicht|mit|für|oder|eine?|brauche|möchte|wie|was|kann|mir|dein|deine|ist|sind)\b/.test(t);
+}
+
+/**
+ * Prepend a clear "unverified" banner to a source-sensitive answer that was
+ * produced WITHOUT any research evidence (the model declined to delegate after
+ * the research nudge, so no web/tool evidence backs it). This keeps the useful
+ * general guidance but stops the swarm from presenting pre-assumptions — part
+ * numbers, specs, prices, manufacturers — as confirmed facts. Regression:
+ * session f59f85f5 (2026-05-29) shipped a wall of invented part numbers.
+ */
+export function prependUnverifiedSourceCaveat(answer: string, userMessage: string): string {
+  if (answer.includes("NICHT mit aktuellen Online-Quellen") || answer.includes("NOT verified against live web sources")) {
+    return answer;
+  }
+  const german = answerLooksGerman(userMessage) || answerLooksGerman(answer);
+  const caveat = german
+    ? "> ⚠️ **Ungeprüft:** Diese Antwort beruht auf allgemeinem Wissen und wurde NICHT mit aktuellen Online-Quellen verifiziert. Behandle konkrete Teilenummern, Spezifikationen, Preise und Herstellerangaben als unbestätigte Annahmen, die vor dem Verlass darauf noch zu prüfen sind."
+    : "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources. Treat specific part numbers, specifications, prices, and manufacturer claims as unconfirmed assumptions to verify before relying on them.";
+  return `${caveat}\n\n${answer}`;
+}
+
 /** Pull the prior turn's topic + answer from history so a contextless follow-up
  *  ("validate your response") can be delegated with the real subject folded in. */
 function extractPriorTurnContext(
@@ -4002,6 +4028,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // redactor). Once a terminal decides to release, this flag short-circuits
       // the remaining routing terminals so the draft falls straight through.
       let releasedAfterRoutingNudge = false;
+      // Set when a source-sensitive answer is released after the research nudge
+      // without any research evidence having been gathered this turn — the
+      // answer then gets an explicit unverified caveat (anti-hallucination).
+      let releasedWithoutResearchEvidence = false;
       const releaseAfterRoutingNudge = (original: string): void => {
         releasedAfterRoutingNudge = true;
         guardrailEvents.push({ type: "routing_nudge_released", details: original });
@@ -4158,6 +4188,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }
 
         releaseAfterRoutingNudge("tool_free_research_answer_rejected");
+        // No delegation/orchestration ran and no findings were shared, yet the
+        // turn is source/freshness-sensitive — the released draft is unverified.
+        if (!currentTurnHasExecutableOrchestration && _turnShareFindingCount === 0) {
+          releasedWithoutResearchEvidence = true;
+        }
       }
 
       // Output guardrail scan
@@ -4255,6 +4290,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             originalLength: rawResponse.length,
           }, { sessionId: session.id, severity: "warn" });
         }
+      }
+
+      // Anti-hallucination caveat: a source-sensitive answer that shipped with
+      // NO research evidence (model declined to delegate) gets an explicit
+      // unverified banner so pre-assumptions aren't read as confirmed facts.
+      // Only for substantial answers — a short "it depends" needs no banner.
+      if (releasedWithoutResearchEvidence && finalResponse.trim().length > 400) {
+        finalResponse = prependUnverifiedSourceCaveat(finalResponse, userMessage);
+        guardrailEvents.push({ type: "guardrail_flagged", details: "unverified_source_sensitive_answer_caveated" });
+        logAudit("guardrail_flagged", {
+          type: "unverified_source_sensitive_answer_caveated",
+          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
+        }, { sessionId: session.id, severity: "warn" });
       }
 
       if (!outputScan.safe && outputScan.redacted) {
