@@ -2916,7 +2916,8 @@ describe("runtime delegated-loop regressions", () => {
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(createEphemeralExecuteMock).not.toHaveBeenCalled();
     expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
-      agentName: "mission_coordinator",
+      // Single-domain research → direct researcher, no coordinator hop (de-layering).
+      agentName: "researcher",
       task: "Use current sources to recommend exact ESP32 MEMS microphone components and verify product choices.",
     });
     expect(statuses).toEqual(expect.arrayContaining([
@@ -2928,7 +2929,7 @@ describe("runtime delegated-loop regressions", () => {
         originalTool: "search_agents",
         rewrittenTo: "delegate_to_agent",
         reason: "search_agents_no_match_fallback",
-        recoveredAgentName: "mission_coordinator",
+        recoveredAgentName: "researcher",
       }),
       expect.objectContaining({ severity: "warn" }),
     );
@@ -3005,7 +3006,9 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.blocked).toBe(false);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
     expect(delegateExecuteMock.mock.calls[0]?.[0]).toMatchObject({
-      agentName: "mission_coordinator",
+      // Single-domain research → the required-research route prefers the direct
+      // researcher; the explicit coordinator pick is rewritten to it (de-layering).
+      agentName: "researcher",
       fallbackAgents: [],
       task: userMessage,
     });
@@ -3019,7 +3022,7 @@ describe("runtime delegated-loop regressions", () => {
         originalTool: "delegate_to_agent",
         rewrittenTo: "delegate_to_agent",
         reason: "required_research_original_task_enforced",
-        recoveredAgentName: "mission_coordinator",
+        recoveredAgentName: "researcher",
       }),
       expect.objectContaining({ severity: "info" }),
     );

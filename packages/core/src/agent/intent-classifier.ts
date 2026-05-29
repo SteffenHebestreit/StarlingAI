@@ -682,6 +682,23 @@ export function buildLanguageInstructionForTurn(userMessage: string): string {
  * Centralizing the softening here means future routing tuning is a single
  * transform rather than scattered edits across the per-intent prompt builders.
  */
+/**
+ * Whether a research request genuinely spans several distinct areas/deliverables
+ * (a hardware build = BOM + power + layout + sourcing; a trip = activities +
+ * transport + lodging). Only then does a coordinator earn its extra hop — the
+ * Anthropic/Cognition consensus is that multi-agent only wins when the task
+ * decomposes into independent threads. Single-domain lookups/validations go
+ * straight to one specialist. Conservative: short asks are always single-domain.
+ */
+export function looksMultiDomainResearch(text: string): boolean {
+  const raw = String(text ?? "");
+  if (raw.trim().length < 300) return false;
+  const questionCount = (raw.match(/\?/g) ?? []).length;
+  const substantiveLines = raw.split(/\n/).map((l) => l.trim()).filter((l) => l.length > 20).length;
+  const conjunctions = (raw.toLowerCase().match(/\b(and|sowie|plus|au[ßs]erdem|additionally|as well as|also|außerdem)\b/g) ?? []).length;
+  return questionCount >= 3 || substantiveLines >= 5 || conjunctions >= 4;
+}
+
 export function toSoftRoutingHint(text: string): string {
   if (!text.trim()) return text;
   const soft = text

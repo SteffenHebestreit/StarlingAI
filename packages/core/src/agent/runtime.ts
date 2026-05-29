@@ -41,6 +41,7 @@ import {
   WORKFLOW_DELIVERABLE_HINT_TERMS,
   WORKFLOW_REQUEST_PATTERNS,
   toSoftRoutingHint,
+  looksMultiDomainResearch,
 } from "./intent-classifier.js";
 import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 
@@ -1020,9 +1021,14 @@ function buildRequiredResearchFallbackRoute(
   guidance: DynamicTurnGuidance | null | undefined,
   allowedToolNameSet: Set<string>,
 ): RequiredResearchFallbackRoute | null {
+  // De-layer single-domain research: a coordinator only earns its extra hop when
+  // the task genuinely spans multiple areas (Anthropic/Cognition consensus).
+  // Otherwise route straight to the researcher specialist. Freshness single-shot
+  // lookups keep web_task_coordinator (its purpose-built lane).
+  const multiDomain = looksMultiDomainResearch(userMessage);
   const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
     ? ["web_task_coordinator", "researcher", "mission_coordinator"]
-    : ["mission_coordinator", "researcher"];
+    : (multiDomain ? ["mission_coordinator", "researcher"] : ["researcher", "mission_coordinator"]);
   const selectedAgent = chooseConfiguredAgent(preferredAgents) ?? preferredAgents[0]!;
   const fallbackAgents = preferredAgents.filter((agentName) => agentName !== selectedAgent && chooseConfiguredAgent([agentName]));
 
