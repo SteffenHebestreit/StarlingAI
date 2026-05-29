@@ -2922,6 +2922,34 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 
+  // Research-capability gate for EXPLICIT delegations (the routing/bidding gates
+  // only cover undirected picks). If a source-sensitive / "search online" task
+  // was explicitly aimed at web-incapable agents (e.g. an orchestrator that saw
+  // a generator ranked high in search_agents), redirect to a research-capable
+  // agent so a generator never runs a research task. Closes the loop the
+  // routing/bidding gates opened. Only redirects when a capable fallback exists.
+  if (taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
+    const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
+    if (capable.length === 0) {
+      const fallback = pickResearchFallbackAgent(attemptedAgents);
+      logAudit("delegation_explicit_redirected_research_incapable", {
+        taskTitle: title,
+        requestedAgents: candidateQueue,
+        redirectedTo: fallback ?? null,
+      }, { sessionId: ctx.sessionId });
+      if (fallback) {
+        routingCandidateMap.set(fallback, {
+          confidence: "medium",
+          matchedTerms: ["research", "search-online", "redirected"],
+          score: 0.7,
+        });
+        candidateQueue = [fallback];
+      }
+    } else if (capable.length < candidateQueue.length) {
+      candidateQueue = capable;
+    }
+  }
+
   while (true) {
     // Abort early if the parent turn was cancelled
     if (ctx.signal?.aborted) {

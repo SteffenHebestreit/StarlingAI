@@ -24,6 +24,7 @@ import { formatUserModelGuidance } from "../user-model/service.js";
 import { searchSessions } from "../agent/session-search.js";
 import { searchSharedFacts } from "../swarm/memory.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
+import { buildDynamicTurnGuidance } from "../agent/intent-classifier.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:recall-context");
@@ -34,6 +35,32 @@ const ALL_SECTIONS: Section[] = ["user", "facts", "memory", "sessions", "skills"
 function truncate(value: string, max: number): string {
   const collapsed = value.replace(/\s+/g, " ").trim();
   return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;
+}
+
+/**
+ * Task-conditional retrieval scope. When the caller does not pin `include`, the
+ * detected intent (via the shared turn classifier — no new heuristics) decides
+ * which tiers lead and how the per-section budget is allocated, so retrieval is
+ * focused on what the task class actually needs instead of a flat dump. Every
+ * tier still appears (each self-skips when empty), so nothing is hidden and the
+ * model can always override via `include`.
+ */
+function deriveRecallPlan(query: string): { intent: string; priority: Set<Section>; order: Section[] } {
+  let guidance: ReturnType<typeof buildDynamicTurnGuidance> = null;
+  try { guidance = buildDynamicTurnGuidance(query); } catch { guidance = null; }
+
+  if (guidance?.swarmMaintenanceSensitive) {
+    // Maintaining StarlingAI itself: prior decisions, learned procedures, and
+    // past maintenance sessions matter most; the dialectic user model rarely does.
+    return { intent: "maintenance", priority: new Set(["memory", "skills", "sessions"]), order: ["memory", "skills", "sessions", "facts", "user"] };
+  }
+  if (guidance?.sourceSensitive || guidance?.freshnessSensitive) {
+    // Research/validation: long-term findings, this session's gathered evidence,
+    // prior research sessions, and research procedures lead.
+    return { intent: "research", priority: new Set(["memory", "facts", "sessions", "skills"]), order: ["memory", "facts", "sessions", "skills", "user"] };
+  }
+  // General: the user model and durable memory lead; all tiers carry full budget.
+  return { intent: "general", priority: new Set(ALL_SECTIONS), order: ["user", "facts", "memory", "sessions", "skills"] };
 }
 
 registerTool({
@@ -72,22 +99,32 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     const limit = Math.max(1, Math.min(10, Number(args["limit"] ?? 5) || 5));
+    const explicitInclude = Array.isArray(args["include"]) && args["include"].length > 0;
     const requested = new Set<Section>(
-      Array.isArray(args["include"])
-        ? args["include"].map(String).filter((value): value is Section => (ALL_SECTIONS as string[]).includes(value))
+      explicitInclude
+        ? (args["include"] as unknown[]).map(String).filter((value): value is Section => (ALL_SECTIONS as string[]).includes(value))
         : ALL_SECTIONS,
     );
     if (requested.size === 0) ALL_SECTIONS.forEach((section) => requested.add(section));
 
+    // Task-conditional scope (only when the caller didn't pin `include`): the
+    // detected intent sets the section order and concentrates the per-section
+    // budget on the tiers the task class needs. Non-priority tiers still appear
+    // at a reduced limit, so nothing is hidden.
+    const plan = deriveRecallPlan(query);
+    const order: Section[] = explicitInclude ? ALL_SECTIONS : plan.order;
+    const limitFor = (section: Section): number =>
+      explicitInclude || plan.priority.has(section) ? limit : Math.min(3, limit);
+
     const sharedSessionId = deriveSharedSessionId(ctx.sessionId);
-    const sections: string[] = [];
-    const meta: Record<string, unknown> = {};
+    const sectionMap = new Map<Section, string>();
+    const meta: Record<string, unknown> = { recallIntent: explicitInclude ? "explicit" : plan.intent };
 
     if (requested.has("user")) {
       try {
         const guidance = formatUserModelGuidance().trim();
         meta["userModel"] = guidance.length > 0;
-        if (guidance) sections.push(`## User model\n${guidance}`);
+        if (guidance) sectionMap.set("user", `## User model\n${guidance}`);
       } catch (err) {
         log.debug({ err }, "recall_context: user model failed");
       }
@@ -97,13 +134,13 @@ registerTool({
       try {
         const embeddingModel = getConfig().agents.defaults.model.embeddingModel;
         const facts = await searchSharedFacts(sharedSessionId, query, {
-          maxResults: limit,
+          maxResults: limitFor("facts"),
           provider: embeddingModel ? getEmbeddingProvider() : undefined,
           embeddingModel,
         });
         meta["sharedFacts"] = facts.length;
         if (facts.length > 0) {
-          sections.push(
+          sectionMap.set("facts",
             "## Working memory (this session)\n"
             + facts.map((fact) => `- **${fact.key}**: ${truncate(fact.value, 200)}`).join("\n"),
           );
@@ -115,10 +152,10 @@ registerTool({
 
     if (requested.has("memory")) {
       try {
-        const records = await searchMemoryRecords(ctx.workspacePath, query, { limit, sessionId: sharedSessionId });
+        const records = await searchMemoryRecords(ctx.workspacePath, query, { limit: limitFor("memory"), sessionId: sharedSessionId });
         meta["memories"] = records.length;
         if (records.length > 0) {
-          sections.push(
+          sectionMap.set("memory",
             "## Relevant long-term memory\n"
             + records.map((record) => `- [${record.scope}/${record.kind}] ${record.subject}: ${truncate(record.content, 180)}`).join("\n"),
           );
@@ -130,10 +167,10 @@ registerTool({
 
     if (requested.has("sessions")) {
       try {
-        const matches = searchSessions(query, { limit, excludeSessionId: ctx.sessionId });
+        const matches = searchSessions(query, { limit: limitFor("sessions"), excludeSessionId: ctx.sessionId });
         meta["sessions"] = matches.length;
         if (matches.length > 0) {
-          sections.push(
+          sectionMap.set("sessions",
             "## Recent related sessions\n"
             + matches.map((match) => {
               const when = new Date(match.updatedAt).toISOString().slice(0, 10);
@@ -148,18 +185,19 @@ registerTool({
 
     if (requested.has("skills")) {
       try {
-        const { text, slugs } = await retrieveSkillGuidance(ctx.workspacePath, query, { limit, maxChars: 800 });
+        const { text, slugs } = await retrieveSkillGuidance(ctx.workspacePath, query, { limit: limitFor("skills"), maxChars: 800 });
         meta["skills"] = slugs.length;
-        if (text.trim()) sections.push(`## Relevant skills\n${text.trim()}`);
+        if (text.trim()) sectionMap.set("skills", `## Relevant skills\n${text.trim()}`);
       } catch (err) {
         log.debug({ err }, "recall_context: skill recall failed");
       }
     }
 
+    const ordered = order.filter((section) => sectionMap.has(section)).map((section) => sectionMap.get(section)!);
     const output = [
       `# Planning context for: "${truncate(query, 120)}"`,
       "",
-      ...(sections.length > 0 ? sections : ["_No stored context matched this task yet — plan from the request directly._"]),
+      ...(ordered.length > 0 ? ordered : ["_No stored context matched this task yet — plan from the request directly._"]),
     ].join("\n\n");
 
     return { success: true, output, metadata: meta };
