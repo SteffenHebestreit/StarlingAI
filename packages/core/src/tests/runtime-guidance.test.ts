@@ -1,7 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage } from "../agent/intent-classifier.js";
+import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint } from "../agent/intent-classifier.js";
+
+describe("toSoftRoutingHint", () => {
+  it("reframes hard imperatives as advisory hints", () => {
+    const hard = "You MUST delegate to swarm_maintainer this turn. Do NOT call search_agents first.";
+    const soft = toSoftRoutingHint(hard);
+    expect(soft).toContain("Routing hint (advisory");
+    expect(soft).not.toContain("You MUST");
+    expect(soft).not.toContain("Do NOT");
+    expect(soft).not.toMatch(/\bthis turn\b/);
+    expect(soft).toContain("swarm_maintainer");
+  });
+
+  it("softens standalone MUST / NEVER / STOP markers", () => {
+    const soft = toSoftRoutingHint("You MUST stop. NEVER retry. STOP discovery. This MUST happen.");
+    expect(soft).not.toMatch(/\bMUST\b/);
+    expect(soft).not.toContain("NEVER");
+    expect(soft).not.toContain("STOP");
+  });
+
+  it("returns blank input unchanged", () => {
+    expect(toSoftRoutingHint("")).toBe("");
+    expect(toSoftRoutingHint("   ")).toBe("   ");
+  });
+});
 
 describe("runtime turn guidance", () => {
   it("adds web-search guidance for freshness-sensitive requests", () => {

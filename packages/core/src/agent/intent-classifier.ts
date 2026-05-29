@@ -657,3 +657,30 @@ export function buildLanguageInstructionForTurn(userMessage: string): string {
   }
   return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message. If the message becomes mixed or ambiguous after all, reply in German.`;
 }
+
+// ── Soft routing enforcement ──────────────────────────────────────────────────
+
+/**
+ * Reframe a hard, imperative routing-enforcement prompt as a strong but
+ * overridable hint. Used when `agents.performance.softRoutingEnforcement` is on
+ * to realize the trust-the-LLM direction (soft hints, not hard gates) for the
+ * *routing-class* enforcement prompts (maintenance / workflow-catalog /
+ * search-no-match). Anti-hallucination and correctness enforcement bypass this
+ * and stay hard.
+ *
+ * Centralizing the softening here means future routing tuning is a single
+ * transform rather than scattered edits across the per-intent prompt builders.
+ */
+export function toSoftRoutingHint(text: string): string {
+  if (!text.trim()) return text;
+  const soft = text
+    .replace(/\bYou MUST\b/g, "You should strongly prefer to")
+    .replace(/\byou MUST\b/g, "you should strongly prefer to")
+    .replace(/\bMUST\b/g, "should")
+    .replace(/\b(Do|DO) NOT\b/g, "prefer not to")
+    .replace(/\bdo NOT\b/g, "prefer not to")
+    .replace(/\bNEVER\b/g, "avoid")
+    .replace(/\bSTOP\b/g, "consider stopping")
+    .replace(/\s+this turn\b/g, "");
+  return `Routing hint (advisory — follow unless you have a clear reason not to):\n${soft}`;
+}

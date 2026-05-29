@@ -22,7 +22,7 @@ import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
-import { recordSkillOutcomeAsync } from "../skills/store.js";
+import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skills/store.js";
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
@@ -40,6 +40,7 @@ import {
   WORKFLOW_ACTION_TERMS,
   WORKFLOW_DELIVERABLE_HINT_TERMS,
   WORKFLOW_REQUEST_PATTERNS,
+  toSoftRoutingHint,
 } from "./intent-classifier.js";
 import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
 
@@ -2968,8 +2969,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const approvedRunCandidateFollowUp = detectApprovedRunCandidateFollowUp(session.getHistory(), userMessage);
   const tools = getToolsAsLLMDefs(allowedToolNames);
   // Register tool schema size on the session so the history trimmer accounts
-  // for the full actual prompt cost (system + tool schemas + history).
+  // for the full actual prompt cost (system + tool schemas + history), and the
+  // context window of the model actually running this turn so the trimmer
+  // budgets against the real window rather than the global default.
   session.setToolSchemasChars(JSON.stringify(tools).length);
+  session.setContextWindow(getConfig().agents.defaults.model.contextWindow);
   const resolvedApprovalCallback = opts.autoApprove
     ? async (_toolName: string, _args: Record<string, unknown>) => true
     : opts.approvalCallback;
@@ -3048,6 +3052,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // Phase 3: skills injected into the planner this turn — outcomes recorded at
   // turn end so retrieval reliability is learned (success rate drives ranking).
   let injectedSkillSlugs: string[] = [];
+  // Skills that matched this turn but were deliberately held out (not injected)
+  // for lift measurement — their outcome is recorded as a baseline at turn end.
+  let heldOutSkillSlugs: string[] = [];
   // Shared findings injected into the main LLM context after delegations complete.
   // Populated once after the first delegation tool result arrives so the main
   // orchestrator's final synthesis call sees verified sub-agent findings rather
@@ -3063,6 +3070,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // value. Set trustModelRouting=false to also force on freshness. Either way the
   // never-empty release applies if the model declines after the nudge.
   const trustModelRouting = getConfig().agents.mainAssistant.trustModelRouting !== false;
+  // Soft routing enforcement (Flaw 2): when on, the routing-class enforcement
+  // prompts (maintenance / workflow-catalog / search-no-match) are injected as
+  // advisory hints rather than hard "You MUST … this turn" gates, and the hard
+  // search_agents tool-removal gate is relaxed. Anti-hallucination (source-
+  // sensitive research) and correctness (unresolved clarification) enforcement
+  // stay hard. Default off — flipping it on changes tuned routing behavior and
+  // should be gated on live-model eval.
+  const softRoutingEnforcement = getConfig().agents.performance.softRoutingEnforcement === true;
+  const applyRoutingTone = (text: string): string =>
+    softRoutingEnforcement && text ? toSoftRoutingHint(text) : text;
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(
       initialDynamicGuidance?.sourceSensitive
@@ -3256,7 +3273,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       );
     }
 
-    const systemPrompt = session.getSystemPrompt();
+    let systemPrompt = session.getSystemPrompt();
     const temporalContext = buildTemporalContextPrompt();
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
     // Lean context injection: when on, the heavy per-turn memory/user-model/skill/
@@ -3290,6 +3307,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       });
       skillGuidance = retrieved.text;
       injectedSkillSlugs = retrieved.slugs;
+      heldOutSkillSlugs = retrieved.heldOutSlugs ?? [];
     }
     // Dialectic user model — small, injected only when populated. Adapts the
     // agent to the user across sessions; droppable under prompt budget.
@@ -3312,10 +3330,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
-      ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: searchAgentsNoMatchFallbackPrompt }] : []),
-      ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: maintenanceDelegationEnforcementPrompt }] : []),
+      ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: applyRoutingTone(searchAgentsNoMatchFallbackPrompt) }] : []),
+      ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: applyRoutingTone(maintenanceDelegationEnforcementPrompt) }] : []),
       ...(unresolvedDelegationEnforcementPrompt ? [{ role: "system" as const, content: unresolvedDelegationEnforcementPrompt }] : []),
-      ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: workflowCatalogEnforcementPrompt }] : []),
+      ...(workflowCatalogEnforcementPrompt ? [{ role: "system" as const, content: applyRoutingTone(workflowCatalogEnforcementPrompt) }] : []),
       ...(approvedRunCandidateEnforcementPrompt ? [{ role: "system" as const, content: approvedRunCandidateEnforcementPrompt }] : []),
       ...(workflowExecutionEnforcementPrompt ? [{ role: "system" as const, content: workflowExecutionEnforcementPrompt }] : []),
       ...(flowGuidance ? [{ role: "system" as const, content: flowGuidance }] : []),
@@ -3404,6 +3422,22 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           systemMessages = buildSystemMessages();
           lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
         }
+        // Priority 4 (last resort): compact the base system prompt itself.
+        // Until now the trimmer dropped only auxiliary blocks and shipped the
+        // base over budget anyway — the base is the dominant consumer, so the
+        // audit signal was effectively dead. This strips clearly non-load-bearing
+        // verbose sections (response-format/formatting guidance) while preserving
+        // Core Principles, Swarm Rules, Tool Use Discipline, and Security. It
+        // fires only when everything else has been dropped and we are still over.
+        if (lastPromptMetrics.systemPromptChars > promptBudget) {
+          const compacted = compactBasePromptUnderPressure(systemPrompt);
+          if (compacted.length < systemPrompt.length) {
+            droppedSections.push({ name: "basePromptCompaction", chars: systemPrompt.length - compacted.length });
+            systemPrompt = compacted;
+            systemMessages = buildSystemMessages();
+            lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          }
+        }
 
         const stillOver = lastPromptMetrics.systemPromptChars > promptBudget;
         logAudit("prompt_budget_exceeded", {
@@ -3464,7 +3498,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           iteration: iterationCount,
         });
       }
-      const activeTools = searchAgentsNoMatchFallbackPrompt
+      // After a search_agents no-match, the hard gate removes the discovery
+      // tools so the model cannot loop on broader keyword retries. Under soft
+      // routing enforcement we keep them available and rely on the (softened)
+      // fallback hint instead — trust-the-LLM over a hard tool removal.
+      const activeTools = (searchAgentsNoMatchFallbackPrompt && !softRoutingEnforcement)
         ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
         : tools;
       llmResponse = await collectStream(provider.stream(messages, activeTools, signal), chunkSink, {
@@ -4259,11 +4297,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // procedures, so a direct single-shot answer is not evidence the procedure
       // was followed (avoids inflating success rates on trivial turns).
       // Fire-and-forget async writes — never block the turn return.
-      if (injectedSkillSlugs.length > 0 && _turnDelegationCount > 0) {
+      if ((injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && _turnDelegationCount > 0) {
         const outcome = finalResponse.length > 50 && !isApology ? "success" : "failure";
         const skillWorkspace = session.getWorkspacePath();
         for (const slug of injectedSkillSlugs) {
           void recordSkillOutcomeAsync(skillWorkspace, slug, outcome).catch(() => { /* non-critical */ });
+        }
+        // Held-out matches record the counterfactual baseline so skillLift can
+        // tell whether injecting the skill actually moves the outcome.
+        for (const slug of heldOutSkillSlugs) {
+          void recordSkillHoldoutOutcomeAsync(skillWorkspace, slug, outcome).catch(() => { /* non-critical */ });
         }
       }
       if (finalResponse.length > 50 && !isApology) {
@@ -5695,6 +5738,27 @@ function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly 
     collapsedHistoryChars,
     promptChars: systemPromptChars + collapsedHistoryChars,
   };
+}
+
+/**
+ * Last-resort base-prompt compaction, used only when the budget trimmer has
+ * already dropped every auxiliary block and the prompt is *still* over budget.
+ *
+ * Strips clearly non-load-bearing verbose sections — the Markdown "## Response
+ * Format" guidance — and collapses runs of blank lines. It deliberately leaves
+ * Core Principles, Swarm Rules, Tool Use Discipline, Orchestration Strategy,
+ * and Security untouched: those carry behavioral and safety contracts. Returns
+ * the prompt unchanged when there is nothing safe to remove.
+ */
+export function compactBasePromptUnderPressure(prompt: string): string {
+  let out = prompt;
+  // Remove the "## Response Format" section (heading through to the next "## ").
+  // Formatting guidance is the lowest-value block under genuine budget
+  // pressure: the model still answers correctly without it.
+  out = out.replace(/\n## Response Format\n[\s\S]*?(?=\n## )/, "\n");
+  // Collapse 3+ consecutive newlines left behind by removals to a single blank line.
+  out = out.replace(/\n{3,}/g, "\n\n");
+  return out;
 }
 
 /**

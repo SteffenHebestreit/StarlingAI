@@ -47,6 +47,36 @@ describe("AgentSession collapsed history", () => {
     expect(collapsed[0]?.content).toContain("**job_finder**");
   });
 
+  it("compacts overflowing history: pins the original request and folds the rest into a digest", () => {
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    // Tiny window so trimming kicks in quickly.
+    session.setContextWindow(2048); // budget ≈ 1536 tokens ≈ 6144 chars
+
+    session.addMessage({ role: "user", content: "ORIGINAL TASK: build the quarterly revenue report with cited sources." });
+    // Pile on enough filler turns to blow past the budget and force compaction.
+    for (let i = 0; i < 24; i++) {
+      session.addMessage({ role: "assistant", content: `Working on step ${i}. ` + "x".repeat(300) });
+      session.addMessage({ role: "user", content: `Follow-up ${i}: ` + "y".repeat(300) });
+    }
+
+    // The original request is never dropped.
+    const history = session.getHistory();
+    expect(history[0]?.role).toBe("user");
+    expect(history[0]?.content).toContain("ORIGINAL TASK: build the quarterly revenue report");
+
+    // History was actually trimmed (not all 49 messages retained).
+    expect(history.length).toBeLessThan(49);
+
+    // The dropped turns survive as a leading digest system message.
+    const collapsed = session.getCollapsedHistory();
+    expect(collapsed[0]?.role).toBe("system");
+    expect(collapsed[0]?.content).toContain("EARLIER CONVERSATION");
+  });
+
   it("drops stale transient synthesis system messages before the next user turn", () => {
     const session = new AgentSession({
       channel: "test",
@@ -173,27 +203,45 @@ describe("AgentSession collapsed history", () => {
     expect(prompt).not.toContain("2025");
   });
 
-  it("refreshes managed default prompts for persisted sessions", () => {
-    const session = new AgentSession({
-      channel: "test",
-      workspacePath: "/workspace",
-      systemPrompt: "You are StarlingAI, a pragmatic AI assistant whose primary role is planning, orchestration, and synthesis across specialized sub-agents.\n\nToday's date: Friday, March 21, 2025",
-    });
+  it("refreshes managed default prompts for persisted sessions", async () => {
+    // Pin taskConditionalPrompt:false via an isolated config so the
+    // intent-routing-rule assertions below don't depend on the repo's ambient
+    // starlingai.json (which sets the flag on, dropping those rules).
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-managed-prompt-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { performance: { taskConditionalPrompt: false } },
+    }, null, 2), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
 
-    const prompt = session.getSystemPrompt();
+    try {
+      const { AgentSession: FreshAgentSession } = await import("../agent/session.js");
+      const session = new FreshAgentSession({
+        channel: "test",
+        workspacePath: "/workspace",
+        systemPrompt: "You are StarlingAI, a pragmatic AI assistant whose primary role is planning, orchestration, and synthesis across specialized sub-agents.\n\nToday's date: Friday, March 21, 2025",
+      });
 
-    expect(prompt).toContain("You are the main assistant inside StarlingAI");
-    // Intent-routing rules are always-on by default (taskConditionalPrompt off):
-    expect(prompt).toContain("computer-use tasks, not pentest tasks");
-    expect(prompt).toContain("Requests asking how the pentest swarm works");
-    expect(prompt).toContain("Tool Use Discipline");
-    expect(prompt).toContain("swarm_maintainer");
-    expect(prompt).toContain("prefer delegate_to_agent(task: \"...\") without agentName first");
-    expect(prompt).toContain("sourced chart, table, or HTML visualization");
-    expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");
-    expect(prompt).toContain("provide a concise user-facing progress update before triggering the next wave of actions");
-    expect(prompt).toContain("Do not waste turns on small talk");
-    expect(prompt).toContain("Do not introduce yourself, your role, or the platform unless the user explicitly asks");
+      const prompt = session.getSystemPrompt();
+
+      expect(prompt).toContain("You are the main assistant inside StarlingAI");
+      // Intent-routing rules render when taskConditionalPrompt is off:
+      expect(prompt).toContain("computer-use tasks, not pentest tasks");
+      expect(prompt).toContain("Requests asking how the pentest swarm works");
+      expect(prompt).toContain("Tool Use Discipline");
+      expect(prompt).toContain("swarm_maintainer");
+      expect(prompt).toContain("prefer delegate_to_agent(task: \"...\") without agentName first");
+      expect(prompt).toContain("sourced chart, table, or HTML visualization");
+      expect(prompt).toContain("You are responsible for all user-facing clarification questions, approval requests, and go/no-go checkpoints");
+      expect(prompt).toContain("provide a concise user-facing progress update before triggering the next wave of actions");
+      expect(prompt).toContain("Do not waste turns on small talk");
+      expect(prompt).toContain("Do not introduce yourself, your role, or the platform unless the user explicitly asks");
+    } finally {
+      delete process.env["SAI_CONFIG_PATH"];
+      vi.resetModules();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("includes configured main assistant custom instructions in the managed default prompt", async () => {

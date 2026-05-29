@@ -17,6 +17,7 @@ import {
   acquireSlot,
   releaseSlot,
   getConcurrencySnapshot,
+  getGlobalConcurrencySnapshot,
   resetConcurrencyForTests,
   DEFAULT_CONCURRENCY,
 } from "../swarm/concurrency.js";
@@ -307,5 +308,38 @@ describe("Swarm Concurrency — semaphore", () => {
 
   it("uses DEFAULT_CONCURRENCY when maxConcurrent not specified", () => {
     expect(DEFAULT_CONCURRENCY).toBe(3);
+  });
+
+  it("counts every acquired slot against the shared global ceiling", async () => {
+    await acquireSlot("agent-a", 5);
+    await acquireSlot("agent-b", 5);
+    await acquireSlot("agent-c", 5);
+    const g = getGlobalConcurrencySnapshot();
+    expect(g.active).toBe(3);
+  });
+
+  it("queues across agent types once the global ceiling is reached", async () => {
+    process.env["STARLINGAI_MAX_GLOBAL_CONCURRENCY"] = "2";
+    resetConcurrencyForTests();
+    try {
+      await acquireSlot("type-1", 10);
+      await acquireSlot("type-2", 10);
+
+      let resolved = false;
+      const pending = acquireSlot("type-3", 10).then(() => { resolved = true; });
+      await new Promise((r) => setImmediate(r));
+      // Per-agent caps are wide open (10), but the global ceiling of 2 is full,
+      // so a third distinct agent type must wait.
+      expect(resolved).toBe(false);
+      expect(getGlobalConcurrencySnapshot().active).toBe(2);
+
+      releaseSlot("type-1");
+      await pending;
+      expect(resolved).toBe(true);
+      expect(getGlobalConcurrencySnapshot().active).toBe(2);
+    } finally {
+      delete process.env["STARLINGAI_MAX_GLOBAL_CONCURRENCY"];
+      resetConcurrencyForTests();
+    }
   });
 });

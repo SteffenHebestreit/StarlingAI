@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getSkill, listSkills, recordSkillOutcome, setSkillPinned, writeSkill } from "../skills/store.js";
+import { getSkill, listSkills, recordSkillOutcome, recordSkillHoldoutOutcome, setSkillPinned, skillLift, writeSkill } from "../skills/store.js";
 import { isPromotionEligible, runSkillImprovementSweep } from "../skills/driver.js";
 
 describe("skill improvement driver", () => {
@@ -101,6 +101,65 @@ describe("skill improvement driver", () => {
     const skill = getSkill(ws, slug)!;
     expect(skill.frontmatter.status).toBe("active");
     expect(isPromotionEligible(skill)).toBe(true);
+  });
+
+  it("computes lift only once both arms have enough samples", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Sampled Procedure",
+      description: "A procedure under lift measurement.",
+      whenToUse: "When measuring lift.",
+      procedure: "Steps under measurement.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    for (let i = 0; i < 4; i++) recordSkillOutcome(ws, slug, "success");
+    // No holdout samples yet → lift indeterminate.
+    expect(skillLift(getSkill(ws, slug)!.meta)).toBeNull();
+
+    for (let i = 0; i < 3; i++) recordSkillHoldoutOutcome(ws, slug, "failure");
+    // Injected 100%, held-out 0% → strong positive lift.
+    expect(skillLift(getSkill(ws, slug)!.meta)).toBeCloseTo(1, 5);
+  });
+
+  it("retires a high-success skill that shows no measured lift", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "No Lift Procedure",
+      description: "Succeeds whether injected or not — easy matching tasks.",
+      whenToUse: "An easy case that succeeds regardless.",
+      procedure: "Steps that the model would have done anyway.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    // High success rate when injected...
+    for (let i = 0; i < 6; i++) recordSkillOutcome(ws, slug, "success");
+    // ...but equally high when held out → lift ≈ 0.
+    for (let i = 0; i < 4; i++) recordSkillHoldoutOutcome(ws, slug, "success");
+
+    const result = runSkillImprovementSweep(ws);
+    expect(result.retired).toContain(slug);
+    expect(getSkill(ws, slug)?.frontmatter.status).toBe("archived");
+  });
+
+  it("keeps a skill with positive measured lift even at a moderate success rate", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Helpful Procedure",
+      description: "Materially improves outcomes when injected.",
+      whenToUse: "A hard case that benefits from the procedure.",
+      procedure: "Steps that genuinely help the model succeed.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    // Injected: 5/6 ≈ 83%. Held out: 0/4 = 0% → clear positive lift.
+    for (let i = 0; i < 5; i++) recordSkillOutcome(ws, slug, "success");
+    recordSkillOutcome(ws, slug, "failure");
+    for (let i = 0; i < 4; i++) recordSkillHoldoutOutcome(ws, slug, "failure");
+
+    const result = runSkillImprovementSweep(ws);
+    expect(result.retired).not.toContain(slug);
+    expect(getSkill(ws, slug)?.frontmatter.status).toBe("active");
   });
 
   it("does not auto-retire manual or pinned skills", () => {

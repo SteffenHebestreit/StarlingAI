@@ -90,6 +90,10 @@ export interface SkillMeta {
   successes: number;
   failures: number;
   patches: number;
+  /** Turns where this skill matched but was deliberately held out (not injected)
+   *  to measure its lift — see recordSkillHoldoutOutcome. */
+  holdoutUses?: number;
+  holdoutSuccesses?: number;
   lastViewedAt?: string;
   lastUsedAt?: string;
   lastPatchedAt?: string;
@@ -523,6 +527,19 @@ export function recordSkillViewed(workspacePath: string, slug: string): void {
   persistSkillMeta(workspacePath, skill.meta);
 }
 
+/** Sync counterpart of recordSkillHoldoutOutcomeAsync (used off the hot path). */
+export function recordSkillHoldoutOutcome(
+  workspacePath: string,
+  slug: string,
+  outcome: "success" | "failure",
+): void {
+  const skill = getSkill(workspacePath, slug);
+  if (!skill) return;
+  skill.meta.holdoutUses = (skill.meta.holdoutUses ?? 0) + 1;
+  if (outcome === "success") skill.meta.holdoutSuccesses = (skill.meta.holdoutSuccesses ?? 0) + 1;
+  persistSkillMeta(workspacePath, skill.meta);
+}
+
 export function setSkillEmbedding(workspacePath: string, slug: string, embedding: number[]): void {
   const skill = getSkill(workspacePath, slug);
   if (!skill) return;
@@ -592,6 +609,25 @@ export async function recordSkillViewedAsync(workspacePath: string, slug: string
   await persistSkillMetaAsync(workspacePath, skill.meta);
 }
 
+/**
+ * Record the outcome of a turn where this skill MATCHED but was deliberately
+ * held out (not injected). Paired with the injected success rate, this yields
+ * the skill's lift — whether injecting it actually helps, or whether its high
+ * success rate just reflects easy matching tasks. Never graduates a draft (a
+ * held-out turn is not evidence the procedure was followed). Fire-and-forget.
+ */
+export async function recordSkillHoldoutOutcomeAsync(
+  workspacePath: string,
+  slug: string,
+  outcome: "success" | "failure",
+): Promise<void> {
+  const skill = await readSkillAsync(workspacePath, slug);
+  if (!skill) return;
+  skill.meta.holdoutUses = (skill.meta.holdoutUses ?? 0) + 1;
+  if (outcome === "success") skill.meta.holdoutSuccesses = (skill.meta.holdoutSuccesses ?? 0) + 1;
+  await persistSkillMetaAsync(workspacePath, skill.meta);
+}
+
 /** Async embedding cache — writes only the meta sidecar, fire-and-forget. */
 export async function setSkillEmbeddingAsync(
   workspacePath: string,
@@ -644,6 +680,25 @@ export function skillSuccessRate(meta: SkillMeta): number {
   return meta.successes / meta.uses;
 }
 
+/** Success rate on turns where the skill matched but was held out (not injected). */
+export function skillHoldoutSuccessRate(meta: SkillMeta): number {
+  const holdoutUses = meta.holdoutUses ?? 0;
+  if (holdoutUses <= 0) return 0;
+  return (meta.holdoutSuccesses ?? 0) / holdoutUses;
+}
+
+/**
+ * The skill's measured lift: injected success rate minus held-out success rate.
+ * Positive means injecting the skill helps; ~0 or negative means its success
+ * rate is just task difficulty, not the procedure. Returns null until both arms
+ * have enough samples to compare (avoids judging on noise).
+ */
+export function skillLift(meta: SkillMeta, minSamplesPerArm = 3): number | null {
+  const holdoutUses = meta.holdoutUses ?? 0;
+  if (meta.uses < minSamplesPerArm || holdoutUses < minSamplesPerArm) return null;
+  return skillSuccessRate(meta) - skillHoldoutSuccessRate(meta);
+}
+
 // ── Persistence ──────────────────────────────────────────────────────────────
 
 function persistSkill(
@@ -694,6 +749,8 @@ function coerceSkillMeta(raw: Partial<SkillMeta>, slug: string): SkillMeta {
     successes: typeof raw.successes === "number" ? raw.successes : 0,
     failures: typeof raw.failures === "number" ? raw.failures : 0,
     patches: typeof raw.patches === "number" ? raw.patches : 0,
+    holdoutUses: typeof raw.holdoutUses === "number" ? raw.holdoutUses : 0,
+    holdoutSuccesses: typeof raw.holdoutSuccesses === "number" ? raw.holdoutSuccesses : 0,
     lastViewedAt: raw.lastViewedAt,
     lastUsedAt: raw.lastUsedAt,
     lastPatchedAt: raw.lastPatchedAt,
