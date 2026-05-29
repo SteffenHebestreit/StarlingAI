@@ -1174,6 +1174,72 @@ function looksLikeExternalResearchAgent(
   return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(haystack));
 }
 
+/** Coordination tools — an agent holding any of these can fan a research task
+ *  out to a web-capable specialist, so it counts as research-capable. */
+const COORDINATION_TOOL_NAMES = new Set<string>([
+  "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
+]);
+
+/** True for a tool name that can reach the open web (real config tool names,
+ *  not just the ephemeral mcp__playwright__ grants in RESEARCH_CAPABLE_TOOL_NAMES). */
+export function isWebReachingToolName(toolName: string): boolean {
+  if (RESEARCH_CAPABLE_TOOL_NAMES.has(toolName)) return true;
+  return toolName === "web_search"
+    || toolName === "web_fetch"
+    || toolName === "url_inspect"
+    || toolName.startsWith("browser_");
+}
+
+/**
+ * Pure capability check against an agent's tool list. Research-capable means it
+ * reaches the web directly (web_search/web_fetch/url_inspect/browser_*) or is a
+ * coordinator that can delegate to one that does. An undefined tool list means
+ * "inherit all tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
+ */
+export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined): boolean {
+  if (!cfg) return true;
+  if (!cfg.tools) return true; // inherits the full tool set
+  return cfg.tools.some(isWebReachingToolName) || cfg.tools.some((t) => COORDINATION_TOOL_NAMES.has(t));
+}
+
+/**
+ * Whether an agent can actually carry out an external-research task. Agents with
+ * an explicit tool list of only generators (image_creator, chart_designer) are
+ * NOT research-capable.
+ */
+function agentIsResearchCapable(agentName: string): boolean {
+  const config = getConfig();
+  return agentCfgIsResearchCapable(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
+}
+
+/** Phrases that explicitly ask the swarm to go online and validate/look up. */
+const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check|im internet (such|recherchier)|recherchier[a-z]* online)\b/i;
+
+/**
+ * Whether a delegation task requires fresh external evidence. The authoritative
+ * signal is the runtime-injected "SOURCE-SENSITIVE DELEGATION" wrapper (the
+ * orchestrator adds it when the turn was classified source-sensitive); we also
+ * catch explicit "search online / validate" phrasing and the vetted research
+ * patterns. When true, the chosen agent MUST be research-capable — this is a
+ * correctness invariant, not a routing preference.
+ */
+export function taskRequiresExternalResearch(task: string): boolean {
+  const t = task ?? "";
+  if (t.includes("SOURCE-SENSITIVE DELEGATION")) return true;
+  if (SEARCH_ONLINE_TASK_RE.test(t)) return true;
+  return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(t));
+}
+
+/** First configured, research-capable, not-yet-attempted coordinator/specialist
+ *  to fall back to when routing produced only research-incapable candidates. */
+function pickResearchFallbackAgent(attempted: string[]): string | undefined {
+  const config = getConfig();
+  const promoted = readPromotedAgents(config.workspacePath);
+  return ["web_task_coordinator", "researcher", "browser_agent", "mission_coordinator"].find(
+    (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
+  );
+}
+
 interface EphemeralToolSelectionContext {
   /** When provided, the validator checks tool-fit against the agent's stated
    *  intent: a research-shaped agent must include at least one
@@ -2906,7 +2972,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
         // Drop candidates that cannot produce the deliverable the task asks
         // for. See agentCanFulfillArtifactTask for the regression context.
-        const routingCandidates = allRoutingCandidates.filter((cand) =>
+        let routingCandidates = allRoutingCandidates.filter((cand) =>
           agentCanFulfillArtifactTask(cand.name, request.task, ctx)
         );
         if (routingCandidates.length === 0 && allRoutingCandidates.length > 0) {
@@ -2914,6 +2980,33 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             taskTitle: title,
             droppedAgents: allRoutingCandidates.map((c) => c.name),
           }, { sessionId: ctx.sessionId });
+        }
+        // Research-capability gate: a source-sensitive / "search online and
+        // validate" task must go to an agent that can actually reach the web (or
+        // a coordinator that can). This stops generation specialists like
+        // image_creator / chart_designer from being routed a research task and
+        // returning narrative-only "Let me search online…" non-answers.
+        // (Regression: session 64b90fcc, 2026-05-29.)
+        if (taskRequiresExternalResearch(request.task) && routingCandidates.length > 0) {
+          const researchCapable = routingCandidates.filter((cand) => agentIsResearchCapable(cand.name));
+          if (researchCapable.length === 0) {
+            logAudit("delegation_routing_filtered_research_incapable", {
+              taskTitle: title,
+              droppedAgents: routingCandidates.map((c) => c.name),
+            }, { sessionId: ctx.sessionId });
+            const fallback = pickResearchFallbackAgent(attemptedAgents);
+            if (fallback) {
+              routingCandidateMap.set(fallback, {
+                confidence: "medium",
+                matchedTerms: ["research", "search-online", "source-sensitive"],
+                score: 0.7,
+              });
+              candidateQueue.push(fallback);
+            }
+            routingCandidates = [];
+          } else {
+            routingCandidates = researchCapable;
+          }
         }
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
@@ -2963,12 +3056,24 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
         const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
-        const bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request.task, ctx));
+        let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request.task, ctx));
         if (bids.length === 0 && rawBids.length > 0) {
           logAudit("delegation_bidding_filtered_artifact_incapable", {
             taskTitle: title,
             droppedAgents: rawBids.map((b) => b.agentName),
           }, { sessionId: ctx.sessionId });
+        }
+        // Same research-capability gate as semantic routing (Step 1): never let
+        // bidding hand a source-sensitive task to a web-incapable generator.
+        if (taskRequiresExternalResearch(request.task) && bids.length > 0) {
+          const researchCapableBids = bids.filter((bid) => agentIsResearchCapable(bid.agentName));
+          if (researchCapableBids.length === 0) {
+            logAudit("delegation_bidding_filtered_research_incapable", {
+              taskTitle: title,
+              droppedAgents: bids.map((b) => b.agentName),
+            }, { sessionId: ctx.sessionId });
+          }
+          bids = researchCapableBids;
         }
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
         bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
