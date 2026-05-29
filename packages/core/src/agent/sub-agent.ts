@@ -1724,7 +1724,7 @@ export interface SubAgentRunOptions {
 
 export interface SubAgentProgressEvent {
   agentName: string;
-  kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";
+  kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed" | "reasoning";
   iteration: number;
   toolName?: string;
   toolCallId?: string;
@@ -1732,6 +1732,9 @@ export interface SubAgentProgressEvent {
   result?: string;
   metadata?: Record<string, unknown>;
   summary?: string;
+  /** Chain-of-thought text for kind="reasoning" — the model's thinking for
+   * this iteration, surfaced to the UI (behind a debug toggle) and audits. */
+  reasoning?: string;
 }
 
 export interface SubAgentExecutionStats {
@@ -3406,6 +3409,30 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       usage.promptTokens += response.usage.promptTokens;
       usage.completionTokens += response.usage.completionTokens;
       usage.totalTokens += response.usage.totalTokens;
+
+      // Surface the model's chain-of-thought for this iteration to the UI
+      // (behind a debug toggle) and the audit log. This is exactly where the
+      // qwen "burned 4096-6144 thinking tokens and stalled" pathology shows
+      // up — making it visible is the whole point of capturing reasoning.
+      if (response.reasoning && response.reasoning.trim()) {
+        const reasoningText = response.reasoning.trim();
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "reasoning",
+          iteration: iterations + 1,
+          reasoning: reasoningText,
+        });
+        logAudit(
+          "sub_agent_reasoning",
+          {
+            agentName: opts.agentName,
+            iteration: iterations + 1,
+            reasoningChars: reasoningText.length,
+            reasoningPreview: reasoningText.slice(0, 2000),
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
 
       if (turnTimeoutReached && turnTimeoutMs && response.tool_calls.length > 0) {
         const synthesized = await attemptTimeoutSynthesis();

@@ -1,5 +1,42 @@
 import { describe, expect, it, vi } from "vitest";
-import { LMStudioProvider, normalizeMessagesForModel, type LLMMessage } from "../providers/lmstudio.js";
+import { LMStudioProvider, normalizeMessagesForModel, splitReasoning, type LLMMessage } from "../providers/lmstudio.js";
+
+describe("splitReasoning", () => {
+  it("returns content unchanged when there is no reasoning", () => {
+    expect(splitReasoning("Just the answer.")).toEqual({ content: "Just the answer." });
+  });
+
+  it("takes reasoning from the reasoning_content field and leaves content clean", () => {
+    expect(splitReasoning("The final answer.", "Let me think step by step…")).toEqual({
+      content: "The final answer.",
+      reasoning: "Let me think step by step…",
+    });
+  });
+
+  it("extracts inline <think> blocks out of the content", () => {
+    const r = splitReasoning("<think>weighing options</think>The answer is 42.");
+    expect(r.content).toBe("The answer is 42.");
+    expect(r.reasoning).toBe("weighing options");
+  });
+
+  it("treats an unterminated <think> (token budget exhausted) as all-reasoning", () => {
+    const r = splitReasoning("<think>I will start by checking the curriculum and then");
+    expect(r.content).toBeNull();
+    expect(r.reasoning).toBe("I will start by checking the curriculum and then");
+  });
+
+  it("merges the field and inline reasoning", () => {
+    const r = splitReasoning("<think>inline thought</think>Done.", "field thought");
+    expect(r.content).toBe("Done.");
+    expect(r.reasoning).toBe("field thought\n\ninline thought");
+  });
+
+  it("handles content that is entirely a closed think block (no answer)", () => {
+    const r = splitReasoning("<think>all I did was think</think>");
+    expect(r.content).toBeNull();
+    expect(r.reasoning).toBe("all I did was think");
+  });
+});
 
 describe("normalizeMessagesForModel", () => {
   it("folds Gemma system prompts into the first user turn", () => {

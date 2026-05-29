@@ -95,7 +95,7 @@ export interface ToolContext {
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   onSubAgentProgress?: (event: {
     agentName: string;
-    kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed";
+    kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed" | "reasoning";
     iteration: number;
     toolName?: string;
     toolCallId?: string;
@@ -103,6 +103,7 @@ export interface ToolContext {
     result?: string;
     metadata?: Record<string, unknown>;
     summary?: string;
+    reasoning?: string;
   }) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;

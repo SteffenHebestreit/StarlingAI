@@ -664,6 +664,9 @@ export class RpcConnection {
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
+          onReasoning: (text) => {
+            this.sendEvent({ type: "agent.reasoning", data: { requestId, text } });
+          },
           onStatus: (status) => {
             this.sendEvent({ type: "status", data: { requestId, status: status.phase, message: status.message, iteration: status.iteration } });
           },
@@ -683,6 +686,19 @@ export class RpcConnection {
             });
           },
           onSubAgentProgress: (event) => {
+            if (event.kind === "reasoning" && event.reasoning) {
+              this.sendEvent({
+                type: "agent.reasoning",
+                data: {
+                  requestId,
+                  text: event.reasoning,
+                  sourceAgent: event.agentName,
+                  delegated: true,
+                },
+              });
+              return;
+            }
+
             if (event.kind === "tool_start" && event.toolName) {
               this.sendEvent({
                 type: "agent.tool_start",

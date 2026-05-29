@@ -73,6 +73,10 @@ export interface RunTurnOptions {
   userDisplayContent?: string;
   userAttachments?: SessionTranscriptAttachment[];
   onChunk?: (text: string) => void;
+  /** Live chain-of-thought tokens for the main assistant turn. Streams ahead
+   * of the answer; the UI shows it in a collapsible panel that auto-collapses
+   * once the first answer token arrives. */
+  onReasoning?: (text: string) => void;
   onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
@@ -3465,11 +3469,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         : tools;
       llmResponse = await collectStream(provider.stream(messages, activeTools, signal), chunkSink, {
         deferTextUntilToolDecision: activeTools.length > 0,
+        onReasoning: opts.onReasoning,
       });
       const llmDurationMs = Date.now() - llmStartedAt;
       llmTimeMs += llmDurationMs;
       if (firstModelResponseMs === undefined) {
         firstModelResponseMs = Date.now() - turnStartedAt;
+      }
+      if (llmResponse.reasoning && llmResponse.reasoning.trim()) {
+        const reasoningText = llmResponse.reasoning.trim();
+        logAudit("agent_reasoning", {
+          iteration: iterationCount,
+          reasoningChars: reasoningText.length,
+          reasoningPreview: reasoningText.slice(0, 2000),
+        }, { sessionId: session.id, channel: session.channel, severity: "info" });
       }
       if (llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
         const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
@@ -5691,16 +5704,22 @@ function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly 
 async function collectStream(
   generator: AsyncGenerator<StreamChunk>,
   onChunk?: (text: string) => void,
-  options: { deferTextUntilToolDecision?: boolean } = {},
+  options: { deferTextUntilToolDecision?: boolean; onReasoning?: (text: string) => void } = {},
 ): Promise<LLMResponse> {
   let content = "";
+  let reasoning = "";
   const toolCallBuffers = new Map<string, { id: string; name: string; args: string }>();
   let finishReason = "stop";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let sawToolCall = false;
 
   for await (const chunk of generator) {
-    if (chunk.type === "text_delta" && chunk.content) {
+    if (chunk.type === "reasoning_delta" && chunk.content) {
+      reasoning += chunk.content;
+      // Reasoning always streams live — it precedes the answer and the UI
+      // collapses it once the first answer token arrives.
+      options.onReasoning?.(chunk.content);
+    } else if (chunk.type === "text_delta" && chunk.content) {
       content += chunk.content;
       if (!options.deferTextUntilToolDecision) {
         onChunk?.(chunk.content);
@@ -5730,7 +5749,7 @@ async function collectStream(
     onChunk(content);
   }
 
-  return { content: content || null, tool_calls, usage, finishReason };
+  return { content: content || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason };
 }
 
 function buildTurnPerformanceMetrics(input: {
