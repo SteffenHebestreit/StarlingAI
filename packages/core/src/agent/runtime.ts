@@ -42,7 +42,7 @@ import {
   WORKFLOW_REQUEST_PATTERNS,
   toSoftRoutingHint,
 } from "./intent-classifier.js";
-import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
+import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 
 const log = childLogger("agent:runtime");
 
@@ -601,6 +601,31 @@ function hasRecentSparseSourceSensitiveMemoryReuse(
   }
 
   return false;
+}
+
+/** Pull the prior turn's topic + answer from history so a contextless follow-up
+ *  ("validate your response") can be delegated with the real subject folded in. */
+function extractPriorTurnContext(
+  history: readonly SessionHistoryMessage[],
+  currentMessage: string,
+): { priorUserRequest?: string; priorAssistantAnswer?: string } {
+  const current = currentMessage.trim();
+  let priorAssistantAnswer: string | undefined;
+  let priorUserRequest: string | undefined;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const message = history[i]!;
+    const content = typeof message.content === "string" ? message.content.trim() : "";
+    const hasToolCalls = Array.isArray((message as { tool_calls?: unknown[] }).tool_calls)
+      && (((message as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0);
+    if (!priorAssistantAnswer && message.role === "assistant" && content.length > 40 && !hasToolCalls) {
+      priorAssistantAnswer = content;
+    }
+    if (!priorUserRequest && message.role === "user" && content && content !== current) {
+      priorUserRequest = content;
+    }
+    if (priorAssistantAnswer && priorUserRequest) break;
+  }
+  return { priorUserRequest, priorAssistantAnswer };
 }
 
 function enforceSourceSensitiveOriginalRequestOnToolCall(
@@ -2952,6 +2977,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : effectiveToolMode
     ? (buildDynamicTurnGuidance(userMessage, effectiveToolMode) ?? detectedDynamicGuidance)
     : detectedDynamicGuidance;
+  // Canonical research subject for source-sensitive / required-research
+  // delegations. A bare follow-up like "validate your response" carries no
+  // topic; fold in the prior turn's request + answer so the specialist
+  // researches the right thing instead of bouncing with "what should I
+  // research?" (regression: session 3a35cff0).
+  const { priorUserRequest, priorAssistantAnswer } = extractPriorTurnContext(session.getHistory(), userMessage);
+  const researchSubject = buildEffectiveResearchSubject(userMessage, priorUserRequest, priorAssistantAnswer);
   const priorEvidenceFollowUpPrompt = reusePriorDelegateEvidenceForFollowUp && priorDelegateEvidenceForFollowUp
     ? buildPriorEvidenceFollowUpPrompt(priorDelegateEvidenceForFollowUp)
     : "";
@@ -3654,7 +3686,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     );
     if (sourceSensitiveOriginalRequestEnforcementActive) {
       for (const tc of llmResponse.tool_calls) {
-        enforceSourceSensitiveOriginalRequestOnToolCall(tc, userMessage, initialDynamicGuidance, session.id, guardrailEvents);
+        enforceSourceSensitiveOriginalRequestOnToolCall(tc, researchSubject, initialDynamicGuidance, session.id, guardrailEvents);
       }
     }
     if (requiredResearchFallbackRoute) {
@@ -4100,7 +4132,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       if (!releasedAfterRoutingNudge && requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -4707,7 +4739,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(cachedToolCall.metadata)) {
           searchAgentsNoMatchCount += 1;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -4778,7 +4810,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(result.metadata)) {
         searchAgentsNoMatchCount += 1;
-        const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(userMessage, initialDynamicGuidance, allowedToolNameSet);
+        const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
         if (route) {
           requiredResearchFallbackRoute = route;
           searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
