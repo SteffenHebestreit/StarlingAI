@@ -98,6 +98,56 @@ export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, 
   ].join("\n");
 }
 
+// A follow-up that refers back to the prior answer ("validate your response",
+// "is that still correct", "stimmt das") carries no topic of its own. Detected
+// by an anaphoric reference to the previous answer in a short message — used to
+// decide whether a delegation needs the prior turn's topic folded in.
+const PRIOR_ANSWER_ANAPHORA_RE = /\b(your\s+(response|answer|reply|previous|last|finding|recommendation)|that\s+(answer|response|recommendation)|this\s+(answer|response)|the\s+(above|previous|last)|is\s+(that|this|it)\s+(still\s+)?(correct|right|accurate|true|up[- ]?to[- ]?date|current)|deine\s+(antwort|aussage|empfehlung)|stimmt\s+das|ob\s+das\s+stimmt|das\s+oben)\b/i;
+
+/**
+ * True when the message is a short follow-up that refers to the previous answer
+ * rather than restating the subject — e.g. "research online and validate your
+ * response". Such a message must NOT be delegated verbatim (the specialist
+ * can't know the topic); the prior turn's topic has to be folded in.
+ */
+export function isContextlessValidationFollowUp(message: string): boolean {
+  const trimmed = String(message ?? "").trim();
+  if (!trimmed || trimmed.length > 200) return false;
+  return PRIOR_ANSWER_ANAPHORA_RE.test(trimmed);
+}
+
+/**
+ * The canonical research subject to delegate. For a self-contained request this
+ * is the message itself. For a contextless follow-up ("validate your response")
+ * it folds in the prior turn's topic and the answer to validate, so the
+ * specialist researches the RIGHT thing instead of bouncing with "what should I
+ * research?" (regression: session 3a35cff0, 2026-05-29).
+ */
+export function buildEffectiveResearchSubject(
+  currentMessage: string,
+  priorUserRequest?: string,
+  priorAssistantAnswer?: string,
+): string {
+  const current = String(currentMessage ?? "").trim();
+  if (!isContextlessValidationFollowUp(current)) return current;
+  if (!priorUserRequest && !priorAssistantAnswer) return current;
+
+  const parts = [
+    current,
+    "",
+    "This follow-up refers to the previous answer in this conversation; it does not restate the topic. Research and validate THAT topic using fresh web sources.",
+  ];
+  if (priorUserRequest) parts.push(`Original topic to research: "${priorUserRequest.trim().slice(0, 400)}"`);
+  if (priorAssistantAnswer) {
+    parts.push(
+      "",
+      "Prior answer to validate and update against current web evidence (correct anything stale, wrong, or unverified — do not merely restate it):",
+      priorAssistantAnswer.trim().slice(0, 1500),
+    );
+  }
+  return parts.join("\n");
+}
+
 export function buildSourceSensitiveOriginalRequestTask(userMessage: string, label?: string, focus?: string): string {
   return [
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
