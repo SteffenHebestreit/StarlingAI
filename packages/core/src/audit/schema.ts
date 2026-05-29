@@ -51,6 +51,7 @@ export type AuditEventType =
   | "prompt_budget_exceeded"
   | "prompt_section_sizes"
   | "history_compacted"
+  | "session_memory_consolidated"
   | "task_budget_exceeded"
   | "turn_guidance_applied"
   | "turn_slo_breach"

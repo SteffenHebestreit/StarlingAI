@@ -739,6 +739,20 @@ export function archiveSession(id: string): boolean {
   const session = _sessions.get(id);
   if (!session || session.isArchived()) return false;
   session.archive();
+  // Fire-and-forget: harvest durable-worthy session facts into long-term
+  // workspace memory before the session's short-term facts age out. Dynamic
+  // import keeps the memory layer out of the session module's load graph.
+  void (async () => {
+    try {
+      const { consolidateSessionMemory } = await import("../memory/session-consolidation.js");
+      await consolidateSessionMemory({
+        sessionId: session.id,
+        workspacePath: session.getWorkspacePath(),
+        channel: session.channel,
+        turnCount: session.getTurnCount(),
+      });
+    } catch { /* best-effort — never block archival */ }
+  })();
   return true;
 }
 

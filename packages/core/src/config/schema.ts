@@ -1196,6 +1196,22 @@ export const SkillLibrarySchema = z.object({
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;
 
+const MemoryConfigSchema = z.object({
+  /**
+   * When a session is archived, promote its durable-worthy shared-facts into
+   * workspace memory (embedded on write) so long-term memory accumulates across
+   * sessions instead of being lost when the session closes. Deterministic,
+   * deduped, credential-scrubbed, and bounded by maxConsolidatedPerSession.
+   */
+  autoConsolidateSessions: z.boolean().default(true),
+  /** Max facts promoted to durable memory per archived session. */
+  maxConsolidatedPerSession: z.number().int().min(1).max(50).default(8),
+  /** Minimum fact-value length (chars) to be worth promoting. */
+  minConsolidatedFactChars: z.number().int().min(1).max(2_000).default(40),
+});
+
+export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
+
 export const ToolPipelineSchema = z.object({
   /**
    * Enable run_tool_pipeline: a declarative batch executor that runs several
@@ -1358,6 +1374,7 @@ export const ConfigSchema = z.object({
   toolDevelopment: ToolDevelopmentSchema.default({}),
   selfImprovement: SelfImprovementSchema.default({}),
   skillLibrary: SkillLibrarySchema.default({}),
+  memory: MemoryConfigSchema.default({}),
   toolPipeline: ToolPipelineSchema.default({}),
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
