@@ -1235,7 +1235,10 @@ export function taskRequiresExternalResearch(task: string): boolean {
 function pickResearchFallbackAgent(attempted: string[]): string | undefined {
   const config = getConfig();
   const promoted = readPromotedAgents(config.workspacePath);
-  return ["web_task_coordinator", "researcher", "browser_agent", "mission_coordinator"].find(
+  // Prefer the direct web specialist over a coordinator: a single research task
+  // does not need a coordinator-of-coordinator hop (the ~20-min web_task_coordinator
+  // → researcher loop, session 44ea5c21). Coordinators are the last resort.
+  return ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"].find(
     (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
   );
 }

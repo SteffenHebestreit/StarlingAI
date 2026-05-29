@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint } from "../agent/intent-classifier.js";
+import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
+
+describe("looksMultiDomainResearch", () => {
+  it("treats short lookups/validations as single-domain", () => {
+    expect(looksMultiDomainResearch("search online and validate your response")).toBe(false);
+    expect(looksMultiDomainResearch("research the best llm for 3d printing")).toBe(false);
+  });
+
+  it("flags a multi-area hardware build spec as multi-domain", () => {
+    const spec = [
+      "I want to build a portable battery-powered recorder.",
+      "I need a flat high-quality microphone module or an array.",
+      "Connect it to an ESP32 to sync recordings over OTA.",
+      "I need two buttons and a battery as well as a USB-C charging module.",
+      "What else do I need and how do I put it together?",
+      "What improvements would you add for the best transcription quality?",
+      "Also make it waterproof.",
+    ].join("\n");
+    expect(looksMultiDomainResearch(spec)).toBe(true);
+  });
+});
 
 describe("toSoftRoutingHint", () => {
   it("reframes hard imperatives as advisory hints", () => {
