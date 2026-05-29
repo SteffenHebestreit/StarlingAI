@@ -1208,6 +1208,23 @@ const MemoryConfigSchema = z.object({
   maxConsolidatedPerSession: z.number().int().min(1).max(50).default(8),
   /** Minimum fact-value length (chars) to be worth promoting. */
   minConsolidatedFactChars: z.number().int().min(1).max(2_000).default(40),
+  /**
+   * Sleep-time consolidation: a periodic idle pass over durable memory that
+   * compacts near-duplicates and backfills missing embeddings (Letta-style
+   * background reflection). Safe and additive — it never deletes facts. Set
+   * false to keep memory maintenance write-triggered only.
+   */
+  sleepTimeConsolidation: z.boolean().default(true),
+  /** Interval (ms) between sleep-time consolidation sweeps. Default 30 min. */
+  consolidationIntervalMs: z.number().int().min(60_000).max(6 * 3_600_000).default(30 * 60_000),
+  /**
+   * Temporal supersession: when a new durable fact is stored under the same
+   * explicit subject as an existing one but with different content, mark the
+   * older record superseded and exclude it from retrieval (Zep/Graphiti-style
+   * validity). Prevents stale facts from resurfacing. Superseded records stay
+   * on disk for forensics. Default true.
+   */
+  supersedeStaleFacts: z.boolean().default(true),
 });
 
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
