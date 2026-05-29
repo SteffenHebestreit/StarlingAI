@@ -2262,6 +2262,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let sufficiencyToolsStripped = false;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
+    // A delegation that "executes" but only reports that the target agent/tool is
+    // already exhausted for this turn made NO progress — re-delegating to it is a
+    // loop. A coordinator did this for ~20 min (session 44ea5c21) before the
+    // per-tool cap finally tripped. Treat such no-progress iterations as blocked
+    // so the loop-stop fires after 2 in a row.
+    const NO_PROGRESS_DELEGATION_FAILURE_RE = /per-agent delegation cap exhausted|already been delegated to its per-turn maximum|already delegated to its per-turn maximum|has been called \d+ times this run \(limit/i;
     const approvalBlockedTools = new Map<string, string>();
     let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
     // Track tools stripped by the evidence-cap mechanism so that blocked
@@ -4183,7 +4189,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return withArtifacts({ output: stripHallucinatedToolTags(directResult), stats });
       }
 
-      if (response.tool_calls.length > 0 && !executedToolThisIteration && toolResults.length > 0) {
+      // No-progress iteration = every tool call was blocked/skipped, OR every
+      // executed result only says the target agent/tool is already exhausted
+      // (re-delegating to a capped agent). Both are loops to stop.
+      const allResultsNoProgressDelegation = toolResults.length > 0
+        && toolResults.every((tr) => NO_PROGRESS_DELEGATION_FAILURE_RE.test(typeof tr.content === "string" ? tr.content : ""));
+      const noProgressIteration = response.tool_calls.length > 0 && toolResults.length > 0
+        && (!executedToolThisIteration || allResultsNoProgressDelegation);
+      if (noProgressIteration) {
         consecutiveBlockedToolIterations += 1;
         if (consecutiveBlockedToolIterations >= BLOCKED_TOOL_ITERATION_THRESHOLD) {
           const lastTR = toolResults[toolResults.length - 1]!;
