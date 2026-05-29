@@ -1178,6 +1178,16 @@ export const SkillLibrarySchema = z.object({
    * operator in the loop while still authoring/retiring skills.
    */
   autoPromoteToScene: z.boolean().default(true),
+  /**
+   * Holdout sampling rate (0–1) for measuring skill lift. With probability
+   * holdoutRate, the top matching skill is NOT injected for a turn and that
+   * turn's outcome is recorded as a baseline. Comparing injected vs. held-out
+   * success (skillLift) shows whether the skill actually helps or whether its
+   * success rate just reflects easy matching tasks — so retirement can be
+   * driven by evidence of value, not raw success rate. 0 disables (default);
+   * 0.15 is a reasonable measurement rate.
+   */
+  holdoutRate: z.number().min(0).max(0.5).default(0),
 });
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;
@@ -1290,6 +1300,20 @@ export const ConfigSchema = z.object({
        * relay prompt, so keep it within the model's context budget).
        */
       maxDelegatedResultChars: z.number().int().min(2_000).max(200_000).default(10_000),
+      /**
+       * Soft routing enforcement. The orchestrator injects per-turn enforcement
+       * system messages (maintenance / workflow-catalog / search-no-match) as
+       * hard imperative gates ("You MUST … this turn", removing tools from the
+       * set). The trust-the-LLM direction is soft hints, not hard gates — but
+       * softening changes tuned routing behavior, so it is gated here and
+       * requires live-model eval before flipping. When true, the *routing-class*
+       * enforcement prompts are reframed as strong recommendations and the hard
+       * search_agents tool-removal gate is relaxed to a hint. Anti-hallucination
+       * enforcement (source-sensitive research) and correctness enforcement
+       * (unresolved clarification) stay hard regardless. Default false (current
+       * eval-validated behavior).
+       */
+      softRoutingEnforcement: z.boolean().default(false),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.

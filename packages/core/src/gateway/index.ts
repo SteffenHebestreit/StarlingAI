@@ -55,7 +55,7 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
-import { getConcurrencySnapshot } from "../swarm/concurrency.js";
+import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
@@ -4343,6 +4343,7 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const concurrency = getConcurrencySnapshot();
+    const globalConcurrency = getGlobalConcurrencySnapshot();
     const busConnected = isSwarmBusConnected();
     const capabilities = getAgentCapabilitySnapshot();
     const directMessages = getAgentMessageBacklogSnapshot();
@@ -4356,6 +4357,7 @@ export function createGateway() {
       capabilities,
       directMessages,
       concurrency,
+      globalConcurrency,
       bottlenecks,
       summary: {
         activeAgents: concurrency.filter(s => s.active > 0).length,

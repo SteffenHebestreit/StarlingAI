@@ -112,15 +112,29 @@ export async function retrieveSkillGuidance(
   workspacePath: string,
   query: string,
   opts: { limit?: number; maxChars?: number; agent?: string; includeSupportFiles?: boolean } = {},
-): Promise<{ text: string; slugs: string[] }> {
+): Promise<{ text: string; slugs: string[]; heldOutSlugs: string[] }> {
   const config = getConfig();
-  if (!config.skillLibrary.enabled) return { text: "", slugs: [] };
+  if (!config.skillLibrary.enabled) return { text: "", slugs: [], heldOutSlugs: [] };
 
   const matches = await searchSkills(workspacePath, query, {
     limit: opts.limit ?? config.skillLibrary.maxInjected,
     ...(opts.agent ? { agent: opts.agent } : {}),
   });
-  if (matches.length === 0) return { text: "", slugs: [] };
+  if (matches.length === 0) return { text: "", slugs: [], heldOutSlugs: [] };
+
+  // Holdout sampling (skillLibrary.holdoutRate, default 0 = off): occasionally
+  // suppress the top match so its turns are recorded as a baseline. Comparing
+  // injected vs. held-out success (skillLift) tells us whether the skill ACTUALLY
+  // helps or whether its success rate just reflects easy matching tasks —
+  // turning open-loop self-improvement into an evidence-based one.
+  const heldOutSlugs: string[] = [];
+  const holdoutRate = config.skillLibrary.holdoutRate ?? 0;
+  let injectable = matches;
+  if (holdoutRate > 0 && matches.length > 0 && Math.random() < holdoutRate) {
+    const heldOut = matches[0]!;
+    heldOutSlugs.push(heldOut.skill.frontmatter.slug);
+    injectable = matches.slice(1);
+  }
 
   const maxChars = Math.max(300, Math.min(3_000, opts.maxChars ?? 1_400));
   const header = "## Learned Procedures";
@@ -130,7 +144,7 @@ export async function retrieveSkillGuidance(
   const lines: string[] = [];
   const slugs: string[] = [];
   let total = header.length + intro.length + 2;
-  for (const match of matches) {
+  for (const match of injectable) {
     const { frontmatter, meta } = match.skill;
     const rate = meta.uses > 0 ? ` ${Math.round(skillSuccessRate(meta) * 100)}% over ${meta.uses}` : " new";
     const agents = frontmatter.agents.length > 0 ? ` agents: ${frontmatter.agents.join(", ")}.` : "";
@@ -144,8 +158,8 @@ export async function retrieveSkillGuidance(
     total += line.length + 1;
   }
 
-  if (lines.length === 0) return { text: "", slugs: [] };
-  return { text: [header, intro, ...lines].join("\n"), slugs };
+  if (lines.length === 0) return { text: "", slugs: [], heldOutSlugs };
+  return { text: [header, intro, ...lines].join("\n"), slugs, heldOutSlugs };
 }
 
 /** Compact procedure preview: first ~2 step lines, single-lined and truncated. */

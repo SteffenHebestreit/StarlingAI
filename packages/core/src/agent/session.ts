@@ -106,6 +106,9 @@ export interface PersistedSessionRecord {
   workspacePath: string;
   turnCount: number;
   history: SessionHistoryMessage[];
+  /** Rolling digest of trimmed-out turns; absent on records written before
+   *  history compaction shipped. */
+  earlierSummary?: string;
 }
 
 export class AgentSession {
@@ -125,6 +128,15 @@ export class AgentSession {
    *  Updated by the runtime each turn before the LLM loop starts so
    *  maybeTrimHistory accounts for the full actual prompt size. */
   private toolSchemasChars = 0;
+  /** Context window (in tokens) of the model actually running this session's
+   *  turns. Set by the runtime each turn from the resolved provider model so the
+   *  trimmer budgets against the real window rather than the global default. */
+  private contextWindowTokens?: number;
+  /** Rolling, deterministic digest of conversation turns that were trimmed out
+   *  of the live window. Folded back into the prompt as a leading system note so
+   *  long-horizon tasks keep the gist of earlier context (and the original
+   *  request, which is pinned verbatim) instead of silently losing it. */
+  private earlierSummary = "";
 
   constructor(opts: AgentSessionOptions & {
     createdAt?: Date;
@@ -132,6 +144,7 @@ export class AgentSession {
     archivedAt?: Date;
     turnCount?: number;
     history?: SessionHistoryMessage[];
+    earlierSummary?: string;
   }) {
     this.id = opts.sessionId ?? randomUUID();
     this.channel = opts.channel;
@@ -143,6 +156,7 @@ export class AgentSession {
     this.archivedAt = opts.archivedAt;
     this.turnCount = opts.turnCount ?? 0;
     this.history = opts.history ? [...opts.history] : [];
+    this.earlierSummary = opts.earlierSummary ?? "";
     this.endLogged = Boolean(this.archivedAt);
 
     if (!opts.createdAt) {
@@ -167,6 +181,7 @@ export class AgentSession {
       archivedAt: record.archivedAt ? new Date(record.archivedAt) : undefined,
       turnCount: record.turnCount,
       history: record.history,
+      earlierSummary: record.earlierSummary,
     });
   }
 
@@ -194,6 +209,12 @@ export class AgentSession {
    */
   getCollapsedHistory(): LLMMessage[] {
     const collapsed: LLMMessage[] = [];
+    // Fold the rolling digest of trimmed-out turns back in as a leading system
+    // note so the model retains earlier context (and the pinned original
+    // request) after older raw messages have been dropped from the window.
+    if (this.earlierSummary) {
+      collapsed.push({ role: "system", content: this.earlierSummary });
+    }
     let i = 0;
     while (i < this.history.length) {
       const msg = this.history[i]!;
@@ -347,6 +368,16 @@ export class AgentSession {
     this.toolSchemasChars = Math.max(0, chars);
   }
 
+  /** Tell the session the context window (tokens) of the model running its
+   *  turns, so the trimmer budgets against the real window. */
+  setContextWindow(tokens: number): void {
+    if (Number.isFinite(tokens) && tokens > 0) this.contextWindowTokens = Math.floor(tokens);
+  }
+
+  private effectiveContextWindow(): number {
+    return this.contextWindowTokens ?? getConfig().agents.defaults.model.contextWindow;
+  }
+
   reset(): void {
     this.history = [];
     this.turnCount = 0;
@@ -401,6 +432,7 @@ export class AgentSession {
       workspacePath: this.workspacePath,
       turnCount: this.turnCount,
       history: this.history.map((message) => ({ ...message })),
+      ...(this.earlierSummary ? { earlierSummary: this.earlierSummary } : {}),
     };
   }
 
@@ -525,18 +557,22 @@ export class AgentSession {
   }
 
   private maybeTrimHistory(): void {
-    const config = getConfig();
-    const maxTokenEstimate = config.agents.defaults.model.contextWindow * 0.75;
+    const maxTokenEstimate = this.effectiveContextWindow() * 0.75;
     if (estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) <= maxTokenEstimate || this.history.length <= 6) return;
 
     const minKeep = 6; // always keep at least the last 6 messages
-    let trimmed = false;
+    // Pin the original request (first user message) verbatim — it carries the
+    // task's requirements and acceptance criteria, which are exactly what a
+    // long-horizon turn must not lose. Everything dropped between the pin and
+    // the kept tail is folded into the rolling digest instead of discarded.
+    const pinnedHead = this.history[0]?.role === "user" ? 1 : 0;
+    let droppedTotal = 0;
 
     while (this.history.length > minKeep && estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) > maxTokenEstimate) {
-      const maxDrop = this.history.length - minKeep;
-      let safeCut = 0;
+      const maxDropEnd = this.history.length - minKeep;
+      let safeCut = pinnedHead;
 
-      for (let i = 0; i < maxDrop; i++) {
+      for (let i = pinnedHead; i < maxDropEnd; i++) {
         const msg = this.history[i];
         const next = this.history[i + 1];
         if (!msg || !next) break;
@@ -549,21 +585,72 @@ export class AgentSession {
         }
       }
 
-      if (safeCut <= 0) break;
-      this.history.splice(0, safeCut);
-      trimmed = true;
+      if (safeCut <= pinnedHead) break;
+      const dropped = this.history.splice(pinnedHead, safeCut - pinnedHead);
+      this.foldIntoEarlierSummary(dropped);
+      droppedTotal += dropped.length;
     }
 
-    if (trimmed) {
+    if (droppedTotal > 0) {
       this.touch();
       persistSessionStore(this);
-      log.debug({ sessionId: this.id, remaining: this.history.length }, "Trimmed history for context window");
+      logAudit("history_compacted", {
+        dropped: droppedTotal,
+        remaining: this.history.length,
+        summaryChars: this.earlierSummary.length,
+      }, { sessionId: this.id, severity: "info" });
+      log.debug({ sessionId: this.id, dropped: droppedTotal, remaining: this.history.length, summaryChars: this.earlierSummary.length }, "Compacted history for context window");
     }
+  }
+
+  /** Append a deterministic digest of the dropped messages to the rolling
+   *  summary, bounded so the digest itself can never dominate the window. */
+  private foldIntoEarlierSummary(dropped: SessionHistoryMessage[]): void {
+    const lines = dropped.flatMap((msg) => digestHistoryMessage(msg));
+    if (lines.length === 0) return;
+
+    const body = (this.earlierSummary ? this.earlierSummary.replace(SUMMARY_HEADER + "\n", "") : "")
+      .split("\n").filter(Boolean)
+      .concat(lines);
+
+    // Cap the digest body. When over budget, drop the OLDEST digest lines and
+    // mark the elision — recent context is the most useful for continuing.
+    let kept = body;
+    let elided = 0;
+    while (kept.join("\n").length > MAX_EARLIER_SUMMARY_CHARS && kept.length > 1) {
+      kept.shift();
+      elided += 1;
+    }
+    const elisionNote = elided > 0 ? [`• … ${elided} earlier item(s) condensed away`] : [];
+    this.earlierSummary = [SUMMARY_HEADER, ...elisionNote, ...kept].join("\n");
   }
 
   private touch(date = new Date()): void {
     this.updatedAt = date;
   }
+}
+
+const SUMMARY_HEADER = "[EARLIER CONVERSATION — condensed because older turns no longer fit the context window. Treat as background; the original request is preserved verbatim in the conversation below.]";
+const MAX_EARLIER_SUMMARY_CHARS = 3_000;
+
+/** Build a compact, deterministic one-liner (or none) for a trimmed message.
+ *  Raw tool-result messages are skipped — their essence is captured by the
+ *  "called <tool>" note on the assistant message that issued them. */
+function digestHistoryMessage(msg: SessionHistoryMessage): string[] {
+  if (msg.role === "tool") return [];
+
+  const toolCalls = (msg as { tool_calls?: Array<{ function: { name: string } }> }).tool_calls;
+  const text = typeof msg.content === "string" ? msg.content.replace(/\s+/g, " ").trim() : "";
+
+  if (msg.role === "assistant" && Array.isArray(toolCalls) && toolCalls.length > 0) {
+    const names = [...new Set(toolCalls.map((call) => call.function?.name).filter(Boolean))].join(", ");
+    const note = text ? `: ${text.slice(0, 160)}` : "";
+    return [`• assistant called ${names}${note}`];
+  }
+
+  if (!text) return [];
+  const label = msg.role === "user" ? "user" : "assistant";
+  return [`• ${label}: ${text.slice(0, 220)}`];
 }
 
 function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage[], toolSchemasChars = 0): number {
@@ -918,6 +1005,17 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
     `- If the user gives an IP or host and asks you to access or work on it, do not reinterpret that as scanning. Start with the relevant owned-system path: computer_use_agent for desktop/UI control, or shell_agent/ops_triage for SSH, Docker, logs, and service work. If the requested adapter is unsupported, say that explicitly instead of switching to pentest tools.`,
   ].join("\n");
 
+  // Computer-use / VS Code discipline bullets. The per-turn classifier emits a
+  // richer, more specific version of these whenever a computer-access intent
+  // fires (intent-classifier.ts, computerAccessSensitive guidance), so when
+  // taskConditionalPrompt is on they are pure duplication in the always-on base
+  // prompt — drop them and rely on the per-turn guidance, same as the
+  // intent-routing rules above.
+  const computerUseDisciplineRules = taskConditionalPrompt ? "" : "\n" + [
+    `- **CRITICAL: Do NOT claim you "cannot" interact with applications visible on the user's desktop (e.g. VS Code, Copilot, browser). You CAN interact with them through delegate_to_agent(agentName: "computer_use_agent", task: "..."). Do NOT fall back to direct computer_* or browser_* calls after that agent fails.**`,
+    `- **VS Code Copilot interaction: When the user asks you to interact with GitHub Copilot inside VS Code, delegate to computer_use_agent with a task like: 'Type "[MESSAGE]" into the GitHub Copilot Chat input in VS Code. Steps: list windows to get VS Code titleBar coordinates, focus VS Code, click the titleBar coordinates, snapshot to find the chat input, click it, type the message.' Do NOT mention keyboard shortcuts, command palette, or Ctrl+Shift+P in the task. Do NOT attempt to call computer_* tools directly — they require a computer session that the sub-agent manages.**`,
+  ].join("\n");
+
   return `You are the main assistant inside StarlingAI, a pragmatic AI system focused on planning, orchestration, and synthesis across specialized sub-agents.
 
 ## Core Principles
@@ -994,9 +1092,7 @@ ${personalityGuidance}
 - **CRITICAL: Sub-agent names (researcher, coder, etc.) are NOT tools. You cannot call them directly. You MUST use delegate_to_agent(agentName: "researcher", task: "...") — that is the only way to invoke a sub-agent.**
 - **CRITICAL: NEVER describe or narrate a tool call in text. If you intend to call a tool, call it directly using the tool interface. Writing "[Tool: ...]" in text is NOT a tool call and will be ignored.**
 - **CRITICAL: If your response starts with "Let me try...", "I will now...", "I'll create...", or any similar phrasing that describes a future tool call — STOP. Call the tool directly instead of writing that sentence.**
-- **CRITICAL: Do NOT regenerate, copy, or paraphrase text or tool results from earlier iterations of the same turn. Each iteration must contribute NEW information — never duplicate prior content. If you notice yourself repeating the same paragraph or tool call pattern, STOP calling tools immediately and write your final answer.**
-- **CRITICAL: Do NOT claim you "cannot" interact with applications visible on the user's desktop (e.g. VS Code, Copilot, browser). You CAN interact with them through delegate_to_agent(agentName: "computer_use_agent", task: "..."). Do NOT fall back to direct computer_* or browser_* calls after that agent fails.**
-- **VS Code Copilot interaction: When the user asks you to interact with GitHub Copilot inside VS Code, delegate to computer_use_agent with a task like: 'Type "[MESSAGE]" into the GitHub Copilot Chat input in VS Code. Steps: list windows to get VS Code titleBar coordinates, focus VS Code, click the titleBar coordinates, snapshot to find the chat input, click it, type the message.' Do NOT mention keyboard shortcuts, command palette, or Ctrl+Shift+P in the task. Do NOT attempt to call computer_* tools directly — they require a computer session that the sub-agent manages.**
+- **CRITICAL: Do NOT regenerate, copy, or paraphrase text or tool results from earlier iterations of the same turn. Each iteration must contribute NEW information — never duplicate prior content. If you notice yourself repeating the same paragraph or tool call pattern, STOP calling tools immediately and write your final answer.**${computerUseDisciplineRules}
 - **Agent exhaustion rule: If a sub-agent result mentions "max_iterations", "timed out", "delegation limit", or "could not complete", that agent is EXHAUSTED for this turn. Do NOT delegate to the same agent again. Use whatever partial results were collected and proceed to the next logical step in your plan. Do not prematurely stop your workflow or skip dependent tasks just because a delegation was partial.**
 - **If a sub-agent fails with a clear actionable error (not found, permission denied, wrong tool), delegate to the next best alternative. But exhaustion-type failures are terminal — synthesize, do not retry.**
 - **After search_agents returns candidates, immediately call delegate_to_agent with the top result — do NOT describe what you plan to do.**

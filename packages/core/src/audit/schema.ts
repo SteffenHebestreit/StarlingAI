@@ -50,6 +50,7 @@ export type AuditEventType =
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
   | "prompt_section_sizes"
+  | "history_compacted"
   | "task_budget_exceeded"
   | "turn_guidance_applied"
   | "turn_slo_breach"

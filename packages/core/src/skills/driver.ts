@@ -23,6 +23,7 @@ import {
   listSkills,
   setSkillStatus,
   skillSuccessRate,
+  skillLift,
   type Skill,
 } from "./store.js";
 
@@ -67,11 +68,33 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
   const result: SkillSweepResult = { retired: [], merged: [], promoted: [] };
   if (!config.enabled) return result;
 
-  // ── 1. Retire low performers ─────────────────────────────────────────────
+  // ── 1. Retire low performers and no-lift skills ──────────────────────────
   const live = listSkills(workspacePath); // excludes archived
   for (const skill of live) {
     if (!isCuratorEligible(skill)) continue;
     if (skill.meta.uses < config.retireMinUses) continue;
+
+    // 1a. Evidence-based retirement: when holdout sampling has produced a
+    // measurable lift and it is non-positive, injecting this skill does not
+    // improve outcomes (its success rate just tracks task difficulty). Retire
+    // it regardless of raw success rate — a high-success-but-zero-lift skill is
+    // dead weight in retrieval.
+    const lift = skillLift(skill.meta);
+    if (lift !== null && lift <= 0) {
+      setSkillStatus(workspacePath, skill.frontmatter.slug, "archived");
+      result.retired.push(skill.frontmatter.slug);
+      logAudit("skill_retired", {
+        slug: skill.frontmatter.slug,
+        reason: "no_measured_lift",
+        lift: Number(lift.toFixed(2)),
+        successRate: Number(skillSuccessRate(skill.meta).toFixed(2)),
+        uses: skill.meta.uses,
+        holdoutUses: skill.meta.holdoutUses ?? 0,
+      }, { severity: "info" });
+      continue;
+    }
+
+    // 1b. Success-rate floor.
     if (skillSuccessRate(skill.meta) >= config.retireBelowSuccessRate) continue;
     setSkillStatus(workspacePath, skill.frontmatter.slug, "archived");
     result.retired.push(skill.frontmatter.slug);
