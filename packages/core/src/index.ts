@@ -274,6 +274,13 @@ export async function main() {
     startSkillImprovementDriver();
   }
 
+  // Start the sleep-time memory consolidation driver — periodic idle pass that
+  // compacts near-duplicate durable memory and backfills missing embeddings.
+  if (getConfig().memory.sleepTimeConsolidation) {
+    const { startMemoryConsolidationDriver } = await import("./memory/driver.js");
+    startMemoryConsolidationDriver();
+  }
+
   // Start transitive federation peer discovery (no-op when disabled)
   const { startPeerDiscovery } = await import("./federation/index.js");
   startPeerDiscovery();

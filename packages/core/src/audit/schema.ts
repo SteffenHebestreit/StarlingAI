@@ -52,6 +52,8 @@ export type AuditEventType =
   | "prompt_section_sizes"
   | "history_compacted"
   | "session_memory_consolidated"
+  | "memory_consolidation_sweep"
+  | "memory_fact_superseded"
   | "task_budget_exceeded"
   | "turn_guidance_applied"
   | "turn_slo_breach"

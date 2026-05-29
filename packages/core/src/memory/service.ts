@@ -7,6 +7,8 @@ import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
+import { getConfig } from "../config/loader.js";
+import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 const log = childLogger("memory:service");
@@ -101,6 +103,9 @@ interface StoredWorkspaceMemoryRecord {
   storedAt?: string;
   createdAt?: string;
   updatedAt?: string;
+  /** When set, this record was superseded by a newer fact about the same
+   *  subject and is excluded from retrieval (kept on disk for forensics). */
+  supersededAt?: string;
   /** Optional pre-computed embedding for semantic search (number[] for JSON). */
   embedding?: number[];
 }
@@ -488,6 +493,8 @@ function _readDurableCached(scope: DurableMemoryScope, workspacePath: string): D
     try {
       const stored = parseStoredWorkspaceMemory(readFileSync(resolve(dir, file), "utf-8"));
       if (!stored) continue;
+      // Superseded facts stay on disk but never resurface in retrieval/listing.
+      if (stored.supersededAt) continue;
       const record = workspaceStoredToRecord(stored);
       records.push(record);
       if (Array.isArray(stored.embedding) && stored.embedding.length > 0) {
@@ -553,6 +560,11 @@ function storeDurableMemoryRecord(
   _bumpCacheVersion(cacheKey);
   const result = workspaceStoredToRecord(stored);
 
+  // Temporal supersession: a new fact about the same explicit subject (with
+  // different content) supersedes prior records about that subject so stale
+  // values stop resurfacing. Best-effort, gated, and never deletes the file.
+  supersedeOlderSubjectFacts(scope, dir, cacheKey, result, key, now);
+
   // Fire-and-forget embedding refresh when the indexable text changed and
   // embeddings are configured.  Writes back to the same file so future reads
   // pick it up.
@@ -587,6 +599,105 @@ async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text
   } catch (err) {
     log.debug({ err }, "Embedding refresh failed — non-critical");
   }
+}
+
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Mark prior records about the same explicit subject as superseded when a newer
+ * fact with different content is stored — Zep/Graphiti-style temporal validity,
+ * MemGraph-independent. Conservative: exact normalized-subject match, subject
+ * length ≥ 4, content must differ, never deletes (sets supersededAt). Gated by
+ * memory.supersedeStaleFacts.
+ */
+function supersedeOlderSubjectFacts(
+  scope: DurableMemoryScope,
+  dir: string,
+  cacheKey: string,
+  fresh: MemoryRecord,
+  freshKey: string,
+  now: string,
+): void {
+  try {
+    if (getConfig().memory.supersedeStaleFacts === false) return;
+    const subjectKey = normalizeForMatch(fresh.subject);
+    if (subjectKey.length < 4) return;
+    const freshFile = `${freshKey}.json`;
+    let changed = false;
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json") && f !== freshFile)) {
+      const path = resolve(dir, file);
+      let stored: StoredWorkspaceMemoryRecord | null;
+      try { stored = parseStoredWorkspaceMemory(readFileSync(path, "utf-8")); } catch { continue; }
+      if (!stored || stored.supersededAt) continue;
+      const older = workspaceStoredToRecord(stored);
+      if (normalizeForMatch(older.subject) !== subjectKey) continue;        // different topic
+      // Near-duplicates/paraphrases are for compaction to MERGE, not supersede —
+      // reuse compaction's exact predicate so the two mechanisms never collide.
+      // Only a genuinely different value for the same subject is superseded.
+      if (areNearDuplicateRecords(older, fresh)) continue;
+      writeFileSync(path, JSON.stringify({ ...stored, supersededAt: now }, null, 2), "utf-8");
+      changed = true;
+      logAudit("memory_fact_superseded", {
+        scope,
+        subject: fresh.subject.slice(0, 80),
+        supersededKey: stored.key,
+        bySupersedingKey: freshKey,
+      }, { severity: "info" });
+    }
+    if (changed) _bumpCacheVersion(cacheKey);
+  } catch (err) {
+    log.debug({ err }, "Subject supersession skipped — non-critical");
+  }
+}
+
+/**
+ * Sleep-time embedding backfill: embed durable records that have no stored
+ * vector (e.g. written while the embedding provider was down) so they become
+ * semantically retrievable. Batched + cache-aware; a no-op without a provider.
+ * Returns the number of records embedded per scope.
+ */
+export async function refreshMissingDurableEmbeddings(
+  workspacePath: string,
+): Promise<Array<{ scope: DurableMemoryScope; refreshed: number }>> {
+  const results: Array<{ scope: DurableMemoryScope; refreshed: number }> = [];
+  if (!isEmbeddingAvailable()) return results;
+
+  for (const scope of ["workspace", "user"] as DurableMemoryScope[]) {
+    const dir = memoryDirForScope(scope, workspacePath);
+    if (!existsSync(dir)) { results.push({ scope, refreshed: 0 }); continue; }
+    const pending: Array<{ path: string; stored: StoredWorkspaceMemoryRecord; text: string }> = [];
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+      const path = resolve(dir, file);
+      let stored: StoredWorkspaceMemoryRecord | null;
+      try { stored = parseStoredWorkspaceMemory(readFileSync(path, "utf-8")); } catch { continue; }
+      if (!stored || stored.supersededAt) continue;
+      if (Array.isArray(stored.embedding) && stored.embedding.length > 0) continue;
+      pending.push({ path, stored, text: `${stored.subject ?? ""}\n${stored.content}` });
+    }
+    let refreshed = 0;
+    // Bound the batch so one sweep can't fire an unbounded embed request.
+    for (let i = 0; i < pending.length; i += 32) {
+      const batch = pending.slice(i, i + 32);
+      const vectors = await computeTextEmbeddings(batch.map((b) => b.text));
+      for (let j = 0; j < batch.length; j++) {
+        const vec = vectors[j];
+        const item = batch[j]!;
+        if (!vec || vec.length === 0) continue;
+        try {
+          if (!existsSync(item.path)) continue;
+          const current = parseStoredWorkspaceMemory(readFileSync(item.path, "utf-8"));
+          if (!current || (Array.isArray(current.embedding) && current.embedding.length > 0)) continue;
+          writeFileSync(item.path, JSON.stringify({ ...current, embedding: Array.from(vec) }, null, 2), "utf-8");
+          refreshed++;
+        } catch { /* skip */ }
+      }
+    }
+    if (refreshed > 0) _bumpCacheVersion(_cacheKey(scope, dir));
+    results.push({ scope, refreshed });
+  }
+  return results;
 }
 
 function _maybeAutoCompact(scope: DurableMemoryScope, workspacePath: string, cacheKey: string): void {
