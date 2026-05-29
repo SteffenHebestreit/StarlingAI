@@ -29,6 +29,10 @@ const runSubAgentMock = vi.fn(async ({ agentName, task }: SubAgentRunOptions) =>
 const collectTaskBidsMock = vi.fn(async (): Promise<Array<Record<string, unknown>>> => []);
 const clearTaskBidsMock = vi.fn();
 const isAutonomousBiddingStartedMock = vi.fn(() => true);
+// Default stats include a realistic write_file call so artifact-task tests
+// (anything matching WORKSPACE_MUTATION_TASK_RE with an artifact tool
+// granted) don't trip the new ephemeral-agent narrative-only guard. Specific
+// tests override this when they want a failure path.
 const runSubAgentWithStatsMock = vi.hoisted(() => vi.fn(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
   output: await runSubAgentMock(args),
   stats: {
@@ -36,9 +40,9 @@ const runSubAgentWithStatsMock = vi.hoisted(() => vi.fn(async (args: SubAgentRun
     sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
     promptChars: 0,
     userContentChars: String(args.task ?? "").length,
-    toolCount: 0,
-    toolNames: [],
-    iterations: 0,
+    toolCount: 1,
+    toolNames: ["write_file"],
+    iterations: 1,
     usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     maxIterations: 5,
     model: "mock",
@@ -74,9 +78,9 @@ describe("create_ephemeral_agent policy", () => {
         sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
         promptChars: 0,
         userContentChars: String(args.task ?? "").length,
-        toolCount: 0,
-        toolNames: [],
-        iterations: 0,
+        toolCount: 1,
+        toolNames: ["write_file"],
+        iterations: 1,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         maxIterations: 5,
         model: "mock",

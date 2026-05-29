@@ -4040,7 +4040,7 @@ registerTool({
 
     const ephemeralName = `ephemeral:${agentName}`;
 
-    const result = await runSubAgent({
+    const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
       context,
@@ -4054,6 +4054,39 @@ registerTool({
       _workflowExecutionStack: ctx._workflowExecutionStack,
       // Note: ephemeral agents have their own maxIter baked into inlineConfig; ctx.maxIterationsOverride is intentionally not forwarded here.
     });
+    const result = runResult.output;
+    const ephemeralStats = runResult.stats
+      ? { toolCount: runResult.stats.toolCount, toolNames: runResult.stats.toolNames }
+      : undefined;
+
+    // Same narrative-only guard delegate_to_agent applies. Without it,
+    // session 31612733 (2026-05-28) had the model emit a 14 KB unclosed
+    // <tool_call> block as TEXT (never actually called write_file), and this
+    // path returned success: true with the hallucination as the output — the
+    // orchestrator dutifully told the user "Die Lernwebsite wurde erfolgreich
+    // erstellt" when no file existed.
+    const ephemeralCfg = { tools };
+    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never);
+    if (narrativeOnly) {
+      const expectedTools = tools.filter((name) =>
+        /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
+      );
+      const expectedHint = expectedTools.length > 0
+        ? ` Expected the agent to call one of: ${expectedTools.slice(0, 4).join(", ")}.`
+        : "";
+      return {
+        success: false,
+        output: "",
+        error: `Ephemeral agent '${ephemeralName}' returned a narrative-only result (granted artifact tools but never invoked one).${expectedHint} The deliverable was NOT produced. Do NOT report success — restate the task as a single direct write_file invocation, or delegate to a configured specialist.`,
+        metadata: {
+          agentName: ephemeralName,
+          grantedTools: tools,
+          rejectedTools: rejected,
+          narrativeOnly: true,
+          toolNames: ephemeralStats?.toolNames ?? [],
+        },
+      };
+    }
 
     const note = rejected.length > 0 ? ` [Note: tools ${rejected.join(", ")} were rejected as not grantable]` : "";
     return {

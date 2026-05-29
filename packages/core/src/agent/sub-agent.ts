@@ -1645,12 +1645,23 @@ function buildArtifactCompletionOutput(params: {
 
 /** Strip hallucinated tool-call XML that some models emit in text output. */
 function stripHallucinatedToolTags(text: string): string {
-  return text
+  let stripped = text
     .replace(/<\|channel\>\w+\s*/g, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
     .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
-    .replace(/<\/tool_call>/g, "")
-    .trim();
+    .replace(/<\/tool_call>/g, "");
+  // Unclosed `<tool_call>` blocks happen when the model burns its max-tokens
+  // budget emitting a Qwen-format tool call as TEXT (session 31612733 had a
+  // 14 KB write_file payload truncate mid-content). The closed-form regex
+  // above leaves the entire block intact, so the orchestrator presents it as
+  // if the file existed. If an opener has no matching closer, strip from the
+  // first opener onward — the content past it is hallucinated, not a real
+  // result.
+  const orphanOpener = stripped.search(/<tool_call>|<function=[^>]*>|<parameter=[^>]*>/);
+  if (orphanOpener >= 0) {
+    stripped = stripped.slice(0, orphanOpener);
+  }
+  return stripped.trim();
 }
 
 function summarizeMailBody(text: string, maxLength = 220): string {

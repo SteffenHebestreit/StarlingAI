@@ -440,9 +440,12 @@ describe("H1.2: architect-spawned ephemeral agents always run in-process", () =>
       workspacePath: ws,
     });
 
-    // runSubAgent is what create_ephemeral_agent uses (not runSubAgentWithStats)
-    const { runSubAgent } = await import("../agent/sub-agent.js");
-    const runSubAgentMock = vi.mocked(runSubAgent);
+    // create_ephemeral_agent now uses runSubAgentWithStats so it can apply
+    // the narrative-only deliverable-miss guard (regression from session
+    // 31612733, 2026-05-28 — model emitted an unclosed <tool_call> block as
+    // text and the old plain-string runSubAgent path reported success).
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const runSubAgentMock = vi.mocked(runSubAgentWithStats);
     expect(runSubAgentMock).toHaveBeenCalled();
 
     const callArgs = runSubAgentMock.mock.calls.find(
