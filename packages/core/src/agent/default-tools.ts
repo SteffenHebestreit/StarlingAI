@@ -14,6 +14,10 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // when skillLibrary.enabled is false.
   "record_skill",
   "skill_manage",
+  // First-class plan checkpoint: on a complex turn the orchestrator records a
+  // short structured plan (objective, reuse-or-delegate steps, acceptance
+  // criteria) that QA checks against and the operator dock can surface/approve.
+  "record_plan",
   // Just-in-time planning context: one read-only call that aggregates the user
   // model, working-memory facts, long-term memory, recent sessions, and skills —
   // so the planner can hydrate context before delegating instead of the prompt

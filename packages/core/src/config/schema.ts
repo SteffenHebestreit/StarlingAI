@@ -1260,6 +1260,11 @@ export const OrchestrationSchema = z.object({
    *  with its own tools and synthesize. Bounds the delegation tree so a complex
    *  task can't nest into a runaway cascade. Built-in default: 3. */
   maxDelegationDepth: z.number().int().min(1).max(8).default(3),
+  /** When true, the orchestrator is nudged to record a short structured plan
+   *  (record_plan) before fanning out on a complex/multi-agent turn — a soft
+   *  checkpoint that QA checks against and the operator dock can surface for
+   *  high-stakes approval. Trivial turns still answer directly. Default: true. */
+  planFirst: z.boolean().default(true),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
    *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
