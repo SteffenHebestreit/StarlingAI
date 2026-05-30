@@ -1,0 +1,63 @@
+# StarlingAI — local-model overlay (Ollama).
+#
+# Layered on top of docker-compose.yml when the setup wizard's "local model"
+# backend is chosen, so the swarm gets a working model with no API key and no
+# external model server:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+#
+# The launchers add this file automatically when .env has
+# SAI_MODEL_BACKEND=ollama. The gateway is already pointed at
+# http://ollama:11434/v1 (the wizard sets SAI_LMSTUDIO_URL), and the served
+# model id is the pulled tag (SAI_OLLAMA_MODEL, e.g. qwen2.5:7b).
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    # Sits on the public network so it can pull the model from the registry on
+    # first start; the gateway shares this network and reaches it as `ollama`.
+    networks:
+      - starlingai-public
+    volumes:
+      - gc-ollama-models:/root/.ollama
+    environment:
+      - SAI_OLLAMA_MODEL=${SAI_OLLAMA_MODEL:-qwen2.5:7b}
+    # Start the server, wait for it to answer, pull the configured model once,
+    # then hand the foreground back to the server process.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        pid=$$!
+        echo "waiting for ollama to come up…"
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        echo "pulling ${SAI_OLLAMA_MODEL:-qwen2.5:7b} (first run only)…"
+        ollama pull "${SAI_OLLAMA_MODEL:-qwen2.5:7b}" || echo "pull failed — retry with: docker compose exec ollama ollama pull ${SAI_OLLAMA_MODEL:-qwen2.5:7b}"
+        wait $$pid
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    # ── GPU acceleration (optional) ──────────────────────────────────────────
+    # Ollama runs on CPU by default, which works everywhere. If you have an
+    # NVIDIA GPU with the container toolkit installed, uncomment to use it:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # The gateway waits for Ollama to be reachable before booting so the first
+  # agent turn doesn't race the model server. (depends_on merges with the base.)
+  gateway:
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  gc-ollama-models:

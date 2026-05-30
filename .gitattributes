@@ -1,0 +1,7 @@
+# Keep cross-platform launchers and shell scripts as LF so they run on
+# macOS/Linux (a CRLF shebang line breaks them: "bad interpreter").
+*.sh        text eol=lf
+*.command   text eol=lf
+*.mjs       text eol=lf
+# Windows batch files expect CRLF.
+*.bat       text eol=crlf

@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Project Setup — StarlingAI</title>
   <link rel="stylesheet" href="assets/style.css" />
+  <style>
+    .oneclick-table { border-collapse: collapse; width: 100%; margin: .6rem 0 .2rem; font-size: .9rem; }
+    .oneclick-table td { padding: .55rem .7rem; border-top: 1px solid var(--border, #2a2a33); vertical-align: top; }
+    .oneclick-table tr:first-child td { border-top: none; }
+    .oneclick-table td:first-child { white-space: nowrap; width: 1%; }
+    .oneclick-table code { white-space: nowrap; }
+  </style>
 </head>
 <body>
 <div class="sidebar-overlay"></div>
@@ -56,8 +63,82 @@
       <!-- Hero -->
       <div class="page-hero">
         <h1>🔧 Project Setup</h1>
-        <p class="tagline">From zero to a running StarlingAI in 6 steps. Takes about 20 minutes, including the updated local Qwen defaults.</p>
+        <p class="tagline">One prerequisite: Docker. Double-click the launcher and a guided wizard does the rest — no Node, no pnpm, no config files to edit.</p>
       </div>
+
+      <!-- ───── One-click start (primary path) ──────────────── -->
+      <section class="oneclick">
+        <div class="callout success">
+          <div class="callout-icon">⚡</div>
+          <div class="callout-body">
+            <strong>Easiest path — just Docker.</strong> Everything else (the setup wizard, the
+            config, the model wiring) runs inside Docker for you. If you can install one app and
+            double-click a file, you can run StarlingAI.
+          </div>
+        </div>
+
+        <h2 style="margin-top:1.4rem;">Three steps</h2>
+
+        <h3>1. Install Docker Desktop</h3>
+        <p>
+          Download and install <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener">Docker Desktop</a>
+          (Windows / macOS) or Docker Engine (Linux), then start it and wait until its whale icon goes green.
+          That is the <em>only</em> thing you install by hand.
+        </p>
+
+        <h3>2. Download StarlingAI</h3>
+        <p>Grab the project — either download the ZIP from your StarlingAI source and unzip it, or clone it:</p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>git clone &lt;your-starlingai-repo-url&gt; starlingai
+cd starlingai</code></pre>
+        </div>
+
+        <h3>3. Double-click the launcher for your system</h3>
+        <table class="oneclick-table">
+          <tr><td><strong>Windows</strong></td><td><code>start.bat</code></td><td>Double-click it in Explorer.</td></tr>
+          <tr><td><strong>macOS</strong></td><td><code>start.command</code></td><td>Double-click in Finder. First time: right-click → <em>Open</em>.</td></tr>
+          <tr><td><strong>Linux</strong></td><td><code>start.sh</code></td><td>Run <code>./start.sh</code> from a terminal.</td></tr>
+        </table>
+
+        <div class="callout">
+          <div class="callout-icon">🧭</div>
+          <div class="callout-body">
+            <strong>The wizard asks one real question — which model to use:</strong>
+            <ul style="margin:.4rem 0 0 1.1rem;">
+              <li><strong>An OpenAI-compatible endpoint you run</strong> — LM Studio, vLLM, llama.cpp, OpenAI… (paste the URL + model id)</li>
+              <li><strong>Anthropic (Claude)</strong> — paste your API key</li>
+              <li><strong>A local model via Ollama</strong> — no API key; the model is downloaded and run for you automatically</li>
+            </ul>
+            It then generates all secrets, wires the model, builds the images, starts every service, and
+            opens the dashboard already signed in. First run takes a few minutes while images build;
+            later starts are fast.
+          </div>
+        </div>
+
+        <p style="margin-top:1rem;">
+          That's it — the dashboard opens at <code>http://localhost:3001</code>. To stop everything later:
+        </p>
+        <div class="code-block">
+          <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
+          <pre><code>docker compose down</code></pre>
+        </div>
+
+        <div class="callout warning" style="margin-top:1.2rem;">
+          <div class="callout-icon">🛠️</div>
+          <div class="callout-body">
+            Want to run from source, develop, or use LM Studio on your host with the full Node toolchain?
+            The <strong>manual / developer setup</strong> below walks through that. Most people don't need it.
+          </div>
+        </div>
+      </section>
+
+      <hr style="border:none;border-top:1px solid var(--border, #2a2a33);margin:2.2rem 0 1.4rem;">
+      <h2 style="margin-bottom:.4rem;">Manual / developer setup <span style="font-weight:400;color:var(--muted);font-size:.85rem;">(optional)</span></h2>
+      <p style="color:var(--muted);margin-bottom:1rem;">
+        Prefer to install the toolchain and run StarlingAI from source? These six steps cover the full
+        developer path with Node, pnpm, and a host LM Studio.
+      </p>
 
       <!-- Progress bar -->
       <div class="progress-wrap">
