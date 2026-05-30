@@ -851,6 +851,78 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("blocks further delegation once a sub-agent is at the delegation depth ceiling", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-depth-ceiling-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        deep_coordinator: {
+          description: "Coordinator running deep in the tree",
+          systemPrompt: "Coordinate.",
+          tools: ["delegate_to_agent"],
+          maxIterations: 2,
+        },
+        leaf_specialist: {
+          description: "Leaf specialist that should never be reached",
+          systemPrompt: "LEAF_SPECIALIST_SYSTEM_PROMPT_MARKER",
+          tools: [],
+          maxIterations: 1,
+        },
+      },
+      orchestration: { maxDelegationDepth: 2 },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/sub-agent.js");
+
+    const allPrompts: string[] = [];
+    let callIndex = 0;
+    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
+      callIndex += 1;
+      allPrompts.push(messages.map((message) => message.content ?? "").join("\n"));
+      if (callIndex === 1) {
+        return Promise.resolve({
+          content: "",
+          tool_calls: [{
+            id: "deep-delegate-1",
+            name: "delegate_to_agent",
+            arguments: { agentName: "leaf_specialist", task: "Do the leaf work." },
+          }],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        });
+      }
+      return Promise.resolve({
+        content: "Answered directly without delegating further.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      // parentSessionId already carries one `sub:` hop, so this run is depth 2 —
+      // at the configured ceiling, so its delegation must be blocked.
+      const result = await runSubAgentWithStats({
+        agentName: "deep_coordinator",
+        task: "Coordinate the deep work.",
+        parentSessionId: "sub:root-depth:mission_coordinator:111",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Answered directly without delegating further");
+      // The leaf specialist was never delegated to (its system prompt never ran).
+      expect(allPrompts.join("\n")).not.toContain("LEAF_SPECIALIST_SYSTEM_PROMPT_MARKER");
+      // The coordinator got a depth-ceiling nudge back as the tool result.
+      expect(allPrompts.join("\n")).toContain("delegation levels deep (limit 2)");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("caps source-sensitive parallel delegation fan-out at three slices before dispatch", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-cap-"));
     const configPath = join(tempDir, "starlingai.json");

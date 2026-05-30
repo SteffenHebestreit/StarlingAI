@@ -346,6 +346,32 @@ function withDefaultSourceSensitiveFallbackAgents(args: Record<string, unknown>)
 // Configurable at runtime via orchestration.maxParallelSlices in the gateway settings.
 const DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 2;
 
+// Delegation tools that spawn one or more nested sub-agent turns (so they
+// deepen the tree). create_ephemeral_agent only defines an agent — the
+// subsequent delegate_to_agent is what actually nests — so it's excluded.
+const DELEGATION_TOOL_NAMES = new Set([
+  "delegate_to_agent",
+  "parallel_delegate",
+  "swarm_delegate",
+  "run_task_graph",
+]);
+function isDelegationToolName(name: string): boolean {
+  return DELEGATION_TOOL_NAMES.has(name);
+}
+
+// How many `sub:` hops deep this session is. The orchestrator is depth 0; its
+// direct sub-agents are depth 1; their sub-agents depth 2; and so on (mirrors
+// the `deriveRootSessionId` walker). Used to bound the delegation tree.
+function delegationDepthFromSessionId(sessionId: string): number {
+  let depth = 0;
+  let current = sessionId;
+  while (current.startsWith("sub:")) {
+    depth += 1;
+    current = current.slice("sub:".length);
+  }
+  return depth;
+}
+
 // True once an ancestor has already fanned this task into source-sensitive
 // cross-check slices (the task arrives pre-wrapped as "…DELEGATION SLICE i/N").
 // Both delegation builders only emit the SLICE label when they fanned out, so a
@@ -3671,6 +3697,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
 
+      // Delegation depth ceiling: a sub-agent at/over the configured nesting
+      // depth must not delegate further — it gathers evidence with its own
+      // tools and synthesizes. Bounds the tree so a complex task can't cascade
+      // into a runaway fan-out. Computed once per iteration (depth is constant
+      // for this run). The orchestrator (depth 0) runs in runtime.ts and is
+      // unaffected; this only caps nesting below it.
+      const currentDelegationDepth = delegationDepthFromSessionId(subSessionId);
+      const maxDelegationDepth = getConfig().orchestration?.maxDelegationDepth ?? 3;
+      const delegationDepthExceeded = currentDelegationDepth >= maxDelegationDepth;
+
       for (const [toolCallIndex, tc] of response.tool_calls.entries()) {
         if (signal?.aborted) break;
         if (requiredResearchFallbackRoute && enforceSubAgentRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, subSessionId, opts.agentName)) {
@@ -3723,6 +3759,30 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             content: blockedMessage,
             tool_call_id: tc.id,
           });
+          continue;
+        }
+
+        // Delegation depth ceiling — block further nesting at/over the limit.
+        if (delegationDepthExceeded && isDelegationToolName(tc.name)) {
+          const nudge = `You are already ${currentDelegationDepth} delegation levels deep (limit ${maxDelegationDepth}). `
+            + `Do NOT delegate again with '${tc.name}'. Gather what you need with your own tools `
+            + `(e.g. web_search, web_fetch, read_file) and write your answer now. If a step is genuinely `
+            + `blocked, report what you have and what's missing instead of delegating.`;
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: nudge,
+            skippedReason: "delegation_depth_ceiling",
+          });
+          logAudit(
+            "delegation_depth_ceiling_enforced",
+            { agentName: opts.agentName, tool: tc.name, depth: currentDelegationDepth, maxDepth: maxDelegationDepth },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+          toolResults.push({ role: "tool", content: nudge, tool_call_id: tc.id });
           continue;
         }
 
@@ -4026,10 +4086,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // delegation result content carries one "timed out after Nms" marker
         // per timed-out child. Count them so the post-tool guard below can
         // decide whether the swarm has cascade-failed.
-        const isDelegationTool = tc.name === "delegate_to_agent"
-          || tc.name === "parallel_delegate"
-          || tc.name === "swarm_delegate"
-          || tc.name === "run_task_graph";
+        const isDelegationTool = isDelegationToolName(tc.name);
         if (isDelegationTool) {
           const timeoutMatches = resultContent.match(/timed out after \d+ms/gi);
           if (timeoutMatches) {
