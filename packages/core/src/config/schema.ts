@@ -1254,6 +1254,12 @@ export const OrchestrationSchema = z.object({
    *  coordinator.  Set to 2 for a single local GPU, 3-4 for multi-GPU or
    *  API-based backends.  Built-in default: 2. */
   maxParallelSlices: z.number().int().min(1).max(8).default(2),
+  /** Maximum sub-agent delegation nesting depth. The orchestrator is depth 0;
+   *  its sub-agents depth 1; their sub-agents depth 2; and so on. A sub-agent
+   *  at or beyond this depth may not delegate further — it must gather evidence
+   *  with its own tools and synthesize. Bounds the delegation tree so a complex
+   *  task can't nest into a runaway cascade. Built-in default: 3. */
+  maxDelegationDepth: z.number().int().min(1).max(8).default(3),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
    *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
