@@ -478,6 +478,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  record_plan: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Record the orchestrator's structured plan for a complex turn",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   skill_manage: {
     tier: ToolTier.ONE_WRITE,
     description: "Create, patch, pin, archive, and maintain Skill Library procedures and support files",

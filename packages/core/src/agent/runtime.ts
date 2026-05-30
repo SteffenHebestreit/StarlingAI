@@ -3382,6 +3382,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     const contextRecallDigest = (iterationCount === 0 && leanContextInjection)
       ? "Durable memory, the user model, this session's working facts, recent related sessions, and learned skills are NOT preloaded into this prompt. Before any non-trivial planning or delegation, call recall_context(query) to pull what is relevant. Do not assume that context is already in view."
       : "";
+    // Plan-first checkpoint: on a genuinely multi-area / multi-step turn, nudge
+    // the orchestrator to record a short structured plan before fanning out so
+    // the risk-gated QA pass can check the answer against acceptance criteria and
+    // the operator dock can surface a high-stakes plan for approval. Soft and
+    // droppable; trivial and single-domain turns are unaffected.
+    let planGuidance = (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true) && looksMultiDomainResearch(userMessage))
+      ? "PLAN FIRST: this spans several steps/areas. Before fanning out, call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
+      : "";
     const collapsedHistory = session.getCollapsedHistory();
 
     const buildSystemMessages = (): LLMMessage[] => [
@@ -3391,6 +3399,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
+      ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
@@ -3431,6 +3440,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         skill: skillGuidance.length,
         userModel: userModelGuidance.length,
         memory: memoryGuidance.length,
+        plan: planGuidance.length,
         trajectory: activeTrajectoryInjectionContext?.length ?? 0,
         contextDigest: contextRecallDigest.length,
         leanContextInjection,
@@ -3483,6 +3493,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         if (lastPromptMetrics.systemPromptChars > promptBudget && flowGuidance) {
           droppedSections.push({ name: "flowGuidance", chars: flowGuidance.length });
           flowGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 4: plan-first nudge — high value (governs turn structure), so
+        // dropped only under the most extreme prompt pressure, after the above.
+        if (lastPromptMetrics.systemPromptChars > promptBudget && planGuidance) {
+          droppedSections.push({ name: "planGuidance", chars: planGuidance.length });
+          planGuidance = "";
           systemMessages = buildSystemMessages();
           lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
         }

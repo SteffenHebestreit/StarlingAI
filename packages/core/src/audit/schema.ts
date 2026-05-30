@@ -122,6 +122,7 @@ export type AuditEventType =
   | "delegation_bidding_filtered_research_incapable"
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_depth_ceiling_enforced"
+  | "flow_plan_recorded"
   | "unverified_source_sensitive_answer_caveated"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"

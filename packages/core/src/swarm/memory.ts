@@ -221,6 +221,55 @@ export async function readAllFacts(sessionId: string): Promise<Record<string, st
   return Object.fromEntries(_facts.get(sessionId) ?? new Map());
 }
 
+// ── Turn plan slot ───────────────────────────────────────────────────────────
+// A reserved per-session slot holding the orchestrator's structured plan for the
+// current turn (JSON). Kept OUT of the facts hash so the raw JSON never leaks
+// into human-facing shared-facts context dumps; sub-agents and QA read it
+// explicitly via readTurnPlan. Scoped to the root session id by the caller.
+const PLAN_VALUE_MAX = 8000;        // chars — a plan is short; cap prevents bloat
+const planKey = (sid: string) => `starlingai:mem:${sid}:turnplan`;
+const _turnPlans = new Map<string, string>();
+
+export async function writeTurnPlan(sessionId: string, planJson: string): Promise<void> {
+  const safeVal = planJson.slice(0, PLAN_VALUE_MAX);
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      await (redis as { set: (k: string, v: string) => Promise<void> }).set(planKey(sessionId), safeVal);
+      await (redis as { expire: (k: string, ttl: number) => Promise<void> }).expire(planKey(sessionId), SESSION_TTL_S);
+      return;
+    } catch (err) {
+      log.warn({ err }, "writeTurnPlan Redis failed — using in-process");
+    }
+  }
+  _turnPlans.set(sessionId, safeVal);
+}
+
+export async function readTurnPlan(sessionId: string): Promise<string | null> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      return await (redis as { get: (k: string) => Promise<string | null> }).get(planKey(sessionId));
+    } catch (err) {
+      log.warn({ err }, "readTurnPlan Redis failed — using in-process");
+    }
+  }
+  return _turnPlans.get(sessionId) ?? null;
+}
+
+export async function clearTurnPlan(sessionId: string): Promise<void> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      await (redis as { del: (k: string) => Promise<void> }).del(planKey(sessionId));
+      return;
+    } catch (err) {
+      log.warn({ err }, "clearTurnPlan Redis failed — using in-process");
+    }
+  }
+  _turnPlans.delete(sessionId);
+}
+
 export async function searchSharedFacts(
   sessionId: string,
   query: string,
