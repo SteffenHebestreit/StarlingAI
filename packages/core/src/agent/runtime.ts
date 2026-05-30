@@ -218,7 +218,34 @@ async function hasSharedFactsForFinalSynthesis(sessionId: string): Promise<boole
   }
 }
 
-async function getSharedFactsEvidenceForFinalSynthesis(
+// A shared-fact value that is a raw tool dump, not user-facing evidence: PDF
+// bytes / internals, or a bare url_inspect HTTP-probe line (status + headers,
+// no prose). These must never crowd out or stand in for curated findings — they
+// are exactly what produced the "answer = %PDF-1.7 … 200 OK application/pdf"
+// garbage when a coordinator's synthesis timed out and the backstop fired.
+export function isJunkEvidenceValue(value: string): boolean {
+  const v = value.trim();
+  if (!v) return true;
+  if (/%PDF-\d/i.test(v)) return true;
+  if (/\bendobj\b|\bendstream\b|\/FlateDecode\b|\/MediaBox\b/i.test(v)) return true;
+  if (/(?:\b0{6,}\b[^\n]*){3,}/.test(v)) return true; // PDF xref offset tables
+  // url_inspect probe: "200 OK final: <url> content-type: …" with no sentence.
+  if (/\b\d{3}\s+(?:OK|Not Found|Found|Moved|Forbidden)\b/i.test(v)
+    && /\bcontent-type:/i.test(v)
+    && !/[.!?]\s/.test(v)) return true;
+  return false;
+}
+
+// True when most non-empty lines of an evidence blob are raw-tool junk — used to
+// reject a long raw dump in favour of concise curated findings.
+function evidenceIsMostlyJunk(evidence: string): boolean {
+  const lines = evidence.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+  const junk = lines.filter((l) => isJunkEvidenceValue(l)).length;
+  return junk / lines.length >= 0.5;
+}
+
+export async function getSharedFactsEvidenceForFinalSynthesis(
   sessionId: string,
   maxChars = 4_000,
 ): Promise<{ evidence: string; itemCount: number } | null> {
@@ -226,7 +253,18 @@ async function getSharedFactsEvidenceForFinalSynthesis(
     const facts = await readAllFacts(sessionId);
     const entries = Object.entries(facts)
       .filter(([, value]) => value.trim().length > 0)
-      .sort(([left], [right]) => left.localeCompare(right));
+      // Raw tool dumps (PDF bytes, bare HTTP probes) are not user-facing evidence
+      // and would otherwise fill the budget ahead of curated findings.
+      .filter(([, value]) => !isJunkEvidenceValue(value))
+      // Curated share_finding entries (claims/specs, e.g. im73a135v01_verified_specs)
+      // first; auto_<agent>_<tool>_<hash> raw shares last. The old plain
+      // alphabetical sort let auto_* junk crowd out the verified findings.
+      .sort(([left], [right]) => {
+        const lj = left.startsWith("auto_") ? 1 : 0;
+        const rj = right.startsWith("auto_") ? 1 : 0;
+        if (lj !== rj) return lj - rj;
+        return left.localeCompare(right);
+      });
     if (entries.length === 0) return null;
 
     const lines: string[] = [];
@@ -400,11 +438,14 @@ function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
       return line;
     })
     .filter((line) => !looksLikeOrchestrationOnlyEvidence(line))
+    // Drop raw PDF bytes / bare HTTP-probe lines — never show binary or
+    // header-only junk to the user as "evidence".
+    .filter((line) => !isJunkEvidenceValue(line))
     .filter((line) => line.length > 0);
   return lines.join("\n").trim() || "In diesem Lauf wurde keine verwertbare fachliche Evidenz erzeugt.";
 }
 
-function formatSourceSensitiveEvidenceBackstop(evidence: string): string {
+export function formatSourceSensitiveEvidenceBackstop(evidence: string): string {
   const compactEvidence = compactSourceSensitiveEvidenceForDisplay(evidence);
   return [
     "Die bisher belastbare Evidenz aus diesem Lauf:",
@@ -484,13 +525,19 @@ function looksLikeWeakRecoveryEvidence(evidence: string): boolean {
   return false;
 }
 
-function chooseBetterRecoveryEvidence(
+export function chooseBetterRecoveryEvidence(
   delegateEvidence: { evidence: string; itemCount: number } | null,
   sharedFactsEvidence: { evidence: string; itemCount: number } | null,
   options?: { preferHigherScore?: boolean },
 ): { evidence: string; itemCount: number } | null {
   if (!delegateEvidence) return sharedFactsEvidence;
   if (looksLikeWeakRecoveryEvidence(delegateEvidence.evidence)) {
+    return sharedFactsEvidence;
+  }
+  // A delegate "evidence" blob that is mostly raw tool junk (PDF bytes, HTTP
+  // probes) must not win on length over concise curated findings — that is what
+  // shipped %PDF garbage instead of the verified specs the swarm had gathered.
+  if (sharedFactsEvidence && evidenceIsMostlyJunk(delegateEvidence.evidence)) {
     return sharedFactsEvidence;
   }
   if (!sharedFactsEvidence) return delegateEvidence;
