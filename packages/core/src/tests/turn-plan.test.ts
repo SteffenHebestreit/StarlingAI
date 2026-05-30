@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   normalizeTurnPlan,
   countParallelWidth,
+  classifyTurnRisk,
   persistTurnPlan,
   loadTurnPlan,
   clearTurnPlanForSession,
@@ -33,8 +34,8 @@ describe("turn plan — normalization", () => {
     expect(plan.steps).toHaveLength(3);
     expect(plan.steps[0]).toMatchObject({ id: "s1", kind: "reuse" });
     expect(plan.steps[1]).toMatchObject({ kind: "delegate", agent: "researcher", parallelGroup: 1 });
-    expect(plan.steps[2].kind).toBe("delegate"); // omitted kind defaults to delegate
-    expect(plan.steps[2].id).toBe("s3");          // auto-assigned id
+    expect(plan.steps[2]!.kind).toBe("delegate"); // omitted kind defaults to delegate
+    expect(plan.steps[2]!.id).toBe("s3");          // auto-assigned id
     expect(plan.acceptanceCriteria).toEqual(["names a winner", "cites sources"]);
     expect(plan.riskTier).toBe("high");           // case-normalized
     expect(plan.wide).toBe(false);                // only 2 in the parallel group
@@ -62,6 +63,20 @@ describe("turn plan — normalization", () => {
   });
 });
 
+describe("turn plan — risk classification", () => {
+  it("is high when the orchestrator declared the plan high-risk", () => {
+    expect(classifyTurnRisk({ planRiskTier: "high" })).toBe("high");
+  });
+  it("is high for sourced factual claims and approval-gated actions", () => {
+    expect(classifyTurnRisk({ sourceSensitive: true })).toBe("high");
+    expect(classifyTurnRisk({ invokedApprovalGatedTool: true })).toBe("high");
+  });
+  it("is low for plain chat / low-stakes single-domain work", () => {
+    expect(classifyTurnRisk({})).toBe("low");
+    expect(classifyTurnRisk({ planRiskTier: "low", sourceSensitive: false, invokedApprovalGatedTool: false })).toBe("low");
+  });
+});
+
 describe("turn plan — persistence (root-session scoped)", () => {
   afterEach(async () => {
     await clearTurnPlanForSession("plan-root");
@@ -85,7 +100,7 @@ describe("turn plan — persistence (root-session scoped)", () => {
     // …and so does a sub-agent two hops deep (same root bucket).
     const fromSub = await loadTurnPlan("sub:sub:plan-root:mission_coordinator:111:researcher:222");
     expect(fromSub?.objective).toBe("do the thing");
-    expect(fromSub?.steps[0].description).toBe("step one");
+    expect(fromSub?.steps[0]?.description).toBe("step one");
   });
 
   it("returns null when no plan was recorded", async () => {

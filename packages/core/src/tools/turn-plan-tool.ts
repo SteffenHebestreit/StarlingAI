@@ -10,7 +10,8 @@
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { normalizeTurnPlan, persistTurnPlan, countParallelWidth } from "../agent/turn-plan.js";
+import { getConfig } from "../config/loader.js";
+import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
 
 const log = childLogger("tool:record_plan");
 
@@ -67,6 +68,13 @@ registerTool({
     }, { sessionId: ctx.sessionId, severity: "info" });
     log.info({ steps: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide }, "Turn plan recorded");
 
+    // High-stakes / wide plan-approval pause (Phase 3c). Off by default; when on,
+    // a high-risk or wide plan must be approved in the operator dock BEFORE the
+    // orchestrator fans out. Degrades safely: a timeout or a missing channel
+    // returns control without dead-ending or auto-executing the risky plan.
+    const approvalResult = await maybeRequestPlanApproval(plan, ctx, width);
+    if (approvalResult) return approvalResult;
+
     return {
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
@@ -75,3 +83,55 @@ registerTool({
     };
   },
 });
+
+/**
+ * Returns a ToolResult to short-circuit the tool when the plan was not approved
+ * (denied / timed out / channel missing-but-required-to-pause), or null to let
+ * the orchestrator proceed (approved, or approval not required).
+ */
+async function maybeRequestPlanApproval(plan: TurnPlan, ctx: ToolContext, width: number): Promise<ToolResult | null> {
+  const planApproval = getConfig().orchestration?.planApproval ?? false;
+  if (!planApproval || (plan.riskTier !== "high" && !plan.wide)) return null;
+
+  // No approval channel (e.g. autonomous scene) — proceed rather than block.
+  if (!ctx.approvalCallback) return null;
+
+  logAudit("plan_approval_requested", {
+    agentName: ctx.currentAgentName ?? "main",
+    riskTier: plan.riskTier,
+    wide: plan.wide,
+    parallelWidth: width,
+    steps: plan.steps.length,
+  }, { sessionId: ctx.sessionId, severity: "warn" });
+
+  let approved = false;
+  try {
+    approved = await ctx.approvalCallback("record_plan", {
+      summary: "Approve this plan before the swarm executes it?",
+      riskTier: plan.riskTier,
+      wide: plan.wide,
+      plan: renderTurnPlan(plan),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const timedOut = /timed out/i.test(message);
+    logAudit("plan_approval_resolved", { outcome: timedOut ? "timeout" : "denied" }, { sessionId: ctx.sessionId, severity: "warn" });
+    return {
+      success: true,
+      output: timedOut
+        ? "Plan approval timed out. I have NOT executed this high-stakes plan. Tell me to proceed as-is, or what to change, and I will continue."
+        : "The operator did not approve this plan, so I have NOT executed it. Revise it to address their concern, or ask the user what to change before proceeding.",
+      metadata: { approved: false, timedOut },
+    };
+  }
+
+  logAudit("plan_approval_resolved", { outcome: approved ? "approved" : "denied" }, { sessionId: ctx.sessionId, severity: approved ? "info" : "warn" });
+  if (!approved) {
+    return {
+      success: true,
+      output: "The operator did not approve this plan, so I have NOT executed it. Revise it to address their concern, or ask the user what to change before proceeding.",
+      metadata: { approved: false },
+    };
+  }
+  return null; // approved → proceed
+}

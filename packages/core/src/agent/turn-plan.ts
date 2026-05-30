@@ -144,6 +144,28 @@ export async function clearTurnPlanForSession(sessionId: string): Promise<void> 
   await clearTurnPlan(rootSessionId(sessionId));
 }
 
+export interface TurnRiskSignals {
+  /** Risk tier the orchestrator declared in its plan, if any. */
+  planRiskTier?: TurnRiskTier;
+  /** The turn makes sourced factual claims (dynamic guidance: source-sensitive). */
+  sourceSensitive?: boolean;
+  /** The turn invoked at least one approval-gated tool (external/destructive/credential). */
+  invokedApprovalGatedTool?: boolean;
+}
+
+/**
+ * Risk-proportional gate input. A turn is high-stakes when it makes sourced
+ * factual claims, takes an approval-gated (external/destructive/credential)
+ * action, or the orchestrator itself flagged the plan high-risk. Everything else
+ * (chat, low-stakes single-domain work) is low — and skips the QA pass entirely.
+ */
+export function classifyTurnRisk(signals: TurnRiskSignals): TurnRiskTier {
+  if (signals.planRiskTier === "high") return "high";
+  if (signals.sourceSensitive === true) return "high";
+  if (signals.invokedApprovalGatedTool === true) return "high";
+  return "low";
+}
+
 /** Compact human-readable rendering of a plan (for QA prompts / context). */
 export function renderTurnPlan(plan: TurnPlan): string {
   const lines = [`Objective: ${plan.objective}`];
