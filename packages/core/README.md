@@ -9,7 +9,6 @@ The core runtime of StarlingAI — the agent swarm gateway, the tool registry, t
 | Entry | Purpose | Script |
 |---|---|---|
 | `src/index.ts` | Gateway, swarm bus, runtime, channels, tools | `pnpm dev` · `pnpm start` |
-| `src/computer-node-main.ts` | Windows host agent for legacy `remote_node` computer-use | `pnpm dev:computer-node` |
 | `src/computer-remote-main.ts` | Sidecar for `remote_vnc`/`remote_rdp`/`remote_ssh` | `pnpm dev:computer-remote` |
 | `src/scene-worker-main.ts` | Out-of-process scene job worker (drains the shared job queue) | `pnpm dev:scene-worker` |
 

@@ -43,7 +43,6 @@ pnpm sai start        # build config, build images, start core services, print l
 | `--fresh` | Wipe all volumes + rebuild + start (clean slate) |
 | `--pentest` | Also start the Kali Linux pentest service |
 | `--computer-desktop` | Also start the bundled VNC desktop for computer-use workflows |
-| `--strix-halo` | Apply the Strix Halo ROCm compose overrides |
 | `--all` | Start all remaining optional services |
 
 Stopping the stack:
@@ -155,34 +154,7 @@ You can also point at the bundled ephemeral desktop with a named VNC node:
 
 Launch that bundled desktop container with `pnpm sai start --computer-desktop`.
 
-### Legacy Windows node host
-
-For direct control of an interactive Windows desktop on the target machine itself, the legacy `remote_node` adapter is still available. Keep it only for cases where raw host-desktop capture and input injection are required; prefer `remote_vnc`, `remote_rdp`, or `remote_ssh` for new setups.
-
-Gateway-side configuration:
-
-```jsonc
-"computerUse": {
-	"enabled": true,
-	"adapters": {
-		"remote_node": {
-			"baseUrl": "http://10.10.0.2:8877",
-			"authToken": "$SAI_COMPUTER_NODE_TOKEN",
-			"timeoutMs": 15000,
-			"label": "Windows workstation"
-		}
-	}
-}
-```
-
-On the target Windows machine, run the node host as a real Windows process (it needs direct access to the interactive desktop for screenshots, input injection, clipboard access, and window focus):
-
-```bat
-start-computer-node.bat
-stop-computer-node.bat
-```
-
-Both forward to `scripts/computer-node-host.ps1`. Set `SAI_COMPUTER_NODE_TOKEN` to the shared secret before starting.
+For controlling an external host, the `computer_use_agent` connects through the `computer-remote` service to a host on its access list (`remote_vnc`, `remote_rdp`, or `remote_ssh` adapters) — add the host's URL/credentials under `computerUse.adapters` in config.
 
 ## Scenes: Missions for the Swarm
 

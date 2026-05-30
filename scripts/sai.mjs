@@ -74,7 +74,6 @@ async function cmdStart() {
       "no-cache":        { type: "boolean", default: false },
       fresh:             { type: "boolean", default: false },
       pentest:           { type: "boolean", default: false },
-      "strix-halo":     { type: "boolean", default: false },
       "computer-desktop":{ type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
@@ -85,7 +84,6 @@ async function cmdStart() {
   const noCache     = values["no-cache"] || values.fresh;
   const wipeVolumes = values.fresh;
   const pentest     = values.pentest || values.all;
-  const strixHalo   = values["strix-halo"];
   const desktop     = values["computer-desktop"] || values.all;
 
   hdr("StarlingAI — Starting up");
@@ -124,11 +122,6 @@ async function cmdStart() {
 
   // Compose file stack
   const composeFiles = ["-f", "docker-compose.yml"];
-  if (strixHalo && existsSync("docker-compose.strix-halo.yml")) {
-    composeFiles.push("-f", "docker-compose.strix-halo.yml");
-  } else if (strixHalo) {
-    warn("docker-compose.strix-halo.yml not found; continuing without Strix Halo overrides.");
-  }
 
   const profileArgs = [];
   if (pentest) profileArgs.push("--profile", "pentest");
@@ -208,17 +201,11 @@ async function cmdStop() {
     args: restArgs,
     options: {
       volumes: { type: "boolean", default: false },
-      "strix-halo": { type: "boolean", default: false },
     },
     strict: false,
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  if (values["strix-halo"] && existsSync("docker-compose.strix-halo.yml")) {
-    composeFiles.push("-f", "docker-compose.strix-halo.yml");
-  } else if (values["strix-halo"]) {
-    warn("docker-compose.strix-halo.yml not found; continuing without Strix Halo overrides.");
-  }
   const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop"];
 
   hdr("Stopping StarlingAI...");
@@ -359,10 +346,9 @@ ${BOLD}Commands:${RESET}
     --no-cache                         Rebuild without Docker cache
     --fresh                            Wipe volumes + rebuild (clean slate)
     --pentest                          Include Kali pentest service
-    --strix-halo                       Include Strix Halo ROCm compose overrides
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
-  stop  [--volumes] [--strix-halo]   Stop services (--volumes wipes data)
+  stop  [--volumes]                  Stop services (--volumes wipes data)
   wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
                                      incl. pgvector, QuestDB, MemGraph, audit log)
                                      while containers keep running; config kept

@@ -10,12 +10,13 @@ const allowedFiles = new Set([
   ".dockerignore",
   ".env",
   ".env.example",
+  ".gitattributes",
   ".gitignore",
   ".mcp.json",
   "CONTRIBUTING.md",
   "docker-compose.computer.yml",
   "docker-compose.model-servers.yml",
-  "docker-compose.strix-halo.yml",
+  "docker-compose.ollama.yml",
   "docker-compose.yml",
   "LICENSE",
   "package.json",
@@ -28,10 +29,10 @@ const allowedFiles = new Set([
   "scene-eval.jsonc",
   "starlingai.example.json",
   "starlingai.json",
-  "start-computer-node.bat",
   "start.bat",
+  "start.command",
+  "start.ps1",
   "start.sh",
-  "stop-computer-node.bat",
 ]);
 
 const allowedDirectories = new Set([
