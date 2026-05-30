@@ -346,12 +346,28 @@ function withDefaultSourceSensitiveFallbackAgents(args: Record<string, unknown>)
 // Configurable at runtime via orchestration.maxParallelSlices in the gateway settings.
 const DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES = 2;
 
+// True once an ancestor has already fanned this task into source-sensitive
+// cross-check slices (the task arrives pre-wrapped as "…DELEGATION SLICE i/N").
+// Both delegation builders only emit the SLICE label when they fanned out, so a
+// single canonical hand-off ("…DELEGATION:" with no SLICE) is not treated as a
+// prior fan-out.
+function wasAlreadySlicedUpstream(parentTask: string): boolean {
+  return parentTask.includes("SOURCE-SENSITIVE DELEGATION SLICE");
+}
+
 function enforceSourceSensitivePreEvidenceDelegation(
   toolCall: { name: string; arguments: Record<string, unknown> },
   parentTask: string,
   subSessionId: string,
   agentName: string,
 ): void {
+  // Pre-evidence source-sensitive enforcement rewrites every parallel slice to
+  // the SAME canonical parent task, so a SECOND fan-out only produces identical
+  // copies. The first layer to fan out (orchestrator or a single coordinator)
+  // keeps its configured cross-check slices; if THIS task already arrived sliced
+  // from upstream, re-slicing here just compounds the tree 2→4→8 and blows the
+  // turn budget — so collapse to a single canonical delegation instead.
+  const isNested = wasAlreadySlicedUpstream(parentTask);
   const originalArgs = toolCall.arguments ?? {};
   let nextArgs: Record<string, unknown> | null = null;
 
@@ -370,7 +386,10 @@ function enforceSourceSensitivePreEvidenceDelegation(
       ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
       : [];
     if (rawTasks.length > 0) {
-      const cappedTasks = rawTasks.slice(0, getConfig().orchestration?.maxParallelSlices ?? DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
+      const sliceCap = isNested
+        ? 1
+        : (getConfig().orchestration?.maxParallelSlices ?? DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
+      const cappedTasks = rawTasks.slice(0, sliceCap);
       if (rawTasks.length > cappedTasks.length) {
         logAudit(
           "sub_agent_tool_call",
@@ -378,11 +397,11 @@ function enforceSourceSensitivePreEvidenceDelegation(
             agentName,
             tool: "parallel_delegate",
             phase: "recovered",
-            reason: "source_sensitive_parallel_slice_cap",
+            reason: isNested ? "source_sensitive_nested_parallel_collapsed" : "source_sensitive_parallel_slice_cap",
             originalTaskCount: rawTasks.length,
             cappedTaskCount: cappedTasks.length,
           },
-          { sessionId: subSessionId, severity: "info" },
+          { sessionId: subSessionId, severity: isNested ? "warn" : "info" },
         );
       }
       nextArgs = {
@@ -392,7 +411,11 @@ function enforceSourceSensitivePreEvidenceDelegation(
           const focus = deriveSourceSensitiveDelegationFocus(originalTask, parentTask);
           const nextTask = withDefaultSourceSensitiveFallbackAgents({
             ...taskSpec,
-            task: buildCanonicalSourceSensitiveDelegationTask(parentTask, `SLICE ${index + 1}/${cappedTasks.length}`, focus),
+            task: buildCanonicalSourceSensitiveDelegationTask(
+              parentTask,
+              cappedTasks.length > 1 ? `SLICE ${index + 1}/${cappedTasks.length}` : undefined,
+              focus,
+            ),
           });
           delete nextTask["context"];
           return nextTask;
