@@ -1632,6 +1632,10 @@ describe("sub-agent turn timeouts", () => {
     const stateDir = join(tempDir, ".starlingai");
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
+    // Clean (non-timed-out) but slow finishes under a generous budget: history
+    // shows the agent legitimately takes ~100s, so the adaptive budget should
+    // grow above the 60s default. (durationMs must stay below timeoutMs, else
+    // the run counts as timed-out and is excluded from the baseline.)
     const makeOutcome = (durationMs: number): OutcomeEntry => ({
       ts: new Date().toISOString(),
       agent: "adaptive_agent",
@@ -1640,7 +1644,7 @@ describe("sub-agent turn timeouts", () => {
       iterations: 1,
       totalTokens: 50,
       durationMs,
-      timeoutMs: 60_000,
+      timeoutMs: 200_000,
     });
     for (const durationMs of [90_000, 100_000, 110_000]) {
       appendFileSync(outcomesFile, JSON.stringify(makeOutcome(durationMs)) + "\n");

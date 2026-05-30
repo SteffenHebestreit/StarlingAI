@@ -78,8 +78,20 @@ export interface AdaptiveTimeoutRecommendation {
 const MIN_PROFILE_RUNS = 3;
 const MIN_TIMEOUT_SAMPLES = 3;
 const MIN_ADAPTIVE_TIMEOUT_MS = 15_000;
-const MAX_ADAPTIVE_TIMEOUT_MS = 1_800_000;
+// Ceiling for an adaptively-grown per-sub-agent timeout. Kept well under the
+// interactive orchestrator turn cap (gateway.turnTimeoutMs, 10 min) so a single
+// sub-agent run can never consume the whole turn — bounded deep work, room left
+// for the orchestrator's own synthesis. Was 30 min, which (together with the
+// feedback loop below) let coordinators grow 25-min timeouts.
+const MAX_ADAPTIVE_TIMEOUT_MS = 360_000;
 const TIMEOUT_HEADROOM_FACTOR = 1.5;
+// A run whose duration reached ~this fraction of its allotted timeout was almost
+// certainly killed by that timeout (the outcome log records durationMs ≈ the
+// timeout, sometimes slightly over due to the post-operation grace). Such runs
+// must NOT seed the baseline: feeding a timed-out duration back in ratchets the
+// next timeout upward toward the ceiling — a self-reinforcing loop that produced
+// 25-min coordinator timeouts.
+const TIMEOUT_HIT_FRACTION = 0.9;
 const PROMPT_OUTCOME_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const PROMPT_MIN_ADVERSE_OUTCOMES = 2;
 
@@ -107,8 +119,15 @@ export function computeAdaptiveSubAgentTimeoutMs(
   const outcomes = readRecentOutcomes(workspacePath, 50)
     .filter((entry) => entry.agent === agentName)
     .filter((entry) => (entry.outcome === "success" || entry.outcome === "partial") && typeof entry.durationMs === "number" && entry.durationMs > 0)
+    // Drop runs that ran to (or past) their own timeout — their duration is the
+    // allotted budget, not a real completion time, so including them would
+    // inflate the next budget toward the ceiling. Only clean finishes inform it.
+    .filter((entry) => !(typeof entry.timeoutMs === "number" && entry.timeoutMs > 0
+      && entry.durationMs! >= entry.timeoutMs * TIMEOUT_HIT_FRACTION))
     .slice(-10);
 
+  // Too few clean (non-timed-out) samples → fall back to the static default
+  // rather than grow a budget from a history of timeouts.
   if (outcomes.length < MIN_TIMEOUT_SAMPLES) return null;
 
   const durations = outcomes
@@ -116,7 +135,11 @@ export function computeAdaptiveSubAgentTimeoutMs(
     .sort((left, right) => left - right);
 
   const baselineMs = percentile(durations, 0.95);
-  const timeoutMs = clampTimeout(Math.max(fallbackTimeoutMs, Math.round(baselineMs * TIMEOUT_HEADROOM_FACTOR)));
+  // Cap the history-derived growth to [MIN, MAX], then floor at the agent's own
+  // default. The ceiling bounds how far HISTORY can push the budget up; it must
+  // never pull the budget BELOW a legitimately higher default (e.g. a
+  // coordinator's turn-cap-derived floor can exceed the adaptive ceiling).
+  const timeoutMs = Math.max(fallbackTimeoutMs, clampTimeout(Math.round(baselineMs * TIMEOUT_HEADROOM_FACTOR)));
 
   return {
     timeoutMs,
