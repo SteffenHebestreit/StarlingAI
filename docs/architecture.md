@@ -139,6 +139,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
 | **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + opt-in/opt-out container model), outcome tracking, audit trail, hot-reload config |
+| **Decision-flow controls** | 1 | Implemented | First-class turn plan (`record_plan`), `maxDelegationDepth` + nested-slice collapse bound the fan-out, risk-gated auto-verify QA, and optional plan-approval pause — all soft/flag-gated under `orchestration.*` (`agent/turn-plan.ts`) |
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
@@ -360,6 +361,16 @@ User message
     ▼
 [14] Response streamed to client via AG-UI SSE / WebSocket
 ```
+
+### Decision-flow controls
+
+A soft policy layer shapes *how* the loop runs without scripting it (all tunable under `orchestration.*`, defaults sensible):
+
+- **Answer-first.** Trivial turns are answered directly — no plan, no delegation, no QA pass.
+- **Plan checkpoint** (between [4] and [5]). On a multi-area turn the orchestrator records a first-class plan via `record_plan` (`agent/turn-plan.ts`): objective, steps tagged reuse / delegate / direct, acceptance criteria, stop conditions, and a risk tier. The plan is persisted in a reserved per-session slot so sub-agents and the QA pass read the same criteria, and it reinforces reusing a workflow before decomposing. Soft and droppable (`planFirst`).
+- **Bounded fan-out** (at [8]). `maxParallelSlices` caps a coordinator's parallel width, nested source-sensitive re-slicing is collapsed to avoid identical-copy duplication, and `maxDelegationDepth` stops a sub-agent at the nesting limit from delegating further — together these keep a complex task from cascading into a runaway tree.
+- **Risk-gated verification** (between [12] and [13]). High-stakes turns (sourced claims, approval-gated actions, or a plan flagged high-risk) get an automatic verify-and-repair pass against the plan's acceptance criteria; source-sensitive turns reuse the evidence backstop; low-stakes turns skip QA (`riskGatedQA`).
+- **Plan approval** (extends [3]). A high-risk or wide plan can pause for human approval in the operator dock before execution, reusing the existing approval rail (`planApproval`, off by default).
 
 ---
 

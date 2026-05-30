@@ -22,6 +22,8 @@
 
 ## Latest Main-Branch Highlights
 
+- **One-click Docker-only setup** — the only prerequisite is Docker. Double-click a launcher (`start.bat` on Windows, `start.command` on macOS, `./start.sh` on Linux) and a guided wizard runs inside Docker (no host Node/pnpm), picks your model backend, and brings the whole stack up.
+- **Sharper decision flow** — the orchestrator answers trivial turns directly, records a first-class plan for complex ones (`record_plan`), bounds delegation depth and width so a task can't cascade into a runaway fan-out, and runs a risk-gated verification pass before shipping high-stakes answers.
 - **Federated swarms** — instances delegate work to each other over HMAC-signed, peer-scoped tokens, while each side keeps full control of its own tool tiers and approval gates.
 - **Open interoperability** — StarlingAI serves an MCP server (HTTP + stdio) and a public A2A protocol (server + client), so external clients and agents can use and collaborate with the swarm.
 - **Procedural skill library** — agents author and refine reusable `SKILL.md` playbooks at runtime; `search_skills` / `record_skill` and a background distiller turn successful trajectories into discoverable procedures.
@@ -109,6 +111,22 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 
 ## Quick Start
 
+**The only prerequisite is [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine on Linux).** No Node, no pnpm — the guided setup runs inside Docker.
+
+1. Install Docker and start it (wait for the whale icon to go green).
+2. Download or clone StarlingAI, then **double-click the launcher for your system**:
+   - **Windows** — `start.bat`
+   - **macOS** — `start.command` (first time: right-click → *Open*)
+   - **Linux** — `./start.sh`
+
+The launcher runs a guided wizard (pick a model backend: an OpenAI-compatible endpoint you run, an Anthropic key, or a local model via Ollama that's pulled for you), then builds the images, starts every service, and opens the dashboard already signed in. First run takes a few minutes while images build; later starts are fast. Stop everything with `docker compose down`.
+
+Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup tutorials. The gateway listens on `http://localhost:8765`.
+
+### From source (developers)
+
+To run from source with the full Node toolchain (Node 22 + pnpm):
+
 ```bash
 git clone https://github.com/SteffenHebestreit/StarlingAI starlingai
 cd starlingai
@@ -118,8 +136,6 @@ pnpm sai start        # build config, build images, start services
 ```
 
 Repo-local launchers are available too: use `./sai ...` in Bash/WSL or `./sai ...` / `.\sai ...` from the repository root on Windows PowerShell.
-
-Open `http://localhost:3001` for the dashboard and `http://localhost:3002` for the interactive setup tutorials. The gateway listens on `http://localhost:8765`.
 
 ## Repository Layout
 
@@ -199,6 +215,20 @@ workspace/               # Agent-tunable — the swarm self-improves here
 **The agent cannot modify `config/`.** Within `workspace/`, only agent definitions and scene definitions are mutable by the config-assistant. `workspace/jobs/` is durable workspace data, but it is operator-managed rather than agent-writable.
 
 Run `pnpm sai config build` to compile both zones into `starlingai.json` (the artifact Docker mounts). See [config/README.md](config/README.md) and [workspace/README.md](workspace/README.md) for details.
+
+### Decision-flow controls (`orchestration.*`)
+
+The orchestrator's flow is tunable without code edits (all optional, sensible defaults):
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `maxParallelSlices` | `2` | Max parallel cross-check slices a coordinator may fan out (raise for multi-GPU / API backends). |
+| `maxDelegationDepth` | `3` | Max sub-agent nesting depth; deeper agents must use their own tools instead of delegating — bounds the tree. |
+| `planFirst` | `true` | Nudge the orchestrator to record a structured plan (`record_plan`) before fanning out on a complex turn. |
+| `riskGatedQA` | `true` | Auto-verify high-stakes answers (sourced claims, external actions) against the plan's acceptance criteria before shipping. |
+| `planApproval` | `false` | Pause a high-risk or wide plan for human approval in the operator dock before executing it. |
+
+Model wiring is environment-driven (the setup wizard writes these to `.env`): `SAI_DEFAULT_MODEL` pins the default agent model, `SAI_LMSTUDIO_URL` / `ANTHROPIC_API_KEY` select the provider, and `SAI_MODEL_BACKEND=ollama` (with `SAI_OLLAMA_MODEL`) enables the bundled `docker-compose.ollama.yml` local-model overlay.
 
 ---
 
