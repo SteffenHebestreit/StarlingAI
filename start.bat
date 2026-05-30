@@ -1,4 +1,5 @@
 @echo off
-REM Deprecated — use: pnpm sai start [flags]
-echo WARNING: start.bat is deprecated. Use: pnpm sai start %* >&2
-node scripts/sai.mjs start %*
+REM StarlingAI one-click launcher (Windows). Double-click this file.
+REM The only prerequisite is Docker Desktop — setup runs guided, inside Docker.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1"
+if errorlevel 1 pause

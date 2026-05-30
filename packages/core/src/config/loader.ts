@@ -350,6 +350,17 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const ant = (p["anthropic"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), anthropic: { ...ant, apiKey: env["ANTHROPIC_API_KEY"] } };
   }
+  if (env["SAI_DEFAULT_MODEL"]) {
+    // Lets the guided setup wizard pin the default agent model from .env alone
+    // (Docker-only first-run, where hand-editing config shards isn't an option).
+    const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
+    const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+    const model = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
+    raw["agents"] = {
+      ...(agents as object),
+      defaults: { ...(defaults as object), model: { ...(model as object), primary: env["SAI_DEFAULT_MODEL"] } },
+    };
+  }
   if (env["TELEGRAM_BOT_TOKEN"]) {
     const ch = (raw["channels"] as Record<string, unknown> | undefined) ?? {};
     const tg = (ch["telegram"] as Record<string, unknown> | undefined) ?? {};

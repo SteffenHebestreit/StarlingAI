@@ -15,6 +15,7 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_MUTABLE_CONFIG_PATH"];
     delete process.env["SAI_LMSTUDIO_URL"];
     delete process.env["SAI_LMSTUDIO_API_KEY"];
+    delete process.env["SAI_DEFAULT_MODEL"];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -218,6 +219,34 @@ describe("config loader mutable overlay", () => {
 
       expect(config.providers.lmstudio?.baseUrl).toBe("http://env-lmstudio:1234/v1");
       expect(config.providers.lmstudio?.apiKey).toBe("env-api-key");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("overrides the default agent model from SAI_DEFAULT_MODEL (Docker-only wizard wiring)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-model-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(baseConfigPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: "lmstudio/qwen/qwen3.6-35b-a3b", temperature: 0.4 },
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_DEFAULT_MODEL"] = "ollama/qwen2.5:7b";
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.agents.defaults.model.primary).toBe("ollama/qwen2.5:7b");
+      // Sibling fields under the same model block are preserved.
+      expect(config.agents.defaults.model.temperature).toBe(0.4);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

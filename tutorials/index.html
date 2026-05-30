@@ -57,7 +57,7 @@
         <div class="badge-row">
           <span class="tag tag-blue">current main</span>
           <span class="tag tag-green">Self-hosted</span>
-          <span class="tag tag-yellow">20 min setup</span>
+          <span class="tag tag-yellow">one-click setup</span>
         </div>
       </div>
 
@@ -71,7 +71,7 @@
         <a class="nav-card" href="setup.html">
           <div class="card-icon">🔧</div>
           <div class="card-title">Project Setup</div>
-          <div class="card-desc">Install prerequisites, configure secrets, start all services with Docker Compose.</div>
+          <div class="card-desc">Install Docker, double-click the launcher, pick a model in the guided wizard — it builds and starts everything for you.</div>
           <div class="card-arrow">Start here →</div>
         </a>
 
@@ -110,39 +110,17 @@
       <div class="section">
         <div class="section-title">⚡ What you'll need</div>
         <p style="color:var(--muted);font-size:.9rem;margin-bottom:1rem;">
-          Make sure you have the following before starting. Click each item once you've confirmed it's ready.
+          The one-click launcher needs just <strong>one</strong> thing installed. Everything else runs inside Docker for you.
         </p>
 
         <ul class="check-list">
-          <li data-check="nodejs">
-            <span class="check-icon"></span>
-            <div>
-              <strong>Node.js 22+</strong> —
-              <a href="https://nodejs.org" target="_blank" rel="noopener">nodejs.org</a>
-              &nbsp;<code>node --version</code> should show <code>v22.x.x</code> or higher
-            </div>
-          </li>
           <li data-check="docker">
             <span class="check-icon"></span>
             <div>
-              <strong>Docker Desktop</strong> —
+              <strong>Docker Desktop</strong> (the only prerequisite) —
               <a href="https://www.docker.com/products/docker-desktop" target="_blank" rel="noopener">docker.com</a>
-              &nbsp;with Compose v2 included
-            </div>
-          </li>
-          <li data-check="lmstudio">
-            <span class="check-icon"></span>
-            <div>
-              <strong>LM Studio</strong> —
-              <a href="https://lmstudio.ai" target="_blank" rel="noopener">lmstudio.ai</a>
-              &nbsp;for local model hosting (free)
-            </div>
-          </li>
-          <li data-check="pnpm">
-            <span class="check-icon"></span>
-            <div>
-              <strong>pnpm</strong> — fast Node package manager.
-              Install via <code>npm install -g pnpm</code>
+              &nbsp;with Compose v2 included. Then double-click <code>start.bat</code> (Windows),
+              <code>start.command</code> (macOS), or run <code>./start.sh</code> (Linux).
             </div>
           </li>
           <li data-check="ram">
@@ -151,13 +129,20 @@
               <strong>~16 GB RAM recommended</strong> — 8 GB minimum; more RAM = larger models possible
             </div>
           </li>
-          <li data-check="git">
+          <li data-check="model">
             <span class="check-icon"></span>
             <div>
-              <strong>Git</strong> — for cloning the repository
+              <strong>A model — your choice, picked in the wizard.</strong> Use an OpenAI-compatible endpoint you run
+              (<a href="https://lmstudio.ai" target="_blank" rel="noopener">LM Studio</a>, vLLM, llama.cpp…), an Anthropic API key,
+              or a local model via Ollama that the wizard downloads for you (no key, nothing to install yourself).
             </div>
           </li>
         </ul>
+
+        <p style="color:var(--muted);font-size:.85rem;margin-top:.9rem;">
+          Only if you want to develop from source: Node.js 22+, pnpm, and Git — see the
+          <a href="setup.html">manual / developer setup</a>.
+        </p>
       </div>
 
       <div class="divider"></div>
@@ -184,8 +169,8 @@
         </p>
         <p>
           Everything runs in Docker containers on your own machine. Your data never leaves your network.
-          LM Studio provides the local language model; no OpenAI API key required (though you can plug one in
-          if you prefer cloud models).
+          You choose the language model in the setup wizard: an OpenAI-compatible endpoint you run (LM Studio,
+          vLLM, llama.cpp…), an Anthropic key, or a local model via Ollama — no cloud key required unless you want one.
         </p>
 
         <div class="routing-diagram" style="margin-top:1.25rem;">
