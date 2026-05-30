@@ -17,6 +17,7 @@ import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import { longRunningGenerationManager } from "./long-running-generation.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
@@ -2910,6 +2911,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   const wardenAbort = new AbortController();
   const sessionId = opts.session.id;
   registerSessionAbortController(sessionId, wardenAbort);
+  // Fresh turn: clear any per-turn "operator stopped" latch so a stop in a
+  // previous turn never auto-stops this one's long-running generations.
+  longRunningGenerationManager.clearStopRequested(sessionId);
 
   // Merge caller signal + timeout signal + warden signal: any source can cancel the turn.
   const allSignals: AbortSignal[] = [];

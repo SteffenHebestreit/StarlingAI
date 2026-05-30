@@ -79,6 +79,7 @@ export type AuditEventType =
   | "long_running_generation_resolved"
   | "long_running_generation_timeout"
   | "long_running_generation_stopped"
+  | "long_running_generation_auto_stopped"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement

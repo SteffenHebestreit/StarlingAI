@@ -108,3 +108,58 @@ describe("longRunningGenerationManager", () => {
     expect(longRunningGenerationManager.resolveRequest("nope", "continue")).toBeNull();
   });
 });
+
+describe("longRunningGenerationManager — operator stop latches the turn", () => {
+  beforeEach(() => longRunningGenerationManager.resetForTests());
+  afterEach(() => longRunningGenerationManager.resetForTests());
+
+  // Same turn (root "turnA"): a coordinator and its researcher child.
+  const coord = "sub:turnA:mission_coordinator:1";
+  const child = "sub:sub:turnA:mission_coordinator:1:researcher:2";
+  const otherTurn = "sub:turnB:mission_coordinator:9";
+  const req = (runSessionId: string) => ({
+    agentName: "researcher", runSessionId, parentSessionId: "turnA",
+    reason: "still going", elapsedMs: DEFAULT_SOFT_THRESHOLD_MS + 1, completionTokens: 9000, iterations: 3,
+  });
+
+  it("auto-stops later runs in the same turn after one operator stop (no re-prompt)", async () => {
+    const first = longRunningGenerationManager.requestContinuation(req(coord));
+    longRunningGenerationManager.resolveRequest(longRunningGenerationManager.listPending()[0]!.id, "stop", "admin");
+    await expect(first).resolves.toBe("stop");
+    // A fresh sub-agent in the same turn must NOT raise a new operator prompt.
+    const second = await longRunningGenerationManager.requestContinuation(req(child));
+    expect(second).toBe("stop");
+    expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+    expect(longRunningGenerationManager.isStopRequested(child)).toBe(true);
+  });
+
+  it("resolves sibling pending prompts in the same turn when the operator stops one", async () => {
+    const a = longRunningGenerationManager.requestContinuation(req(coord));
+    const b = longRunningGenerationManager.requestContinuation(req(child));
+    expect(longRunningGenerationManager.listPending()).toHaveLength(2);
+    longRunningGenerationManager.resolveRequest(
+      longRunningGenerationManager.listPending().find((r) => r.runSessionId === coord)!.id, "stop", "admin");
+    await expect(a).resolves.toBe("stop");
+    await expect(b).resolves.toBe("stop"); // sibling auto-resolved
+    expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+  });
+
+  it("does not auto-stop a different turn", async () => {
+    const first = longRunningGenerationManager.requestContinuation(req(coord));
+    longRunningGenerationManager.resolveRequest(longRunningGenerationManager.listPending()[0]!.id, "stop", "admin");
+    await first;
+    // A run in a different root (turn) is unaffected and still prompts.
+    void longRunningGenerationManager.requestContinuation({ ...req(otherTurn), parentSessionId: "turnB" });
+    expect(longRunningGenerationManager.listPending()).toHaveLength(1);
+    expect(longRunningGenerationManager.isStopRequested(otherTurn)).toBe(false);
+  });
+
+  it("clearStopRequested re-enables prompting for the next turn", async () => {
+    const first = longRunningGenerationManager.requestContinuation(req(coord));
+    longRunningGenerationManager.resolveRequest(longRunningGenerationManager.listPending()[0]!.id, "stop", "admin");
+    await first;
+    longRunningGenerationManager.clearStopRequested("turnA");
+    void longRunningGenerationManager.requestContinuation(req(child));
+    expect(longRunningGenerationManager.listPending()).toHaveLength(1);
+  });
+});
