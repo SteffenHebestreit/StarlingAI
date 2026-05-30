@@ -5,7 +5,8 @@
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
-import { isToolAllowed } from "../guardrails/tool-tiers.js";
+import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
+import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -4328,6 +4329,48 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
         }, { sessionId: session.id, severity: "warn" });
+      }
+
+      // Risk-gated auto-verify QA gate: for high-stakes turns that recorded a
+      // plan with acceptance criteria, check the answer against those criteria
+      // and repair if it falls short. Source-sensitive turns were already
+      // anchored by the evidence backstop above, so they skip the redundant
+      // verify call. Low-stakes / chat turns skip QA entirely.
+      if (getConfig().orchestration?.riskGatedQA ?? true) {
+        const qaPlan = await loadTurnPlan(session.id);
+        const invokedApprovalGatedTool = [..._turnToolCallCounts.keys()].some(requiresApproval);
+        const risk = classifyTurnRisk({
+          planRiskTier: qaPlan?.riskTier,
+          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          invokedApprovalGatedTool,
+        });
+        if (risk === "high") {
+          if (initialDynamicGuidance?.sourceSensitive) {
+            logAudit("flow_verification_passed", { reason: "covered_by_source_sensitive_backstop" }, { sessionId: session.id, severity: "info" });
+          } else if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
+            const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
+              + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+              + "\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
+              + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
+            const verified = await forceSynthesis(session, provider, signal, verifyInstruction);
+            const candidate = verified ? sanitizeUserFacingAssistantResponse(verified, 0) : null;
+            // Guard against catastrophic truncation — a legitimate repair may
+            // shorten the answer (dropping unsupported claims), so allow down to
+            // half the length but never accept a stub.
+            if (candidate && candidate.trim().length >= Math.min(200, Math.floor(finalResponse.trim().length * 0.5))) {
+              const repaired = candidate.trim() !== finalResponse.trim();
+              finalResponse = candidate;
+              logAudit(repaired ? "flow_verification_repaired" : "flow_verification_passed",
+                { acceptanceCriteria: qaPlan.acceptanceCriteria.length, repaired },
+                { sessionId: session.id, severity: repaired ? "warn" : "info" });
+              if (repaired) guardrailEvents.push({ type: "guardrail_flagged", details: "risk_gated_qa_repaired" });
+            } else {
+              logAudit("flow_verification_passed", { reason: "verify_produced_no_better_candidate" }, { sessionId: session.id, severity: "info" });
+            }
+          } else {
+            logAudit("flow_high_stakes_unverified", { reason: qaPlan ? "no_acceptance_criteria" : "no_plan", invokedApprovalGatedTool }, { sessionId: session.id, severity: "info" });
+          }
+        }
       }
 
       if (!outputScan.safe && outputScan.redacted) {

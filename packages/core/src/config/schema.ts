@@ -1265,6 +1265,17 @@ export const OrchestrationSchema = z.object({
    *  checkpoint that QA checks against and the operator dock can surface for
    *  high-stakes approval. Trivial turns still answer directly. Default: true. */
   planFirst: z.boolean().default(true),
+  /** When true, high-stakes turns (sourced factual claims, approval-gated
+   *  actions, or a plan the orchestrator flagged high-risk) get an automatic
+   *  verification pass that checks the answer against the plan's acceptance
+   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip QA
+   *  entirely. Source-sensitive turns reuse the existing evidence backstop.
+   *  Default: true. */
+  riskGatedQA: z.boolean().default(true),
+  /** When true, a high-stakes or wide plan pauses for human approval in the
+   *  operator dock before the orchestrator executes it. Off by default until the
+   *  dock plan card is confirmed end-to-end. */
+  planApproval: z.boolean().default(false),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
    *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
