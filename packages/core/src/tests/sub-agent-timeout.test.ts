@@ -767,6 +767,90 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("collapses re-fan-out when the task already arrived sliced from upstream (no compounding tree)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-nested-"));
+    const configPath = join(tempDir, "starlingai.json");
+    // The coordinator's OWN task already carries an upstream cross-check slice
+    // label — i.e. an ancestor (orchestrator) already fanned this out. A second
+    // fan-out here would only spawn identical canonical copies and compound the
+    // tree 2→4→8, which is the runaway-latency failure mode.
+    const parentTask = "SOURCE-SENSITIVE DELEGATION SLICE 1/2:\n"
+      + "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        source_sensitive_coordinator: {
+          description: "Source-sensitive coordinator",
+          systemPrompt: "Coordinate source-sensitive research.",
+          tools: ["parallel_delegate"],
+          maxIterations: 2,
+        },
+        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
+      },
+      orchestration: { maxParallelSlices: 3 },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    await import("../tools/sub-agent.js");
+
+    const allPrompts: string[] = [];
+    let callIndex = 0;
+    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return Promise.resolve({
+          content: "",
+          tool_calls: [{
+            id: "parallel-nested-1",
+            name: "parallel_delegate",
+            arguments: {
+              tasks: [
+                { agentName: "researcher_a", task: "Verify vendor identity from current sources." },
+                { agentName: "researcher_b", task: "Find pricing and supplier data." },
+                { agentName: "researcher_c", task: "Prepare layout advice." },
+              ],
+            },
+          }],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        });
+      }
+      allPrompts.push(messages.map((message) => message.content ?? "").join("\n"));
+      return Promise.resolve({
+        content: "Observed evidence: source-backed placeholder finding.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "source_sensitive_coordinator",
+        task: parentTask,
+        parentSessionId: "parent-already-sliced",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Observed evidence");
+      // Collapsed to a single canonical child: exactly one dispatched child task
+      // carries the unlabelled header ("…DELEGATION:" — no SLICE), and no second
+      // or third re-fan-out slice was dispatched.
+      const collapsedChildPrompts = allPrompts.filter((p) => p.includes("SOURCE-SENSITIVE DELEGATION:"));
+      expect(collapsedChildPrompts).toHaveLength(1);
+      expect(allPrompts.join("\n")).not.toContain("SLICE 2/");
+      expect(allPrompts.join("\n")).not.toContain("SLICE 3/");
+      // The canonical request still reaches the single child.
+      expect(collapsedChildPrompts[0]).toContain("ZX-9000");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("caps source-sensitive parallel delegation fan-out at three slices before dispatch", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-cap-"));
     const configPath = join(tempDir, "starlingai.json");
