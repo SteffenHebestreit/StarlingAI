@@ -118,6 +118,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `agent_store_write` / `agent_store_delete` | Per-agent durable key-value store (Redis/Postgres backed) | None |
 | `research_note` / `research_notes_clear` | Research scratchpad note write/clear | None |
 | `share_finding` / `share_evidence` | Publish a finding or evidence record to the shared swarm fact ledger | None |
+| `record_plan` | Record the orchestrator's structured plan (objective, steps, acceptance criteria) for a complex turn | None |
 | `graph_upsert_entity` / `graph_relate` / `graph_delete_node` | Write to the MemGraph knowledge graph | None |
 | `memory_promote` / `memory_compact` | Promote ephemeral memory to durable; compact memory store | None |
 | `n8n_fetch_leads` | Fetch lead data from an n8n workflow | None |

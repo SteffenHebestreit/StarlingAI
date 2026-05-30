@@ -4,14 +4,26 @@ Get a general-purpose AI agent swarm running locally in minutes. StarlingAI orch
 
 ## Prerequisites
 
-- Node.js 22+
-- pnpm (`corepack enable` picks up the pinned version)
-- Docker Desktop
-- LM Studio running with at least one tool-capable model loaded
+- **[Docker Desktop](https://www.docker.com/products/docker-desktop/)** (Windows/macOS) or Docker Engine (Linux) — **the only prerequisite.**
+- A model — your choice, picked in the setup wizard: an OpenAI-compatible endpoint you run (LM Studio, vLLM, llama.cpp…), an Anthropic API key, or a local model via Ollama that the wizard downloads for you.
 
-In LM Studio, enable function calling for the models you plan to use. The default configuration assumes an OpenAI-compatible LM Studio endpoint at `http://host.docker.internal:1234/v1`. The swarm works with any tool-capable model — Qwen3, Llama, Mistral, or cloud providers like Anthropic as fallback.
+No Node, no pnpm, no config files to edit by hand — the guided setup runs inside Docker.
 
-## First Run
+## First Run (one-click)
+
+1. Install Docker and start it (wait for the whale icon to go green).
+2. Download or clone StarlingAI, then **double-click the launcher for your system**:
+   - **Windows** — `start.bat`
+   - **macOS** — `start.command` (first time: right-click → *Open*)
+   - **Linux** — `./start.sh`
+
+The launcher checks Docker, runs the guided wizard in a throwaway `node:22-alpine` container (generates secrets, wires your chosen model, bootstraps `starlingai.json`, mints a dashboard login token), then `docker compose up -d --build` and opens the dashboard already signed in. First run builds the images (a few minutes); later starts are fast. If you chose the local Ollama backend, the model is pulled automatically on first start.
+
+Stop everything later with `docker compose down`.
+
+### From source (developers)
+
+To run from source with the full Node toolchain (Node 22 + pnpm):
 
 ```bash
 pnpm install
@@ -19,9 +31,7 @@ pnpm sai setup        # check prerequisites, generate .env secrets (once)
 pnpm sai start        # build config, build images, start core services, print login token
 ```
 
-`pnpm sai start` compiles `config/` + `workspace/` into the generated `starlingai.json` artifact, builds images on first run, starts the stack, waits for health, and prints a dashboard login token. There is no file to copy by hand.
-
-Repo-local launchers are available too: use `./sai ...` in Bash/WSL, or `./sai ...` / `.\sai ...` from the repository root in Windows PowerShell. (`start.sh` / `start.bat` still work but are deprecated shims that forward to `sai start`.)
+`pnpm sai start` compiles `config/` + `workspace/` into the generated `starlingai.json` artifact, builds images on first run, starts the stack, waits for health, and prints a dashboard login token. Repo-local launchers are available too: use `./sai ...` in Bash/WSL, or `./sai ...` / `.\sai ...` from the repository root in Windows PowerShell.
 
 ## `sai start` flags
 
