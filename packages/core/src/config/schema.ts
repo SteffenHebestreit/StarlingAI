@@ -213,7 +213,14 @@ export const GatewaySchema = z.object({
   bindHost: z.enum(["loopback", "lan", "docker"]).default("loopback"),
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
-  turnTimeoutMs: z.number().int().min(30000).default(1800000), // 30 minutes
+  // Hard ceiling for an interactive orchestrator turn. On expiry the turn is
+  // aborted (propagated to the whole sub-agent subtree) and the partial/backstop
+  // answer is returned, so a stuck coordinator cascade can't churn for half an
+  // hour. 10 min is ~5x the orchestrator SLO (orchestratorTurnSloMs, 120s) —
+  // generous for genuine deep multi-agent research yet far below the old 30 min.
+  // Scenes/jobs are unaffected (they pass their own per-job turnTimeoutMs);
+  // operators with very heavy autonomous workflows can raise this.
+  turnTimeoutMs: z.number().int().min(30000).default(600000), // 10 minutes
   approvalTimeoutMs: z.number().int().min(60_000).max(3_600_000).default(300_000), // 5 minutes
   maxBodyBytes: z.number().int().min(1024).max(52_428_800).default(1_048_576), // 1 MB
   /** Publicly reachable base URL, used to construct approval callback URLs sent to external systems */

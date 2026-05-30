@@ -252,6 +252,25 @@ describe("config loader mutable overlay", () => {
     }
   });
 
+  it("defaults the interactive orchestrator turn ceiling to 10 minutes", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-turn-timeout-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({ gateway: { port: 8765 } }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      // A stuck coordinator cascade must not be able to churn for half an hour;
+      // the hard interactive ceiling is 10 min (was 30 min). Scenes/jobs set
+      // their own per-job timeout and are unaffected.
+      expect(configLoader.loadConfig().gateway.turnTimeoutMs).toBe(600000);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("writes runtime updates into runtime.overrides.json for directory configs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-directory-overlay-"));
     const configDir = join(tempDir, "starling_config");
