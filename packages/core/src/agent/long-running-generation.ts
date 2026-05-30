@@ -38,6 +38,21 @@ import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("agent:long-running");
 
+/** Strip `sub:` nesting hops to the root (turn) session id. Mirrors
+ *  deriveRootSessionId in sub-agent.ts so a stop is scoped to the whole turn. */
+function rootOf(sessionId: string): string {
+  let current = sessionId;
+  while (current.startsWith("sub:")) {
+    const inner = current.slice("sub:".length);
+    const lastColon = inner.lastIndexOf(":");
+    if (lastColon === -1) return inner;
+    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
+    if (secondLastColon === -1) return inner;
+    current = inner.slice(0, secondLastColon);
+  }
+  return current;
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type LongRunningRequestId = string;
@@ -99,6 +114,12 @@ class LongRunningGenerationManager extends EventEmitter {
   private _pending = new Map<LongRunningRequestId, PendingRequest>();
   /** Run sessions that the operator has already granted `unbounded` to. */
   private _unboundedRuns = new Set<string>();
+  /** Root (turn) sessions where the operator explicitly chose `stop`. Every
+   *  subsequent long-running prompt in the SAME turn auto-stops instead of
+   *  re-asking — otherwise a coordinator that re-delegates spawns fresh
+   *  sub-agents that prompt the operator again (the ask→stop→ask loop).
+   *  Cleared at the start of each turn via clearStopRequested(). */
+  private _stopRequestedRoots = new Set<string>();
 
   /**
    * Ask the operator whether to keep going. Resolves when the operator
@@ -126,6 +147,20 @@ class LongRunningGenerationManager extends EventEmitter {
     // threshold crossings on the same run are no-ops.
     if (this._unboundedRuns.has(opts.runSessionId)) {
       return Promise.resolve("unbounded");
+    }
+
+    // Short-circuit: the operator already chose `stop` for this turn — auto-stop
+    // every subsequent run in the same turn instead of re-prompting. This is what
+    // ends the ask→stop→re-delegate→ask loop when a coordinator keeps spawning
+    // fresh sub-agents after the operator has said to stop.
+    const root = rootOf(opts.runSessionId);
+    if (this._stopRequestedRoots.has(root)) {
+      logAudit("long_running_generation_auto_stopped", {
+        agentName: opts.agentName,
+        runSessionId: opts.runSessionId,
+        reason: "operator_stopped_turn",
+      }, { sessionId: opts.parentSessionId, severity: "info" });
+      return Promise.resolve("stop");
     }
 
     // Idempotent on (runSessionId): if a prior request is still pending
@@ -234,6 +269,28 @@ class LongRunningGenerationManager extends EventEmitter {
       this._unboundedRuns.add(request.runSessionId);
     }
 
+    // An explicit `stop` means the operator wants this turn to wind down — mark
+    // the turn so further sub-agents auto-stop, and resolve any sibling prompts
+    // already pending in the same turn so the operator isn't asked again.
+    if (outcome === "stop") {
+      const root = rootOf(request.runSessionId);
+      this._stopRequestedRoots.add(root);
+      for (const sibling of [...this._requests.values()]) {
+        if (sibling.id === requestId || sibling.state !== "pending") continue;
+        if (rootOf(sibling.runSessionId) !== root) continue;
+        const sp = this._pending.get(sibling.id);
+        sibling.state = "resolved";
+        sibling.resolvedAt = Date.now();
+        sibling.resolvedOutcome = "stop";
+        sibling.updatedAt = sibling.resolvedAt;
+        if (sp) {
+          clearTimeout(sp.timer);
+          this._pending.delete(sibling.id);
+          sp.resolve("stop");
+        }
+      }
+    }
+
     logAudit("long_running_generation_resolved", {
       requestId,
       agentName: request.agentName,
@@ -280,6 +337,18 @@ class LongRunningGenerationManager extends EventEmitter {
     return this._unboundedRuns.has(runSessionId);
   }
 
+  /** Clear the per-turn `stop` latch for a root session. Called at the start of
+   *  each orchestrator turn so an operator stop in one turn never auto-stops the
+   *  next. */
+  clearStopRequested(rootSessionId: string): void {
+    this._stopRequestedRoots.delete(rootSessionId);
+  }
+
+  /** Has the operator chosen `stop` for this turn already? */
+  isStopRequested(runSessionId: string): boolean {
+    return this._stopRequestedRoots.has(rootOf(runSessionId));
+  }
+
   getRequest(requestId: LongRunningRequestId): LongRunningRequest | undefined {
     return this._requests.get(requestId);
   }
@@ -297,6 +366,7 @@ class LongRunningGenerationManager extends EventEmitter {
     this._pending.clear();
     this._requests.clear();
     this._unboundedRuns.clear();
+    this._stopRequestedRoots.clear();
     this.removeAllListeners();
   }
 }
