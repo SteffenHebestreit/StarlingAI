@@ -50,3 +50,6 @@ workspace/runtime/runtime.overrides.json
 
 # Test artifacts
 packages/core/tmp/
+# Some tests write process.cwd()-relative paths; when vitest runs from
+# packages/core this lands in a doubled path. Nothing legitimate lives here.
+packages/core/packages/
