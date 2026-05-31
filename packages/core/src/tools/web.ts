@@ -3,7 +3,7 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
 import { resolve as dnsResolve } from "node:dns/promises";
-import { callPlaywrightTool } from "./multimodal.js";
+import { callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
 import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("tool:web");
@@ -279,6 +279,12 @@ registerTool({
         // HEAD failed (some servers reject it) — fall through to full request
       }
 
+      // PDF documents (datasheets, specs, papers) → extract text via the multimodal
+      // service rather than returning raw %PDF bytes (audit 97085c6b).
+      if (isPdfContentType(contentType)) {
+        return await fetchAndExtractPdf(url, maxLength, shareSuffix);
+      }
+
       const isJsonApi = /\bjson\b/i.test(contentType);
 
       // JSON / API responses → native fetch (no browser needed)
@@ -323,6 +329,11 @@ registerTool({
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
           let raw = await res.text();
+          // PDF that HEAD did not flag (no content-type, or PDF served as octet-stream):
+          // detect by content-type or the %PDF magic header and re-route to extraction.
+          if (isPdfContentType(ct) || raw.trimStart().startsWith("%PDF")) {
+            return await fetchAndExtractPdf(url, maxLength, shareSuffix);
+          }
           if (ct.includes("text/html")) raw = stripHtml(raw);
           if (raw.trim().length > 200) {
             nativeFetchText = raw.trim();
@@ -450,6 +461,58 @@ function snapshotToReadableText(snapshot: string, maxChars = 4_000): string {
     return stripped.slice(0, maxChars);
   }
   return extracted.slice(0, maxChars);
+}
+
+export function isPdfContentType(contentType: string): boolean {
+  return /\bapplication\/pdf\b/i.test(contentType);
+}
+
+function pdfFilenameFromUrl(url: string): string {
+  try {
+    const base = new URL(url).pathname.split("/").filter(Boolean).pop() ?? "";
+    if (/\.pdf$/i.test(base)) return base;
+    return `${base || "document"}.pdf`;
+  } catch {
+    return "document.pdf";
+  }
+}
+
+/**
+ * Fetch a PDF and return its EXTRACTED TEXT (via the multimodal document service),
+ * never the raw %PDF bytes. Audit 97085c6b: web_fetch returned raw bytes for the
+ * IM73A135V01 datasheet, so the researcher never learned the mic is analog and the
+ * synthesis invented a 4-channel I2S array. If extraction is unavailable, return a
+ * plain note (not bytes) so the agent does not fabricate the spec.
+ */
+async function fetchAndExtractPdf(url: string, maxLength: number, shareSuffix: string): Promise<ToolResult> {
+  let bytes: Uint8Array;
+  try {
+    const res = await fetchWithTimeout(url, 20000, {
+      headers: { "User-Agent": "StarlingAI/0.1 (research assistant)", "Accept": "application/pdf,*/*" },
+    });
+    if (!res.ok) return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
+    bytes = new Uint8Array(await res.arrayBuffer());
+  } catch (err) {
+    log.error({ err, url }, "web_fetch PDF download failed");
+    return { success: false, output: "", error: `Fetch failed: ${String(err)}` };
+  }
+
+  let markdown = await extractDocumentBytesToMarkdown(bytes, pdfFilenameFromUrl(url), "application/pdf");
+  if (markdown) {
+    if (markdown.length > maxLength) {
+      markdown = markdown.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+    }
+    return {
+      success: true,
+      output: `**Content from:** ${url} (PDF, extracted to text)\n\n${markdown}${shareSuffix}`,
+      metadata: { url, contentLength: markdown.length, contentType: "application/pdf", fetchMethod: "pdf_extract" },
+    };
+  }
+  return {
+    success: true,
+    output: `**Content from:** ${url}\n\nThis URL is a PDF document and its text could not be extracted here (the document-extraction service is unavailable). Do NOT guess its contents — find an HTML datasheet/specs page for the same item, or report the affected values as unverified.${shareSuffix}`,
+    metadata: { url, contentType: "application/pdf", fetchMethod: "pdf_no_extract", pdfExtractionUnavailable: true },
+  };
 }
 
 async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response> {
