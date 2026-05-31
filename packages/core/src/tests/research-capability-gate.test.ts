@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isWebReachingToolName,
+  isWebGatheringToolName,
   agentCfgIsResearchCapable,
   taskRequiresExternalResearch,
 } from "../tools/sub-agent.js";
@@ -30,6 +31,17 @@ describe("research capability gate", () => {
     expect(agentCfgIsResearchCapable({ tools: ["web_search", "web_fetch", "url_inspect"] })).toBe(true); // researcher
     expect(agentCfgIsResearchCapable({ tools: ["web_search", "browser_navigate", "browser_snapshot"] })).toBe(true); // browser_agent
     expect(agentCfgIsResearchCapable({ tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"] })).toBe(true); // coordinator
+  });
+
+  it("does NOT treat a url_inspect-only agent (evidence_analyst shape) as research-capable", () => {
+    // url_inspect probes a known URL but cannot search or fetch page content, so an
+    // agent with no web_search/web_fetch/browser_* cannot do PRIMARY research. It was
+    // being handed gather tasks and dead-looping url_inspect (audit 687a224b).
+    expect(isWebGatheringToolName("url_inspect")).toBe(false);
+    expect(isWebGatheringToolName("web_fetch")).toBe(true);
+    expect(agentCfgIsResearchCapable({
+      tools: ["read_shared_facts", "read_file", "list_files", "extract_file_content", "url_inspect", "share_finding", "write_file"],
+    })).toBe(false);
   });
 
   it("does not block agents that inherit all tools, or unknown/ephemeral agents", () => {

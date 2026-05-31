@@ -1192,15 +1192,30 @@ export function isWebReachingToolName(toolName: string): boolean {
 }
 
 /**
- * Pure capability check against an agent's tool list. Research-capable means it
- * reaches the web directly (web_search/web_fetch/url_inspect/browser_*) or is a
- * coordinator that can delegate to one that does. An undefined tool list means
- * "inherit all tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
+ * True for a tool that can GATHER fresh external evidence (search + fetch page
+ * content + drive a browser). This is the narrower cousin of isWebReachingToolName:
+ * it excludes url_inspect, which only probes a URL you already have (headers,
+ * redirects, content-type) and cannot search or read page content. An agent whose
+ * only "web" tool is url_inspect cannot do PRIMARY research — evidence_analyst
+ * (url_inspect only, no web_search/web_fetch) was wrongly classed research-capable
+ * and dead-looped url_inspect on a 404 after being handed a gather task (audit 687a224b).
+ */
+export function isWebGatheringToolName(toolName: string): boolean {
+  if (toolName === "url_inspect") return false;
+  return isWebReachingToolName(toolName);
+}
+
+/**
+ * Pure capability check against an agent's tool list. Research-capable means it can
+ * GATHER from the web directly (web_search/web_fetch/browser_*) or is a coordinator
+ * that can delegate to one that does. url_inspect alone does NOT qualify (it only
+ * probes a known URL, cannot search/fetch). An undefined tool list means "inherit all
+ * tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
  */
 export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined): boolean {
   if (!cfg) return true;
   if (!cfg.tools) return true; // inherits the full tool set
-  return cfg.tools.some(isWebReachingToolName) || cfg.tools.some((t) => COORDINATION_TOOL_NAMES.has(t));
+  return cfg.tools.some(isWebGatheringToolName) || cfg.tools.some((t) => COORDINATION_TOOL_NAMES.has(t));
 }
 
 /**
