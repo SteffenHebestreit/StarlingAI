@@ -3210,7 +3210,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           primaryDelegationBody: currentPrimaryDelegationBody(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
-        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
+        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
         return withArtifacts({
           output,
           stats,
@@ -3534,7 +3534,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           primaryDelegationBody: currentPrimaryDelegationBody(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
-        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true }, "warn");
+        logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
         return withArtifacts({ output, stats });
       }
 

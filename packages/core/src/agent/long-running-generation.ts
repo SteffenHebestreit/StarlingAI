@@ -87,8 +87,12 @@ export interface LongRunningRequest {
 /** Default soft thresholds; only one needs to cross to fire a request. */
 export const DEFAULT_SOFT_THRESHOLD_MS = 3 * 60 * 1000;        // 3 minutes wall time
 export const DEFAULT_SOFT_THRESHOLD_TOKENS = 8_000;             // accumulated completion tokens
-/** Default wait for the operator to respond before falling back to `stop`. */
-const DEFAULT_LRG_TIMEOUT_MS = 5 * 60 * 1000;                   // 5 minutes
+/** Default wait for the operator to respond before falling back to the default
+ *  outcome (`stop` for normal runs, `continue` for operator-pre-authorized ones).
+ *  Kept short (1.5 min): a normal run that the operator ignores winds down fast
+ *  and synthesizes from what it has, instead of sitting idle for minutes. Audit
+ *  687a224b sat through repeated 5-min waits while a stuck run looped. */
+const DEFAULT_LRG_TIMEOUT_MS = 90 * 1000;                       // 1.5 minutes
 /** Default budget granted by a single `continue` response (per axis). */
 export const DEFAULT_CONTINUE_GRANT_MS = 5 * 60 * 1000;         // +5 minutes
 export const DEFAULT_CONTINUE_GRANT_TOKENS = 8_000;             // +8K completion tokens
