@@ -124,6 +124,8 @@ export type AuditEventType =
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
+  | "delegation_halted_partial_evidence"
+  | "delegation_coordinator_recursion_blocked"
   | "flow_plan_recorded"
   | "flow_verification_passed"
   | "flow_verification_repaired"

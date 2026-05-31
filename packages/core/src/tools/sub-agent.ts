@@ -2142,6 +2142,28 @@ function shouldAcceptPartialDelegation(
  * skip the failure-handling cascade.  Demote those to `failure` so the
  * failed-delegation diagnostic and warden escalation can fire.
  */
+/**
+ * True when a failed/timed-out attempt's output carries real gathered evidence
+ * (findings, figures, sources) rather than just an interrupted/max-iteration NOTICE.
+ * Used to decide whether a captured partial is substantial enough to HALT escalation:
+ * a bare "reached the maximum number of tool-call iterations … partial may be
+ * incomplete" notice (even when it echoes the task) is not evidence worth stopping
+ * for, so we still escalate past it. Distinguishes the 687a224b keystone (a 3789-char
+ * verified-spec body → halt) from a researcher's max-iteration notice (→ keep escalating).
+ */
+export function partialResultHasSubstantiveEvidence(output: string): boolean {
+  if (!output) return false;
+  const stripped = output
+    .replace(/Sub-agent\s+'[^']*'\s+reached the maximum number of tool-call iterations[^.]*\.?/gi, " ")
+    .replace(/reached the maximum number of tool-call iterations\s*\(\d+\)/gi, " ")
+    .replace(/Partial result may be incomplete\.?/gi, " ")
+    .replace(/before producing usable topic-related output\.?/gi, " ")
+    .replace(/Partial progress before interruption:?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped.length >= 200;
+}
+
 export function looksLikeOnlyFailureStubs(output: string): boolean {
   if (!output) return false;
   const text = output.trim();
@@ -2775,6 +2797,18 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   };
 }
 
+/**
+ * True for agents whose job is to decompose-and-re-delegate (mission_coordinator,
+ * web_task_coordinator, …). Mirrors the inline check used during attempt dispatch:
+ * the `_coordinator` name suffix or a `coordination` tag in the agent config.
+ */
+function agentNameIsCoordinator(name: string): boolean {
+  if (!name) return false;
+  if (name.endsWith("_coordinator")) return true;
+  const cfg = getConfig().subAgents[name];
+  return Boolean(cfg && (cfg.tags ?? []).includes("coordination"));
+}
+
 async function executeDelegationWithFallback(request: DelegationRequest, ctx: ToolContext): Promise<ToolResult> {
   const title = request.taskTitle ?? summarizeText(request.task, 80);
   const signature = buildTaskSignature(title, request.task, request.dependsOn ?? []);
@@ -2887,6 +2921,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // "No suitable agent completed the task" which makes the coordinator
   // think it's a routing problem and re-delegate the same work.
   const cappedCandidates: string[] = [];
+  // A coordinator must not delegate to another coordinator — that is pure
+  // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
+  // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
+  // Coordinators delegate to leaf specialists; track skips for the failure diagnostic.
+  const callerIsCoordinator = Boolean(ctx.currentAgentName && agentNameIsCoordinator(ctx.currentAgentName));
+  const skippedCoordinatorCandidates: string[] = [];
   const usesAutonomousBidding = !request.agentName;
 
   if (usesAutonomousBidding) {
@@ -3167,6 +3207,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
     const candidate = candidateQueue.shift()!;
     if (attemptedAgents.includes(candidate)) continue;
+
+    // Coordinator→coordinator block: a coordinator caller skips any coordinator
+    // candidate so the hierarchy stays flat (coordinator → leaf specialist), instead
+    // of nesting mission_coordinator under mission_coordinator. Skipped before the
+    // attempt counter so it isn't recorded as a real attempt.
+    if (callerIsCoordinator && agentNameIsCoordinator(candidate)) {
+      if (!skippedCoordinatorCandidates.includes(candidate)) {
+        skippedCoordinatorCandidates.push(candidate);
+        logAudit("delegation_coordinator_recursion_blocked", {
+          taskTitle: title,
+          callerAgent: ctx.currentAgentName,
+          blockedCandidate: candidate,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+      }
+      continue;
+    }
 
     // Per-agent repeat cap: skip if this agent has already been called its allowed number of times this turn
     const prevCalls = ctx._turnAgentCounts.get(candidate) ?? 0;
@@ -3476,6 +3532,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (lockOwner) await releaseTaskLock(taskId, lockOwner);
         // Infrastructure failures cannot be solved by a different agent — stop immediately
         if (lastFailureWasInfrastructure) break;
+        // Keystone (audit 687a224b): once a failed/timed-out attempt has STILL left
+        // substantive, usable evidence (captured into bestPartialResult above), stop
+        // escalating. Walking the rest of the candidate queue — especially into a
+        // coordinator that re-decomposes and re-fans-out — cost that session 77 min and
+        // a depth-2 coordinator recursion for a marginal gain over evidence we can
+        // already synthesize from. Surface the partial via the tail return instead.
+        // Only halt for a partial that carries real evidence — a bare max-iteration
+        // notice (no findings) must still escalate (e.g. researcher → web_task_coordinator).
+        if (bestPartialResult && partialResultHasSubstantiveEvidence(bestPartialResult.output)) {
+          logAudit("delegation_halted_partial_evidence", {
+            taskTitle: title,
+            agentName: bestPartialResult.agentName,
+            partialChars: bestPartialResult.output.length,
+            remainingCandidates: candidateQueue.length,
+          }, { sessionId: ctx.sessionId, severity: "info" });
+          break;
+        }
         continue;
       }
 
