@@ -611,6 +611,30 @@ async function convertFileToMarkdown(file: WorkspaceBinaryFile): Promise<Record<
   return { markdown: "", filename: file.filename };
 }
 
+/**
+ * Convert raw document bytes (e.g. a PDF fetched from a URL by web_fetch) to
+ * markdown text via the configured multimodal extraction service — the same path
+ * extract_file_content uses for workspace files. Returns the extracted markdown,
+ * or "" when no extraction service is configured, it is unavailable, or the
+ * document yielded no text. Never throws. (Audit 97085c6b: web_fetch returned raw
+ * %PDF bytes for the IM73A135V01 datasheet, so the analog spec never reached synthesis.)
+ */
+export async function extractDocumentBytesToMarkdown(
+  bytes: Uint8Array,
+  filename: string,
+  contentType: string,
+): Promise<string> {
+  const config = getConfig().multimodal.files;
+  if (!config.mcpServer && !multimodalServiceConfigured(config.baseUrl)) return "";
+  try {
+    const body = await convertFileToMarkdown({ resolvedPath: filename, filename, contentType, bytes });
+    return String(body["markdown"] ?? "").trim();
+  } catch (error) {
+    log.warn({ error, filename }, "extractDocumentBytesToMarkdown failed");
+    return "";
+  }
+}
+
 async function callMultimodalToolViaMcp(input: {
   serverName: string;
   toolName: string;

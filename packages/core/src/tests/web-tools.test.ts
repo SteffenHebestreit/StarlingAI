@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config/schema.js";
-import { expandSearchQuery, rankSearchResults, rerankSearchResults, resolveSearchBackendConfig } from "../tools/web.js";
+import { expandSearchQuery, isPdfContentType, rankSearchResults, rerankSearchResults, resolveSearchBackendConfig } from "../tools/web.js";
 
 // Mock MCP registry so tests can control playwright availability
 const mcpConnections = new Map<string, unknown>();
@@ -16,6 +16,22 @@ afterEach(async () => {
 
   const configLoader = await import("../config/loader.js");
   configLoader.resetConfigForTests();
+});
+
+describe("web_fetch PDF detection", () => {
+  // Audit 97085c6b: web_fetch returned raw %PDF bytes for the IM73A135V01 datasheet,
+  // so the analog-mic spec never reached synthesis. PDFs must be routed to extraction.
+  it("recognizes application/pdf content types (with charset/params)", () => {
+    expect(isPdfContentType("application/pdf")).toBe(true);
+    expect(isPdfContentType("application/pdf; charset=binary")).toBe(true);
+    expect(isPdfContentType("APPLICATION/PDF")).toBe(true);
+  });
+
+  it("does not flag HTML/JSON/text as PDF", () => {
+    expect(isPdfContentType("text/html; charset=utf-8")).toBe(false);
+    expect(isPdfContentType("application/json")).toBe(false);
+    expect(isPdfContentType("")).toBe(false);
+  });
 });
 
 describe("web search query expansion", () => {
