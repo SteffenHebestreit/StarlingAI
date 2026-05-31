@@ -75,10 +75,15 @@ registerTool({
     const approvalResult = await maybeRequestPlanApproval(plan, ctx, width);
     if (approvalResult) return approvalResult;
 
+    const delegateStepCount = plan.steps.filter((s) => s.kind === "delegate").length;
     return {
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
-        + `Now execute it: prefer reuse steps first, keep fan-out to genuinely independent work, and make sure the final answer meets the acceptance criteria.`,
+        + (delegateStepCount > 0
+          // Counter the "I planned, so I'm done" off-ramp: recording a plan is NOT
+          // execution. The model must now actually call the delegation tools.
+          ? `Recording a plan is NOT execution. Now CALL the orchestration tools to run the ${delegateStepCount} delegate step${delegateStepCount === 1 ? "" : "s"} — parallel_delegate for genuinely independent work, delegate_to_agent or run_task_graph otherwise. Do NOT write the final answer until those delegations have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
+          : `Now execute it: prefer reuse steps first and make sure the final answer meets the acceptance criteria.`),
       metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide },
     };
   },
