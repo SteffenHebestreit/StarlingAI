@@ -491,6 +491,25 @@ function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string): 
   return false;
 }
 
+/**
+ * QA evidence-anchoring decision (gated by orchestration.qaEvidenceAnchoring).
+ * True when a source-sensitive answer that shipped on the SUCCESS path (the
+ * failure-path backstop never fired) should be re-grounded: there ARE usable
+ * curated findings, the answer is substantial, yet it references none of the
+ * verified tokens — i.e. the model likely answered from training data while the
+ * run's verified facts sit unused in shared findings. Pure + exported for tests.
+ */
+export function answerNeedsEvidenceAnchoringRepair(
+  finalResponse: string,
+  evidence: string | null | undefined,
+): boolean {
+  if (!evidence) return false;
+  if (looksLikeWeakRecoveryEvidence(evidence)) return false;
+  const draft = stripPresentationFormatting(finalResponse).trim();
+  if (draft.length <= 200) return false;
+  return !looksEvidenceAnchored(draft, evidence);
+}
+
 async function synthesizeSourceSensitiveEvidenceBackstop(
   session: AgentSession,
   provider: ChatProvider,
@@ -4397,7 +4416,40 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         });
         if (risk === "high") {
           if (initialDynamicGuidance?.sourceSensitive) {
-            logAudit("flow_verification_passed", { reason: "covered_by_source_sensitive_backstop" }, { sessionId: session.id, severity: "info" });
+            // The failure-path backstop above only fires on a failed/partial run. For a
+            // source-sensitive turn that delegated SUCCESSFULLY, the answer was never
+            // cross-checked — so a training-data answer can ship while verified facts sit
+            // unused in shared findings. Re-ground it if it references none of them.
+            const anchorEvidence = (getConfig().orchestration?.qaEvidenceAnchoring ?? false) && !signal.aborted
+              ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
+              : null;
+            if (anchorEvidence && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {
+              const anchorInstruction = [
+                "EVIDENCE-ANCHORING REPAIR:",
+                "Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, in the SAME language as the user's request.",
+                "Use ONLY these findings plus this conversation's tool results. Do not invent manufacturer, interface, pricing, part, layout, or BOM claims. Mark anything the findings do not support as unverified/incomplete.",
+                "Keep it a concise, useful answer — do not dump raw tool traces or page snapshots.",
+                "Verified findings:",
+                anchorEvidence.evidence.trim(),
+              ].join("\n");
+              const reanchored = await forceSynthesis(session, provider, signal, anchorInstruction);
+              const candidate = reanchored ? sanitizeUserFacingAssistantResponse(reanchored, 0) : null;
+              if (
+                candidate
+                && candidate.trim().length >= Math.min(200, Math.floor(finalResponse.trim().length * 0.5))
+                && looksEvidenceAnchored(stripPresentationFormatting(candidate), anchorEvidence.evidence)
+              ) {
+                finalResponse = candidate;
+                guardrailEvents.push({ type: "guardrail_flagged", details: "qa_evidence_anchoring_repaired" });
+                logAudit("flow_verification_repaired", { reason: "unanchored_to_shared_findings", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
+              } else {
+                logAudit("flow_high_stakes_unverified", { reason: "answer_unanchored_repair_failed", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
+              }
+            } else {
+              logAudit("flow_verification_passed", {
+                reason: anchorEvidence ? "answer_anchored_to_shared_findings" : "covered_by_source_sensitive_backstop",
+              }, { sessionId: session.id, severity: "info" });
+            }
           } else if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
             const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
               + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
