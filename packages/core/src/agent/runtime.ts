@@ -4254,6 +4254,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         releaseAfterRoutingNudge("tool_free_artifact_answer_rejected");
       }
 
+      let autoResearchAnswer: string | null = null;
       if (!releasedAfterRoutingNudge && requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
@@ -4282,11 +4283,62 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           continue;
         }
 
-        releaseAfterRoutingNudge("tool_free_research_answer_rejected");
-        // No delegation/orchestration ran and no findings were shared, yet the
-        // turn is source/freshness-sensitive — the released draft is unverified.
-        if (!currentTurnHasExecutableOrchestration && _turnShareFindingCount === 0) {
-          releasedWithoutResearchEvidence = true;
+        // Source-sensitive turn, model refused to delegate even after the nudge.
+        // Operator policy (orchestration.autoResearchOnRefusal): do NOT ship a
+        // training-data answer — auto-run ONE research delegation and synthesize from
+        // the gathered findings; fall back to the caveated draft only if that yields
+        // nothing. Enforces the source-sensitive correctness invariant without
+        // dead-ending (audit bdbace34: a hardware build shipped fabricated mic specs
+        // with zero delegations after the single nudge release).
+        const autoRoute = ((getConfig().orchestration?.autoResearchOnRefusal ?? true) && !signal.aborted)
+          ? (requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet))
+          : null;
+        if (autoRoute) {
+          logAudit("guardrail_flagged", {
+            type: "source_sensitive_auto_research_delegated",
+            tool: autoRoute.toolName,
+            agent: autoRoute.label,
+          }, { sessionId: session.id, severity: "warn" });
+          opts.onStatus?.({ phase: "guardrail", message: "Der Entwurf hat keine Recherche ausgeführt — ich hole jetzt belegte Quellen über einen Recherche-Spezialisten.", iteration: iterationCount });
+          try {
+            await executeTool(autoRoute.toolName, autoRoute.args, toolContext);
+            _turnDelegationCount += 1;
+          } catch (err) {
+            log.warn({ err, sessionId: session.id }, "Auto-research delegation on refusal failed");
+          }
+          const autoEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+          const autoDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+          const recovery = chooseBetterRecoveryEvidence(autoDelegateEvidence, autoEvidence, { preferHigherScore: true });
+          if (recovery && !looksLikeWeakRecoveryEvidence(recovery.evidence)) {
+            const synthesized = await forceSynthesis(
+              session,
+              provider,
+              signal,
+              "WEB RESEARCH RESULTS — synthesize the final answer now. A research specialist gathered the findings below for the user's request. "
+              + "Write the complete answer in the SAME language as the user's request, grounded ONLY in these findings and this conversation's tool results. "
+              + "Do not invent manufacturer, interface, pricing, part, or layout claims beyond the findings; mark anything the findings do not cover as still to verify.\n"
+              + "Findings:\n" + recovery.evidence.slice(0, 6_000),
+            );
+            const candidate = synthesized ? sanitizeUserFacingAssistantResponse(synthesized, 0) : null;
+            autoResearchAnswer = candidate && candidate.trim().length >= 200
+              ? candidate
+              : formatSourceSensitiveEvidenceBackstop(recovery.evidence);
+            logAudit("guardrail_flagged", {
+              type: "source_sensitive_auto_research_synthesized",
+              evidenceItems: recovery.itemCount,
+              evidenceLength: recovery.evidence.length,
+              synthesized: Boolean(candidate && candidate.trim().length >= 200),
+            }, { sessionId: session.id, severity: "warn" });
+          }
+        }
+
+        if (!autoResearchAnswer) {
+          releaseAfterRoutingNudge("tool_free_research_answer_rejected");
+          // No delegation/orchestration ran and no findings were shared, yet the
+          // turn is source/freshness-sensitive — the released draft is unverified.
+          if (!currentTurnHasExecutableOrchestration && _turnShareFindingCount === 0) {
+            releasedWithoutResearchEvidence = true;
+          }
         }
       }
 
@@ -4385,6 +4437,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             originalLength: rawResponse.length,
           }, { sessionId: session.id, severity: "warn" });
         }
+      }
+
+      // Auto-research synthesis (source-sensitive refusal): the model refused to
+      // delegate, so the runtime ran a research specialist above and synthesized from
+      // the gathered findings — that grounded answer replaces the training-data draft.
+      if (autoResearchAnswer) {
+        finalResponse = autoResearchAnswer;
       }
 
       // Anti-hallucination caveat: a source-sensitive answer that shipped with

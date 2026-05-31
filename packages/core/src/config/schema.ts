@@ -1287,6 +1287,13 @@ export const OrchestrationSchema = z.object({
    *  in shared findings" case. Off by default pending a live smoke test (it can add
    *  one synthesis call on the unanchored-answer path). */
   qaEvidenceAnchoring: z.boolean().default(false),
+  /** When true, a source-sensitive turn where the model refuses to delegate (answers
+   *  tool-free from training data even after the delegation nudge) does NOT ship the
+   *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes
+   *  from the gathered findings, falling back to the caveated draft only if that yields
+   *  nothing. Enforces the source-sensitive correctness invariant without dead-ending.
+   *  Costs one research delegation on the refusal path. */
+  autoResearchOnRefusal: z.boolean().default(true),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the
    *  dock plan card is confirmed end-to-end. */

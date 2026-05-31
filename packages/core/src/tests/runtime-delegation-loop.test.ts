@@ -3861,8 +3861,11 @@ describe("runtime delegated-loop regressions", () => {
   it("never-empty: strict trustModelRouting=false still releases the draft after one nudge", async () => {
     // Phase 1 safety net: even in strict mode, a model that insists on answering
     // tool-free is nudged once and then released — the turn never ends empty.
+    // (autoResearchOnRefusal disabled here so this asserts the release FALLBACK; the
+    // auto-research path is covered by the next test.)
     const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
       agents: { mainAssistant: { toolMode: "orchestration_only", trustModelRouting: false } },
+      orchestration: { autoResearchOnRefusal: false },
     });
 
     let llmCallCount = 0;
@@ -3889,6 +3892,66 @@ describe("runtime delegated-loop regressions", () => {
       expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
       expect.objectContaining({ type: "routing_nudge_released", details: "tool_free_research_answer_rejected" }),
     ]));
+  });
+
+  it("auto-researches instead of releasing when the model refuses to delegate on a source-sensitive turn", async () => {
+    // Audit bdbace34: a source-sensitive hardware build shipped FABRICATED mic specs
+    // because the model answered tool-free and the runtime released after one nudge.
+    // With autoResearchOnRefusal (default on), the runtime auto-runs a research
+    // delegation and synthesizes from the gathered findings instead of the draft.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only");
+    const { writeSharedFact } = await import("../swarm/memory.js");
+
+    let autoDelegateCalls = 0;
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: async (_args: Record<string, unknown>, ctx: { sessionId: string }) => {
+        autoDelegateCalls += 1;
+        await writeSharedFact(
+          ctx.sessionId,
+          "researcher_verified_mic",
+          "Infineon IM73A135V01: analog differential MEMS microphone, SNR 73 dB(A), AOP 135 dBSPL, IP57. "
+          + "Needs an external ADC for an ESP32-S3 (it is analog, not PDM/I2S). Source: infineon.com datasheet.",
+        );
+        return {
+          success: true,
+          output: "[researcher]: verified the microphone specs and sourcing from the official datasheet.",
+          metadata: { delegationSucceeded: true },
+        };
+      },
+    });
+
+    // The model keeps answering tool-free from training data (with WRONG specs).
+    streamMock.mockImplementation(() => createTextStream(
+      "Der IM73A135V01 ist ein PDM-MEMS-Mikrofon mit ~63 dB SNR (aus meinem Wissen).",
+    ));
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "Verify the recorder hardware design and microphone choice with current evidence.",
+    });
+
+    // The runtime auto-delegated research instead of shipping the draft.
+    expect(autoDelegateCalls).toBeGreaterThanOrEqual(1);
+    expect(logAudit).toHaveBeenCalledWith(
+      "guardrail_flagged",
+      expect.objectContaining({ type: "source_sensitive_auto_research_delegated" }),
+      expect.anything(),
+    );
+    // The hallucinated draft was NOT released; the answer is grounded in the findings.
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "routing_nudge_released" }),
+    ]));
+    expect(result.blocked).toBe(false);
+    expect(result.response).toContain("73 dB");
   });
 
   it("lean context injection (default on) injects the recall_context digest + emits prompt_section_sizes telemetry", async () => {
