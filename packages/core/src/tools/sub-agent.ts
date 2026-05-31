@@ -24,6 +24,7 @@ import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutp
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
+import { longRunningGenerationManager } from "../agent/long-running-generation.js";
 
 const log = childLogger("tool:sub-agent");
 import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
@@ -2854,6 +2855,31 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     ? resolvePinnedDelegationAgent(request.routingQuery ?? request.task, ctx)
     : null;
   const attemptedAgents: string[] = [];
+
+  // Operator stopped this turn — do NOT start a fresh delegation. The orchestrator
+  // must synthesize from evidence already gathered (shared findings + prior
+  // delegated results) instead of spawning a new sub-agent. Audit 5a6db38d: after
+  // the operator stopped the researchers, the orchestrator re-delegated to a
+  // coordinator that burned another 14 minutes and then shipped a training-data
+  // answer. Re-evaluated per call; the latch is cleared at runTurn start, so this
+  // only fires within the stopped turn. (A reusable completed/partial task above
+  // has already returned its evidence before reaching here.)
+  if (longRunningGenerationManager.isStopRequested(ctx.sessionId)) {
+    logAudit("delegation_halted_operator_stop", {
+      taskTitle: title,
+      phase: "new_delegation",
+      agentName: request.agentName ?? "auto",
+    }, { sessionId: ctx.sessionId, severity: "info" });
+    taskState.status = "failed";
+    taskState.error = "Operator stopped this turn.";
+    publishSwarmState(ctx);
+    return {
+      success: false,
+      output: "",
+      error: "Operator stopped this turn — do NOT delegate again. Synthesize a final response now from the evidence already gathered (shared findings and the prior delegated results in this conversation), and clearly mark anything that remains open.",
+      metadata: { taskId, attemptedAgents, delegationSucceeded: false, operatorStopped: true },
+    };
+  }
   // I12: Track candidates skipped because they had already exhausted their
   // per-agent delegation cap this turn. Without this, when every routed
   // candidate is already maxed out (e.g. researcher already called 2/2
@@ -2984,6 +3010,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         error: `Turn delegation limit (${maxTotalDelegationsPerTurn}) reached. Stop delegating and synthesize your findings into a final response for the user now.`,
         metadata: { taskId, attemptedAgents, delegationSucceeded: false },
       };
+    }
+
+    // Operator stopped this turn — do NOT ESCALATE to a fallback / next candidate.
+    // The first attempt (started before the stop) is allowed to finish and have
+    // its evidence captured below; we just stop spawning additional agents. This
+    // is what ends the researcher→mission_coordinator→nested-researcher escalation
+    // in audit 5a6db38d, where a stopped researcher's partial was discarded and a
+    // coordinator re-decomposed the same slice. Breaking here falls through to the
+    // bestPartialResult return so the captured evidence is surfaced.
+    if (taskState.attempts.length > 0 && longRunningGenerationManager.isStopRequested(ctx.sessionId)) {
+      logAudit("delegation_halted_operator_stop", {
+        taskTitle: title,
+        phase: "escalation",
+        attempts: taskState.attempts.length,
+      }, { sessionId: ctx.sessionId, severity: "info" });
+      break;
     }
 
     if (candidateQueue.length === 0) {
@@ -3390,6 +3432,30 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         }
         taskState.status = "failed";
         lastFailureWasInfrastructure = classification === "infrastructure_failure";
+        // Preserve substantive evidence from a failed/interrupted attempt so the
+        // tail return surfaces it instead of "No suitable agent completed the
+        // task." A research/timeout attempt that gathered real content (web
+        // results, fetched pages) but got classified as failure — e.g. an operator
+        // stop cut off its synthesis and left an interrupted-output stub — must NOT
+        // be discarded. That discard is why audit 5a6db38d shipped a training-data
+        // answer despite 31 min of real research. Skip pure failure stubs,
+        // planning-only narration, and infrastructure failures.
+        if (
+          !lastFailureWasInfrastructure
+          && output.trim().length > 200
+          && (!bestPartialResult || output.length > bestPartialResult.output.length)
+          && !looksLikeOnlyFailureStubs(output)
+          && !looksLikePlanningOnlyResult(output)
+          && !looksLikeInfrastructureFailure(output)
+        ) {
+          bestPartialResult = {
+            agentName: candidate,
+            output,
+            ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
+            ...(routingInfo ? { routingInfo } : {}),
+            ...(artifacts.length > 0 ? { artifacts } : {}),
+          };
+        }
         publishSwarmState(ctx);
         emitSwarmEvent("task_failed", {
           sessionId: ctx.sessionId,
@@ -3494,7 +3560,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // architect to design a purpose-built ephemeral agent for this task.
   // Skip architect if the failure was infrastructure-level (host unreachable, etc.) —
   // an ephemeral agent would face the exact same connectivity problem.
-  if (!explicitAgentRequested && !lastFailureWasInfrastructure && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))) {
+  if (!explicitAgentRequested && !lastFailureWasInfrastructure && !longRunningGenerationManager.isStopRequested(ctx.sessionId) && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))) {
     const architectResult = await runArchitectFallback(request.task, ctx);
     if (architectResult) {
       clearTaskBids(taskId);

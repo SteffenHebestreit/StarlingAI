@@ -123,6 +123,7 @@ export type AuditEventType =
   | "delegation_bidding_filtered_research_incapable"
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_depth_ceiling_enforced"
+  | "delegation_halted_operator_stop"
   | "flow_plan_recorded"
   | "flow_verification_passed"
   | "flow_verification_repaired"
