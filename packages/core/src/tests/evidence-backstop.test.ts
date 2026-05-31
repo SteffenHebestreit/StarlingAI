@@ -4,6 +4,7 @@ import {
   chooseBetterRecoveryEvidence,
   formatSourceSensitiveEvidenceBackstop,
   getSharedFactsEvidenceForFinalSynthesis,
+  answerNeedsEvidenceAnchoringRepair,
 } from "../agent/runtime.js";
 import { writeSharedFact } from "../swarm/memory.js";
 
@@ -65,5 +66,42 @@ describe("evidence backstop — shared-facts gathering prioritizes curated findi
     expect(result!.evidence).toContain("NOT PDM");
     expect(result!.evidence).not.toContain("%PDF-1.7");
     expect(result!.evidence).not.toContain("application/pdf");
+  });
+});
+
+describe("evidence backstop — answer anchoring decision (qaEvidenceAnchoring gate)", () => {
+  const EVIDENCE = `- ${CURATED}`;
+
+  // A training-data answer about the topic that references NONE of the verified
+  // tokens (no Infineon, no part number, no analog/differential/ESP32 specifics) —
+  // exactly the "answered from memory while verified facts sit unused" failure.
+  const UNANCHORED =
+    "Small acoustic sensors are widely used in consumer electronics like phones and laptops. "
+    + "Connecting one to a hobby board generally involves wiring its data line to a digital input "
+    + "and reading samples in firmware. Pick a component with solid signal quality for your build "
+    + "and follow the reference design from the vendor's documentation.";
+
+  // An answer grounded in the gathered findings — names the part, manufacturer, and specs.
+  const ANCHORED =
+    "The Infineon IM73A135V01 is an analog differential MEMS microphone with 73 dB(A) SNR. "
+    + "Because it is analog, not a PDM or I2S digital part, it requires an external ADC to interface "
+    + "with an ESP32-S3 — route the analog output through the ADC and sample it in firmware.";
+
+  it("flags a substantial source-sensitive answer that ignores the verified findings", () => {
+    expect(answerNeedsEvidenceAnchoringRepair(UNANCHORED, EVIDENCE)).toBe(true);
+  });
+
+  it("passes an answer that is grounded in the findings", () => {
+    expect(answerNeedsEvidenceAnchoringRepair(ANCHORED, EVIDENCE)).toBe(false);
+  });
+
+  it("does not fire when there is no usable evidence", () => {
+    expect(answerNeedsEvidenceAnchoringRepair(UNANCHORED, "")).toBe(false);
+    expect(answerNeedsEvidenceAnchoringRepair(UNANCHORED, null)).toBe(false);
+    expect(answerNeedsEvidenceAnchoringRepair(UNANCHORED, "Partial progress before interruption: none")).toBe(false);
+  });
+
+  it("ignores short answers (a brief 'it depends' needs no anchoring repair)", () => {
+    expect(answerNeedsEvidenceAnchoringRepair("It depends on your exact build constraints.", EVIDENCE)).toBe(false);
   });
 });

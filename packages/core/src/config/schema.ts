@@ -1279,6 +1279,14 @@ export const OrchestrationSchema = z.object({
    *  entirely. Source-sensitive turns reuse the existing evidence backstop.
    *  Default: true. */
   riskGatedQA: z.boolean().default(true),
+  /** When true, a source-sensitive turn that delegated SUCCESSFULLY (so the
+   *  failure-path evidence backstop never fired) has its final answer cross-checked
+   *  against the curated shared findings: if the answer references none of the
+   *  verified tokens, it is re-synthesized grounded in those findings before
+   *  shipping. Catches the "ships a training-data answer while verified facts sit
+   *  in shared findings" case. Off by default pending a live smoke test (it can add
+   *  one synthesis call on the unanchored-answer path). */
+  qaEvidenceAnchoring: z.boolean().default(false),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the
    *  dock plan card is confirmed end-to-end. */
