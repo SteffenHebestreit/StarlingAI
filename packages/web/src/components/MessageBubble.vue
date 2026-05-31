@@ -662,14 +662,20 @@ const swarmExecutionItems = computed<ExecutionItem[]>(() => swarmTasks.value
       startedAt: attempt.startedAt,
     }];
 
+    // A tool name only appears in toolNames after that call COMPLETED, so each
+    // listed sub-agent tool call did run. Render it "done" — never inherit the
+    // parent attempt's "partial"/"failed" status (a stopped/timed-out attempt,
+    // or one the operator chose to stop/extend, must not retroactively paint the
+    // searches that already succeeded as failed). The attempt node itself keeps
+    // its real status.
     for (const [toolIndex, toolName] of (attempt.toolNames ?? []).entries()) {
       items.push({
         key: `${task.id}-${attempt.agentName}-${attempt.startedAt}-${index}-tool-${toolIndex}`,
         kind: "subagent-tool" as const,
         name: toolName,
         meta: `${attempt.agentName} · ${toolIndex + 1}/${attempt.toolNames?.length ?? 0}`,
-        status,
-        statusSymbol: executionStatusSymbol(status),
+        status: "done" as const,
+        statusSymbol: executionStatusSymbol("done"),
         startedAt: attempt.startedAt,
       });
     }
