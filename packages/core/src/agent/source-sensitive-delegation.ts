@@ -6,15 +6,18 @@
 // A single generic focus is always correct and never contaminates the slice
 // with a mistaken topic guess.
 const GENERIC_VERIFICATION_FOCUS =
-  "verify every concrete entity in this slice — products, part numbers, vendors/manufacturers, "
-  + "interfaces/protocols, specifications, prices, quantities, dates, and URLs — against an "
-  + "authoritative or vendor source before stating it as fact; report anything unverified as such";
+  "gather and confirm every concrete entity in this slice — products, part numbers, vendors/manufacturers, "
+  + "interfaces/protocols, specifications, prices, quantities, dates, and URLs — from official or vendor "
+  + "sources, and report anything you could not confirm as unverified";
 
 function formatCoordinatorFocusLines(focus: string | undefined): string[] {
   if (!focus) return [];
   return [
     "",
-    "Coordinator focus for this slice (generic only; still verify every concrete claim independently):",
+    // Avoid the literal word "coordinator" here — it leaks into the embedded routing
+    // text and pulls web_task_coordinator/mission_coordinator up the ranking for what
+    // is a primary-gather slice (validated against the live nomic model).
+    "Focus for this slice (generic only; still confirm every concrete claim from a source):",
     `- ${focus}`,
   ];
 }
@@ -33,11 +36,20 @@ export function deriveSourceSensitiveDelegationFocus(task: string | undefined, c
 
 export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, label?: string, focus?: string): string {
   return [
+    // The two web-research framing lines lead, because the (English) preamble
+    // dominates the embedding routing signal over a non-English request body: a
+    // "verify/confirm"-framed preamble routed the PRIMARY gather to source_verifier
+    // (a draft checker) instead of researcher. Leading with gather framing + trimmed
+    // verify-density routes to researcher #1 with source_verifier well down — validated
+    // against the live nomic model on the actual DE/EN requests. The "SOURCE-SENSITIVE
+    // DELEGATION[ LABEL]:" marker line is preserved verbatim for the three detectors
+    // (taskRequiresExternalResearch, the SLICE includes-check, the runtime guidance
+    // regex); the verification discipline is unchanged (a correctness invariant).
+    "WEB RESEARCH TASK — gather fresh sourced evidence from official primary sources.",
+    "Research the parent task below: use web_search and web_fetch to open official manufacturer, vendor, standards, and datasheet pages and gather the requested specifications, interfaces, datasheet values, prices, and component sourcing.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The parent task below is the canonical request.",
-    "Do not treat coordinator-added manufacturer, product, interface, version, quantity, price, date, URL, or specification claims as verified unless they are present in this parent task or in completed tool evidence.",
-    "For user-supplied identifiers, search the exact identifier first and verify manufacturer, interface, and specifications from official or vendor evidence before naming them as facts.",
-    "Verify externally before confirming any concrete fact. If evidence is missing, report uncertainty instead of filling gaps.",
+    "The parent task below is the canonical request. Search user-supplied identifiers exactly as given; do not treat coordinator-added manufacturer, product, interface, version, quantity, price, date, URL, or specification claims as confirmed unless they appear in this parent task or in completed tool evidence.",
+    "State a concrete fact only after an official or vendor source confirms it; if evidence is missing, report uncertainty instead of filling gaps.",
     "",
     "Parent task:",
     parentTask.trim(),
@@ -97,10 +109,15 @@ export function buildEffectiveResearchSubject(
 
 export function buildSourceSensitiveOriginalRequestTask(userMessage: string, label?: string, focus?: string): string {
   return [
+    // See buildCanonicalSourceSensitiveDelegationTask: lead with web-research / gather
+    // framing so embedding routing picks researcher (the primary gatherer) over
+    // source_verifier (a draft checker); the SOURCE-SENSITIVE marker line is preserved
+    // verbatim for the detectors and the verification discipline is unchanged.
+    "WEB RESEARCH TASK — gather fresh sourced evidence from official primary sources.",
+    "Research the request below: use web_search and web_fetch to open official manufacturer, vendor, standards, and datasheet pages and gather the requested specifications, interfaces, datasheet values, prices, and component sourcing.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The user's original request below is the only canonical task. Treat every product name, part number, vendor, protocol, interface, price, date, URL, quantity, and specification as unverified until a completed tool result or shared finding confirms it.",
-    "Do not copy coordinator-added assumptions into searches or final claims. For user-supplied identifiers, search the exact identifier first and verify manufacturer, interface, and specifications from official or vendor evidence before naming them as facts.",
-    "If evidence contradicts an assumption in the task text, the evidence wins. If evidence is missing, report that it remains unverified instead of filling the gap.",
+    "The user's original request below is the only canonical task. Search user-supplied identifiers exactly as given; do not copy coordinator-added assumptions into searches or final claims, and treat every product name, part number, vendor, interface, price, date, URL, quantity, and specification as unconfirmed until a completed tool result or shared finding confirms it.",
+    "State a concrete fact only after an official or vendor source confirms it; if evidence contradicts an assumption in the request, the evidence wins, and if evidence is missing, report it as unverified rather than filling the gap.",
     "",
     "Original user request:",
     userMessage.trim(),

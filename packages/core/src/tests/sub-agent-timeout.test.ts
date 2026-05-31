@@ -756,9 +756,9 @@ describe("sub-agent turn timeouts", () => {
       expect(childPrompts.join("\n")).toContain("SLICE 1/3");
       expect(childPrompts.join("\n")).toContain("SLICE 2/3");
       expect(childPrompts.join("\n")).toContain("SLICE 3/3");
-      expect(childPrompts.join("\n")).toContain("Coordinator focus for this slice");
-      // Topic-agnostic verification focus (replaced the overfit per-topic buckets).
-      expect(childPrompts.join("\n")).toContain("verify every concrete entity");
+      expect(childPrompts.join("\n")).toContain("Focus for this slice");
+      // Topic-agnostic, gather-framed verification focus (replaced the overfit per-topic buckets).
+      expect(childPrompts.join("\n")).toContain("gather and confirm every concrete entity");
       expect(childPrompts.join("\n")).not.toContain("VendorX is already confirmed");
       expect(childPrompts.join("\n")).not.toContain("ST ZX-9000");
       expect(childPrompts.join("\n")).not.toContain("assuming I2S");
