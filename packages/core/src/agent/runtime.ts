@@ -620,7 +620,7 @@ function isBroadSourceSensitiveAdvisoryRequest(userMessage: string): boolean {
   return signals >= 2;
 }
 
-function hasRecentSourceSensitivePartialDelegation(
+export function hasRecentSourceSensitivePartialDelegation(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
 ): boolean {
   const recent = [...history].reverse().slice(0, 12);
@@ -634,14 +634,17 @@ function hasRecentSourceSensitivePartialDelegation(
     const delegationOutcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : "";
-    const terminalState = typeof meta["terminalState"] === "string"
-      ? String(meta["terminalState"]).toLowerCase()
-      : "";
 
     if (delegationOutcome === "failure") return true;
-    if (delegationOutcome === "partial" && (terminalState === "timeout" || terminalState === "max_iterations" || terminalState === "cancelled" || !terminalState)) {
-      return true;
-    }
+    // Any PARTIAL outcome means the swarm did not fully cover the request, so the
+    // curated shared findings must ground the final synthesis — regardless of
+    // terminalState. A coordinator that synthesizes after its inner researchers time
+    // out reports outcome "partial" with terminalState "completed"; the old list
+    // (timeout/max_iterations/cancelled/empty) excluded that case, so the backstop
+    // never fired and a confident training-data answer shipped that CONTRADICTED the
+    // verified finding (audit 1ba15cb5: shared finding = IM73A135V01 is analog; the
+    // answer said "digital PDM").
+    if (delegationOutcome === "partial") return true;
   }
 
   return false;

@@ -112,3 +112,59 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
   const cutoff = cleaned.lastIndexOf(" ", maxChars);
   return cleaned.slice(0, cutoff > maxChars * 0.8 ? cutoff : maxChars).trim();
 }
+
+/** Universal web page-furniture words. A finding dominated by these is the
+ * navigation / login / cookie chrome a fetch dragged in, not a real fact.
+ * Deliberately topic-agnostic — no domain or product terms (those would
+ * overfit one site / one example request). */
+const NAV_CHROME_WORDS = new Set<string>([
+  "login", "log", "register", "signin", "sign", "signup", "logout", "account",
+  "menu", "dashboard", "cookie", "cookies", "accept", "consent", "privacy",
+  "newsletter", "subscribe", "skip", "breadcrumb", "settings", "notifications",
+  "bookmarks", "navigation", "footer", "header", "sitemap", "copyright",
+  "search", "home", "language",
+]);
+
+/**
+ * Quality gate for auto-shared findings: returns true when an extracted value
+ * carries no synthesis value and must NOT be written to shared facts.
+ *
+ * Catches the noise that has polluted shared facts: raw PDF/binary bytes, bare
+ * HTTP-probe header dumps with no prose, navigation/login boilerplate, and
+ * symbol/number-only blobs. Structural signals only — no topic keywords — so it
+ * generalizes across sites and requests instead of fixing one example.
+ *
+ * Run AFTER extractKeyFacts so the boilerplate stripping has already had its
+ * chance; this rejects what survives that and is still not a real finding.
+ */
+export function extractedFindingIsLowValue(value: string): boolean {
+  const v = value.trim();
+  if (!v) return true;
+
+  // Raw PDF / binary bytes — never a readable finding.
+  if (/%PDF-\d/i.test(v)) return true;
+  if (/\bendobj\b|\bendstream\b|\/FlateDecode\b|\/MediaBox\b|\/Linearized\b/i.test(v)) return true;
+  if (/(?:\b0{6,}\b[^\n]*){3,}/.test(v)) return true; // PDF xref offset tables
+
+  // Bare HTTP/probe header dump: status line + headers, with no actual sentence.
+  if (/\b\d{3}\s+(?:OK|Not Found|Found|Moved|Forbidden|No Content)\b/i.test(v)
+    && /\b(?:content-type|last-modified|content-length|final):/i.test(v)
+    && !/[.!?]\s/.test(v)) return true;
+
+  // Readable-word density. Match alphabetic tokens (len >= 2) so terse spec
+  // findings ("SNR 73 dB AOP 124 analog output") survive, but pure byte/number
+  // dumps (< 3 real words) are rejected.
+  const realWords = v.match(/[\p{L}][\p{L}'-]+/gu) ?? [];
+  if (realWords.length < 3) return true;
+
+  // Navigation / login / cookie chrome. Only meaningful once there are enough
+  // words for the ratio to be stable; a high fraction of page-furniture words
+  // means the crawler captured the menu/footer, not a finding. Real prose never
+  // approaches 45% chrome words, so this won't drop substantive content.
+  if (realWords.length >= 10) {
+    const navHits = realWords.filter((w) => NAV_CHROME_WORDS.has(w.toLowerCase())).length;
+    if (navHits / realWords.length >= 0.45) return true;
+  }
+
+  return false;
+}

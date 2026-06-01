@@ -40,7 +40,7 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import { isSessionDegraded } from "./warden.js";
 import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
-import { truncateToolResult, extractKeyFacts } from "../tools/result-shaping.js";
+import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue } from "../tools/result-shaping.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
@@ -561,6 +561,15 @@ async function autoShareUsefulFinding(params: {
   // This produces a compact, information-dense summary instead of a head-truncated
   // raw dump that wastes shared-facts space on headers and URL lines.
   const extracted = extractKeyFacts(params.evidence, params.toolName);
+
+  // Quality gate: only the extracted "good stuff" goes into shared facts. If what
+  // survived extraction is still raw PDF/binary bytes, a bare HTTP-probe dump, or
+  // navigation/login boilerplate, skip the share — it would pollute the shared
+  // findings the final synthesis and evidence backstop read from.
+  if (extractedFindingIsLowValue(extracted)) {
+    params.sharedKeys.delete(key);
+    return null;
+  }
 
   await shareFinding(
     params.sessionId,
@@ -4762,9 +4771,24 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
         })
       : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}) before producing usable topic-related output.`;
+    // A run halted by the iteration guardrail that still GATHERED usable
+    // information is partial-with-evidence, NOT a failure — being limited by a
+    // guardrail mid-research is not the same as failing. "Gathered usable
+    // information" means: recovered evidence snippets, a workflow passthrough, or
+    // findings the agent published to shared memory (an explicit share_finding, or
+    // a quality-passing auto-share — junk auto-shares no longer increment the
+    // count). This deliberately does NOT key on raw successfulToolCount: a
+    // successful search_workflows that returned "no workflows matched" succeeded
+    // as a call but gathered nothing, and stays a failure.
+    const gatheredSharedFindings = shareFindinCallCount > 0 || autoSharedFindingCount > 0;
     const maxIterationsStats = completedFromArtifact
       ? buildStats("completed", "success")
-      : buildStats("max_iterations", recoveredUsefulEvidence || Boolean(workflowPassthroughOutput) ? "partial" : "failure");
+      : buildStats(
+          "max_iterations",
+          recoveredUsefulEvidence || Boolean(workflowPassthroughOutput) || gatheredSharedFindings
+            ? "partial"
+            : "failure",
+        );
     logSubAgentCompletionAudit(maxIterationsStats, maxIterationsOutput, {
       synthesizedAfterMaxIterations: false,
       completedFromArtifact,
