@@ -1956,7 +1956,7 @@ function looksLikeReadOnlyMutationMiss(
 // Website wurde erstellt" but never actually called write_file.
 const ARTIFACT_PRODUCING_TOOLS = new Set([
   "write_file", "edit_file", "create_dir",
-  "generate_document", "generate_website", "generate_docx", "generate_pptx", "generate_pdf",
+  "generate_document", "generate_website", "generate_presentation", "generate_docx", "generate_pptx", "generate_pdf",
   "bundle_artifact_zip", "export_workspace_artifact",
   "shell_exec",
 ]);

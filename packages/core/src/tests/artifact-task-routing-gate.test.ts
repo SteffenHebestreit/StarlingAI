@@ -49,6 +49,12 @@ describe("agentCfgCanFulfillArtifactTask", () => {
         { tools: ["generate_document"] },
       ),
     ).toBe(true);
+    expect(
+      agentCfgCanFulfillArtifactTask(
+        "create a reveal.js presentation about Dresden architecture",
+        { tools: ["generate_presentation"] },
+      ),
+    ).toBe(true);
   });
 
   it("does NOT filter when the task is purely investigative", () => {
