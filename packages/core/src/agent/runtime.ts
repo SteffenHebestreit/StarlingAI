@@ -758,7 +758,27 @@ export function looksLikeRegurgitatedPriorAnswer(
   return false;
 }
 
-function enforceSourceSensitiveOriginalRequestOnToolCall(
+/**
+ * True when a create_ephemeral_agent spec grants WRITE/artifact tools but no
+ * web-reaching tools (web_search / web_fetch / browser_*). Such an agent renders
+ * already-gathered evidence — it is NOT a researcher — so the source-sensitive
+ * "WEB RESEARCH TASK — gather datasheets/sourcing/pricing" preamble must not be
+ * injected into its task: that boilerplate both mis-frames the writer AND is the
+ * exact trigger for the agent-factory research-capability gate, which then rejects
+ * the writer for lacking web tools (audit 74e49d90: presentation_builder rejected,
+ * artifact never built, turn shipped a raw evidence dump). Mirrors the gate's own
+ * web-tool set (web_search/web_fetch/browser_*; url_inspect does not count).
+ * Empty/omitted tools ⇒ inherits all (may include web) ⇒ do not skip.
+ */
+export function ephemeralAgentSpecLacksWebTools(args: Record<string, unknown>): boolean {
+  const tools = Array.isArray(args["tools"])
+    ? args["tools"].filter((t): t is string => typeof t === "string")
+    : null;
+  if (!tools || tools.length === 0) return false;
+  return !tools.some((t) => /^web_search$/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t));
+}
+
+export function enforceSourceSensitiveOriginalRequestOnToolCall(
   toolCall: LLMResponse["tool_calls"][number],
   userMessage: string,
   guidance: DynamicTurnGuidance | null | undefined,
@@ -766,6 +786,13 @@ function enforceSourceSensitiveOriginalRequestOnToolCall(
   guardrailEvents: Array<{ type: string; details: string }>,
 ): void {
   if (!guidance?.sourceSensitive) return;
+  // A source-sensitive task may still spawn a downstream WRITER to render the
+  // gathered evidence into an artifact. Don't rewrite a write-only ephemeral
+  // agent's task into a research-gather preamble — it would be rejected for
+  // lacking web tools and the artifact would never be produced.
+  if (toolCall.name === "create_ephemeral_agent" && ephemeralAgentSpecLacksWebTools(toolCall.arguments ?? {})) {
+    return;
+  }
   const originalArgs = toolCall.arguments ?? {};
   let nextArgs: Record<string, unknown> | null = null;
 
