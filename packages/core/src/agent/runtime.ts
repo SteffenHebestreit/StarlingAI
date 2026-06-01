@@ -433,12 +433,22 @@ function formatRecoveryEvidenceForFinalUser(
  * cites a URL is not flagged. Topic- and site-agnostic — structural framing only.
  */
 export function looksLikeRawToolEvidenceDump(value: string): boolean {
-  if (value.trim().length < 200) return false;
+  const v = value.trim();
+  if (v.length < 200) return false;
+  // A user-facing answer that LEADS with a raw tool-result header is always a dump —
+  // a synthesized answer never begins with "Web Search Results for:", "Content from:
+  // <url>", or recovered-evidence scaffolding. One leading marker is enough (audit
+  // 33df2aec: a search-results partial led with "Web Search Results for: … MENU Home
+  // Travel …" and shipped verbatim — only one structural marker, so the >=2 rule below
+  // missed it). Tolerates a little leading markdown/punctuation.
+  if (/^[\s>*#`_-]{0,8}(?:Web Search Results for:|Content from:\s*https?:\/\/|Recovered evidence snippets|Partial progress before interruption)/i.test(v)) {
+    return true;
+  }
   let hits = 0;
-  if (/(?:^|\n|\s)Content from:\s*https?:\/\//i.test(value)) hits += 1;
-  if (/Web Search Results for:/i.test(value)) hits += 1;
-  if (/Recovered evidence snippets|Partial progress before interruption/i.test(value)) hits += 1;
-  if (/Jump to content|Skip to (?:main )?content|move to sidebar|Create account\s+Log\s*in/i.test(value)) hits += 1;
+  if (/(?:^|\n|\s)Content from:\s*https?:\/\//i.test(v)) hits += 1;
+  if (/Web Search Results for:/i.test(v)) hits += 1;
+  if (/Recovered evidence snippets|Partial progress before interruption/i.test(v)) hits += 1;
+  if (/Jump to content|Skip to (?:main )?content|move to sidebar|Create account\s+Log\s*in/i.test(v)) hits += 1;
   return hits >= 2;
 }
 
