@@ -2405,8 +2405,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let autoSharedFindingCount = 0;
     const autoSharedFindingKeys = new Set<string>();
-    // Distillation budget for the auto-share path: bound the extra model calls per run
-    // (slow single-GPU latency ceiling). Gated by orchestration.distillSharedFacts.
+    // Distillation budget for the auto-share path: a high SAFETY ceiling, not a
+    // compute-saving cap — uncurated raw findings bloat the downstream build/synthesis
+    // context far more than the small distill call costs (audit 65f46046), so we curate
+    // every eligible web finding. Gated by orchestration.distillSharedFacts.
     const distillSharedFacts = {
       enabled: config.orchestration.distillSharedFacts,
       minChars: config.orchestration.distillSharedFactsMinChars,
