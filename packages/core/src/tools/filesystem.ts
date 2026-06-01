@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { basename, resolve, extname, join } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -257,15 +257,20 @@ registerTool({
 
 registerTool({
   name: "write_file",
-  description: "Write content to a file within the workspace. No size limit on writes — pass the full content in one call, even for large files (50+ KB single-page apps, multi-thousand-line scripts, full reports). Do NOT split a single deliverable across multiple write_file calls or fabricate workarounds for a non-existent size cap. Creates the file and parent directories if needed; overwrites if the file exists.",
-  embeddingDescription: "Write, save, create, or persist a file with given content. Datei schreiben, speichern, erstellen, sichern. Write code, documents, reports, generated output. Neue Datei anlegen. No size limit — keine Größenbeschränkung; bei großen Deliverables einen einzigen Aufruf mit dem kompletten Inhalt.",
+  description: "Write content to a file within the workspace. For a normal-sized deliverable, pass the full content in one call (mode defaults to 'overwrite'). For a VERY LARGE single file (e.g. a 30 KB+ HTML page or reveal.js deck, a long report, a multi-thousand-line script) that the model cannot reliably emit in one completion, build it INCREMENTALLY: write the first chunk, then call write_file again with mode:'append' for each subsequent chunk until the file is complete — each chunk is appended verbatim with no overlap. This keeps every call bounded and avoids the single-giant-completion timeout on slow backends. Creates the file and parent directories if needed. mode:'overwrite' (default) replaces an existing file; mode:'append' adds to it (creating it if missing); mode:'create' fails if the file already exists.",
+  embeddingDescription: "Write, save, create, append, or persist a file with given content. Datei schreiben, speichern, erstellen, anhängen, sichern. Write code, documents, reports, generated output. Build large files incrementally by appending chunks. Große Dateien stückweise per Append aufbauen.",
   costHint: "low",
   latencyHint: "low",
   parameters: {
     type: "object",
     properties: {
       path: { type: "string", description: "Relative path within workspace" },
-      content: { type: "string", description: "File content to write" },
+      content: { type: "string", description: "File content to write (for mode:'append', the chunk to append verbatim)" },
+      mode: {
+        type: "string",
+        enum: ["overwrite", "append", "create"],
+        description: "'overwrite' (default) replaces/creates the file; 'append' adds to the end (creating it if missing) — use this to build a large file in bounded chunks; 'create' fails if the file already exists.",
+      },
       createDirs: { type: "boolean", description: "Create parent directories if needed", default: true },
     },
     required: ["path", "content"],
@@ -274,6 +279,9 @@ registerTool({
     const path = String(args["path"] ?? "");
     const content = String(args["content"] ?? "");
     const createDirs = Boolean(args["createDirs"] ?? true);
+    const rawMode = String(args["mode"] ?? "overwrite").toLowerCase();
+    const mode: "overwrite" | "append" | "create" =
+      rawMode === "append" || rawMode === "create" ? rawMode : "overwrite";
     const { safe, resolved, relativePath } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) {
@@ -285,16 +293,32 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for writing` };
     }
 
+    const fileExists = existsSync(resolved);
+    if (mode === "create" && fileExists) {
+      return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
+    }
+
     try {
       if (createDirs) {
         mkdirSync(resolve(resolved, ".."), { recursive: true });
       }
-      writeFileSync(resolved, content, "utf-8");
+      const appended = mode === "append" && fileExists;
+      if (appended) {
+        appendFileSync(resolved, content, "utf-8");
+      } else {
+        writeFileSync(resolved, content, "utf-8");
+      }
+      // On append, preview/size reflect the full resulting file so the artifact
+      // shows the whole deliverable as it is assembled — not just the last chunk.
+      const fullContent = appended ? readFileSync(resolved, "utf-8") : content;
       const contentType = inferArtifactContentType(relativePath);
-      const textPreview = buildArtifactTextPreview(content);
+      const textPreview = buildArtifactTextPreview(fullContent);
+      const verb = appended ? "appended to" : "written";
       return {
         success: true,
-        output: `File written: ${relativePath} (${content.length} chars)`,
+        output: appended
+          ? `Appended ${content.length} chars to ${relativePath} (now ${fullContent.length} chars total)`
+          : `File ${verb}: ${relativePath} (${content.length} chars)`,
         metadata: {
           artifactKind: "workspace_file",
           path,
@@ -303,7 +327,8 @@ registerTool({
           contentType,
           previewMode: inferArtifactPreviewMode(contentType),
           isDirectory: false,
-          size: content.length,
+          size: fullContent.length,
+          writeMode: mode,
           ...(textPreview ? { textPreview } : {}),
         },
       };
