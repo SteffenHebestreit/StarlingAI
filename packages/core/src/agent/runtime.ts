@@ -365,6 +365,9 @@ function formatSharedFactsRecoveryForUserDisplay(evidence: string): string {
   const stripped = evidence
     .replace(/^[ \t]*-\s+read_shared_facts:\s*/im, "")
     .replace(/##\s+Shared\s+Session\s+Facts\s+\(\d+\)\s*/i, "")
+    // Defense-in-depth: our own injected agent hint must never reach the user, even
+    // for facts stored before result-shaping started stripping it (audit 65f46046).
+    .replace(/💡?\s*If this content is useful for your task,?\s*call share_finding now[\s\S]*?(?:runs out\.?|(?=\n)|$)/gi, "")
     .trim();
   // Split on whichever auto-key marker is present:
   //   `- auto_xxx_yyy:` (bullet-line shape) — preserve the leading split
@@ -409,7 +412,10 @@ function buildRecoveryEvidenceUserMessage(evidence: string): string {
   return [
     "Die Recherche wurde unterbrochen, bevor ein vollständiges Dossier fertiggestellt werden konnte. Die bisher gesammelten Quellen und Fakten:",
     formatted,
-    "Bitte starte den Lauf mit engerem Fokus erneut, damit ein Spezialist die fehlenden Abschnitte (Produkt-Empfehlungen, Verdrahtung, BOM, Verbesserungen) belastbar abdecken kann.",
+    // Topic-agnostic footer. NEVER name domain-specific sections here (an earlier version
+    // hardcoded "(Produkt-Empfehlungen, Verdrahtung, BOM, Verbesserungen)" — overfit to one
+    // hardware-BOM request, audit 65f46046 surfaced it verbatim on a Dresden architecture deck).
+    "Falls Abschnitte fehlen, starte den Lauf bei Bedarf mit einem engeren Fokus erneut, damit ein Spezialist die noch offenen Punkte vollständig abdecken kann.\n(If anything is missing, you can re-run with a narrower focus so a specialist can complete the remaining sections.)",
   ].join("\n\n");
 }
 
@@ -5806,21 +5812,53 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     opts.onStatus?.({ phase: "guardrail", message: "Die Recherche ist abgeschlossen — ich lasse jetzt den Inhalts-Spezialisten das Artefakt aus den belegten Fakten erstellen.", iteration: iterationCount });
+    const buildTask = "BUILD TASK — the research is already done; produce the requested deliverable NOW from the verified findings in the context. "
+      + "Do NOT re-research. Use ONLY facts present in the context; cite the source URLs where relevant. "
+      + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
+      + userMessage;
+    let buildResultMetadata: Record<string, unknown> | undefined;
     try {
-      const buildTask = "BUILD TASK — the research is already done; produce the requested deliverable NOW from the verified findings in the context. "
-        + "Do NOT re-research. Use ONLY facts present in the context; cite the source URLs where relevant. "
-        + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
-        + userMessage;
-      await executeTool("delegate_to_agent", {
+      const buildResult = await executeTool("delegate_to_agent", {
         agentName: "content_writer",
         task: buildTask,
         context: curatedForBuild.slice(0, 8_000),
       }, toolContext);
       _turnDelegationCount += 1;
+      buildResultMetadata = buildResult.metadata;
+      // executeTool here runs OUTSIDE the main tool loop, which is what normally
+      // appends the result (with artifacts metadata) to history. Record the auto-build
+      // delegation as a well-formed assistant+tool pair so (a) the built artifact
+      // surfaces as a clickable attachment on the final message (persistAssistantTurnState
+      // → collectTurnArtifactAttachments only reads tool-role history) and (b) history
+      // stays valid for synthesis and the next turn (audit 65f46046: the deck WAS built
+      // but the success message never shipped because the stale history walk found no
+      // artifact and the failure backstop won instead).
+      const autoBuildCallId = `autobuild_${Date.now().toString(36)}`;
+      session.addMessage({
+        role: "assistant",
+        content: "",
+        tool_calls: [{
+          id: autoBuildCallId,
+          type: "function",
+          function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: "content_writer", task: "BUILD TASK (auto-build after research)" }) },
+        }],
+      });
+      session.addMessage({
+        role: "tool",
+        content: (buildResult.success ? buildResult.output : (buildResult.error?.trim() ? `Error: ${buildResult.error}` : buildResult.output)).slice(0, 4_000),
+        tool_call_id: autoBuildCallId,
+        metadata: buildResult.metadata,
+      });
     } catch (err) {
       log.warn({ err, sessionId: session.id }, "Auto-build-after-research delegation failed");
     }
-    const builtArtifacts = collectTurnArtifactAttachments(session);
+    // Detect the built artifact from the delegation RETURN metadata first (authoritative;
+    // see above), falling back to the history walk.
+    const builtArtifacts: Array<Record<string, unknown>> = [];
+    if (buildResultMetadata) extractArtifactsFromMetadata(buildResultMetadata, builtArtifacts, new Set<string>());
+    if (builtArtifacts.length === 0) {
+      for (const a of collectTurnArtifactAttachments(session)) builtArtifacts.push(a);
+    }
     if (builtArtifacts.length > 0) {
       const paths = builtArtifacts
         .map((a) => (typeof a["relativePath"] === "string" && a["relativePath"] ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "")))

@@ -52,6 +52,12 @@ export function truncateToolResult(content: string, toolName: string): string {
 export function extractKeyFacts(text: string, toolName: string, maxChars = 600): string {
   // Strip known boilerplate common across tool result types.
   let cleaned = text
+    // StarlingAI's own injected agent hint — appended to sub-agent web tool output
+    // (web.ts shareSuffix). It is our text, never a fact; it must never be stored as a
+    // shared finding or echoed back to the user (audit 65f46046: it surfaced verbatim
+    // inside the shared-facts recovery dump: "…💡 If this content is useful for your
+    // task, call share_finding now…").
+    .replace(/💡?\s*If this content is useful for your task,?\s*call share_finding now[\s\S]*?(?:runs out\.?|$)/gi, "")
     // Web search header line
     .replace(/\*\*Web Search Results for:\*\*[^\n]*\n?/g, "")
     // Web fetch / browser content header
