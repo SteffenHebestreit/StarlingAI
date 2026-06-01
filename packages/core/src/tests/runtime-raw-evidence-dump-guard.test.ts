@@ -44,10 +44,23 @@ describe("terminal junk guard — looksLikeRawToolEvidenceDump", () => {
     expect(looksLikeRawToolEvidenceDump("I couldn't log in to the portal — please check the credentials.")).toBe(false);
   });
 
-  it("requires two distinct structural markers (one alone is not enough)", () => {
-    const onlySearch =
-      "Web Search Results for: \"reveal.js theme\" returned several relevant pages about presentation "
-      + "frameworks, theming options, and CDN usage, none of which contained any navigation boilerplate at all.";
-    expect(looksLikeRawToolEvidenceDump(onlySearch)).toBe(false);
+  it("flags an answer that LEADS with a raw tool-result header even with one marker (audit 33df2aec)", () => {
+    // The search-results partial led with the tool header + generic site chrome
+    // ("MENU Home Travel Style All Tours") that the specific chrome phrases don't match,
+    // so the >=2 rule missed it. A leading header alone is enough — answers never start so.
+    const leadingSearchDump =
+      "Web Search Results for: \"Katholische Hofkirche Dresden architect\" (via duckduckgo) "
+      + "Katholische Hofkirche History https://travelsetu.com/guide/... The foundation stone was laid in 1738. "
+      + "Tours of Distinction 1-800-426-4324 MENU Home Travel Style All Tours Land Tours Overnight Tours Blog Group Leaders";
+    expect(looksLikeRawToolEvidenceDump(leadingSearchDump)).toBe(true);
+  });
+
+  it("does NOT flag a synthesized answer that references a marker phrase mid-sentence", () => {
+    // Only one marker AND not leading → a real written answer, not a dump.
+    const real =
+      "Ich habe die Recherche abgeschlossen. Aus den durchgesehenen Web Search Results for the Zwinger ergibt "
+      + "sich folgendes Gesamtbild: der Zwinger ist ein barockes Bauensemble, erbaut zwischen 1709 und 1728, und gilt "
+      + "als Hauptwerk des sächsischen Barock — eine zusammenhängende Darstellung ohne weitere Rohausgabe.";
+    expect(looksLikeRawToolEvidenceDump(real)).toBe(false);
   });
 });
