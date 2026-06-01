@@ -422,6 +422,45 @@ function formatRecoveryEvidenceForFinalUser(
   return evidence;
 }
 
+/**
+ * True when a string is a RAW TOOL-RESULT DUMP rather than a written answer: web_fetch
+ * page text ("Content from: <url> …"), search-result blocks ("Web Search Results for:
+ * …"), recovered-evidence scaffolding, or scraped page chrome ("Jump to content",
+ * "move to sidebar", "Create account Log in"). Such a dump must never be the
+ * user-facing final answer (audit 003f5aeb: every Dresden presentation run, when the
+ * artifact build failed, shipped the raw Dresden_Castle Wikipedia nav menu verbatim).
+ * Requires >= 2 distinct structural markers so a genuine synthesized answer that merely
+ * cites a URL is not flagged. Topic- and site-agnostic — structural framing only.
+ */
+export function looksLikeRawToolEvidenceDump(value: string): boolean {
+  if (value.trim().length < 200) return false;
+  let hits = 0;
+  if (/(?:^|\n|\s)Content from:\s*https?:\/\//i.test(value)) hits += 1;
+  if (/Web Search Results for:/i.test(value)) hits += 1;
+  if (/Recovered evidence snippets|Partial progress before interruption/i.test(value)) hits += 1;
+  if (/Jump to content|Skip to (?:main )?content|move to sidebar|Create account\s+Log\s*in/i.test(value)) hits += 1;
+  return hits >= 2;
+}
+
+/**
+ * Honest user-facing message for the "research succeeded but the artifact step failed"
+ * end-state. Surfaces the curated, sourced findings (so the gathered work isn't lost)
+ * under a bilingual could-not-finish preamble — never the raw dump. Used by the
+ * last-resort terminal guard.
+ */
+function buildResearchGatheredFallback(curatedEvidence: string | null): string {
+  const head = [
+    "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
+    + "Die Inhalte wurden jedoch recherchiert und mit Quellen belegt — bestätige bitte, dann lasse ich die Datei vom zuständigen Spezialisten erstellen.",
+    "I couldn't finish the requested artifact (e.g. the HTML file) this turn, but the content was researched and sourced — confirm and I'll have the content specialist build the file.",
+  ].join("\n\n");
+  const curated = curatedEvidence?.trim();
+  if (curated) {
+    return `${head}\n\n## Recherchierte Fakten & Quellen / Researched facts & sources\n\n${formatSharedFactsRecoveryForUserDisplay(curated)}`;
+  }
+  return head;
+}
+
 function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
   const lines = evidence
     .split("\n")
@@ -5715,7 +5754,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? (evidenceForUserDisplay ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
-  const finalMsg = await rewriteTerminalResponseIfNeeded(evidenceBackstopMsg, iterationCount, session, provider, signal);
+  // Last-resort guard: a raw tool-result dump (web_fetch page chrome, search-result
+  // blocks, recovered-evidence scaffolding) must never be the user-facing answer
+  // (audit 003f5aeb: every Dresden run, when the artifact build failed, shipped the raw
+  // Dresden_Castle Wikipedia nav menu verbatim). Replace it with the curated, sourced
+  // findings under an honest could-not-finish preamble, or an honest status when nothing
+  // clean was gathered. Structural detection only — topic- and site-agnostic.
+  let presentableFinalMsg: string = evidenceBackstopMsg;
+  if (looksLikeRawToolEvidenceDump(presentableFinalMsg)) {
+    const curated = terminalSharedFactsEvidence
+      && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
+      ? terminalSharedFactsEvidence.evidence
+      : null;
+    logAudit("guardrail_flagged", {
+      type: "raw_tool_evidence_dump_suppressed",
+      finishReason: terminalFinishReason,
+      dumpLength: presentableFinalMsg.length,
+      curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    presentableFinalMsg = buildResearchGatheredFallback(curated);
+  }
+  const finalMsg = await rewriteTerminalResponseIfNeeded(presentableFinalMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
   if (opts.onChunk) opts.onChunk(finalMsg);
 
