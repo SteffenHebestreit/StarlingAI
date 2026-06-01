@@ -726,6 +726,38 @@ function extractPriorTurnContext(
   return { priorUserRequest, priorAssistantAnswer };
 }
 
+/**
+ * True when a final answer is substantially a verbatim copy of an EARLIER
+ * assistant turn. On a turn where every tool call was blocked (no successful work
+ * happened), this means the model gave up and parroted a previous deliverable
+ * summary — shipping a stale FALSE SUCCESS that implies the user's new request was
+ * carried out when it was not (audit 43b3ec65 turn 3: "update the presentation and
+ * add the sources" shipped a verbatim copy of the turn-1 "presentation created"
+ * summary — no edit, no sources). Scans EVERY prior assistant answer, not just the
+ * most recent, because the parroted turn may be several turns back. A shared
+ * 180-char normalized leading slice is a near-certain duplication signal; genuinely
+ * distinct answers do not coincidentally share that much text. Topic-agnostic.
+ */
+export function looksLikeRegurgitatedPriorAnswer(
+  candidate: string,
+  history: readonly SessionHistoryMessage[],
+): boolean {
+  const norm = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
+  const cand = norm(candidate);
+  if (cand.length < 180) return false;
+  const candHead = cand.slice(0, 180);
+  for (const message of history) {
+    if (message.role !== "assistant") continue;
+    const hasToolCalls = Array.isArray((message as { tool_calls?: unknown[] }).tool_calls)
+      && (((message as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0);
+    if (hasToolCalls) continue;
+    const prior = typeof message.content === "string" ? norm(message.content) : "";
+    if (prior.length < 180) continue;
+    if (prior.slice(0, 180) === candHead) return true;
+  }
+  return false;
+}
+
 function enforceSourceSensitiveOriginalRequestOnToolCall(
   toolCall: LLMResponse["tool_calls"][number],
   userMessage: string,
@@ -5482,7 +5514,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }, { sessionId: session.id, severity: "warn" });
         terminalFinishReason = "all_tool_calls_blocked";
         terminalSynthesisInstruction =
-          "The model repeatedly attempted tool calls that were blocked or unavailable. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the requested artifact could not be created because the direct file tool was unavailable, say that plainly and do not invent an artifact path.";
+          "The model repeatedly attempted tool calls that were blocked or unavailable, so NOTHING was created or changed this turn. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the user asked you to create or modify an artifact and you have no direct file tool, say plainly that you could not apply the change and offer to delegate it — do NOT invent an artifact path, and do NOT repeat or re-paste an earlier turn's answer as if the change had been applied.";
         _forcedSynthesisFired = true;
         log.warn({ iterationCount, blocked: _consecutiveFullyBlockedIterations }, "All tool calls blocked for consecutive iterations — forcing synthesis");
         break;
@@ -5554,11 +5586,40 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     { preferHigherScore: false },
   );
   const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
-  const synthesized = bypassTerminalSynthesis
+  let synthesized = bypassTerminalSynthesis
     ? null
     : await forceSynthesis(
         session, provider, signal, terminalSynthesisInstruction,
       );
+  // Honesty guard for the fully-blocked path. When EVERY tool call this turn was
+  // blocked, nothing was actually done — yet the model sometimes "answers" by
+  // re-pasting an EARLIER turn's deliverable summary verbatim, shipping a stale
+  // false success (audit 43b3ec65 turn 3: "update the presentation + add the
+  // sources" parroted the turn-1 "presentation created" summary — no edit, no
+  // sources). Detect that regurgitation and re-synthesize an honest status; the
+  // corrective pass keeps the user's language. Only fires on all_tool_calls_blocked,
+  // where no successful work could have produced a legitimate restatement.
+  if (
+    terminalFinishReason === "all_tool_calls_blocked"
+    && synthesized
+    && looksLikeRegurgitatedPriorAnswer(synthesized, session.getHistory())
+  ) {
+    logAudit("guardrail_flagged", {
+      type: "blocked_turn_regurgitated_prior_answer",
+      finishReason: terminalFinishReason,
+      synthesizedLength: synthesized.length,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    const honest = await forceSynthesis(
+      session, provider, signal,
+      "Every tool call you attempted this turn was blocked or unavailable, so NOTHING was created or changed this turn. "
+      + "Your previous draft just re-pasted an earlier turn's answer, which falsely implies the user's new request was carried out — it was NOT. "
+      + "Reply briefly and honestly IN THE USER'S LANGUAGE: state that you could not apply the requested change this turn because the needed action was not available to you directly, and offer to delegate it to the appropriate specialist so it actually gets done. "
+      + "Do NOT restate or re-paste the earlier deliverable as if it had been updated, do NOT invent a file path, and do NOT claim success.",
+    );
+    synthesized = (honest && !looksLikeRegurgitatedPriorAnswer(honest, session.getHistory()))
+      ? honest
+      : "I couldn't apply that change in this turn — the action I attempted wasn't available to me directly, and no specialist was invoked to carry it out. Confirm and I'll delegate the update to the right specialist so it actually gets done.\n\nIch konnte die gewünschte Änderung in diesem Schritt nicht ausführen — die benötigte Aktion stand mir nicht direkt zur Verfügung, und es wurde kein Spezialist damit beauftragt. Bestätige bitte, dann delegiere ich die Aktualisierung an den passenden Spezialisten.";
+  }
   // When we have evidence in scope, prefer it over the generic
   // "I've gathered partial results" message — that string was correct
   // about what happened but threw away the partial results.  Only fall
