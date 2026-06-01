@@ -128,6 +128,56 @@ describe("filesystem tools", () => {
     expect(existsSync(join(tempDir, "generated", "generated", "site", "index.html"))).toBe(false);
   });
 
+  // Incremental large-file build (general fix for the slow-model single-call
+  // timeout): the model writes a head chunk then appends the rest, so no single
+  // write_file call has to emit a 30 KB+ blob. General across HTML/report/script.
+  it("builds a file incrementally with mode:'append' (head + chunks)", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const { readFileSync, existsSync } = await import("node:fs");
+    const tool = getTool("write_file")!;
+    const ctx = { sessionId: "session-append-build", workspacePath: tempDir };
+
+    const head = await tool.execute({ path: "deck/index.html", content: "<!doctype html><html><body>" }, ctx);
+    expect(head.success).toBe(true);
+    expect(head.metadata).toMatchObject({ writeMode: "overwrite", size: "<!doctype html><html><body>".length });
+
+    const mid = await tool.execute({ path: "deck/index.html", content: "<section>Slide 1</section>", mode: "append" }, ctx);
+    expect(mid.success).toBe(true);
+    expect(mid.metadata).toMatchObject({ writeMode: "append" });
+    expect(mid.output).toMatch(/Appended 26 chars to .+\(now \d+ chars total\)/);
+
+    const tail = await tool.execute({ path: "deck/index.html", content: "</body></html>", mode: "append" }, ctx);
+    expect(tail.success).toBe(true);
+
+    const full = readFileSync(join(tempDir, "generated", "deck", "index.html"), "utf-8");
+    expect(full).toBe("<!doctype html><html><body><section>Slide 1</section></body></html>");
+    expect(tail.metadata?.["size"]).toBe(full.length);
+    expect(existsSync(join(tempDir, "generated", "deck", "index.html"))).toBe(true);
+  });
+
+  it("mode:'append' creates the file when it does not exist yet", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const { readFileSync } = await import("node:fs");
+    const tool = getTool("write_file")!;
+    const result = await tool.execute(
+      { path: "notes/log.md", content: "first line\n", mode: "append" },
+      { sessionId: "session-append-create", workspacePath: tempDir },
+    );
+    expect(result.success).toBe(true);
+    expect(readFileSync(join(tempDir, "generated", "notes", "log.md"), "utf-8")).toBe("first line\n");
+  });
+
+  it("mode:'create' refuses to clobber an existing file", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("write_file")!;
+    const ctx = { sessionId: "session-create-guard", workspacePath: tempDir };
+    const first = await tool.execute({ path: "once/seed.txt", content: "original", mode: "create" }, ctx);
+    expect(first.success).toBe(true);
+    const second = await tool.execute({ path: "once/seed.txt", content: "clobber", mode: "create" }, ctx);
+    expect(second.success).toBe(false);
+    expect(second.error).toMatch(/already exists/i);
+  });
+
   it("exports an existing folder as a downloadable archive artifact", async () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("export_workspace_artifact");

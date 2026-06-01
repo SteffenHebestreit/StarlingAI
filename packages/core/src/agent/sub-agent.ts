@@ -690,7 +690,10 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   // number here is the soft TOTAL cap as a backstop; session 2d810e7d
   // (2026-05-28) showed an honest 4-file write blocked at file 4 under
   // the old flat cap of 3.
-  write_file: 12,
+  // Raised from 12 to accommodate incremental large-file builds (write head +
+  // many mode:"append" chunks) without tripping the flat per-tool cap; the tight
+  // per-path overwrite cap (PER_PATH_WRITE_CAP=2) remains the real loop guard.
+  write_file: 24,
   edit_file: 12,
   generate_document: 4,
   generate_website: 2,
@@ -711,6 +714,10 @@ const PATH_KEYED_WRITE_TOOLS = new Set<string>([
   "export_workspace_artifact",
 ]);
 const PER_PATH_WRITE_CAP = 2;
+// write_file(mode:"append") to the same path is the incremental-build path (write
+// head → append chunks), so one file legitimately takes many appends. Bound it
+// generously to still catch a true runaway, but well above a chunked large file.
+const PER_PATH_APPEND_CAP = 24;
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
@@ -3952,12 +3959,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           })()
           : null;
         if (writePath !== null) {
+          // Appending to one file is HOW a large artifact is built incrementally
+          // (write head → append chunks), so repeated write_file(mode:"append") to
+          // the same path is expected, not a loop. Give it a much higher per-path
+          // ceiling; plain overwrites keep the tight loop-guard cap.
+          const isAppendWrite = tc.name === "write_file"
+            && typeof tc.arguments?.["mode"] === "string"
+            && String(tc.arguments["mode"]).toLowerCase() === "append";
+          const pathCap = isAppendWrite ? PER_PATH_APPEND_CAP : PER_PATH_WRITE_CAP;
           const pathKey = `${tc.name}:${writePath}`;
           const pathCount = perWritePathCount.get(pathKey) ?? 0;
-          if (pathCount >= PER_PATH_WRITE_CAP) {
+          if (pathCount >= pathCap) {
             log.warn(
-              { agentName: opts.agentName, tool: tc.name, path: writePath, count: pathCount, cap: PER_PATH_WRITE_CAP },
-              "Sub-agent exceeded per-path write cap (same path rewritten too many times)",
+              { agentName: opts.agentName, tool: tc.name, path: writePath, count: pathCount, cap: pathCap, append: isAppendWrite },
+              "Sub-agent exceeded per-path write cap (same path written too many times)",
             );
             emitSubAgentToolAudit({
               agentName: opts.agentName,
@@ -3965,12 +3980,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               phase: "done",
               args: tc.arguments,
               toolCallId: tc.id,
-              errorText: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${PER_PATH_WRITE_CAP} per path). Move on to a different path or finalize.`,
+              errorText: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${pathCap} per path). Move on to a different path or finalize.`,
               skippedReason: "per_path_write_cap",
             });
             toolResults.push({
               role: "tool",
-              content: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${PER_PATH_WRITE_CAP} per path). Move on to a different path or finalize.`,
+              content: `Tool '${tc.name}' has already written '${writePath}' ${pathCount} times this run (limit: ${pathCap} per path). Move on to a different path or finalize.`,
               tool_call_id: tc.id,
             });
             continue;
