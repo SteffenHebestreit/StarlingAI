@@ -11,7 +11,7 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
-import type { LLMMessage } from "../providers/lmstudio.js";
+import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
@@ -539,12 +539,61 @@ async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Pr
 // (too short, duplicate, or boilerplate). The caller counts the returned
 // length toward cumulativeUsefulEvidenceBytes so the evidence cap tracks
 // actual stored knowledge density rather than raw tool output volume.
+/**
+ * LLM distillation pass for the auto-share path. Given the sub-agent's OBJECTIVE
+ * ("what we're looking for") and the raw content a tool returned, extract ONLY the
+ * objective-relevant facts/figures/dates/prices and their source URLs as a compact
+ * bullet list — dropping navigation, login/cookie boilerplate, and anything off-topic.
+ * Returns the distilled text, "" when nothing relevant was found, or null on
+ * failure/abort (caller then keeps the heuristic extract — never drops evidence).
+ * One short model call; gated + bounded by the caller.
+ */
+export async function distillFindingForSharedFacts(params: {
+  objective: string;
+  toolName: string;
+  rawEvidence: string;
+  provider: ChatProvider;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const objective = params.objective.replace(/\s+/g, " ").trim().slice(0, 600);
+  const raw = params.rawEvidence.slice(0, 6000);
+  const messages: LLMMessage[] = [
+    {
+      role: "system",
+      content:
+        "You are an evidence-distillation step in a research pipeline. You are given a research OBJECTIVE "
+        + "and RAW CONTENT that a tool returned. Extract ONLY the information in the raw content that is "
+        + "relevant to the objective: concrete facts, figures, dates, names, prices, specs, and the source "
+        + "URL(s) they came from. Output a compact Markdown bullet list (at most 8 bullets). Preserve exact "
+        + "numbers, units, and URLs verbatim. DROP navigation menus, cookie/consent/login banners, site "
+        + "chrome, and anything not relevant to the objective. Do NOT add facts that are not in the raw "
+        + "content. If the raw content contains nothing relevant to the objective, reply with exactly: NONE",
+    },
+    {
+      role: "user",
+      content: `OBJECTIVE:\n${objective}\n\nRAW CONTENT (from ${params.toolName}):\n${raw}`,
+    },
+  ];
+  try {
+    const response = await params.provider.complete(messages, [], params.signal);
+    const distilled = (response.content ?? "").trim();
+    if (!distilled || /^NONE\b/i.test(distilled)) return "";
+    return distilled;
+  } catch {
+    return null;
+  }
+}
+
 async function autoShareUsefulFinding(params: {
   sessionId: string;
   agentName: string;
   toolName: string;
   evidence: string;  // raw (structured) tool output — not whitespace-collapsed
   sharedKeys: Set<string>;
+  objective: string;
+  provider: ChatProvider;
+  signal?: AbortSignal;
+  distill?: { enabled: boolean; minChars: number; budget: { remaining: number } };
 }): Promise<string | null> {
   // Normalize only for length check and dedup key — preserve structure for extraction
   const normalized = params.evidence.replace(/\s+/g, " ").trim();
@@ -562,21 +611,54 @@ async function autoShareUsefulFinding(params: {
   // raw dump that wastes shared-facts space on headers and URL lines.
   const extracted = extractKeyFacts(params.evidence, params.toolName);
 
-  // Quality gate: only the extracted "good stuff" goes into shared facts. If what
-  // survived extraction is still raw PDF/binary bytes, a bare HTTP-probe dump, or
-  // navigation/login boilerplate, skip the share — it would pollute the shared
-  // findings the final synthesis and evidence backstop read from.
+  // Quality gate (fast, no model call): only the extracted "good stuff" goes into
+  // shared facts. If what survived extraction is still raw PDF/binary bytes, a bare
+  // HTTP-probe dump, or navigation/login boilerplate, skip the share — it would
+  // pollute the shared findings the final synthesis and evidence backstop read from.
   if (extractedFindingIsLowValue(extracted)) {
     params.sharedKeys.delete(key);
     return null;
   }
 
+  // Distillation: for a LARGE web-research extract, hand the objective + raw content to
+  // a one-shot model pass that keeps only the objective-relevant facts/URLs. Keeps
+  // shared findings dense and shrinks the context the final synthesis must read. Bounded
+  // per run; on failure/abort, keep the heuristic extract (never drops evidence).
+  // Scoped to web-research tools — that is where scraped page chrome / search-result
+  // noise comes from. Structured outputs (ssh_exec, DB queries, delegation results, file
+  // contents) are returned as-is: distilling them risks dropping precise data.
+  let toShare = extracted;
+  const distill = params.distill;
+  if (
+    distill?.enabled
+    && /^(?:web_search|web_fetch|browser_)/i.test(params.toolName)
+    && distill.budget.remaining > 0
+    && extracted.length >= distill.minChars
+  ) {
+    distill.budget.remaining -= 1;
+    const distilled = await distillFindingForSharedFacts({
+      objective: params.objective,
+      toolName: params.toolName,
+      rawEvidence: params.evidence,
+      provider: params.provider,
+      signal: params.signal,
+    });
+    if (distilled === "") {
+      // Nothing in this result was relevant to the objective — don't pollute facts.
+      params.sharedKeys.delete(key);
+      return null;
+    }
+    if (distilled && !extractedFindingIsLowValue(distilled)) {
+      toShare = distilled;
+    }
+  }
+
   await shareFinding(
     params.sessionId,
     key,
-    `[${params.agentName}/${params.toolName}] ${extracted}`,
+    `[${params.agentName}/${params.toolName}] ${toShare}`,
   );
-  return extracted;
+  return toShare;
 }
 
 // Per-tool call caps enforced inside sub-agent runs.
@@ -2315,6 +2397,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let autoSharedFindingCount = 0;
     const autoSharedFindingKeys = new Set<string>();
+    // Distillation budget for the auto-share path: bound the extra model calls per run
+    // (slow single-GPU latency ceiling). Gated by orchestration.distillSharedFacts.
+    const distillSharedFacts = {
+      enabled: config.orchestration.distillSharedFacts,
+      minChars: config.orchestration.distillSharedFactsMinChars,
+      budget: { remaining: config.orchestration.distillSharedFactsMaxPerRun },
+    };
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
     let sufficiencyToolsStripped = false;
@@ -4168,6 +4257,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 toolName: tc.name,
                 evidence: usefulTrimmed,
                 sharedKeys: autoSharedFindingKeys,
+                objective: opts.task,
+                provider,
+                signal,
+                distill: distillSharedFacts,
               });
               if (extractedFinding !== null) {
                 autoSharedFindingCount += 1;

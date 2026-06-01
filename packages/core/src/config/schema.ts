@@ -1294,6 +1294,25 @@ export const OrchestrationSchema = z.object({
    *  nothing. Enforces the source-sensitive correctness invariant without dead-ending.
    *  Costs one research delegation on the refusal path. */
   autoResearchOnRefusal: z.boolean().default(true),
+  /** When true, before a sub-agent auto-shares a large tool result, a one-shot
+   *  distillation pass is given the agent's OBJECTIVE plus the raw found content and
+   *  extracts only the objective-relevant facts/figures/URLs — instead of storing the
+   *  heuristic extract verbatim. This keeps shared findings dense and shrinks the
+   *  context the final synthesis must read (audit 003f5aeb: raw scraped page chrome
+   *  was filling shared facts and leaking into answers). Skipped for small/clean
+   *  findings (under distillSharedFactsMinChars) and bounded per run; on any
+   *  distillation failure the heuristic extract is kept (never drops evidence).
+   *  Costs one short model call per large finding — default on, eval-pending on the
+   *  single-GPU latency profile. */
+  distillSharedFacts: z.boolean().default(true),
+  /** Only auto-share findings whose heuristic extract is at least this many chars are
+   *  routed through the distillation pass; shorter findings are already compact and
+   *  stored as-is. Built-in default: 320. */
+  distillSharedFactsMinChars: z.number().int().min(120).max(4000).default(320),
+  /** Maximum distillation passes per sub-agent run (latency/cost ceiling on a slow
+   *  single GPU). Beyond this, large findings fall back to the heuristic extract.
+   *  Built-in default: 10. */
+  distillSharedFactsMaxPerRun: z.number().int().min(1).max(100).default(10),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the
    *  dock plan card is confirmed end-to-end. */
