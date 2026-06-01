@@ -272,3 +272,113 @@ describe("generate_website", () => {
     expect(second.error).toContain("Refusing");
   });
 });
+
+// The reliable artifact path for "create an HTML/reveal.js presentation" — the
+// recurring Dresden-deck failure was the slow model timing out on a single giant
+// write_file HTML blob. generate_presentation lets the model author compact Markdown
+// per slide while the tool assembles the full reveal.js HTML deterministically.
+describe("generate_presentation", () => {
+  const cleanup: string[] = [];
+  beforeEach(() => { cleanup.length = 0; });
+  afterEach(() => {
+    for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function tool() {
+    const [{ getTool }] = await Promise.all([import("./registry.js"), import("./website.js")]);
+    return getTool("generate_presentation")!;
+  }
+  function tempWorkspace(): string {
+    const dir = mkdtempSync(join(tmpdir(), "starlingai-deck-"));
+    cleanup.push(dir);
+    return dir;
+  }
+
+  it("is registered", async () => {
+    const [{ getTool }] = await Promise.all([import("./registry.js"), import("./website.js")]);
+    expect(getTool("generate_presentation")).toBeDefined();
+  });
+
+  it("builds a reveal.js deck: one <section> per slide, markdown + bullets rendered", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Dresden Architecture",
+      theme: "white",
+      slides: [
+        { title: "Der Zwinger", content: "Ein **barockes** Bauensemble.\n\nErbaut 1709–1728." },
+        { title: "Highlights", bullets: ["Kronentor", "Nymphenbad", "Glockenspielpavillon"], notes: "Speaker note here." },
+      ],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["artifactKind"]).toBe("website");
+    expect(result.metadata?.["slideCount"]).toBe(2);
+    expect(result.metadata?.["indexPath"]).toBe("deck/index.html");
+
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain("<title>Dresden Architecture</title>");
+    expect(html).toContain('class="reveal"');
+    expect((html.match(/<section>/g) ?? []).length).toBe(2);
+    expect(html).toContain("<h2>Der Zwinger</h2>");
+    expect(html).toContain("<strong>barockes</strong>");
+    expect(html).toContain("<li>Kronentor</li>");
+    expect(html).toContain('<aside class="notes">');
+    expect(html).toContain("reveal.js@4.6.1/dist/reveal.js");
+    expect(html).toContain("theme/white.css");
+  });
+
+  it("honors theme + revealVersion and sanitizes a bad version to the default", async () => {
+    const ws = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "deck",
+      title: "T",
+      theme: "night",
+      revealVersion: "5.0.4",
+      slides: [{ title: "One", content: "Body" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    let html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain("reveal.js@5.0.4/");
+    expect(html).toContain("theme/night.css");
+
+    const ws2 = tempWorkspace();
+    await (await tool()).execute({
+      outputDir: "deck",
+      title: "T",
+      revealVersion: "../../etc/passwd",
+      slides: [{ title: "One", content: "Body" }],
+    }, { sessionId: "s1", workspacePath: ws2 });
+    html = readFileSync(join(ws2, "deck", "index.html"), "utf8");
+    expect(html).toContain("reveal.js@4.6.1/");
+    expect(html).not.toContain("passwd");
+  });
+
+  it("rejects a bad theme and an empty/invalid slide list", async () => {
+    const ws = tempWorkspace();
+    const badTheme = await (await tool()).execute({
+      outputDir: "deck", title: "T", theme: "neon", slides: [{ title: "x" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(badTheme.success).toBe(false);
+    expect(badTheme.error).toContain("theme");
+
+    const emptySlides = await (await tool()).execute({
+      outputDir: "deck", title: "T", slides: [],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(emptySlides.success).toBe(false);
+
+    const emptySlide = await (await tool()).execute({
+      outputDir: "deck", title: "T", slides: [{ notes: "only notes, no content" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(emptySlide.success).toBe(false);
+    expect(emptySlide.error).toContain("at least one of");
+  });
+
+  it("overwrite=false refuses an existing deck", async () => {
+    const ws = tempWorkspace();
+    const args = { outputDir: "deck", title: "T", slides: [{ title: "One", content: "Body" }] };
+    await (await tool()).execute(args, { sessionId: "s1", workspacePath: ws });
+    const second = await (await tool()).execute({ ...args, overwrite: false }, { sessionId: "s1", workspacePath: ws });
+    expect(second.success).toBe(false);
+    expect(second.error).toContain("Refusing");
+  });
+});

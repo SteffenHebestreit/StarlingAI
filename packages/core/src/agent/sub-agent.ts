@@ -694,6 +694,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   edit_file: 12,
   generate_document: 4,
   generate_website: 2,
+  generate_presentation: 2,
   generate_docx: 4,
   generate_pptx: 4,
   generate_pdf: 4,

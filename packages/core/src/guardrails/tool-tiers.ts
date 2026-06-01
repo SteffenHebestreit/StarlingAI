@@ -1301,6 +1301,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  generate_presentation: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Generate a self-contained reveal.js HTML slide deck in the workspace from a structured slide list",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   extract_notebook: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Convert a Jupyter .ipynb notebook into a single Markdown document with code, outputs, and image refs",

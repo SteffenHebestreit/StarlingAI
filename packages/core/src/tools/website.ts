@@ -262,6 +262,242 @@ registerTool({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// generate_presentation — self-contained reveal.js HTML slide deck
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REVEAL_THEMES = [
+  "black", "white", "league", "beige", "sky", "night", "serif",
+  "simple", "solarized", "blood", "moon", "dracula",
+] as const;
+type RevealTheme = (typeof REVEAL_THEMES)[number];
+const DEFAULT_REVEAL_VERSION = "4.6.1";
+
+interface SlideSpec {
+  title?: string;
+  content?: string;
+  bullets?: string[];
+  format: "markdown" | "html";
+  notes?: string;
+}
+
+registerTool({
+  name: "generate_presentation",
+  description:
+    "Generate a self-contained reveal.js HTML slide deck in the workspace from a STRUCTURED slide list — author each slide's content as compact Markdown (or bullet points), and the tool assembles the full reveal.js HTML, theme, and navigation. Use this for any 'create an HTML presentation / slide deck / reveal.js deck' deliverable instead of emitting a whole HTML document via write_file (which the model cannot reliably produce in one call). Each slide: {title?, content? (markdown), bullets?[], notes?}. Produces index.html with a preview-ready artifactKind='website' response.",
+  embeddingDescription:
+    "generate presentation slide deck reveal.js reveal html slides talk keynote pitch deck Präsentation Foliensatz erstellen HTML-Präsentation create slideshow",
+  parameters: {
+    type: "object",
+    properties: {
+      outputDir: {
+        type: "string",
+        description: "Workspace-relative directory to write the deck into (index.html). Created if missing.",
+      },
+      title: {
+        type: "string",
+        description: "Deck title (appears in <title> and as the default first slide when no title slide is provided).",
+      },
+      slides: {
+        type: "array",
+        description:
+          "Ordered slide list. Each slide: title (optional heading), content (optional Markdown body), bullets (optional string array rendered as a list), format ('markdown' default or 'html' for raw content), notes (optional speaker notes). At least one of title/content/bullets is required per slide.",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            content: { type: "string" },
+            bullets: { type: "array", items: { type: "string" } },
+            format: { type: "string", enum: ["markdown", "html"] },
+            notes: { type: "string" },
+          },
+        },
+      },
+      theme: {
+        type: "string",
+        enum: [...REVEAL_THEMES],
+        description: "reveal.js theme. Defaults to 'white'. Common: black, white, league, sky, night, serif, moon.",
+      },
+      revealVersion: {
+        type: "string",
+        description: `reveal.js version to load from the jsDelivr CDN. Defaults to '${DEFAULT_REVEAL_VERSION}'.`,
+      },
+      transition: {
+        type: "string",
+        enum: ["none", "fade", "slide", "convex", "concave", "zoom"],
+        description: "Slide transition. Defaults to 'slide'.",
+      },
+      overwrite: {
+        type: "boolean",
+        description: "When false, fail if index.html already exists. Default true.",
+      },
+    },
+    required: ["outputDir", "title", "slides"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const outputDir = String(args["outputDir"] ?? "").trim();
+    const title = String(args["title"] ?? "").trim();
+    const overwrite = args["overwrite"] !== false;
+
+    if (!outputDir) return fail("outputDir is required");
+    if (!title) return fail("title is required");
+
+    const theme = normalizeRevealTheme(args["theme"]);
+    if (!theme) return fail(`theme must be one of: ${REVEAL_THEMES.join(", ")}`);
+
+    const slides = normalizeSlides(args["slides"]);
+    if (!slides.ok) return fail(slides.error);
+    if (slides.slides.length === 0) return fail("at least one slide is required");
+
+    const revealVersion = normalizeRevealVersion(args["revealVersion"]);
+    const transition = normalizeTransition(args["transition"]);
+
+    let resolvedDir: { resolved: string; relativePath: string };
+    try {
+      resolvedDir = resolvePathWithinWorkspace(outputDir, ctx.workspacePath);
+    } catch {
+      return fail("outputDir must resolve inside the workspace");
+    }
+
+    try {
+      await mkdir(resolvedDir.resolved, { recursive: true });
+    } catch (err) {
+      return fail(`Failed to create outputDir: ${String(err)}`);
+    }
+
+    const indexPath = join(resolvedDir.resolved, "index.html");
+    if (!overwrite) {
+      try {
+        await stat(indexPath);
+        return fail(`Refusing to overwrite existing deck at ${resolvedDir.relativePath}/index.html`);
+      } catch {
+        // ok, not present
+      }
+    }
+
+    const html = renderRevealDeck({ title, slides: slides.slides, theme, revealVersion, transition });
+    try {
+      await writeFile(indexPath, html, "utf8");
+    } catch (err) {
+      return fail(`Failed to write index.html: ${String(err)}`);
+    }
+
+    const indexRelative = posix.join(resolvedDir.relativePath.replace(/\\/g, "/"), "index.html");
+    const totalBytes = Buffer.byteLength(html, "utf8");
+    log.info(
+      { outputDir: resolvedDir.relativePath, slides: slides.slides.length, theme, revealVersion, bytes: totalBytes },
+      "generate_presentation produced reveal.js deck",
+    );
+
+    return {
+      success: true,
+      output: `reveal.js deck with ${slides.slides.length} slide(s) written to ${resolvedDir.relativePath}. Open ${indexRelative}.`,
+      metadata: {
+        artifactKind: "website",
+        outputPath: resolvedDir.relativePath,
+        indexPath: indexRelative,
+        slideCount: slides.slides.length,
+        theme,
+        revealVersion,
+        totalBytes,
+        previewMode: "website",
+        contentType: "text/html; charset=utf-8",
+      },
+    };
+  },
+});
+
+function normalizeRevealTheme(value: unknown): RevealTheme | null {
+  const v = String(value ?? "white").trim().toLowerCase();
+  return (REVEAL_THEMES as readonly string[]).includes(v) ? (v as RevealTheme) : null;
+}
+
+function normalizeRevealVersion(value: unknown): string {
+  const v = String(value ?? "").trim();
+  // Only allow a simple semver-ish token from the CDN path — never arbitrary text in a URL.
+  return /^\d+(?:\.\d+){0,2}$/.test(v) ? v : DEFAULT_REVEAL_VERSION;
+}
+
+function normalizeTransition(value: unknown): string {
+  const allowed = new Set(["none", "fade", "slide", "convex", "concave", "zoom"]);
+  const v = String(value ?? "slide").trim().toLowerCase();
+  return allowed.has(v) ? v : "slide";
+}
+
+function normalizeSlides(value: unknown): { ok: true; slides: SlideSpec[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: "slides must be an array" };
+  const normalized: SlideSpec[] = [];
+  for (const [i, raw] of value.entries()) {
+    if (!raw || typeof raw !== "object") return { ok: false, error: `slides[${i}] must be an object` };
+    const r = raw as Record<string, unknown>;
+    const title = typeof r["title"] === "string" ? String(r["title"]).trim() : undefined;
+    const content = typeof r["content"] === "string" ? String(r["content"]) : undefined;
+    const bullets = Array.isArray(r["bullets"])
+      ? r["bullets"].filter((b): b is string => typeof b === "string")
+      : undefined;
+    const notes = typeof r["notes"] === "string" ? String(r["notes"]) : undefined;
+    const format = r["format"] === "html" ? "html" : "markdown";
+    if (!title && !content && (!bullets || bullets.length === 0)) {
+      return { ok: false, error: `slides[${i}] needs at least one of title, content, or bullets` };
+    }
+    normalized.push({ title, content, bullets, notes, format });
+  }
+  return { ok: true, slides: normalized };
+}
+
+function renderSlideSection(slide: SlideSpec): string {
+  const parts: string[] = [];
+  if (slide.title) parts.push(`<h2>${renderInline(slide.title)}</h2>`);
+  if (slide.content) parts.push(slide.format === "html" ? slide.content : markdownToHtml(slide.content));
+  if (slide.bullets && slide.bullets.length > 0) {
+    parts.push(`<ul>\n${slide.bullets.map((b) => `<li>${renderInline(b)}</li>`).join("\n")}\n</ul>`);
+  }
+  const notes = slide.notes ? `\n<aside class="notes">\n${markdownToHtml(slide.notes)}\n</aside>` : "";
+  return `<section>\n${parts.join("\n")}${notes}\n</section>`;
+}
+
+function renderRevealDeck(input: {
+  title: string;
+  slides: SlideSpec[];
+  theme: RevealTheme;
+  revealVersion: string;
+  transition: string;
+}): string {
+  const base = `https://cdn.jsdelivr.net/npm/reveal.js@${input.revealVersion}`;
+  const sections = input.slides.map(renderSlideSection).join("\n");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(input.title)}</title>
+  <link rel="stylesheet" href="${base}/dist/reset.css">
+  <link rel="stylesheet" href="${base}/dist/reveal.css">
+  <link rel="stylesheet" href="${base}/dist/theme/${input.theme}.css" id="theme">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+${sections}
+    </div>
+  </div>
+  <script src="${base}/dist/reveal.js"></script>
+  <script src="${base}/plugin/notes/notes.js"></script>
+  <script src="${base}/plugin/markdown/markdown.js"></script>
+  <script src="${base}/plugin/highlight/highlight.js"></script>
+  <script>
+    Reveal.initialize({
+      hash: true,
+      transition: ${JSON.stringify(input.transition)},
+      plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+    });
+  </script>
+</body>
+</html>
+`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Arg normalization
 // ─────────────────────────────────────────────────────────────────────────────
 
