@@ -478,6 +478,28 @@ export function looksLikeArtifactCreationRequest(userMessage: string): boolean {
   return /\b(presentation|pr[äa]sentation|slides?|slide deck|deck|folien|foliensatz|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|site|document|dokument|report|bericht|paper|file|datei|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx)\b/.test(t);
 }
 
+/**
+ * Heuristic: the answer INLINES a full artifact (a complete HTML document, or a large
+ * fenced code block carrying the whole deliverable) instead of it being a real workspace
+ * file. On a source-sensitive artifact-creation turn that produced NO artifact, this is the
+ * model hand-writing the deliverable from training data and passing it off as the result
+ * (audit 453a263e: after the build was stopped, synthesis pasted a multi-KB reveal.js deck
+ * — fabricated, falsely "verified"). Structural only: full-document markers or a big code
+ * fence; format-agnostic, no topic terms. The caller scopes this to the no-artifact case.
+ */
+export function looksLikeInlinedArtifactFabrication(value: string): boolean {
+  const v = value ?? "";
+  if (v.length < 1500) return false;
+  // A complete HTML/XML document inlined into the answer.
+  if (/<!DOCTYPE\s+html/i.test(v) && /<\/html>/i.test(v)) return true;
+  if (/```[a-z]*\s*<!DOCTYPE\s+html/i.test(v)) return true;
+  if (/```[a-z]*\s*<html[\s>]/i.test(v)) return true;
+  // The whole deliverable pasted as one large fenced code block rather than written to a file.
+  const fences = v.match(/```[\s\S]*?```/g);
+  if (fences && fences.some((f) => f.length >= 1500)) return true;
+  return false;
+}
+
 function buildResearchGatheredFallback(curatedEvidence: string | null): string {
   const head = [
     "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
@@ -5901,6 +5923,36 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated);
+  }
+  // Fabricated-inline-artifact guard: on a source-sensitive artifact-creation turn that
+  // produced NO real artifact (the build was stopped/blocked/never ran), the model
+  // sometimes hand-writes the whole deliverable inline (a multi-KB <!DOCTYPE html> /
+  // fenced code block) from training data and presents it as the verified result (audit
+  // 453a263e: the operator Stopped mid-research, the auto-build was correctly blocked, and
+  // synthesis pasted a fabricated reveal.js deck repeating the Permoser→Neumann error + an
+  // invented source URL — no workspace file, false "verified" claim). Replace it with the
+  // honest curated-facts fallback: the verified findings + real sources, stating the file
+  // was not built this turn. Scoped to the no-artifact case so legit builds are untouched.
+  if (
+    !autoBuildFinalMsg
+    && initialDynamicGuidance?.sourceSensitive
+    && looksLikeArtifactCreationRequest(userMessage)
+    && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 1
+    && collectTurnArtifactAttachments(session).length === 0
+    && looksLikeInlinedArtifactFabrication(presentableFinalMsg)
+  ) {
+    const curatedForHonest = terminalSharedFactsEvidence
+      && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
+      ? terminalSharedFactsEvidence.evidence
+      : null;
+    if (curatedForHonest) {
+      logAudit("guardrail_flagged", {
+        type: "inline_artifact_fabrication_suppressed",
+        answerLength: presentableFinalMsg.length,
+        curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
+      }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+      presentableFinalMsg = buildResearchGatheredFallback(curatedForHonest);
+    }
   }
   const finalMsg = await rewriteTerminalResponseIfNeeded(presentableFinalMsg, iterationCount, session, provider, signal);
   persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
