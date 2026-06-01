@@ -20,7 +20,8 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
-import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults } from "../swarm/memory.js";
+import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts } from "../swarm/memory.js";
+import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
@@ -3034,9 +3035,28 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // artifact is the failure mode in audit 6b382964 (content_writer → researcher, which
   // narrated and never wrote the reveal.js deck). When the task asks to produce an
   // artifact AND every requested agent is artifact-capable for it, let the writer run.
+  //
+  // PRECONDITION: a render exemption only holds once research has ACTUALLY produced
+  // shared facts. On a source-sensitive task with ZERO shared facts the "render" agent
+  // would build the deliverable from nothing — straight from training data, no
+  // verification (audit 42339f53: content_writer built a Dresden deck with fabricated
+  // facts and fake "sources" because the exemption skipped the redirect on a fresh
+  // session). When the task needs research and no facts exist yet, it is a GATHER, not a
+  // render — withhold the exemption so the research redirect fires (then the terminal
+  // auto-build runs once facts exist).
   const renderCfgConfig = getConfig();
   const renderCfgPromoted = readPromotedAgents(renderCfgConfig.workspacePath);
-  const isArtifactRenderDelegation = candidateQueue.length > 0
+  let renderHasGatheredFacts = true;
+  if (taskRequiresExternalResearch(request.task)) {
+    try {
+      const facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
+      renderHasGatheredFacts = Object.keys(facts).length > 0;
+    } catch {
+      renderHasGatheredFacts = false;
+    }
+  }
+  const isArtifactRenderDelegation = renderHasGatheredFacts
+    && candidateQueue.length > 0
     && candidateQueue.every((name) =>
       isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
   if (isArtifactRenderDelegation && taskRequiresExternalResearch(request.task)) {
