@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeRawToolEvidenceDump, looksLikeArtifactCreationRequest } from "../agent/runtime.js";
+import { looksLikeRawToolEvidenceDump, looksLikeArtifactCreationRequest, looksLikeInlinedArtifactFabrication } from "../agent/runtime.js";
 
 /**
  * Last-resort terminal guard (audit 003f5aeb). When the "create a verified reveal.js
@@ -92,5 +92,33 @@ describe("looksLikeArtifactCreationRequest — verb + artifact noun", () => {
     ]) {
       expect(looksLikeArtifactCreationRequest(m)).toBe(false);
     }
+  });
+});
+
+// Fabricated-inline-artifact guard (audit 453a263e): after the operator stopped a
+// source-sensitive deck turn mid-research, the auto-build was blocked and synthesis pasted
+// a full reveal.js HTML deck inline (fabricated, falsely "verified", no workspace file).
+describe("looksLikeInlinedArtifactFabrication — inlined full deliverable", () => {
+  it("flags a full HTML document inlined in a fenced block", () => {
+    const deck =
+      "## Präsentation: Architektur von Dresden\n\nHier ist der vollständige HTML-Code:\n\n```html\n"
+      + "<!DOCTYPE html>\n<html lang=\"de\">\n<head><title>Zwinger</title></head>\n<body>\n"
+      + "<div class=\"reveal\"><div class=\"slides\">" + "<section><h1>Slide</h1></section>".repeat(40)
+      + "</div></div>\n</body>\n</html>\n```\n";
+    expect(looksLikeInlinedArtifactFabrication(deck)).toBe(true);
+  });
+
+  it("flags a bare full HTML document (no fence)", () => {
+    const doc = "<!DOCTYPE html>\n<html>\n<body>\n" + "<section>content</section>\n".repeat(80) + "</body>\n</html>";
+    expect(looksLikeInlinedArtifactFabrication(doc)).toBe(true);
+  });
+
+  it("does NOT flag the honest curated-facts fallback or a short reply", () => {
+    expect(looksLikeInlinedArtifactFabrication(
+      "Ich konnte die Datei nicht fertigstellen. Belegte Fakten:\n- Der Zwinger wurde ab 1709 erbaut (Quelle: britannica.com).\n- Architekt: Pöppelmann.",
+    )).toBe(false);
+    expect(looksLikeInlinedArtifactFabrication("Die Datei wurde erstellt: dresden/index.html.")).toBe(false);
+    // A small inline code snippet (e.g. a config line) is not a fabricated full artifact.
+    expect(looksLikeInlinedArtifactFabrication("Run this:\n\n```bash\nnpm run build\n```")).toBe(false);
   });
 });
