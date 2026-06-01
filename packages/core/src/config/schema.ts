@@ -1300,19 +1300,25 @@ export const OrchestrationSchema = z.object({
    *  heuristic extract verbatim. This keeps shared findings dense and shrinks the
    *  context the final synthesis must read (audit 003f5aeb: raw scraped page chrome
    *  was filling shared facts and leaking into answers). Skipped for small/clean
-   *  findings (under distillSharedFactsMinChars) and bounded per run; on any
-   *  distillation failure the heuristic extract is kept (never drops evidence).
-   *  Costs one short model call per large finding — default on, eval-pending on the
-   *  single-GPU latency profile. */
+   *  findings (under distillSharedFactsMinChars); on any distillation failure the
+   *  heuristic extract is kept (never drops evidence).
+   *  Curate for QUALITY, not budget: skipping distillation does not save compute, it
+   *  DEFERS and amplifies it — every uncurated finding (raw page chrome included) bloats
+   *  the shared-facts context that the build/synthesis step and every later
+   *  read_shared_facts must process (audit 65f46046: an uncurated 28KB / ~117K-token
+   *  build prompt that a per-finding distill would have shrunk). A small objective-scoped
+   *  distill up-front is a net compute WIN. Default on. */
   distillSharedFacts: z.boolean().default(true),
   /** Only auto-share findings whose heuristic extract is at least this many chars are
-   *  routed through the distillation pass; shorter findings are already compact and
-   *  stored as-is. Built-in default: 320. */
-  distillSharedFactsMinChars: z.number().int().min(120).max(4000).default(320),
-  /** Maximum distillation passes per sub-agent run (latency/cost ceiling on a slow
-   *  single GPU). Beyond this, large findings fall back to the heuristic extract.
-   *  Built-in default: 10. */
-  distillSharedFactsMaxPerRun: z.number().int().min(1).max(100).default(10),
+   *  routed through the distillation pass; shorter findings are already compact (and
+   *  pure chrome is caught by the low-value gate), so they are stored as-is. Built-in
+   *  default: 200. */
+  distillSharedFactsMinChars: z.number().int().min(120).max(4000).default(200),
+  /** Safety ceiling on distillation passes per sub-agent run — NOT a compute-saving
+   *  budget (uncurated findings cost more downstream than the distill call saves, so we
+   *  curate every eligible web finding). Set high enough to cover a research-heavy run;
+   *  beyond it, extra findings fall back to the heuristic extract. Built-in default: 100. */
+  distillSharedFactsMaxPerRun: z.number().int().min(1).max(500).default(100),
   /** When true, a source-sensitive turn whose ORIGINAL request asked to create a concrete
    *  artifact (file/website/presentation/document/report) and that gathered curated
    *  findings but never produced the artifact (research alone consumed the turn on a slow
