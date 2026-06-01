@@ -458,6 +458,20 @@ export function looksLikeRawToolEvidenceDump(value: string): boolean {
  * under a bilingual could-not-finish preamble — never the raw dump. Used by the
  * last-resort terminal guard.
  */
+/**
+ * Heuristic: the user's request asks to CREATE a concrete artifact/deliverable (a file,
+ * website, presentation/deck, document, report, chart, app) — not merely to research or
+ * answer a question. Mutation verb + artifact noun, EN + DE. Used to decide whether a
+ * source-sensitive turn that only gathered evidence should auto-build the artifact in the
+ * same turn. Topic-agnostic — verb+noun shape only.
+ */
+export function looksLikeArtifactCreationRequest(userMessage: string): boolean {
+  const t = (userMessage ?? "").toLowerCase();
+  const hasVerb = /\b(create|build|generate|make|write|produce|draft|compose|erstelle|erstellen|erstell|baue|bau|schreibe|schreib|generiere|generier|verfasse|verfass|erzeuge|erzeug|mach)\b/.test(t);
+  if (!hasVerb) return false;
+  return /\b(presentation|pr[äa]sentation|slides?|slide deck|deck|folien|foliensatz|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|site|document|dokument|report|bericht|paper|file|datei|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx)\b/.test(t);
+}
+
 function buildResearchGatheredFallback(curatedEvidence: string | null): string {
   const head = [
     "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
@@ -5764,14 +5778,80 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? (evidenceForUserDisplay ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
+  // Auto-build-after-research (orchestration.autoBuildAfterResearch): on a slow backend,
+  // research alone can consume the whole turn and the forced terminal synthesis then
+  // ships the gathered evidence without ever reaching the artifact-build step. When the
+  // user's ORIGINAL request asked to create a concrete artifact, the turn is
+  // source-sensitive, research produced curated findings, and NO artifact was produced
+  // this turn, auto-run ONE content_writer build from the gathered facts before shipping
+  // (audit 33df2aec: a "create a verified reveal.js deck" turn spent ~7 min researching,
+  // then shipped a raw search dump and never built the deck). Mirrors autoResearchOnRefusal;
+  // degrades to the honest research-gathered fallback if the build produces nothing.
+  let autoBuildFinalMsg: string | null = null;
+  const curatedForBuild = terminalSharedFactsEvidence
+    && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
+    ? terminalSharedFactsEvidence.evidence
+    : null;
+  if (
+    (getConfig().orchestration?.autoBuildAfterResearch ?? true)
+    && initialDynamicGuidance?.sourceSensitive
+    && curatedForBuild
+    && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 3
+    && looksLikeArtifactCreationRequest(userMessage)
+    && collectTurnArtifactAttachments(session).length === 0
+    && !signal.aborted
+  ) {
+    logAudit("guardrail_flagged", {
+      type: "source_sensitive_auto_build_delegated",
+      curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    opts.onStatus?.({ phase: "guardrail", message: "Die Recherche ist abgeschlossen — ich lasse jetzt den Inhalts-Spezialisten das Artefakt aus den belegten Fakten erstellen.", iteration: iterationCount });
+    try {
+      const buildTask = "BUILD TASK — the research is already done; produce the requested deliverable NOW from the verified findings in the context. "
+        + "Do NOT re-research. Use ONLY facts present in the context; cite the source URLs where relevant. "
+        + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
+        + userMessage;
+      await executeTool("delegate_to_agent", {
+        agentName: "content_writer",
+        task: buildTask,
+        context: curatedForBuild.slice(0, 8_000),
+      }, toolContext);
+      _turnDelegationCount += 1;
+    } catch (err) {
+      log.warn({ err, sessionId: session.id }, "Auto-build-after-research delegation failed");
+    }
+    const builtArtifacts = collectTurnArtifactAttachments(session);
+    if (builtArtifacts.length > 0) {
+      const paths = builtArtifacts
+        .map((a) => (typeof a["relativePath"] === "string" && a["relativePath"] ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "")))
+        .filter((p): p is string => Boolean(p));
+      const synth = await forceSynthesis(
+        session,
+        provider,
+        signal,
+        "The requested artifact has just been BUILT by the content specialist from the verified findings. "
+        + "Confirm to the user in the SAME language as their request: state that the file was created, give its path(s), and a 2–3 sentence summary of what it contains and the sources used. Do NOT dump raw evidence.",
+      );
+      const candidate = synth ? sanitizeUserFacingAssistantResponse(synth, iterationCount) : null;
+      autoBuildFinalMsg = candidate && candidate.trim().length >= 80
+        ? candidate
+        : `Die angeforderte Datei wurde aus den belegten Fakten erstellt: ${paths.join(", ")}.\n\n(The requested file was built from the verified findings: ${paths.join(", ")}.)`;
+      logAudit("guardrail_flagged", {
+        type: "source_sensitive_auto_build_synthesized",
+        artifacts: paths.length,
+        synthesized: Boolean(candidate && candidate.trim().length >= 80),
+      }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    }
+  }
+
   // Last-resort guard: a raw tool-result dump (web_fetch page chrome, search-result
   // blocks, recovered-evidence scaffolding) must never be the user-facing answer
   // (audit 003f5aeb: every Dresden run, when the artifact build failed, shipped the raw
   // Dresden_Castle Wikipedia nav menu verbatim). Replace it with the curated, sourced
   // findings under an honest could-not-finish preamble, or an honest status when nothing
   // clean was gathered. Structural detection only — topic- and site-agnostic.
-  let presentableFinalMsg: string = evidenceBackstopMsg;
-  if (looksLikeRawToolEvidenceDump(presentableFinalMsg)) {
+  let presentableFinalMsg: string = autoBuildFinalMsg ?? evidenceBackstopMsg;
+  if (!autoBuildFinalMsg && looksLikeRawToolEvidenceDump(presentableFinalMsg)) {
     const curated = terminalSharedFactsEvidence
       && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
       ? terminalSharedFactsEvidence.evidence

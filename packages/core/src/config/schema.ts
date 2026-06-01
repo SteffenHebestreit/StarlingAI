@@ -1313,6 +1313,15 @@ export const OrchestrationSchema = z.object({
    *  single GPU). Beyond this, large findings fall back to the heuristic extract.
    *  Built-in default: 10. */
   distillSharedFactsMaxPerRun: z.number().int().min(1).max(100).default(10),
+  /** When true, a source-sensitive turn whose ORIGINAL request asked to create a concrete
+   *  artifact (file/website/presentation/document/report) and that gathered curated
+   *  findings but never produced the artifact (research alone consumed the turn on a slow
+   *  backend) auto-runs ONE content_writer build from the gathered facts before shipping —
+   *  so the deliverable lands in the same turn instead of dead-ending at a "research done,
+   *  confirm to build" message. Mirrors autoResearchOnRefusal. Costs one build delegation
+   *  on that path (the turn runs longer: research + build). Falls back to the honest
+   *  research-gathered message if the build produces nothing. Default on. */
+  autoBuildAfterResearch: z.boolean().default(true),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the
    *  dock plan card is confirmed end-to-end. */
