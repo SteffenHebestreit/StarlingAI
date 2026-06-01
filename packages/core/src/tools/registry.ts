@@ -130,6 +130,14 @@ export interface ToolContext {
   maxIterationsOverride?: number;
   /** Override the per-turn timeout in ms for delegated tasks. 0 disables timeout inheritance. */
   turnTimeoutOverrideMs?: number;
+  /**
+   * Set ONLY for the terminal auto-build-after-research delegation. An operator Stop means
+   * "stop gathering more — build NOW from what we have," not "abort the build too": so this
+   * one bounded build delegation is exempt from the operator-stop latch that otherwise blocks
+   * new delegations. Never set on the open research/coordination path (that latch still
+   * prevents runaway re-delegation after Stop).
+   */
+  allowDelegationAfterOperatorStop?: boolean;
   /** Shared turn-local swarm state for orchestration and recovery. */
   swarmState?: SwarmState;
   /** Optional live callback whenever swarm state changes during a turn. */

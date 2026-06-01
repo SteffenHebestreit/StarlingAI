@@ -5844,7 +5844,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         agentName: "content_writer",
         task: buildTask,
         context: curatedForBuild.slice(0, 8_000),
-      }, toolContext);
+        // Operator Stop means "build now from what we gathered," so this one bounded
+        // build delegation runs even when the stop latch is set (audit 453a263e).
+      }, { ...toolContext, allowDelegationAfterOperatorStop: true });
       _turnDelegationCount += 1;
       buildResultMetadata = buildResult.metadata;
       // executeTool here runs OUTSIDE the main tool loop, which is what normally

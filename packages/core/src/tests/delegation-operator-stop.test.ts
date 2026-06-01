@@ -98,6 +98,47 @@ describe("operator-stop halts delegation escalation and preserves evidence", () 
     longRunningGenerationManager.resetForTests();
   }, 30_000);
 
+  it("EXEMPTS the terminal auto-build delegation from the stop latch (Stop = build from what we have)", async () => {
+    const [{ getTool }, { longRunningGenerationManager }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../agent/long-running-generation.js"),
+    ]);
+    await import("../tools/sub-agent.js");
+    longRunningGenerationManager.resetForTests();
+
+    // Latch a stop for the turn, as the operator dock does.
+    const wait = longRunningGenerationManager.requestContinuation({
+      agentName: "researcher",
+      runSessionId: "session-stop-autobuild",
+      reason: "running long",
+      elapsedMs: 1,
+      completionTokens: 1,
+      iterations: 1,
+      waitTimeoutMs: 60_000,
+    });
+    const pending = longRunningGenerationManager.listPending();
+    longRunningGenerationManager.resolveRequest(pending[0]!.id, "stop", "admin");
+    await wait;
+    expect(longRunningGenerationManager.isStopRequested("session-stop-autobuild")).toBe(true);
+
+    const delegate = getTool("delegate_to_agent");
+    const result = await delegate!.execute(
+      { agentName: "content_writer", task: "BUILD TASK — produce the deck from the verified findings" },
+      // allowDelegationAfterOperatorStop = the terminal auto-build's exemption.
+      { sessionId: "session-stop-autobuild", workspacePath: "/workspace", swarmState: freshSwarmState(), allowDelegationAfterOperatorStop: true },
+    );
+
+    // The build sub-agent runs despite the stop, and the latch is cleared so its own
+    // long-running checks won't auto-stop it mid-build.
+    const calledAgents = runSubAgentWithStatsMock.mock.calls.map((call) => call[0].agentName);
+    expect(calledAgents).toContain("content_writer");
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["operatorStopped"]).toBeUndefined();
+    expect(longRunningGenerationManager.isStopRequested("session-stop-autobuild")).toBe(false);
+
+    longRunningGenerationManager.resetForTests();
+  }, 30_000);
+
   it("does not escalate to the fallback agent when the operator stops mid-run, and returns the partial evidence", async () => {
     const [{ getTool }, { longRunningGenerationManager }] = await Promise.all([
       import("../tools/registry.js"),

@@ -2928,7 +2928,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // answer. Re-evaluated per call; the latch is cleared at runTurn start, so this
   // only fires within the stopped turn. (A reusable completed/partial task above
   // has already returned its evidence before reaching here.)
-  if (longRunningGenerationManager.isStopRequested(ctx.sessionId)) {
+  // EXCEPTION: the terminal auto-build-after-research delegation
+  // (ctx.allowDelegationAfterOperatorStop) is exempt — an operator Stop means "stop
+  // gathering more, build NOW from what we have," so the single bounded build from
+  // already-gathered facts must still run (audit 453a263e: Stop blocked the build and the
+  // turn shipped a fabricated inline deck instead of building from the verified findings).
+  if (!ctx.allowDelegationAfterOperatorStop && longRunningGenerationManager.isStopRequested(ctx.sessionId)) {
     logAudit("delegation_halted_operator_stop", {
       taskTitle: title,
       phase: "new_delegation",
@@ -2943,6 +2948,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       error: "Operator stopped this turn — do NOT delegate again. Synthesize a final response now from the evidence already gathered (shared findings and the prior delegated results in this conversation), and clearly mark anything that remains open.",
       metadata: { taskId, attemptedAgents, delegationSucceeded: false, operatorStopped: true },
     };
+  }
+  // Terminal auto-build is exempt AND the operator had stopped: clear the turn's stop latch
+  // so the build sub-agent's own long-running-generation checks don't auto-stop it mid-build.
+  // Safe — the auto-build is the turn's final action (nothing else delegates after it), and
+  // content_writer has no delegate tools, so this cannot re-open a runaway re-delegation loop.
+  if (ctx.allowDelegationAfterOperatorStop && longRunningGenerationManager.isStopRequested(ctx.sessionId)) {
+    longRunningGenerationManager.clearStopRequested(ctx.sessionId);
+    logAudit("delegation_halted_operator_stop", {
+      taskTitle: title,
+      phase: "auto_build_stop_latch_cleared",
+      agentName: request.agentName ?? "content_writer",
+    }, { sessionId: ctx.sessionId, severity: "info" });
   }
   // I12: Track candidates skipped because they had already exhausted their
   // per-agent delegation cap this turn. Without this, when every routed
