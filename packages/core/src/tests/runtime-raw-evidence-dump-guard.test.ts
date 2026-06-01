@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeRawToolEvidenceDump } from "../agent/runtime.js";
+import { looksLikeRawToolEvidenceDump, looksLikeArtifactCreationRequest } from "../agent/runtime.js";
 
 /**
  * Last-resort terminal guard (audit 003f5aeb). When the "create a verified reveal.js
@@ -62,5 +62,35 @@ describe("terminal junk guard — looksLikeRawToolEvidenceDump", () => {
       + "sich folgendes Gesamtbild: der Zwinger ist ein barockes Bauensemble, erbaut zwischen 1709 und 1728, und gilt "
       + "als Hauptwerk des sächsischen Barock — eine zusammenhängende Darstellung ohne weitere Rohausgabe.";
     expect(looksLikeRawToolEvidenceDump(real)).toBe(false);
+  });
+});
+
+// Auto-build-after-research (audit 33df2aec): a source-sensitive turn whose request asks
+// to CREATE an artifact but where research consumed the whole turn should auto-build the
+// deliverable from the gathered facts. looksLikeArtifactCreationRequest is the verb+noun
+// gate that decides whether the turn is an artifact request at all.
+describe("looksLikeArtifactCreationRequest — verb + artifact noun", () => {
+  it("flags concrete artifact-creation requests (EN + DE)", () => {
+    for (const m of [
+      "Erstelle mir eine Präsentation über die Architektur von Dresden; nutze reveal.js",
+      "create a reveal.js HTML presentation about the Zwinger",
+      "build me a multi-page website for the launch",
+      "schreibe einen ausführlichen Bericht über die Quartalszahlen",
+      "generate a PDF report from the verified data",
+      "baue eine Landingpage mit Quellenangaben",
+    ]) {
+      expect(looksLikeArtifactCreationRequest(m)).toBe(true);
+    }
+  });
+
+  it("does NOT flag pure research / question requests (no artifact to build)", () => {
+    for (const m of [
+      "research the architecture of Dresden and confirm the construction dates",
+      "was ist der Zwinger und wann wurde er gebaut?",
+      "vergleiche die Baustile von Semperoper und Frauenkirche",
+      "summarize the latest CVEs for nginx",
+    ]) {
+      expect(looksLikeArtifactCreationRequest(m)).toBe(false);
+    }
   });
 });
