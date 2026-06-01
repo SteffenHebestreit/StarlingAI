@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentCfgCanFulfillArtifactTask } from "../tools/sub-agent.js";
+import { agentCfgCanFulfillArtifactTask, isArtifactRenderTask, taskRequiresExternalResearch } from "../tools/sub-agent.js";
 
 // Session 2d810e7d (2026-05-28) regression: a CPSA-F "erzeuge mir eine
 // vollumfängliche Lernwebsite" delegation was routed to an agent without
@@ -100,5 +100,39 @@ describe("agentCfgCanFulfillArtifactTask", () => {
     ]) {
       expect(agentCfgCanFulfillArtifactTask(task, readOnly)).toBe(false);
     }
+  });
+});
+
+// Audit 6b382964: a reveal.js WRITE delegation to content_writer was bounced to
+// researcher by the source-sensitive research-incapable redirect (the brief carried
+// "cite the official sources / use the verified URLs" wording), and researcher narrated
+// but never wrote the deck. isArtifactRenderTask exempts a render/artifact delegation
+// aimed at an artifact-capable agent so the writer actually runs. Structural only.
+describe("isArtifactRenderTask — render delegations are not research gathers", () => {
+  const writerCfg = { tools: ["read_shared_facts", "generate_presentation", "generate_website", "write_file", "share_finding"] };
+  const renderTask =
+    "Write a complete, self-contained reveal.js HTML presentation about Dresden architecture. "
+    + "Use ONLY the verified facts in the context and cite the official source URLs on the relevant slides.";
+
+  it("treats a reveal.js write task to an artifact-capable agent as a render step", () => {
+    expect(isArtifactRenderTask(renderTask, writerCfg)).toBe(true);
+  });
+
+  it("still flags that same task as research-wording (why the redirect used to fire)", () => {
+    // The brief reads as source-sensitive; the exemption is what prevents the bad redirect.
+    expect(taskRequiresExternalResearch(`SOURCE-SENSITIVE DELEGATION\n${renderTask}`)).toBe(true);
+  });
+
+  it("does NOT treat a write task as a render step for a research-only agent (no write tools)", () => {
+    const researcherCfg = { tools: ["web_search", "web_fetch", "read_shared_facts", "share_finding"] };
+    expect(isArtifactRenderTask(renderTask, researcherCfg)).toBe(false);
+  });
+
+  it("does NOT treat a pure gather task as a render step", () => {
+    expect(isArtifactRenderTask("research the Zwinger architecture and confirm the construction dates", writerCfg)).toBe(false);
+  });
+
+  it("treats a coordinator that can delegate the build as render-capable", () => {
+    expect(isArtifactRenderTask(renderTask, { tools: ["delegate_to_agent", "parallel_delegate"] })).toBe(true);
   });
 });

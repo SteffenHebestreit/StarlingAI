@@ -122,6 +122,7 @@ export type AuditEventType =
   | "delegation_routing_filtered_research_incapable"
   | "delegation_bidding_filtered_research_incapable"
   | "delegation_explicit_redirected_research_incapable"
+  | "delegation_render_research_redirect_skipped"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"

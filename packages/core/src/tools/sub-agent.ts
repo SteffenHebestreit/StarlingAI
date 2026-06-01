@@ -2038,6 +2038,20 @@ function agentCanFulfillArtifactTask(
   return agentCfgCanFulfillArtifactTask(task, cfg);
 }
 
+/**
+ * True when a delegation is a RENDER/ARTIFACT step: the task asks to produce a
+ * concrete deliverable (write the file / create the deck / generate the site) AND the
+ * target agent can actually produce it. Such a step consumes already-gathered shared
+ * facts; it must NOT be hijacked by the source-sensitive research-incapable redirect,
+ * even when the brief carries research wording ("cite the official sources", "use the
+ * verified URLs"). Audit 6b382964: a reveal.js write delegation to content_writer was
+ * bounced to researcher, which narrated and never wrote the deck.
+ */
+export function isArtifactRenderTask(task: string, cfg: { tools?: string[] } | undefined): boolean {
+  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
+  return agentCfgCanFulfillArtifactTask(task, cfg);
+}
+
 export function looksLikeFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
@@ -3012,7 +3026,26 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // a generator ranked high in search_agents), redirect to a research-capable
   // agent so a generator never runs a research task. Closes the loop the
   // routing/bidding gates opened. Only redirects when a capable fallback exists.
-  if (taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
+  //
+  // EXCEPTION — RENDER/ARTIFACT delegations: writing the deck / creating the file /
+  // generating the site from already-gathered shared facts is NOT a gather task, even
+  // when the brief is full of source-sensitive wording ("use the verified URLs", "cite
+  // official sources"). Bouncing the writer to a researcher that cannot produce the
+  // artifact is the failure mode in audit 6b382964 (content_writer → researcher, which
+  // narrated and never wrote the reveal.js deck). When the task asks to produce an
+  // artifact AND every requested agent is artifact-capable for it, let the writer run.
+  const renderCfgConfig = getConfig();
+  const renderCfgPromoted = readPromotedAgents(renderCfgConfig.workspacePath);
+  const isArtifactRenderDelegation = candidateQueue.length > 0
+    && candidateQueue.every((name) =>
+      isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+  if (isArtifactRenderDelegation && taskRequiresExternalResearch(request.task)) {
+    logAudit("delegation_render_research_redirect_skipped", {
+      taskTitle: title,
+      requestedAgents: candidateQueue,
+    }, { sessionId: ctx.sessionId });
+  }
+  if (!isArtifactRenderDelegation && taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
       const fallback = pickResearchFallbackAgent(attemptedAgents);
