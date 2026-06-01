@@ -680,6 +680,77 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  it("classifies a max-iterations run that published shared findings as partial, not failure", async () => {
+    // A guardrail-limited run is not a failed run if it gathered usable
+    // information. Here the researcher published a finding to shared memory
+    // (concrete gathered knowledge), then exhausted its iteration budget and the
+    // synthesis pass kept emitting tool calls. Even with no recoverable evidence
+    // snippet in the narrative, the published finding means the run is
+    // partial-with-evidence — the chain must not treat it as a total failure.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-shared-finding-partial-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        researcher_shares: {
+          description: "Researcher that publishes a finding before running out of budget",
+          systemPrompt: "Research and publish findings.",
+          tools: ["share_finding"],
+          maxIterations: 1,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "share_finding",
+      description: "Publish a finding to shared memory",
+      parameters: { type: "object", properties: {} },
+      // Keep the output short (< the 180-char snippet threshold) so it is NOT
+      // buffered as a recovered evidence snippet — this isolates the
+      // shared-findings signal as the sole reason the run is partial.
+      async execute() {
+        return { success: true, output: "Finding published: key=k1." };
+      },
+    });
+
+    completeMock
+      // Iteration 1: publish a finding (uses up maxIterations=1).
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "share-1", name: "share_finding", arguments: { key: "k1", value: "v1" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      // Synthesis-after-max-iterations: model misbehaves and tries another tool
+      // call, so it falls through to the terminal max-iterations classification.
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "share-2", name: "share_finding", arguments: { key: "k2", value: "v2" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "researcher_shares",
+        task: "Research and publish a finding.",
+        parentSessionId: "parent-shared-finding-partial",
+        workspacePath: tempDir,
+      });
+
+      expect(result.stats.terminalState).toBe("max_iterations");
+      expect(result.stats.outcome).toBe("partial");
+    } finally {
+      unregisterTool("share_finding");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("preserves all source-sensitive parallel delegation slices while anchoring them to the parent task", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-"));
     const configPath = join(tempDir, "starlingai.json");

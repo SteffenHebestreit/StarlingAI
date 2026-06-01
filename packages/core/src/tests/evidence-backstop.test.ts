@@ -5,6 +5,7 @@ import {
   formatSourceSensitiveEvidenceBackstop,
   getSharedFactsEvidenceForFinalSynthesis,
   answerNeedsEvidenceAnchoringRepair,
+  hasRecentSourceSensitivePartialDelegation,
 } from "../agent/runtime.js";
 import { writeSharedFact } from "../swarm/memory.js";
 
@@ -66,6 +67,32 @@ describe("evidence backstop — shared-facts gathering prioritizes curated findi
     expect(result!.evidence).toContain("NOT PDM");
     expect(result!.evidence).not.toContain("%PDF-1.7");
     expect(result!.evidence).not.toContain("application/pdf");
+  });
+});
+
+describe("evidence backstop — partial-delegation trigger (audit 1ba15cb5)", () => {
+  // A coordinator that synthesizes after its inner researchers time out returns
+  // outcome "partial" with terminalState "completed". The old gate only fired for
+  // partial+timeout/max_iterations/cancelled, so partial+completed slipped through:
+  // the backstop never re-grounded the answer, and a confident "digital PDM" reply
+  // shipped that contradicted the verified "analog" shared finding.
+  const delegateMsg = (outcome: string, terminalState: string) => ([{
+    role: "tool",
+    content: "Delegated result from mission_coordinator — PARTIAL PROGRESS.\nObserved evidence: ...",
+    metadata: { agentName: "mission_coordinator", delegationOutcome: outcome, terminalState, delegationSucceeded: true },
+  }]);
+
+  it("fires for a partial outcome even when terminalState is 'completed'", () => {
+    expect(hasRecentSourceSensitivePartialDelegation(delegateMsg("partial", "completed"))).toBe(true);
+  });
+
+  it("still fires for partial+timeout and for failure (no regression)", () => {
+    expect(hasRecentSourceSensitivePartialDelegation(delegateMsg("partial", "timeout"))).toBe(true);
+    expect(hasRecentSourceSensitivePartialDelegation(delegateMsg("failure", "error"))).toBe(true);
+  });
+
+  it("does not fire for a fully successful delegation", () => {
+    expect(hasRecentSourceSensitivePartialDelegation(delegateMsg("success", "completed"))).toBe(false);
   });
 });
 
