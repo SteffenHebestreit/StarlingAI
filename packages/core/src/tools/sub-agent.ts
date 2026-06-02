@@ -1188,6 +1188,7 @@ export function isWebReachingToolName(toolName: string): boolean {
   if (RESEARCH_CAPABLE_TOOL_NAMES.has(toolName)) return true;
   return toolName === "web_search"
     || toolName === "web_fetch"
+    || toolName === "fetch_image"
     || toolName === "url_inspect"
     || toolName.startsWith("browser_");
 }

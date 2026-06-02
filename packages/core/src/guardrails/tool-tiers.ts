@@ -100,6 +100,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  fetch_image: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Download + verify a real image from a URL/page and save it into the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   geocode_location: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Resolve a place name or address to geographic coordinates via OpenStreetMap",
