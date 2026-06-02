@@ -56,4 +56,26 @@ describe("blocked-turn honesty guard — looksLikeRegurgitatedPriorAnswer", () =
   it("does not flag short answers (no 180-char prefix to coincidentally share)", () => {
     expect(looksLikeRegurgitatedPriorAnswer("Erledigt.", history)).toBe(false);
   });
+
+  // audit f6e10341: the reship had only drifted by a leading "[content_writer]:"
+  // delegate tag (and a "## Zusammenfassung" header), so the byte-exact 180-prefix
+  // check missed it. Containment must still catch a verbatim copy that gained a prefix.
+  it("flags a verbatim reship that only gained a leading delegate-tag prefix", () => {
+    expect(looksLikeRegurgitatedPriorAnswer(`[content_writer]: ${TURN1}`, history)).toBe(true);
+  });
+
+  it("flags a near-verbatim reship with reordered clauses (high token overlap, drifted head)", () => {
+    const reordered =
+      "Zusammenfassung der Umsetzung: 10 Slides gemäß Vorgabe mit allen inhaltlichen Anforderungen, "
+      + "reveal.js CDN v4.6.1, Gold/Weiß/Creme Farbschema mit Barock-Theme. "
+      + "Die HTML-Präsentation wurde erfolgreich erstellt und ist unter dresden-zwinger-presentation/index.html verfügbar.";
+    expect(looksLikeRegurgitatedPriorAnswer(reordered, history)).toBe(true);
+  });
+
+  it("does NOT flag a same-topic answer that is genuinely different work (low token overlap)", () => {
+    const distinct =
+      "Ich habe in diesem Schritt nur die Bild-URLs als JSON gesammelt; die Folien selbst wurden noch nicht "
+      + "aktualisiert. Wenn du möchtest, baue ich die Präsentation jetzt mit den Bildern neu auf — sag kurz Bescheid.";
+    expect(looksLikeRegurgitatedPriorAnswer(distinct, history)).toBe(false);
+  });
 });

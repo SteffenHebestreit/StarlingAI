@@ -829,6 +829,14 @@ function extractPriorTurnContext(
  * 180-char normalized leading slice is a near-certain duplication signal; genuinely
  * distinct answers do not coincidentally share that much text. Topic-agnostic.
  */
+function leadingContentTokenSet(normalized: string): Set<string> {
+  // First ~80 word tokens of the leading slice, Unicode-aware so German umlaut
+  // words ("präsentation", "zerstörung") stay intact (\w would shred them).
+  return new Set(
+    normalized.slice(0, 600).split(/[^\p{L}\p{N}]+/u).filter((t) => t.length > 2).slice(0, 80),
+  );
+}
+
 export function looksLikeRegurgitatedPriorAnswer(
   candidate: string,
   history: readonly SessionHistoryMessage[],
@@ -837,6 +845,7 @@ export function looksLikeRegurgitatedPriorAnswer(
   const cand = norm(candidate);
   if (cand.length < 180) return false;
   const candHead = cand.slice(0, 180);
+  const candTokens = leadingContentTokenSet(cand);
   for (const message of history) {
     if (message.role !== "assistant") continue;
     const hasToolCalls = Array.isArray((message as { tool_calls?: unknown[] }).tool_calls)
@@ -844,7 +853,23 @@ export function looksLikeRegurgitatedPriorAnswer(
     if (hasToolCalls) continue;
     const prior = typeof message.content === "string" ? norm(message.content) : "";
     if (prior.length < 180) continue;
+    // (a) Byte-exact leading slice — the original strict signal.
     if (prior.slice(0, 180) === candHead) return true;
+    // (b) One leading slice fully contained in the other — catches a verbatim copy
+    //     that merely gained or lost a short prefix (e.g. a "[content_writer]:"
+    //     delegate tag, or a "## Zusammenfassung" header). Byte-exact prefix alone
+    //     was too brittle: audit f6e10341 turn 3 re-pasted the turn-1 deck summary
+    //     yet slipped past the exact check because the stored copy had drifted.
+    if (prior.includes(candHead) || cand.includes(prior.slice(0, 180))) return true;
+    // (c) High leading-token overlap — near-verbatim with small reordering/word drift
+    //     (also survives history compaction, which can lightly reword the stored copy).
+    if (candTokens.size >= 20) {
+      const priorTokens = leadingContentTokenSet(prior);
+      let inter = 0;
+      for (const t of candTokens) if (priorTokens.has(t)) inter++;
+      const union = new Set([...candTokens, ...priorTokens]).size;
+      if (union > 0 && inter / union >= 0.9) return true;
+    }
   }
   return false;
 }
@@ -5709,16 +5734,24 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     : await forceSynthesis(
         session, provider, signal, terminalSynthesisInstruction,
       );
-  // Honesty guard for the fully-blocked path. When EVERY tool call this turn was
-  // blocked, nothing was actually done — yet the model sometimes "answers" by
-  // re-pasting an EARLIER turn's deliverable summary verbatim, shipping a stale
-  // false success (audit 43b3ec65 turn 3: "update the presentation + add the
-  // sources" parroted the turn-1 "presentation created" summary — no edit, no
-  // sources). Detect that regurgitation and re-synthesize an honest status; the
-  // corrective pass keeps the user's language. Only fires on all_tool_calls_blocked,
-  // where no successful work could have produced a legitimate restatement.
+  // Honesty guard for terminal turns that did NOT deliver the user's NEW request,
+  // yet "answer" by re-pasting an EARLIER turn's deliverable summary almost verbatim —
+  // shipping a stale false success. First seen on all_tool_calls_blocked (audit
+  // 43b3ec65 turn 3), but the SAME reship happens when a turn ends with tool calls
+  // rejected after synthesis was required (audit f6e10341 turn 2: "add images"
+  // produced only a sidecar JSON yet the answer re-pasted the turn-1 "presentation
+  // created" summary) or hits the iteration limit. So fire across that whole "nothing
+  // was actually delivered for THIS request" terminal set, not just the blocked path.
+  // The corrective pass keeps the user's language and does NOT assert "nothing was
+  // created" (a sidecar may have been written) — only that the prior deliverable was
+  // not updated as the stale copy implied.
+  const REGURGITATION_GUARD_REASONS = new Set([
+    "all_tool_calls_blocked",
+    "synthesis_required_tool_call_rejected",
+    "max_tool_iterations",
+  ]);
   if (
-    terminalFinishReason === "all_tool_calls_blocked"
+    REGURGITATION_GUARD_REASONS.has(terminalFinishReason)
     && synthesized
     && looksLikeRegurgitatedPriorAnswer(synthesized, session.getHistory())
   ) {
@@ -5729,14 +5762,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     const honest = await forceSynthesis(
       session, provider, signal,
-      "Every tool call you attempted this turn was blocked or unavailable, so NOTHING was created or changed this turn. "
-      + "Your previous draft just re-pasted an earlier turn's answer, which falsely implies the user's new request was carried out — it was NOT. "
-      + "Reply briefly and honestly IN THE USER'S LANGUAGE: state that you could not apply the requested change this turn because the needed action was not available to you directly, and offer to delegate it to the appropriate specialist so it actually gets done. "
-      + "Do NOT restate or re-paste the earlier deliverable as if it had been updated, do NOT invent a file path, and do NOT claim success.",
+      "Your previous draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out. Do NOT ship that stale copy. "
+      + "Reply briefly and honestly IN THE USER'S LANGUAGE: describe only what actually happened in THIS turn (what, if anything, was produced or attempted this turn), and if the requested change was NOT applied to the deliverable, say so plainly and offer to delegate it to the right specialist so it gets done. "
+      + "Do NOT re-paste the earlier deliverable as if it had been updated, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
     );
     synthesized = (honest && !looksLikeRegurgitatedPriorAnswer(honest, session.getHistory()))
       ? honest
-      : "I couldn't apply that change in this turn — the action I attempted wasn't available to me directly, and no specialist was invoked to carry it out. Confirm and I'll delegate the update to the right specialist so it actually gets done.\n\nIch konnte die gewünschte Änderung in diesem Schritt nicht ausführen — die benötigte Aktion stand mir nicht direkt zur Verfügung, und es wurde kein Spezialist damit beauftragt. Bestätige bitte, dann delegiere ich die Aktualisierung an den passenden Spezialisten.";
+      : "I didn't actually apply that change in this turn, and I won't restate the earlier result as if it had been updated. Confirm and I'll delegate the work to the right specialist so it gets done.\n\nIch habe die Änderung in diesem Schritt nicht tatsächlich angewendet und gebe das frühere Ergebnis nicht als aktualisiert aus. Bestätige bitte, dann delegiere ich die Arbeit an den passenden Spezialisten.";
   }
   // When we have evidence in scope, prefer it over the generic
   // "I've gathered partial results" message — that string was correct

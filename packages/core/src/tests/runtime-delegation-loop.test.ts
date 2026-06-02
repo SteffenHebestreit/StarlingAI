@@ -3149,7 +3149,7 @@ describe("runtime delegated-loop regressions", () => {
     expect(taskTexts.join("\n")).toContain("Focus for this slice");
     // Topic-agnostic, gather-framed verification focus (research-framed so embedding
     // routing picks researcher over source_verifier; replaced the overfit per-topic buckets).
-    expect(taskTexts.join("\n")).toContain("gather and confirm every concrete entity");
+    expect(taskTexts.join("\n")).toContain("gather and confirm every concrete fact");
     expect(taskTexts.join("\n")).not.toContain("VendorX");
     expect(taskTexts.join("\n")).not.toContain("ST ZX-9000");
     expect(taskTexts.join("\n")).not.toContain("assuming I2S");
