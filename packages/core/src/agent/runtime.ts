@@ -18,6 +18,7 @@ import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment }
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
+import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
@@ -3152,6 +3153,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   // Fresh turn: clear any per-turn "operator stopped" latch so a stop in a
   // previous turn never auto-stops this one's long-running generations.
   longRunningGenerationManager.clearStopRequested(sessionId);
+  // Mark this turn live so the user can steer it mid-flight (drained in the loop);
+  // cleared in the finally below so the active flag never leaks across turns.
+  turnSteeringManager.markTurnActive(sessionId);
 
   // Merge caller signal + timeout signal + warden signal: any source can cancel the turn.
   const allSignals: AbortSignal[] = [];
@@ -3168,6 +3172,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     deregisterSessionAbortController(sessionId);
+    turnSteeringManager.markTurnDone(sessionId);
   }
 }
 
@@ -3625,6 +3630,29 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           toolIterations: iterationCount,
         }),
       );
+    }
+
+    // Mid-turn user steering: fold any messages the user sent WHILE this turn
+    // has been running into the conversation as authoritative guidance before the
+    // next model call, so they redirect the remaining work without aborting (Stop
+    // is the abort path). Drains the per-turn queue; a no-op on iteration 0 (the
+    // queue was cleared at turn start). Opt-out via orchestration.midTurnSteering.
+    if (getConfig().orchestration?.midTurnSteering ?? true) {
+      const steering = turnSteeringManager.drain(session.id);
+      if (steering.length > 0) {
+        const joined = steering.map((s) => `- ${s}`).join("\n");
+        session.addMessage({
+          role: "user",
+          content: "[USER STEERING — sent mid-turn] The user added the following while you were working. "
+            + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
+            + "Do not restart from scratch or re-do already-completed steps.\n" + joined,
+        });
+        logAudit("turn_steering_injected", {
+          count: steering.length,
+          iteration: iterationCount,
+        }, { sessionId: session.id, channel: session.channel, severity: "info" });
+        opts.onStatus?.({ phase: "steering", message: "Folding in your mid-turn message…", iteration: iterationCount });
+      }
     }
 
     let systemPrompt = session.getSystemPrompt();

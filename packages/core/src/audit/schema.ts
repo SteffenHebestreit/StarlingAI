@@ -80,6 +80,9 @@ export type AuditEventType =
   | "long_running_generation_timeout"
   | "long_running_generation_stopped"
   | "long_running_generation_auto_stopped"
+  // Mid-turn user steering — fold user guidance into a running turn
+  | "turn_steering_enqueued"
+  | "turn_steering_injected"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement

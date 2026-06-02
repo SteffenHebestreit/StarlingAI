@@ -2291,6 +2291,26 @@ export const useGatewayStore = defineStore("gateway", () => {
     return id;
   }
 
+  /**
+   * Mid-turn steering: hand a message to a RUNNING turn instead of starting a
+   * new one. Returns true when the gateway queued it (a turn is in flight); false
+   * when no turn is active, so the caller can fall back to sendMessage. Never
+   * throws — a transport/HTTP error resolves to false (caller falls back).
+   */
+  async function steerTurn(sessionId: string, message: string): Promise<boolean> {
+    try {
+      const res = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/steer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      });
+      const data = await res.json() as { steered?: boolean };
+      return Boolean(data?.steered);
+    } catch {
+      return false;
+    }
+  }
+
   async function sendMessage(
     text: string,
     enableThinking?: boolean,
@@ -2712,6 +2732,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     loadScenes,
     appendPendingUserMessage,
     sendMessage,
+    steerTurn,
     rewindToMessage,
     convertFileToMarkdown,
     transcribeAudio,
