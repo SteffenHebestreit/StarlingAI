@@ -1232,6 +1232,39 @@ function agentIsResearchCapable(agentName: string): boolean {
 /** Phrases that explicitly ask the swarm to go online and validate/look up. */
 const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check|im internet (such|recherchier)|recherchier[a-z]* online)\b/i;
 
+/** Image/photo nouns (EN + DE). */
+const MEDIA_NOUN_RE = /\b(?:images?|photos?|photographs?|pictures?|bild(?:er|material)?|foto(?:s|grafien)?)\b/i;
+/** Verbs that mean "obtain an EXISTING resource", not "generate a new one". */
+const MEDIA_SOURCING_VERB_RE = /\b(?:find|search(?:\s+for)?|sources?|sourcing|locate|fetch|retrieve|finde|suche|recherchier\w*|beschaff\w*|besorg\w*)\b/i;
+/** Qualifiers that mark media as REAL/EXISTING web resources needing verification. */
+const MEDIA_WEB_QUALIFIER_RE = /\b(?:urls?|verif\w*|verifizier\w*|validated?|validier\w*|real|echte?|existing|vorhanden\w*|from\s+the\s+web|online|im\s+internet|wikimedia|commons|free[-\s]?licen[sc]e\w*|lizenzfrei\w*|public[-\s]?domain|gemeinfrei\w*|stock|reachable|working)\b/i;
+/** Local-media context — a "find images in the workspace/attached files" task is
+ *  NOT a web-sourcing task and must not be redirected to a web agent. */
+const MEDIA_LOCAL_CONTEXT_RE = /\b(?:workspace|local|on\s+disk|filesystem|file\s+system|folder|directory|ordner|verzeichnis|attached|uploaded|hochgeladen)\b/i;
+
+/**
+ * Whether a task asks the swarm to FIND and/or VERIFY EXISTING images/media from the
+ * web (real photos, working image URLs, free-license/Commons sources) — as opposed to
+ * GENERATING new visuals. This is a correctness gate, not a routing preference: a pure
+ * generator (image_creator, chart_designer) cannot reach the web and, asked to "source
+ * verified image URLs", fabricates plausible-but-dead URLs (audit f6e10341: "add images"
+ * → chart_designer invented Wikimedia URLs). Such a task must go to a web-capable
+ * specialist (image_sourcer) instead. Kept deliberately general: keys on the concept
+ * "obtain & verify existing web media", not on any one host or example.
+ */
+export function taskRequiresWebMediaSourcing(task: string): boolean {
+  const t = task ?? "";
+  if (!MEDIA_NOUN_RE.test(t)) return false;
+  // A purely-local media task (find images already in the workspace / attached files)
+  // is not web sourcing — unless it ALSO carries a web/verify qualifier.
+  const hasWebQualifier = MEDIA_WEB_QUALIFIER_RE.test(t);
+  if (MEDIA_LOCAL_CONTEXT_RE.test(t) && !hasWebQualifier) return false;
+  // Form 1: explicit sourcing verb + image noun ("find a photo", "source images").
+  // Form 2: image noun + a web/verify/real qualifier ("images with verified URLs",
+  //         "real photos from Wikimedia Commons", "check the image URLs load").
+  return MEDIA_SOURCING_VERB_RE.test(t) || hasWebQualifier;
+}
+
 /**
  * Whether a delegation task requires fresh external evidence. The authoritative
  * signal is the runtime-injected "SOURCE-SENSITIVE DELEGATION" wrapper (the
@@ -1244,18 +1277,28 @@ export function taskRequiresExternalResearch(task: string): boolean {
   const t = task ?? "";
   if (t.includes("SOURCE-SENSITIVE DELEGATION")) return true;
   if (SEARCH_ONLINE_TASK_RE.test(t)) return true;
+  if (taskRequiresWebMediaSourcing(t)) return true;
   return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(t));
 }
 
 /** First configured, research-capable, not-yet-attempted coordinator/specialist
  *  to fall back to when routing produced only research-incapable candidates. */
-function pickResearchFallbackAgent(attempted: string[]): string | undefined {
+function pickResearchFallbackAgent(
+  attempted: string[],
+  opts?: { preferMediaSourcer?: boolean },
+): string | undefined {
   const config = getConfig();
   const promoted = readPromotedAgents(config.workspacePath);
   // Prefer the direct web specialist over a coordinator: a single research task
   // does not need a coordinator-of-coordinator hop (the ~20-min web_task_coordinator
   // → researcher loop, session 44ea5c21). Coordinators are the last resort.
-  return ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"].find(
+  // For an image-SOURCING task, the image_sourcer specialist (web + vision: it can
+  // verify a URL resolves to an image AND confirm the subject) is the right first
+  // pick; fall back to the generic researcher if it isn't configured.
+  const order = opts?.preferMediaSourcer
+    ? ["image_sourcer", "researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"]
+    : ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"];
+  return order.find(
     (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
   );
 }
@@ -3085,16 +3128,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   if (!isArtifactRenderDelegation && taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
-      const fallback = pickResearchFallbackAgent(attemptedAgents);
+      const preferMediaSourcer = taskRequiresWebMediaSourcing(request.task);
+      const fallback = pickResearchFallbackAgent(attemptedAgents, { preferMediaSourcer });
       logAudit("delegation_explicit_redirected_research_incapable", {
         taskTitle: title,
         requestedAgents: candidateQueue,
         redirectedTo: fallback ?? null,
+        mediaSourcing: preferMediaSourcer,
       }, { sessionId: ctx.sessionId });
       if (fallback) {
         routingCandidateMap.set(fallback, {
           confidence: "medium",
-          matchedTerms: ["research", "search-online", "redirected"],
+          matchedTerms: preferMediaSourcer
+            ? ["image", "image-url", "verify", "redirected"]
+            : ["research", "search-online", "redirected"],
           score: 0.7,
         });
         candidateQueue = [fallback];
@@ -3188,15 +3235,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (taskRequiresExternalResearch(request.task) && routingCandidates.length > 0) {
           const researchCapable = routingCandidates.filter((cand) => agentIsResearchCapable(cand.name));
           if (researchCapable.length === 0) {
+            const preferMediaSourcer = taskRequiresWebMediaSourcing(request.task);
             logAudit("delegation_routing_filtered_research_incapable", {
               taskTitle: title,
               droppedAgents: routingCandidates.map((c) => c.name),
+              mediaSourcing: preferMediaSourcer,
             }, { sessionId: ctx.sessionId });
-            const fallback = pickResearchFallbackAgent(attemptedAgents);
+            const fallback = pickResearchFallbackAgent(attemptedAgents, { preferMediaSourcer });
             if (fallback) {
               routingCandidateMap.set(fallback, {
                 confidence: "medium",
-                matchedTerms: ["research", "search-online", "source-sensitive"],
+                matchedTerms: preferMediaSourcer
+                  ? ["image", "image-url", "verify", "source-sensitive"]
+                  : ["research", "search-online", "source-sensitive"],
                 score: 0.7,
               });
               candidateQueue.push(fallback);
