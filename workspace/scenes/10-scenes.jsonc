@@ -365,6 +365,23 @@
           "default": "yes"
         }
       }
+    },
+    "validate_image": {
+      "description": "Verify that one or more candidate image URLs are reachable AND actually depict the requested subject, before anything embeds them. Returns a per-URL VERIFIED / REJECTED / UNVERIFIED verdict and publishes the verified URLs verbatim. Use it to vet image links (e.g. for a presentation, web page, or document) instead of trusting an unchecked URL. Example queries: 'verify these image URLs show the Zwinger', 'check that these photo links work and are the right building', 'validate the image URLs before we embed them', 'prüfe ob diese Bild-URLs erreichbar sind und das richtige Motiv zeigen'.",
+      "task": "Validate the candidate image URL(s) for the subject \"{{subject}}\" so only real, on-topic images get used downstream. Read shared facts first — the candidates may already be there. Handle each URL ONE at a time and do EXACTLY this; never web_search for or invent alternative URLs:\n1. REACHABLE? Call url_inspect on the URL. It PASSES only on a final HTTP 200 with a content-type that starts image/ (image/jpeg, image/png, …). A 404 or non-image content-type = REJECT. A 429 (rate-limited) is INCONCLUSIVE: wait briefly and re-inspect once; if still 429, mark it UNVERIFIED rather than rejecting.\n2. RIGHT SUBJECT? For each reachable URL, browser_navigate to that exact URL, browser_screenshot it, then analyze_image the screenshot and decide whether it actually depicts \"{{subject}}\". If it shows something unrelated, REJECT it. (If no vision model is available, accept the reachable image but note 'subject not visually confirmed'.)\n3. Never modify, resize, re-host, or guess a URL — validate exactly the strings you were given.\nThen report a compact verdict list — for EVERY input URL: VERIFIED / REJECTED / UNVERIFIED, the EXACT URL, and a one-line reason — and publish each VERIFIED URL (exact string, plus what it depicts) via share_finding so downstream steps embed it verbatim. Do not pass, embed, or recommend any URL that did not reach VERIFIED (or UNVERIFIED with a clear caveat). Candidate URLs:\n{{candidateUrls}}",
+      "allowedAgents": [
+        "image_sourcer"
+      ],
+      "params": {
+        "subject": {
+          "description": "What the images must depict (e.g. 'the Dresden Zwinger')",
+          "default": "the requested subject"
+        },
+        "candidateUrls": {
+          "description": "The image URLs to validate (newline- or comma-separated)",
+          "default": "(use the candidate image URLs already in shared facts or named in the request)"
+        }
+      }
     }
   }
 }
