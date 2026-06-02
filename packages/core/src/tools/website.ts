@@ -423,16 +423,35 @@ function normalizeTransition(value: unknown): string {
   return allowed.has(v) ? v : "slide";
 }
 
+// The slow local model frequently serializes an ARRAY argument as a JSON STRING
+// (`"slides": "[{…}]"`, `"bullets": "[\"…\"]"`) instead of a real array — a tool-calling
+// quirk of small models, not a user error. Parsing it leniently lets the deck build on the
+// FIRST call instead of bouncing on "slides must be an array" and burning the per-tool cap,
+// which collapsed every build into hand-written-HTML timeouts (audit 2daf5f54: 5 turns /
+// ~100 min before one call happened to pass a real array).
+function coerceJsonArrayArg(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return value;
+  try { return JSON.parse(trimmed); } catch { return value; }
+}
+
 function normalizeSlides(value: unknown): { ok: true; slides: SlideSpec[] } | { ok: false; error: string } {
-  if (!Array.isArray(value)) return { ok: false, error: "slides must be an array" };
+  let coerced = coerceJsonArrayArg(value);
+  // A single slide object (not wrapped in an array) becomes a one-slide deck.
+  if (coerced && typeof coerced === "object" && !Array.isArray(coerced)) coerced = [coerced];
+  if (!Array.isArray(coerced)) {
+    return { ok: false, error: 'slides must be an array of slide objects (e.g. [{"title":"…","bullets":["…"]}]) — pass a JSON array, not a quoted string' };
+  }
   const normalized: SlideSpec[] = [];
-  for (const [i, raw] of value.entries()) {
+  for (const [i, raw] of coerced.entries()) {
     if (!raw || typeof raw !== "object") return { ok: false, error: `slides[${i}] must be an object` };
     const r = raw as Record<string, unknown>;
     const title = typeof r["title"] === "string" ? String(r["title"]).trim() : undefined;
     const content = typeof r["content"] === "string" ? String(r["content"]) : undefined;
-    const bullets = Array.isArray(r["bullets"])
-      ? r["bullets"].filter((b): b is string => typeof b === "string")
+    const bulletsValue = coerceJsonArrayArg(r["bullets"]);
+    const bullets = Array.isArray(bulletsValue)
+      ? bulletsValue.filter((b): b is string => typeof b === "string")
       : undefined;
     const notes = typeof r["notes"] === "string" ? String(r["notes"]) : undefined;
     const format = r["format"] === "html" ? "html" : "markdown";
