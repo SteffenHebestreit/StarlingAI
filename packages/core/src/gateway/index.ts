@@ -61,6 +61,7 @@ import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getAgentMessageBacklogSnapshot, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
+import { turnSteeringManager } from "../agent/turn-steering.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
@@ -3475,6 +3476,31 @@ export function createGateway() {
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
+  });
+
+  // POST /api/sessions/:sessionId/steer — fold a user message into a RUNNING turn
+  // (mid-turn steering). Only queues when a turn is actually in flight; returns
+  // steered:false otherwise so the client can fall back to sending a normal message.
+  app.post("/api/sessions/:sessionId/steer", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
+
+    let message = "";
+    try {
+      const body = await c.req.json() as { message?: unknown };
+      message = typeof body?.message === "string" ? body.message : "";
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (!message.trim()) return c.json({ error: "message is required" }, 400);
+
+    const steered = turnSteeringManager.enqueueIfActive(sessionId, message);
+    // active mirrors steered here, but expose it explicitly so the client knows
+    // whether to fall back to a normal new-message send.
+    return c.json({ steered, active: turnSteeringManager.isTurnActive(sessionId) });
   });
 
   // ── Site credentials API ─────────────────────────────────────────────────

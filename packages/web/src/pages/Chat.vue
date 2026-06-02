@@ -552,13 +552,14 @@
             ref="composerTextareaEl"
             v-model="inputText"
             @keydown="onComposerKeydown"
-            :disabled="gateway.isLoading || !gateway.connected || Boolean(gateway.pendingInputRequest)"
+            :disabled="!gateway.connected || Boolean(gateway.pendingInputRequest)"
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            placeholder="Message StarlingAI… (Enter to send, Shift+Enter for newline, / for commands)"
+            :placeholder="gateway.isLoading ? 'Steer the running turn — your message is folded in at the next step…' : 'Message StarlingAI… (Enter to send, Shift+Enter for newline, / for commands)'"
             rows="3"
           />
+          <div v-if="steeringNote" class="chat-composer__steering-note">{{ steeringNote }}</div>
         </div>
 
         <div class="chat-composer__controls">
@@ -924,6 +925,7 @@ const computerStore = useComputerStore();
 const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
+const steeringNote = ref("");   // transient note shown after a mid-turn steering message is sent
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null);
 const messagesEl = ref<HTMLElement | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
@@ -2695,7 +2697,22 @@ function onComposerKeydown(event: KeyboardEvent) {
 
 async function sendMessage() {
   const trimmedText = inputText.value.trim();
-  if ((!trimmedText && pendingImageContexts.value.length === 0) || gateway.isLoading) return;
+  if (!trimmedText && pendingImageContexts.value.length === 0) return;
+  // Mid-turn steering: a turn is already running → fold this text into it instead
+  // of dropping the message. Text-only (image steering not supported yet). If the
+  // gateway reports no live turn, restore the text and fall through to a normal send.
+  if (gateway.isLoading) {
+    if (!trimmedText || pendingImageContexts.value.length > 0) return;
+    const sid = gateway.currentSessionId;
+    inputText.value = "";
+    if (sid && await gateway.steerTurn(sid, trimmedText)) {
+      await gateway.appendPendingUserMessage(trimmedText);
+      steeringNote.value = "Steering sent — folding it into the running turn at the next step.";
+      window.setTimeout(() => { steeringNote.value = ""; }, 6000);
+      return;
+    }
+    inputText.value = trimmedText;
+  }
   const spokenAckLanguage = pendingSpokenAckLanguage.value;
   pendingSpokenAckLanguage.value = null;
 
@@ -3841,6 +3858,15 @@ onUnmounted(() => {
   width: 100%;
   flex: 1 1 auto;
   position: relative;
+}
+
+.chat-composer__steering-note {
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  color: rgb(110 231 183);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 /* Slash-command autocomplete popup. Anchored to the bottom of the field so it
