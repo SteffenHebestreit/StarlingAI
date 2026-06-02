@@ -4,6 +4,8 @@ import {
   isWebGatheringToolName,
   agentCfgIsResearchCapable,
   taskRequiresExternalResearch,
+  requiredExecutionCapabilities,
+  filterCandidatesByExecutionCapability,
 } from "../tools/sub-agent.js";
 
 /**
@@ -58,5 +60,85 @@ describe("research capability gate", () => {
   it("leaves ordinary generation tasks alone (gate inactive)", () => {
     expect(taskRequiresExternalResearch("Generate a chart from the numbers I gave you")).toBe(false);
     expect(taskRequiresExternalResearch("Draw a logo for the project")).toBe(false);
+  });
+});
+
+/**
+ * Capability-aware routing/bidding gate (audit 14661623: a no-web generator out-bid
+ * the web specialist). When a task UNAMBIGUOUSLY needs an execution tool class and both
+ * capable and incapable agents were routed/bid, the gate keeps the capable ones — but it
+ * never dead-ends, and always passes coordinators + tool-inheritors. Detectors are
+ * high-precision so a false positive cannot drop a correct non-execution specialist.
+ */
+describe("execution capability gate", () => {
+  const tools: Record<string, { tools?: string[] }> = {
+    shell_agent: { tools: ["shell_exec", "ssh_exec", "read_file"] },
+    coder: { tools: ["mcp__code_sandbox__run_ts", "mcp__code_sandbox__run_js", "read_file"] },
+    browser_agent: { tools: ["web_search", "browser_navigate", "browser_click", "site_fill_credentials"] },
+    researcher: { tools: ["web_search", "web_fetch", "url_inspect"] },
+    content_writer: { tools: ["generate_presentation", "generate_document", "write_file"] },
+    mission_coordinator: { tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"] },
+    inheritor: {}, // no tools list → inherits all
+  };
+  const lookup = (name: string) => tools[name];
+
+  it("detects execution classes only on high-precision signals", () => {
+    expect(requiredExecutionCapabilities("ssh into the box and restart the service")).toContain("shell");
+    expect(requiredExecutionCapabilities("run the command df -h on the server")).toContain("shell");
+    expect(requiredExecutionCapabilities("run this TypeScript snippet and show the output")).toContain("code_exec");
+    expect(requiredExecutionCapabilities("log in to the portal and submit the form")).toContain("browser_interaction");
+    // False-positive guards — ambiguous verbs/nouns must NOT trip a class.
+    expect(requiredExecutionCapabilities("build the website with a hero section")).toEqual([]);
+    expect(requiredExecutionCapabilities("write a TypeScript function that parses dates")).toEqual([]);
+    expect(requiredExecutionCapabilities("look up the spec on the official website")).toEqual([]);
+    expect(requiredExecutionCapabilities("run a quick analysis of these numbers")).toEqual([]);
+  });
+
+  it("keeps the shell-capable agent over an incapable peer", () => {
+    const { kept, dropped } = filterCandidatesByExecutionCapability(
+      ["content_writer", "shell_agent"], "ssh into the host and check disk with df -h", lookup,
+    );
+    expect(kept).toEqual(["shell_agent"]);
+    expect(dropped).toContain("content_writer");
+  });
+
+  it("routes a sandbox-run task to the code-capable agent", () => {
+    const { kept } = filterCandidatesByExecutionCapability(
+      ["content_writer", "coder"], "run this JavaScript snippet in a sandbox", lookup,
+    );
+    expect(kept).toEqual(["coder"]);
+  });
+
+  it("routes an interactive-site task to the browser-capable agent", () => {
+    const { kept } = filterCandidatesByExecutionCapability(
+      ["researcher", "browser_agent"], "log in to the supplier portal and place the order", lookup,
+    );
+    expect(kept).toEqual(["browser_agent"]);
+  });
+
+  it("never dead-ends: with no capable candidate it keeps the originals", () => {
+    const { kept, dropped } = filterCandidatesByExecutionCapability(
+      ["content_writer", "researcher"], "ssh into the box and restart the service", lookup,
+    );
+    expect(kept).toEqual(["content_writer", "researcher"]);
+    expect(dropped).toEqual([]);
+  });
+
+  it("always passes coordinators (they can delegate) and tool-inheritors", () => {
+    const coord = filterCandidatesByExecutionCapability(
+      ["mission_coordinator", "content_writer"], "ssh into the host and tail the log", lookup,
+    );
+    expect(coord.kept).toContain("mission_coordinator");
+    const inh = filterCandidatesByExecutionCapability(
+      ["inheritor", "content_writer"], "ssh into the host and tail the log", lookup,
+    );
+    expect(inh.kept).toContain("inheritor");
+  });
+
+  it("does not filter a non-execution task or a single candidate", () => {
+    expect(filterCandidatesByExecutionCapability(["content_writer", "researcher"], "write a blog post about dogs", lookup).kept)
+      .toEqual(["content_writer", "researcher"]);
+    expect(filterCandidatesByExecutionCapability(["content_writer"], "ssh into the box", lookup).kept)
+      .toEqual(["content_writer"]);
   });
 });
