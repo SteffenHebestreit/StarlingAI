@@ -272,10 +272,17 @@ const REVEAL_THEMES = [
 type RevealTheme = (typeof REVEAL_THEMES)[number];
 const DEFAULT_REVEAL_VERSION = "4.6.1";
 
+interface SlideImage {
+  url: string;
+  alt?: string;
+  caption?: string;
+}
+
 interface SlideSpec {
   title?: string;
   content?: string;
   bullets?: string[];
+  images?: SlideImage[];
   format: "markdown" | "html";
   notes?: string;
 }
@@ -283,7 +290,7 @@ interface SlideSpec {
 registerTool({
   name: "generate_presentation",
   description:
-    "Generate a self-contained reveal.js HTML slide deck in the workspace from a STRUCTURED slide list — author each slide's content as compact Markdown (or bullet points), and the tool assembles the full reveal.js HTML, theme, and navigation. Use this for any 'create an HTML presentation / slide deck / reveal.js deck' deliverable instead of emitting a whole HTML document via write_file (which the model cannot reliably produce in one call). Each slide: {title?, content? (markdown), bullets?[], notes?}. Produces index.html with a preview-ready artifactKind='website' response.",
+    "Generate a self-contained reveal.js HTML slide deck in the workspace from a STRUCTURED slide list — author each slide's content as compact Markdown (or bullet points), and the tool assembles the full reveal.js HTML, theme, and navigation. Use this for any 'create an HTML presentation / slide deck / reveal.js deck' deliverable instead of emitting a whole HTML document via write_file (which the model cannot reliably produce in one call). Each slide: {title?, content? (markdown), bullets?[], image? (a direct image URL to embed), notes?}. To put a PICTURE on a slide, set its `image` to the direct image URL (an https URL you have VERIFIED resolves to a real image) — do NOT write the image as a bullet caption. Produces index.html with a preview-ready artifactKind='website' response.",
   embeddingDescription:
     "generate presentation slide deck reveal.js reveal html slides talk keynote pitch deck Präsentation Foliensatz erstellen HTML-Präsentation create slideshow",
   parameters: {
@@ -300,13 +307,28 @@ registerTool({
       slides: {
         type: "array",
         description:
-          "Ordered slide list. Each slide: title (optional heading), content (optional Markdown body), bullets (optional string array rendered as a list), format ('markdown' default or 'html' for raw content), notes (optional speaker notes). At least one of title/content/bullets is required per slide.",
+          "Ordered slide list. Each slide: title (optional heading), content (optional Markdown body), bullets (optional string array rendered as a list), image (optional direct image URL embedded on the slide; or images:[{url,alt?,caption?}] for several), format ('markdown' default or 'html' for raw content), notes (optional speaker notes). At least one of title/content/bullets/image is required per slide.",
         items: {
           type: "object",
           properties: {
             title: { type: "string" },
             content: { type: "string" },
             bullets: { type: "array", items: { type: "string" } },
+            image: { type: "string", description: "Direct image URL (http(s) or data:image) embedded on the slide. Use a URL you have verified resolves to a real image." },
+            imageAlt: { type: "string", description: "Optional alt text for `image`." },
+            imageCaption: { type: "string", description: "Optional caption shown under `image`." },
+            images: {
+              type: "array",
+              description: "Optional list of images to embed on the slide; each {url, alt?, caption?}.",
+              items: {
+                type: "object",
+                properties: {
+                  url: { type: "string" },
+                  alt: { type: "string" },
+                  caption: { type: "string" },
+                },
+              },
+            },
             format: { type: "string", enum: ["markdown", "html"] },
             notes: { type: "string" },
           },
@@ -436,6 +458,50 @@ function coerceJsonArrayArg(value: unknown): unknown {
   try { return JSON.parse(trimmed); } catch { return value; }
 }
 
+// Only allow image URLs a browser can load AND that can't smuggle script: http(s),
+// protocol-relative, or an embedded data:image. The deck is opened in a browser, so a
+// `javascript:`/`file:` "URL" would be a stored-XSS / local-file-read vector — reject it.
+function sanitizeImageUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const u = value.trim();
+  if (!u) return null;
+  if (/^https?:\/\//i.test(u) || u.startsWith("//") || /^data:image\/[a-z0-9.+-]+[;,]/i.test(u)) return u;
+  return null;
+}
+
+// Per-slide images: a convenience `image` (string URL or object) with optional
+// imageAlt/imageCaption siblings, plus an `images` list ({url|src, alt?, caption?}). The
+// list tolerates a JSON-string array from the slow model (same quirk as bullets/slides).
+function normalizeSlideImages(slide: Record<string, unknown>): SlideImage[] {
+  const out: SlideImage[] = [];
+  const pushOne = (raw: unknown, altFallback?: unknown, captionFallback?: unknown): void => {
+    if (typeof raw === "string") {
+      const url = sanitizeImageUrl(raw);
+      if (!url) return;
+      out.push({
+        url,
+        alt: typeof altFallback === "string" ? altFallback : undefined,
+        caption: typeof captionFallback === "string" ? captionFallback : undefined,
+      });
+      return;
+    }
+    if (raw && typeof raw === "object") {
+      const r = raw as Record<string, unknown>;
+      const url = sanitizeImageUrl(r["url"] ?? r["src"] ?? r["href"]);
+      if (!url) return;
+      const alt = typeof r["alt"] === "string" ? r["alt"] : undefined;
+      const caption = typeof r["caption"] === "string"
+        ? r["caption"]
+        : (typeof r["title"] === "string" ? r["title"] : undefined);
+      out.push({ url, alt, caption });
+    }
+  };
+  if (slide["image"] !== undefined) pushOne(slide["image"], slide["imageAlt"], slide["imageCaption"]);
+  const imagesVal = coerceJsonArrayArg(slide["images"]);
+  if (Array.isArray(imagesVal)) for (const it of imagesVal) pushOne(it);
+  return out;
+}
+
 function normalizeSlides(value: unknown): { ok: true; slides: SlideSpec[] } | { ok: false; error: string } {
   let coerced = coerceJsonArrayArg(value);
   // A single slide object (not wrapped in an array) becomes a one-slide deck.
@@ -455,17 +521,29 @@ function normalizeSlides(value: unknown): { ok: true; slides: SlideSpec[] } | { 
       : undefined;
     const notes = typeof r["notes"] === "string" ? String(r["notes"]) : undefined;
     const format = r["format"] === "html" ? "html" : "markdown";
-    if (!title && !content && (!bullets || bullets.length === 0)) {
-      return { ok: false, error: `slides[${i}] needs at least one of title, content, or bullets` };
+    const images = normalizeSlideImages(r);
+    if (!title && !content && (!bullets || bullets.length === 0) && images.length === 0) {
+      return { ok: false, error: `slides[${i}] needs at least one of title, content, bullets, or image` };
     }
-    normalized.push({ title, content, bullets, notes, format });
+    normalized.push({ title, content, bullets, images: images.length > 0 ? images : undefined, notes, format });
   }
   return { ok: true, slides: normalized };
+}
+
+function renderSlideImage(img: SlideImage): string {
+  const alt = img.alt ?? img.caption ?? "";
+  const tag = `<img src="${escapeAttr(img.url)}" alt="${escapeAttr(alt)}">`;
+  return img.caption
+    ? `<figure>\n${tag}\n<figcaption>${renderInline(img.caption)}</figcaption>\n</figure>`
+    : tag;
 }
 
 function renderSlideSection(slide: SlideSpec): string {
   const parts: string[] = [];
   if (slide.title) parts.push(`<h2>${renderInline(slide.title)}</h2>`);
+  if (slide.images && slide.images.length > 0) {
+    for (const img of slide.images) parts.push(renderSlideImage(img));
+  }
   if (slide.content) parts.push(slide.format === "html" ? slide.content : markdownToHtml(slide.content));
   if (slide.bullets && slide.bullets.length > 0) {
     parts.push(`<ul>\n${slide.bullets.map((b) => `<li>${renderInline(b)}</li>`).join("\n")}\n</ul>`);

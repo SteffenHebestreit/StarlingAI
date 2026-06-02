@@ -434,4 +434,79 @@ describe("generate_presentation", () => {
     expect((html.match(/<section>/g) ?? []).length).toBe(1);
     expect(html).toContain("<h2>Only One</h2>");
   });
+
+  // Images: a slide can embed a verified image URL via the `image` field (the deck-build
+  // half of the image unit — the image_sourcer agent supplies the verified URLs).
+  it("embeds a slide image from the `image` field with alt text", async () => {
+    const ws = tempWorkspace();
+    const url = "https://upload.wikimedia.org/wikipedia/commons/8/8a/Zwinger_Dresden.jpg";
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Bilder",
+      slides: [{ title: "Der Zwinger", image: url, imageAlt: "Zwinger Gesamtansicht", content: "Barock." }],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain(`<img src="${url}" alt="Zwinger Gesamtansicht">`);
+    // Image is placed before the body content.
+    expect(html.indexOf("<img")).toBeLessThan(html.indexOf("Barock"));
+  });
+
+  it("renders an `images` list (incl. a JSON-string) as figures with captions", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Galerie",
+      slides: [{
+        title: "Highlights",
+        images: JSON.stringify([
+          { url: "https://example.com/a.jpg", caption: "Kronentor" },
+          { url: "https://example.com/b.png", alt: "Nymphenbad" },
+        ]),
+      }],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain('<img src="https://example.com/a.jpg"');
+    expect(html).toContain("<figcaption>Kronentor</figcaption>");
+    expect(html).toContain('<img src="https://example.com/b.png" alt="Nymphenbad">');
+  });
+
+  it("a slide with only a valid image (no title/content/bullets) still builds", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "T",
+      slides: [{ image: "https://example.com/only.jpg" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(result.success).toBe(true);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain('<img src="https://example.com/only.jpg"');
+  });
+
+  it("rejects a non-http(s)/data image URL (no javascript:/file: injection into the deck)", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "T",
+      // The bad image is dropped; the slide still has a title so it builds without an <img>.
+      slides: [{ title: "Safe", image: "javascript:alert(1)" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(result.success).toBe(true);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).not.toContain("javascript:alert");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("<h2>Safe</h2>");
+
+    // A slide whose ONLY content is a rejected image is empty → error.
+    const empty = await (await tool()).execute({
+      outputDir: "deck2",
+      title: "T",
+      slides: [{ image: "file:///etc/passwd" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(empty.success).toBe(false);
+    expect(empty.error).toContain("at least one of");
+  });
 });
