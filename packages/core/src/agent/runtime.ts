@@ -478,6 +478,47 @@ export function looksLikeArtifactCreationRequest(userMessage: string): boolean {
   return /\b(presentation|pr[äa]sentation|slides?|slide deck|deck|folien|foliensatz|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|site|document|dokument|report|bericht|paper|file|datei|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx)\b/.test(t);
 }
 
+const ARTIFACT_NOUN_RE =
+  /\b(presentation|pr[äa]sentation|slides?|slide deck|folien|foliensatz|deck|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|document|dokument|report|bericht|paper|file|datei|index\.html|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx|artifact|artefakt)\b/i;
+
+/**
+ * Broader than {@link looksLikeArtifactCreationRequest}: the turn asks to CREATE *or* CHANGE
+ * a concrete artifact (update / edit / insert into / add to / embed in / replace). Used to
+ * scope the false-completion guard so a "füge die Bilder in die Präsentation ein" (modify)
+ * request is covered, not just "erstelle eine Präsentation" (create). Topic-agnostic.
+ */
+export function looksLikeArtifactMutationRequest(userMessage: string): boolean {
+  if (looksLikeArtifactCreationRequest(userMessage)) return true;
+  const t = (userMessage ?? "").toLowerCase();
+  const hasMutateVerb =
+    /\b(update|updated|edit|modify|change|revise|adjust|insert|add|append|embed|replace|fix|aktualisiere?|aktualisier|ändere?|änder|bearbeite?|bearbeit|überarbeite?|überarbeit|ergänze?|ergänz|einf[üu]gen|einf[üu]ge|f[üu]ge|hinzuf[üu]gen|hinzuf[üu]ge|einbette?|einbinden|einbinde|ersetze?|ersetz)\b/.test(t);
+  if (!hasMutateVerb) return false;
+  return ARTIFACT_NOUN_RE.test(t);
+}
+
+/**
+ * The answer ASSERTS, as a completed fact, that it created/updated/saved/inserted the
+ * artifact — yet the caller only invokes this when NO artifact was produced this turn, so a
+ * match means a FALSE "I updated the presentation" claim (audit 14661623 turn 2: the run
+ * gathered image URLs, never rebuilt the deck, but said "Die Bilder wurden eingefügt …
+ * URLs überprüft"). Clause-scoped so a negated, honest "I did NOT update the deck" is not
+ * flagged. Structural + bilingual; needs a completion verb AND an artifact noun in the SAME
+ * clause, with no negation in that clause.
+ */
+export function claimsArtifactWrittenButUnproduced(value: string): boolean {
+  const text = value ?? "";
+  if (!text.trim()) return false;
+  const claimVerb =
+    /(eingef[üu]gt|eingebettet|aktualisiert|erstellt|gespeichert|hinzugef[üu]gt|geändert|überarbeitet|ergänzt|integriert|eingebunden|ersetzt|inserted|embedded|updated|created|saved|added|modified|written|generated|built|produced)/i;
+  const negation =
+    /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
+  // Split into clauses so a negated clause ("… wurde NICHT geändert") can't trip the claim.
+  for (const clause of text.split(/[.!?\n;:]+/)) {
+    if (claimVerb.test(clause) && ARTIFACT_NOUN_RE.test(clause) && !negation.test(clause)) return true;
+  }
+  return false;
+}
+
 /**
  * Heuristic: the answer INLINES a full artifact (a complete HTML document, or a large
  * fenced code block carrying the whole deliverable) instead of it being a real workspace
@@ -4636,6 +4677,35 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
         }, { sessionId: session.id, severity: "warn" });
+      }
+
+      // False-completion guard: the turn asked to CREATE or MODIFY an artifact, produced
+      // NO artifact this turn (no build delegation surfaced an attachment, no workspace
+      // write), yet the answer claims it created/updated/inserted the artifact — ship an
+      // honest status instead of the false success (audit 14661623 turn 2: gathered image
+      // URLs via one search, never rebuilt the deck, but answered "Die Bilder wurden
+      // eingefügt … URLs überprüft"). The three AND-conditions keep real builds (an artifact
+      // was produced → skipped) and report-only turns (no claim → skipped) untouched;
+      // topic-agnostic. Runs for ALL backends, not only source-sensitive ones.
+      if (
+        looksLikeArtifactMutationRequest(userMessage)
+        && collectTurnArtifactAttachments(session).length === 0
+        && claimsArtifactWrittenButUnproduced(finalResponse)
+      ) {
+        logAudit("guardrail_flagged", {
+          type: "artifact_completion_claim_unbacked_suppressed",
+          finishReason: terminalFinishReason,
+          answerLength: finalResponse.length,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        const honest = await forceSynthesis(
+          session, provider, signal,
+          "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed. "
+          + "Reply briefly and honestly IN THE USER'S LANGUAGE: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.",
+        );
+        const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
+        finalResponse = (candidate && candidate.trim().length >= 40 && !claimsArtifactWrittenButUnproduced(candidate))
+          ? candidate
+          : "Ich habe die Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige bitte, dann lasse ich den Inhalts-Spezialisten die Präsentation jetzt damit erstellen bzw. aktualisieren.\n\nI did **not** create or modify the file in this turn — I only gathered the requested information. Confirm and I'll have the content specialist build or update the presentation now.";
       }
 
       // Risk-gated auto-verify QA gate: for high-stakes turns that recorded a
