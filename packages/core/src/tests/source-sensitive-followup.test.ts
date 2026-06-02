@@ -76,8 +76,12 @@ describe("source-sensitive delegation preamble — research-framed + detector ma
       // Detector marker preserved → source-sensitive enforcement + gate still fire.
       expect(task).toContain("SOURCE-SENSITIVE DELEGATION:");
       expect(taskRequiresExternalResearch(task)).toBe(true);
-      // Verification discipline retained.
-      expect(task.toLowerCase()).toContain("official or vendor");
+      // Verification discipline retained (topic-agnostic wording — the preamble no longer
+      // uses hardware-flavored "official or vendor"; it confirms against "authoritative or
+      // official" sources). Both builders share this phrase.
+      expect(task.toLowerCase()).toContain("authoritative or official source");
+      // Scope cap present: stay on the named subject, a handful of sources, then stop.
+      expect(task.toLowerCase()).toContain("stay tightly scoped");
       expect(task).toContain(userMessage);
     });
 

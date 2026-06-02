@@ -626,20 +626,20 @@ const blockLabel = computed((): string => {
 // turn was blocked (already shown via the block badge above). Those belong in
 // the audit log, not surfaced to the user as warnings. Only genuinely
 // user-relevant outcomes (e.g. output redaction) are shown in chat.
-const HIDDEN_GUARDRAIL_TYPES = new Set([
-  "delegation_required",
-  "workflow_required",
-  "routing_nudge_released",
-  "tool_blocked",
-  "blocked",
-]);
+// Chat shows ONLY genuinely user-relevant guardrail OUTCOMES (e.g. output redaction).
+// ALLOWLIST, not denylist: internal orchestration mechanics — assistant_text_suppressed,
+// synthesis_required, tool_calls_after_synthesis_required, source_sensitive_auto_build_*,
+// raw_tool_evidence_dump_suppressed, delegation_*, etc. — are noise the user neither needs
+// nor can act on, so they never render in chat (they remain in the audit log). A denylist
+// leaked every new internal type into the conversation; an allowlist cannot. Real blocks
+// are surfaced separately by the `message.blocked` badge above.
 const GUARDRAIL_LABELS: Record<string, string> = {
   output_redacted: "🔒 Sensitive output was redacted",
 };
 const visibleGuardrailEvents = computed(() =>
   (props.message.guardrailEvents ?? [])
-    .filter((ev) => !HIDDEN_GUARDRAIL_TYPES.has(ev.type))
-    .map((ev) => GUARDRAIL_LABELS[ev.type] ?? `⚠ ${ev.type}: ${ev.details}`),
+    .filter((ev) => Object.prototype.hasOwnProperty.call(GUARDRAIL_LABELS, ev.type))
+    .map((ev) => GUARDRAIL_LABELS[ev.type]!),
 );
 
 const swarmTasks = computed(() => Object.values(props.message.swarmState?.tasks ?? {}));
@@ -1098,6 +1098,22 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
 
     if (!attachment.relativePath) return;
 
+    // Website project (a directory with index.html): serve it from the gateway static
+    // preview server (token in the query so an iframe src works) — the SAME path the side
+    // panel uses (Chat.vue openPanelArtifact). This MUST run before the blob fetch:
+    // relativePath is the DIRECTORY, so /api/workspace/file can't return it as a single
+    // file — that is why the opened-message preview was blank while the side panel worked.
+    if (attachment.previewMode === "website" || attachment.isDirectory) {
+      artifactPreview.value = {
+        title: attachment.title || attachment.filename,
+        filename: attachment.filename,
+        kind: "html",
+        url: gateway.buildWorkspacePreviewUrl(attachment.relativePath),
+        sandbox: "allow-scripts allow-same-origin allow-forms allow-popups",
+      };
+      return;
+    }
+
     const { blob, filename } = await gateway.fetchWorkspaceArtifactBlob(attachment.relativePath, { disposition: "inline" });
     if (attachment.previewMode === "image") {
       lightboxUrl.value = URL.createObjectURL(blob);
@@ -1112,27 +1128,6 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
         kind: "mermaid",
         text: source,
         svg: await renderMermaidSvg(source, filename),
-      };
-      return;
-    }
-
-    if (attachment.previewMode === "website") {
-      const indexHtml = await blob.text();
-      const baseDir = attachment.relativePath ? attachment.relativePath.replace(/\/[^/]*$/, "") : "";
-      const inlined = await inlineWebsiteAssets(indexHtml, baseDir);
-      artifactPreview.value = {
-        title: attachment.title || filename,
-        filename,
-        kind: "website",
-        srcdoc: inlined.srcdoc,
-        sandbox: "allow-same-origin",
-        websiteMeta: {
-          inlinedAssetCount: inlined.inlinedCount,
-          skippedAssetCount: inlined.skippedCount,
-          note: inlined.skippedCount > 0
-            ? "Some assets could not be inlined; download the bundle for the full multi-page site."
-            : "Sub-page navigation is disabled in inline preview — use Download to browse the full site locally.",
-        },
       };
       return;
     }

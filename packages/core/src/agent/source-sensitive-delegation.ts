@@ -6,9 +6,8 @@
 // A single generic focus is always correct and never contaminates the slice
 // with a mistaken topic guess.
 const GENERIC_VERIFICATION_FOCUS =
-  "gather and confirm every concrete entity in this slice — products, part numbers, vendors/manufacturers, "
-  + "interfaces/protocols, specifications, prices, quantities, dates, and URLs — from official or vendor "
-  + "sources, and report anything you could not confirm as unverified";
+  "gather and confirm every concrete fact this slice needs — names, dates, figures, quantities, definitions, "
+  + "and source URLs — from authoritative or official sources, and report anything you could not confirm as unverified";
 
 function formatCoordinatorFocusLines(focus: string | undefined): string[] {
   if (!focus) return [];
@@ -46,10 +45,11 @@ export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, 
     // (taskRequiresExternalResearch, the SLICE includes-check, the runtime guidance
     // regex); the verification discipline is unchanged (a correctness invariant).
     "WEB RESEARCH TASK — gather fresh sourced evidence from official primary sources.",
-    "Research the parent task below: use web_search and web_fetch to open official manufacturer, vendor, standards, and datasheet pages and gather the requested specifications, interfaces, datasheet values, prices, and component sourcing.",
+    "Research the parent task below: use web_search and web_fetch to open the most authoritative primary or official sources for the subject(s) the request explicitly names, and gather the concrete facts, names, dates, figures, and source URLs needed to fulfill it.",
+    "Stay tightly scoped to the subject(s) the request names: consult a handful of authoritative sources (aim for ~3–6) and then STOP and report — do NOT broaden the search to tangential, adjacent, or merely related topics the request did not ask for.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The parent task below is the canonical request. Search user-supplied identifiers exactly as given; do not treat coordinator-added manufacturer, product, interface, version, quantity, price, date, URL, or specification claims as confirmed unless they appear in this parent task or in completed tool evidence.",
-    "State a concrete fact only after an official or vendor source confirms it; if evidence is missing, report uncertainty instead of filling gaps.",
+    "The parent task below is the canonical request. Search user-supplied identifiers exactly as given; do not treat coordinator-added names, identifiers, dates, quantities, prices, URLs, or specification claims as confirmed unless they appear in this parent task or in completed tool evidence.",
+    "State a concrete fact only after an authoritative or official source confirms it; if evidence is missing, report uncertainty instead of filling gaps.",
     "",
     "Parent task:",
     parentTask.trim(),
@@ -114,10 +114,11 @@ export function buildSourceSensitiveOriginalRequestTask(userMessage: string, lab
     // source_verifier (a draft checker); the SOURCE-SENSITIVE marker line is preserved
     // verbatim for the detectors and the verification discipline is unchanged.
     "WEB RESEARCH TASK — gather fresh sourced evidence from official primary sources.",
-    "Research the request below: use web_search and web_fetch to open official manufacturer, vendor, standards, and datasheet pages and gather the requested specifications, interfaces, datasheet values, prices, and component sourcing.",
+    "Research the request below: use web_search and web_fetch to open the most authoritative primary or official sources for the subject(s) the request explicitly names, and gather the concrete facts, names, dates, figures, and source URLs needed to fulfill it.",
+    "Stay tightly scoped to the subject(s) the request names: consult a handful of authoritative sources (aim for ~3–6) and then STOP and report — do NOT broaden the search to tangential, adjacent, or merely related topics the request did not ask for.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The user's original request below is the only canonical task. Search user-supplied identifiers exactly as given; do not copy coordinator-added assumptions into searches or final claims, and treat every product name, part number, vendor, interface, price, date, URL, quantity, and specification as unconfirmed until a completed tool result or shared finding confirms it.",
-    "State a concrete fact only after an official or vendor source confirms it; if evidence contradicts an assumption in the request, the evidence wins, and if evidence is missing, report it as unverified rather than filling the gap.",
+    "The user's original request below is the only canonical task. Search user-supplied identifiers exactly as given; do not copy coordinator-added assumptions into searches or final claims, and treat every name, identifier, date, quantity, price, URL, and specification as unconfirmed until a completed tool result or shared finding confirms it.",
+    "State a concrete fact only after an authoritative or official source confirms it; if evidence contradicts an assumption in the request, the evidence wins, and if evidence is missing, report it as unverified rather than filling the gap.",
     "",
     "Original user request:",
     userMessage.trim(),
