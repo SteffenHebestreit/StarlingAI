@@ -81,8 +81,51 @@
       </aside>
     </section>
 
+    <!-- Session shared-facts tab -->
+    <section v-if="activeTab === 'facts'" class="memory-page__panel">
+      <div class="memory-controls">
+        <div class="memory-controls__group memory-controls__group--grow">
+          <label class="memory-controls__label">Session ID</label>
+          <input
+            v-model="factsSessionId"
+            type="search"
+            class="memory-controls__input"
+            placeholder="Paste a session ID to inspect what the swarm shared during it"
+            @keyup.enter="loadSharedFacts()"
+          />
+        </div>
+        <button class="memory-controls__refresh" @click="loadSharedFacts()" :disabled="factsLoading || !factsSessionId.trim()">
+          {{ factsLoading ? "Loading…" : "Load" }}
+        </button>
+      </div>
+      <div v-if="factsError" class="memory-page__notice memory-page__notice--error">{{ factsError }}</div>
+      <div v-else-if="!factsLoaded" class="memory-page__notice">
+        Enter a session ID (from the Sessions page or an audit export) and press Load to see the
+        <strong>shared facts</strong> that sub-agents published via <code>share_finding</code> — plus
+        auto-extracted findings — during that swarm turn. These live for the session only and are not
+        in the Memory Store tab.
+      </div>
+      <div v-else-if="sharedFacts.length === 0 && !factsLoading" class="memory-page__notice">
+        No shared facts for this session. Either nothing was published this session, or it has expired.
+      </div>
+      <div v-else class="memory-list">
+        <article v-for="fact in sharedFacts" :key="fact.key" class="memory-card">
+          <header class="memory-card__header">
+            <span :class="['fact-badge', fact.auto ? 'fact-badge--auto' : 'fact-badge--shared']">
+              {{ fact.auto ? "auto-extracted" : "shared" }}
+            </span>
+            <span class="memory-card__owner">{{ fact.key }}</span>
+          </header>
+          <p class="memory-card__content">{{ fact.value }}</p>
+        </article>
+      </div>
+      <div v-if="factsLoaded && sharedFacts.length > 0" class="memory-page__notice memory-page__notice--info">
+        {{ sharedFacts.length }} fact(s) · shared session <code>{{ factsSharedSessionId }}</code>
+      </div>
+    </section>
+
     <!-- Memory store tab -->
-    <section v-else class="memory-page__panel">
+    <section v-else-if="activeTab === 'memory'" class="memory-page__panel">
       <div class="memory-controls">
         <div class="memory-controls__group">
           <label class="memory-controls__label">Scope</label>
@@ -197,6 +240,7 @@ const gateway = useGatewayStore();
 const tabs = [
   { id: "graph", label: "Knowledge Graph" },
   { id: "memory", label: "Memory Store" },
+  { id: "facts", label: "Session Facts" },
 ] as const;
 
 const activeTab = ref<typeof tabs[number]["id"]>("graph");
@@ -232,6 +276,14 @@ interface CurationReport {
 }
 const curationReport = ref<CurationReport | null>(null);
 const curating = ref(false);
+
+// ── Session shared-facts state ──────────────────────────────────────────────
+const factsSessionId = ref<string>("");
+const factsLoading = ref(false);
+const factsError = ref<string | null>(null);
+const factsLoaded = ref(false);
+const factsSharedSessionId = ref<string>("");
+const sharedFacts = ref<Array<{ key: string; value: string; auto: boolean }>>([]);
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -429,6 +481,29 @@ async function runCurate(): Promise<void> {
   }
 }
 
+async function loadSharedFacts(): Promise<void> {
+  const sid = factsSessionId.value.trim();
+  if (!sid) return;
+  factsLoading.value = true;
+  factsError.value = null;
+  try {
+    const res = await fetch(`${apiBase()}/api/sessions/${encodeURIComponent(sid)}/shared-facts`, { headers: authHeaders() });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const data = await res.json() as { sharedSessionId: string; facts: Array<{ key: string; value: string; auto: boolean }> };
+    sharedFacts.value = data.facts ?? [];
+    factsSharedSessionId.value = data.sharedSessionId ?? "";
+    factsLoaded.value = true;
+  } catch (err) {
+    factsError.value = err instanceof Error ? err.message : String(err);
+    factsLoaded.value = true;
+  } finally {
+    factsLoading.value = false;
+  }
+}
+
 function onMemoryQueryChange(): void {
   if (memoryQueryTimer) clearTimeout(memoryQueryTimer);
   memoryQueryTimer = setTimeout(() => { void loadMemory(); }, 250);
@@ -446,6 +521,8 @@ function formatDate(iso: string): string {
 watch(activeTab, (tab) => {
   if (tab === "graph") {
     nextTick(() => { void loadGraph(); });
+  } else if (tab === "facts") {
+    if (factsSessionId.value.trim() && !factsLoaded.value) void loadSharedFacts();
   } else {
     void loadMemory();
     void loadCuration();
@@ -816,5 +893,27 @@ void computed; // silence unused-import lint without needing to remove it
   border: 1px solid rgba(56, 189, 248, 0.32);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
+}
+
+/* ── Session shared-facts badges ────────────────────────────────────────── */
+.fact-badge {
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.fact-badge--shared {
+  background: rgba(52, 211, 153, 0.16);
+  color: rgb(167 243 208);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+
+.fact-badge--auto {
+  background: rgba(148, 163, 184, 0.16);
+  color: rgb(203 213 225);
+  border: 1px solid rgba(148, 163, 184, 0.35);
 }
 </style>
