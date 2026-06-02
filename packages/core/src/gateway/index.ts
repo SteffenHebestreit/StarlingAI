@@ -59,7 +59,8 @@ import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/c
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
-import { getAgentMessageBacklogSnapshot } from "../swarm/memory.js";
+import { getAgentMessageBacklogSnapshot, readAllFacts } from "../swarm/memory.js";
+import { deriveSharedSessionId } from "../tools/memory.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
@@ -3448,6 +3449,30 @@ export function createGateway() {
       if (error instanceof Error && error.message.includes("Session not found")) {
         return c.json({ error: error.message }, 404);
       }
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // GET /api/sessions/:sessionId/shared-facts — the swarm's shared session memory
+  // (what sub-agents published via share_finding + auto-extracted findings) for a session.
+  // Read-only; powers the MemoryInspector "Shared facts" view so a run's evidence is
+  // inspectable (e.g. what image_sourcer shared vs. what content_writer embedded).
+  app.get("/api/sessions/:sessionId/shared-facts", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
+
+    try {
+      const sharedSessionId = deriveSharedSessionId(sessionId);
+      const facts = await readAllFacts(sharedSessionId);
+      // Curated (share_finding) facts first, then auto-extracted `auto_*` findings; each group alphabetical.
+      const items = Object.entries(facts)
+        .map(([key, value]) => ({ key, value, auto: key.startsWith("auto_") }))
+        .sort((a, b) => (a.auto === b.auto ? a.key.localeCompare(b.key) : (a.auto ? 1 : -1)));
+      return c.json({ sessionId, sharedSessionId, count: items.length, facts: items });
+    } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
   });
