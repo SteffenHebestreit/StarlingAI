@@ -1261,6 +1261,81 @@ function pickResearchFallbackAgent(attempted: string[]): string | undefined {
   );
 }
 
+// ── General capability-aware routing/bidding gate ───────────────────────────
+// Beyond the dedicated web-research and artifact gates, some tasks UNAMBIGUOUSLY
+// require a concrete EXECUTION tool class that an agent either holds or doesn't.
+// Routing/bidding rank on semantic + outcome fit and can elect an agent that
+// literally lacks the tool the task needs (audit 14661623: a no-web generator
+// out-bid the web specialist). This gate keeps the capable candidates WHEN BOTH
+// capable and incapable candidates are present for the same task. It is a
+// preventive routing filter, not an output backstop: it NEVER dead-ends (if no
+// candidate is capable it leaves the set untouched and the run proceeds), always
+// passes coordinators (they can delegate to a capable specialist) and tool-
+// inheritors, and only ever swaps an incapable auto-pick for a capable peer that
+// was already a candidate — it cannot invent agents. Detectors are deliberately
+// high-precision (concrete command/host/language/transaction signals, never
+// ambiguous verbs like "build" or "run a script") so a false positive cannot
+// drop a correct non-execution specialist.
+type ExecutionCapability = "shell" | "code_exec" | "browser_interaction";
+
+const EXECUTION_CAPABILITY_DETECTORS: Record<ExecutionCapability, RegExp> = {
+  // Host/server command execution — concrete shell/system signals only.
+  shell: /\b(?:ssh|sudo|systemctl|journalctl|crontab|kubectl|docker(?:\s|-compose|$)|chmod|chown|apt(?:-get)?|yum|dnf|pacman|ps aux|df -h|free -m|uptime|on the (?:server|host|remote machine|box)|shell command|bash command|run the command|restart the (?:service|daemon|container))\b|\.sh\b/i,
+  // Run/execute code in a sandbox — require an explicit language or "sandbox",
+  // never bare "run a script" (ambiguous with a shell script).
+  code_exec: /\b(?:run|execute|laufen lassen|führe?\s+aus)\b[^.\n]{0,30}\b(?:javascript|typescript|js|ts|python|node(?:\.js)?)\b|\bin a sandbox\b|\bsandbox:/i,
+  // Interactive actions on a live website — strong transaction/login/form signals.
+  browser_interaction: /\b(?:log ?in|sign ?in|anmelden|einloggen|fill (?:in |out )?the form|formular ausf(?:ü|ue)llen|submit the form|formular absenden|add to cart|in den warenkorb|check ?out|book (?:a|the)\b|apply (?:for|to)\b|place (?:an|the) order|bestellung aufgeben)\b/i,
+};
+
+function agentSatisfiesExecutionCapability(cfg: { tools?: string[] } | undefined, cap: ExecutionCapability): boolean {
+  if (!cfg) return true;       // unknown / ephemeral — don't filter
+  if (!cfg.tools) return true; // inherits the full tool set
+  const tools = cfg.tools;
+  if (tools.some((t) => COORDINATION_TOOL_NAMES.has(t))) return true; // can delegate to a capable specialist
+  switch (cap) {
+    case "shell":
+      return tools.includes("shell_exec") || tools.includes("ssh_exec");
+    case "code_exec":
+      return tools.some((t) => t.startsWith("mcp__code_sandbox__") || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(t));
+    case "browser_interaction":
+      return tools.some((t) => t.startsWith("browser_") || t === "site_fill_credentials" || t.startsWith("computer_"));
+  }
+}
+
+/** Execution tool classes the task UNAMBIGUOUSLY requires (high-precision detectors). */
+export function requiredExecutionCapabilities(task: string): ExecutionCapability[] {
+  const t = task ?? "";
+  return (Object.keys(EXECUTION_CAPABILITY_DETECTORS) as ExecutionCapability[])
+    .filter((cap) => EXECUTION_CAPABILITY_DETECTORS[cap].test(t));
+}
+
+/**
+ * Capability-aware filter for AUTO-selected candidates (semantic routing + bidding).
+ * For each execution capability the task requires, drop candidates that lack it — but
+ * only while at least one capable candidate remains (never dead-end). Pure; the caller
+ * decides what to do with the result. Coordinators and tool-inheritors always pass.
+ */
+export function filterCandidatesByExecutionCapability(
+  names: string[],
+  task: string,
+  lookup: (name: string) => { tools?: string[] } | undefined,
+): { kept: string[]; dropped: string[]; capabilities: ExecutionCapability[] } {
+  const capabilities = requiredExecutionCapabilities(task);
+  if (capabilities.length === 0 || names.length <= 1) return { kept: names, dropped: [], capabilities };
+  let kept = names;
+  const dropped: string[] = [];
+  for (const cap of capabilities) {
+    const capable = kept.filter((name) => agentSatisfiesExecutionCapability(lookup(name), cap));
+    if (capable.length > 0 && capable.length < kept.length) {
+      for (const name of kept) if (!capable.includes(name)) dropped.push(name);
+      kept = capable;
+    }
+    // capable.length === 0 → no candidate holds this class; leave `kept` as-is (no dead-end).
+  }
+  return { kept, dropped: uniqueNames(dropped), capabilities };
+}
+
 interface EphemeralToolSelectionContext {
   /** When provided, the validator checks tool-fit against the agent's stated
    *  intent: a research-shaped agent must include at least one
@@ -3207,6 +3282,27 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             routingCandidates = researchCapable;
           }
         }
+        // Capability-aware gate: when the task needs a concrete execution tool class
+        // (shell/code-exec/browser interaction) and both capable and incapable agents
+        // were routed, keep the capable ones so bidding/routing can't elect an agent
+        // that lacks the tool the task needs.
+        if (routingCandidates.length > 1) {
+          const capCfg = getConfig();
+          const capPromoted = readPromotedAgents(capCfg.workspacePath);
+          const { kept, dropped, capabilities } = filterCandidatesByExecutionCapability(
+            routingCandidates.map((c) => c.name),
+            request.task,
+            (name) => capCfg.subAgents[name] ?? capPromoted[name],
+          );
+          if (dropped.length > 0) {
+            logAudit("delegation_routing_filtered_capability_incapable", {
+              taskTitle: title,
+              droppedAgents: dropped,
+              capabilities,
+            }, { sessionId: ctx.sessionId });
+            routingCandidates = routingCandidates.filter((c) => kept.includes(c.name));
+          }
+        }
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
@@ -3273,6 +3369,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             }, { sessionId: ctx.sessionId });
           }
           bids = researchCapableBids;
+        }
+        // Same capability-aware gate as semantic routing: don't let a winning bid come
+        // from an agent that lacks the execution tool class the task needs.
+        if (bids.length > 1) {
+          const capCfg = getConfig();
+          const capPromoted = readPromotedAgents(capCfg.workspacePath);
+          const { kept, dropped, capabilities } = filterCandidatesByExecutionCapability(
+            bids.map((b) => b.agentName),
+            request.task,
+            (name) => capCfg.subAgents[name] ?? capPromoted[name],
+          );
+          if (dropped.length > 0) {
+            logAudit("delegation_bidding_filtered_capability_incapable", {
+              taskTitle: title,
+              droppedAgents: dropped,
+              capabilities,
+            }, { sessionId: ctx.sessionId });
+            bids = bids.filter((b) => kept.includes(b.agentName));
+          }
         }
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
         bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
