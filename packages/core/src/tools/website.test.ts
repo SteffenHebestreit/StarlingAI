@@ -381,4 +381,57 @@ describe("generate_presentation", () => {
     expect(second.success).toBe(false);
     expect(second.error).toContain("Refusing");
   });
+
+  // The slow local model often serializes the slides array (and per-slide bullets) as a
+  // JSON *string* instead of a real array — the deck must still build on the first call
+  // rather than bouncing on "slides must be an array" and burning the per-tool cap
+  // (audit 2daf5f54: 5 turns wasted before one call happened to pass a real array).
+  it("coerces a JSON-string slides argument into a real deck", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Coerced",
+      slides: JSON.stringify([
+        { title: "Der Zwinger", content: "Ein **barockes** Bauensemble." },
+        { title: "Highlights", bullets: ["Kronentor", "Nymphenbad"] },
+      ]),
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["slideCount"]).toBe(2);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect((html.match(/<section>/g) ?? []).length).toBe(2);
+    expect(html).toContain("<h2>Der Zwinger</h2>");
+    expect(html).toContain("<strong>barockes</strong>");
+    expect(html).toContain("<li>Kronentor</li>");
+  });
+
+  it("coerces a JSON-string bullets field on a slide", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Coerced bullets",
+      slides: [{ title: "Highlights", bullets: JSON.stringify(["Kronentor", "Nymphenbad", "Glockenspielpavillon"]) }],
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect(html).toContain("<li>Kronentor</li>");
+    expect(html).toContain("<li>Glockenspielpavillon</li>");
+  });
+
+  it("wraps a single slide object (not in an array) into a one-slide deck", async () => {
+    const ws = tempWorkspace();
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Single",
+      slides: { title: "Only One", content: "Body" } as unknown as never,
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["slideCount"]).toBe(1);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect((html.match(/<section>/g) ?? []).length).toBe(1);
+    expect(html).toContain("<h2>Only One</h2>");
+  });
 });
