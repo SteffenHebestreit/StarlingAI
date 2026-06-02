@@ -406,6 +406,31 @@ describe("generate_presentation", () => {
     expect(html).toContain("<li>Kronentor</li>");
   });
 
+  // The slow model serializes slides as a JSON STRING *and* mis-escapes inner quotes — a
+  // notes value like `… „Elbflorenz" rührt …` leaves a raw " that breaks JSON.parse, so the
+  // deck build collapsed to hand-written HTML (audit 39953ed9). The coercion now repairs the
+  // dominant defect (unescaped inner quotes) and still builds on the first call.
+  it("repairs unescaped inner quotes in a JSON-string slides arg", async () => {
+    const ws = tempWorkspace();
+    const slides =
+      '[{"title": "Architektur von Dresden", "notes": "Der Spitzname „Elbflorenz" rührt von den Bauwerken.", "content": "Barock."},'
+      + ' {"title": "Zwinger", "bullets": ["Kronentor", "Nymphenbad"], "notes": "He said "hallo" heute."}]';
+    const result = await (await tool()).execute({
+      outputDir: "deck",
+      title: "Coerced+Repaired",
+      slides,
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["slideCount"]).toBe(2);
+    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    expect((html.match(/<section>/g) ?? []).length).toBe(2);
+    expect(html).toContain("<h2>Architektur von Dresden</h2>");
+    expect(html).toContain("<li>Kronentor</li>");
+    // The repaired inner-quote text is preserved as content (rendered, escaped).
+    expect(html).toContain("Elbflorenz");
+  });
+
   it("coerces a JSON-string bullets field on a slide", async () => {
     const ws = tempWorkspace();
     const result = await (await tool()).execute({
