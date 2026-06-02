@@ -540,6 +540,141 @@ describe("sub-agent research tool caps", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("does not let rejected-argument failures burn the per-tool SUCCESS cap", async () => {
+    // Audit 2daf5f54: generate_presentation rejected a JSON-string `slides` arg, the
+    // failed attempts consumed the per-tool cap, and the corrected retry was hard-blocked
+    // → the deck never built. A failed call (which did no real work) must be refunded so
+    // the model can fix its arguments within the success budget.
+    const { tempDir, configPath } = writeTempConfig({
+      orchestration: { subAgentToolCaps: { generate_presentation: 2 } },
+      subAgents: {
+        deck_agent: {
+          description: "Deck build cap-refund test agent",
+          systemPrompt: "Build the deck; fix the arguments if they are rejected.",
+          tools: ["generate_presentation"],
+          maxIterations: 10,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    let attempts = 0;
+    // Distinct args each time so the consecutive-duplicate cache does not short-circuit
+    // (the slow model re-serializes a malformed payload slightly differently each retry).
+    const responses = [
+      buildToolCallResponse("deck-1", "generate_presentation", { slides: "v1" }),
+      buildToolCallResponse("deck-2", "generate_presentation", { slides: "v2" }),
+      buildToolCallResponse("deck-3", "generate_presentation", { slides: "v3" }),
+      buildToolCallResponse("deck-4", "generate_presentation", { slides: [{ title: "ok" }] }),
+      {
+        content: "Deck built.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      },
+    ];
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "Deck built.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "generate_presentation",
+      description: "Build a slide deck from a structured slide list.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        attempts += 1;
+        if (!Array.isArray((args as Record<string, unknown>)["slides"])) {
+          return { success: false, output: "", error: "slides must be an array of slide objects" };
+        }
+        return { success: true, output: "deck built", metadata: { outputPath: "deck", filename: "index.html" } };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "deck_agent",
+        task: "Build the slide deck.",
+        parentSessionId: "parent-cap-refund",
+        workspacePath: "/workspace",
+      });
+
+      // All 4 calls reached the tool: the 3 rejected-arg failures did NOT block the
+      // 4th, corrected call (which succeeded). Old behavior blocked at the 3rd (cap=2).
+      expect(attempts).toBe(4);
+      expect(result.stats.terminalState).toBe("completed");
+    } finally {
+      unregisterTool("generate_presentation");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still bounds an always-failing tool via the separate per-tool FAILURE cap", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        flaky_agent: {
+          description: "Always-failing tool cap test agent",
+          systemPrompt: "Call the tool; stop if it keeps failing.",
+          tools: ["web_fetch"],
+          maxIterations: 12,
+        },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    let attempts = 0;
+    const responses: Array<Record<string, unknown>> =
+      Array.from({ length: 7 }, (_v, i) => buildToolCallResponse(`flaky-${i + 1}`, "web_fetch", { url: `https://example.com/${i + 1}` }));
+    responses.push({
+      content: "Giving up.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "Giving up.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "web_fetch",
+      description: "A tool that always fails for this test.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        attempts += 1;
+        return { success: false, output: "", error: "still broken" };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      await runSubAgentWithStats({
+        agentName: "flaky_agent",
+        task: "Use the tool.",
+        parentSessionId: "parent-failure-cap",
+        workspacePath: "/workspace",
+      });
+
+      // PER_TOOL_FAILURE_CAP (4) bounds it: distinct-arg failures reach the tool only
+      // until the failure budget is exhausted, then are blocked before executing.
+      expect(attempts).toBe(4);
+    } finally {
+      unregisterTool("web_fetch");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("per-agent model config", () => {

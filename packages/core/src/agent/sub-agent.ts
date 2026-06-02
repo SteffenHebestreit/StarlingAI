@@ -718,6 +718,13 @@ const PER_PATH_WRITE_CAP = 2;
 // head → append chunks), so one file legitimately takes many appends. Bound it
 // generously to still catch a true runaway, but well above a chunked large file.
 const PER_PATH_APPEND_CAP = 24;
+// A FAILED tool call (most often arguments the model can fix by re-emitting them —
+// e.g. generate_presentation rejecting a JSON-string `slides` arg) must NOT burn the
+// per-tool SUCCESS cap, or a couple of mis-serializations hard-block a build tool
+// mid-task (audit 2daf5f54: "slides must be an array" twice → build collapse). Failed
+// calls are refunded from the success cap and counted under this separate, bounded
+// budget so a genuinely-stuck arg-rejection loop is still capped.
+const PER_TOOL_FAILURE_CAP = 4;
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
@@ -2368,6 +2375,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // paths. Counting per-path lets us catch the loop without blocking a
     // 4-file website build at file 3.
     const perWritePathCount = new Map<string, number>();
+    // Per-tool FAILED-call counters, separate from the success cap above. A failed
+    // call refunds the success cap and increments this instead; exceeding
+    // PER_TOOL_FAILURE_CAP blocks the tool so repeated arg-rejection can't loop forever.
+    const perToolFailureCount = new Map<string, number>();
     let workflowPassthroughOutput: string | null = null;
     // Observability: per-tool byte totals for context-budget runaway detection
     const bytesByTool = new Map<string, number>();
@@ -4015,6 +4026,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           });
           continue;
         }
+        const priorFailures = perToolFailureCount.get(tc.name) ?? 0;
+        if (priorFailures >= PER_TOOL_FAILURE_CAP) {
+          log.warn(
+            { agentName: opts.agentName, tool: tc.name, failures: priorFailures, cap: PER_TOOL_FAILURE_CAP },
+            "Sub-agent exceeded per-tool failure cap (arguments kept being rejected)",
+          );
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: `Tool '${tc.name}' failed ${priorFailures} times this run — its arguments keep being rejected. Stop calling it; work with the results you already have or report the blocker.`,
+            skippedReason: "per_tool_failure_cap",
+          });
+          toolResults.push({
+            role: "tool",
+            content: `Tool '${tc.name}' failed ${priorFailures} times this run — its arguments keep being rejected. Stop calling it; work with the results you already have or report the blocker.`,
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
         perToolCallCount.set(tc.name, priorCount + 1);
 
         // ABA-duplicate detection (idempotent tools only): if the same tool
@@ -4102,6 +4135,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
         executedToolThisIteration = true;
+        if (!result.success) {
+          // A failed call did no real work — most often the model can fix it by
+          // re-emitting corrected arguments. Refund the per-tool (and per-path)
+          // SUCCESS cap and account for it under the bounded failure budget instead,
+          // so a couple of arg rejections can't hard-block a build tool mid-task.
+          perToolCallCount.set(tc.name, priorCount);
+          if (writePath !== null) {
+            const refundKey = `${tc.name}:${writePath}`;
+            const pc = perWritePathCount.get(refundKey) ?? 0;
+            if (pc > 0) perWritePathCount.set(refundKey, pc - 1);
+          }
+          perToolFailureCount.set(tc.name, (perToolFailureCount.get(tc.name) ?? 0) + 1);
+        }
         emitSubAgentToolAudit({
           agentName: opts.agentName,
           tool: tc.name,
