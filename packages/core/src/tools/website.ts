@@ -445,6 +445,46 @@ function normalizeTransition(value: unknown): string {
   return allowed.has(v) ? v : "slide";
 }
 
+// Escape stray, unescaped double-quotes that appear INSIDE a JSON string value — the
+// dominant way the slow local model corrupts a serialized slides/bullets string (audit
+// 39953ed9: a notes value `… „Elbflorenz" rührt …` left the closing typographic quote as a
+// raw " that terminated the string early and broke JSON.parse, so coercion failed and the
+// build fell back to hand-written HTML). Single left-to-right pass tracking string state: a
+// " is a real delimiter only when the next non-space char is structural (:,}]) or EOF —
+// otherwise it is content and gets escaped. Used ONLY as a fallback after a normal
+// JSON.parse fails, so valid JSON is never touched.
+function repairUnescapedInnerQuotes(s: string): string {
+  let out = "";
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (!inStr) {
+      out += c;
+      if (c === '"') inStr = true;
+      continue;
+    }
+    if (c === "\\") { // copy an escape sequence verbatim (e.g. \" \\ \n)
+      out += c + (s[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && (s[j] === " " || s[j] === "\t" || s[j] === "\n" || s[j] === "\r")) j++;
+      const next = j < s.length ? s[j]! : "";
+      if (next === "" || next === ":" || next === "," || next === "}" || next === "]") {
+        out += '"'; // genuine closing delimiter
+        inStr = false;
+      } else {
+        out += '\\"'; // stray inner quote → escape it so JSON.parse survives
+      }
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 // The slow local model frequently serializes an ARRAY argument as a JSON STRING
 // (`"slides": "[{…}]"`, `"bullets": "[\"…\"]"`) instead of a real array — a tool-calling
 // quirk of small models, not a user error. Parsing it leniently lets the deck build on the
@@ -455,7 +495,10 @@ function coerceJsonArrayArg(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return value;
-  try { return JSON.parse(trimmed); } catch { return value; }
+  try { return JSON.parse(trimmed); } catch {
+    // Fallback: repair the dominant defect (unescaped inner quotes) and retry once.
+    try { return JSON.parse(repairUnescapedInnerQuotes(trimmed)); } catch { return value; }
+  }
 }
 
 // Only allow image URLs a browser can load AND that can't smuggle script: http(s),
