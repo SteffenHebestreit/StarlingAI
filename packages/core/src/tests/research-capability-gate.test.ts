@@ -4,7 +4,6 @@ import {
   isWebGatheringToolName,
   agentCfgIsResearchCapable,
   taskRequiresExternalResearch,
-  taskRequiresWebMediaSourcing,
 } from "../tools/sub-agent.js";
 
 /**
@@ -59,58 +58,5 @@ describe("research capability gate", () => {
   it("leaves ordinary generation tasks alone (gate inactive)", () => {
     expect(taskRequiresExternalResearch("Generate a chart from the numbers I gave you")).toBe(false);
     expect(taskRequiresExternalResearch("Draw a logo for the project")).toBe(false);
-  });
-});
-
-/**
- * Web-media SOURCING gate (audit f6e10341): "add images with verified URLs" was
- * routed to chart_designer — a generator with no web tools — which fabricated
- * plausible-but-dead Wikimedia URLs. Sourcing/verifying EXISTING web images is a
- * gather task and must be treated as research-requiring (→ image_sourcer), while
- * GENERATING new visuals stays with image_creator/chart_designer. Kept general:
- * keys on "obtain & verify existing web media", not on any one host/example.
- */
-describe("web media sourcing gate", () => {
-  it("flags tasks that FIND/SOURCE existing images (EN + DE)", () => {
-    expect(taskRequiresWebMediaSourcing("find a free-license photo of the venue")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("source images for the four sections")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("search for a picture of the product")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("suche verifizierte Bild-URLs für die Folien")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("finde echte, lizenzfreie Fotos")).toBe(true);
-  });
-
-  it("flags tasks that VERIFY/embed images with real URLs (no sourcing verb needed)", () => {
-    expect(taskRequiresWebMediaSourcing("add images with verified URLs to the deck")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("use real photos from Wikimedia Commons")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("check that the image URLs are reachable and load")).toBe(true);
-    expect(taskRequiresWebMediaSourcing("get working public-domain photos online")).toBe(true);
-  });
-
-  it("does NOT flag pure image GENERATION tasks", () => {
-    expect(taskRequiresWebMediaSourcing("create an image of a sunset over mountains")).toBe(false);
-    expect(taskRequiresWebMediaSourcing("generate a hero image for the landing page")).toBe(false);
-    expect(taskRequiresWebMediaSourcing("draw a picture of a robot")).toBe(false);
-    expect(taskRequiresWebMediaSourcing("erzeuge ein Bild eines Sonnenuntergangs")).toBe(false);
-    // "with images" alone (decorative, no sourcing verb / web qualifier) stays generative.
-    expect(taskRequiresWebMediaSourcing("build a presentation with images and charts")).toBe(false);
-  });
-
-  it("does NOT flag local-media tasks (workspace/attached) without a web qualifier", () => {
-    expect(taskRequiresWebMediaSourcing("find the images already in the workspace folder")).toBe(false);
-    expect(taskRequiresWebMediaSourcing("describe the attached photos")).toBe(false);
-    // …but a local mention WITH a web/verify qualifier still counts as web sourcing.
-    expect(taskRequiresWebMediaSourcing("verify the image URLs and download them to the workspace")).toBe(true);
-  });
-
-  it("does NOT flag non-media tasks", () => {
-    expect(taskRequiresWebMediaSourcing("find the latest revenue figures")).toBe(false);
-    expect(taskRequiresWebMediaSourcing("search the web for the spec")).toBe(false);
-  });
-
-  it("makes the research gate fire for media-sourcing (so generators get redirected)", () => {
-    expect(taskRequiresExternalResearch("find verified image URLs for the presentation")).toBe(true);
-    expect(taskRequiresExternalResearch("add images with verified URLs to the deck")).toBe(true);
-    // pure generation must NOT trip the research gate
-    expect(taskRequiresExternalResearch("generate a hero image for the landing page")).toBe(false);
   });
 });

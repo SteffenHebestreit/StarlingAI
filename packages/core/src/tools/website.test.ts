@@ -460,76 +460,42 @@ describe("generate_presentation", () => {
     expect(html).toContain("<h2>Only One</h2>");
   });
 
-  // Images: a slide can embed a verified image URL via the `image` field (the deck-build
-  // half of the image unit — the image_sourcer agent supplies the verified URLs).
-  it("embeds a slide image from the `image` field with alt text", async () => {
+  // generate_presentation stays general: it has NO dedicated image schema. A slide that
+  // needs a picture embeds it through ordinary Markdown in `content` (`![alt](url)`),
+  // exactly like any other Markdown image. Use-case-specific image sourcing/verification
+  // lives in a workflow, not in this core tool.
+  it("renders a Markdown image in slide content (general path, no image field)", async () => {
     const ws = tempWorkspace();
-    const url = "https://upload.wikimedia.org/wikipedia/commons/8/8a/Zwinger_Dresden.jpg";
+    const url = "https://example.com/zwinger.jpg";
     const result = await (await tool()).execute({
       outputDir: "deck",
       title: "Bilder",
-      slides: [{ title: "Der Zwinger", image: url, imageAlt: "Zwinger Gesamtansicht", content: "Barock." }],
+      slides: [{ title: "Der Zwinger", content: `![Zwinger](${url})\n\nBarock.` }],
     }, { sessionId: "s1", workspacePath: ws });
 
     expect(result.success).toBe(true);
     const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
-    expect(html).toContain(`<img src="${url}" alt="Zwinger Gesamtansicht">`);
-    // Image is placed before the body content.
-    expect(html.indexOf("<img")).toBeLessThan(html.indexOf("Barock"));
+    expect(html).toContain(`<img src="${url}" alt="Zwinger">`);
   });
 
-  it("renders an `images` list (incl. a JSON-string) as figures with captions", async () => {
-    const ws = tempWorkspace();
-    const result = await (await tool()).execute({
-      outputDir: "deck",
-      title: "Galerie",
-      slides: [{
-        title: "Highlights",
-        images: JSON.stringify([
-          { url: "https://example.com/a.jpg", caption: "Kronentor" },
-          { url: "https://example.com/b.png", alt: "Nymphenbad" },
-        ]),
-      }],
-    }, { sessionId: "s1", workspacePath: ws });
-
-    expect(result.success).toBe(true);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
-    expect(html).toContain('<img src="https://example.com/a.jpg"');
-    expect(html).toContain("<figcaption>Kronentor</figcaption>");
-    expect(html).toContain('<img src="https://example.com/b.png" alt="Nymphenbad">');
-  });
-
-  it("a slide with only a valid image (no title/content/bullets) still builds", async () => {
+  it("ignores a dedicated `image` field (no longer part of the schema)", async () => {
     const ws = tempWorkspace();
     const result = await (await tool()).execute({
       outputDir: "deck",
       title: "T",
-      slides: [{ image: "https://example.com/only.jpg" }],
+      // `image` is not a slide field anymore; the slide builds from its title only.
+      slides: [{ title: "Safe", image: "https://example.com/x.jpg" }],
     }, { sessionId: "s1", workspacePath: ws });
     expect(result.success).toBe(true);
     const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
-    expect(html).toContain('<img src="https://example.com/only.jpg"');
-  });
-
-  it("rejects a non-http(s)/data image URL (no javascript:/file: injection into the deck)", async () => {
-    const ws = tempWorkspace();
-    const result = await (await tool()).execute({
-      outputDir: "deck",
-      title: "T",
-      // The bad image is dropped; the slide still has a title so it builds without an <img>.
-      slides: [{ title: "Safe", image: "javascript:alert(1)" }],
-    }, { sessionId: "s1", workspacePath: ws });
-    expect(result.success).toBe(true);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
-    expect(html).not.toContain("javascript:alert");
     expect(html).not.toContain("<img");
     expect(html).toContain("<h2>Safe</h2>");
 
-    // A slide whose ONLY content is a rejected image is empty → error.
+    // A slide with no title/content/bullets is empty → error (image field is not content).
     const empty = await (await tool()).execute({
       outputDir: "deck2",
       title: "T",
-      slides: [{ image: "file:///etc/passwd" }],
+      slides: [{ image: "https://example.com/only.jpg" }],
     }, { sessionId: "s1", workspacePath: ws });
     expect(empty.success).toBe(false);
     expect(empty.error).toContain("at least one of");
