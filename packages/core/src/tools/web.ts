@@ -3,7 +3,10 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
 import { resolve as dnsResolve } from "node:dns/promises";
-import { callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, posix } from "node:path";
+import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
+import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("tool:web");
@@ -416,6 +419,264 @@ registerTool({
     } catch (err) {
       log.error({ err, url }, "web_fetch failed");
       return { success: false, output: "", error: `Fetch failed: ${String(err)}` };
+    }
+  },
+});
+
+// ─── fetch_image ─────────────────────────────────────────────────────────────
+// Download + verify a real image into the workspace so deliverables embed a LOCAL
+// asset instead of a fragile (and frequently fabricated) hotlink. The recurring
+// failure this kills: the model is handed a Commons File: PAGE url, then guesses the
+// uncomputable hashed /thumb/<hash>/…NNNpx- direct URL and embeds a dead 404 link
+// (audits 39953ed9, 3b53af25 — 0/N image URLs resolved). Given a page, this tool
+// extracts the real image (og:image, then the largest <img>/"Original file" link)
+// so nothing has to be guessed; given a direct image it uses it as-is. It keeps the
+// bytes only when the response is genuinely an image (content-type image/*), then
+// saves it under the workspace and returns the workspace-relative path.
+const IMAGE_FETCH_UA = "Mozilla/5.0 (compatible; StarlingAI/0.1 image fetcher; +https://starlingai.io)";
+const IMAGE_MIN_BYTES = 256;
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+function imageExtFromContentType(contentType: string): string {
+  const ct = contentType.split(";")[0]!.trim().toLowerCase();
+  switch (ct) {
+    case "image/jpeg": case "image/jpg": return ".jpg";
+    case "image/png": return ".png";
+    case "image/webp": return ".webp";
+    case "image/gif": return ".gif";
+    case "image/svg+xml": return ".svg";
+    case "image/avif": return ".avif";
+    case "image/bmp": return ".bmp";
+    case "image/tiff": return ".tiff";
+    default: return ".img";
+  }
+}
+
+function slugifyImageName(raw: string): string {
+  const base = raw.replace(/\.[a-z0-9]{1,5}$/i, ""); // drop any existing extension
+  const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  return slug || "image";
+}
+
+function imageBaseNameFromUrl(url: string): string {
+  try {
+    const last = new URL(url).pathname.split("/").filter(Boolean).pop() ?? "";
+    return slugifyImageName(decodeURIComponent(last));
+  } catch {
+    return "image";
+  }
+}
+
+/** Pull the best embeddable image URL out of an HTML page: prefer og:image /
+ *  twitter:image (what Commons File pages, articles, and stock pages expose as the
+ *  canonical image), then fall back to the first reasonably-sized <img src>. Relative
+ *  srcs are resolved against the page URL. Returns an absolute http(s) URL or null. */
+function extractImageUrlFromHtml(html: string, baseUrl: string): string | null {
+  const metaPatterns = [
+    /<meta[^>]+(?:property|name)=["']og:image(?::secure_url)?["'][^>]*\bcontent=["']([^"']+)["']/i,
+    /<meta[^>]+\bcontent=["']([^"']+)["'][^>]*(?:property|name)=["']og:image(?::secure_url)?["']/i,
+    /<meta[^>]+(?:property|name)=["']twitter:image(?::src)?["'][^>]*\bcontent=["']([^"']+)["']/i,
+  ];
+  for (const re of metaPatterns) {
+    const m = html.match(re);
+    if (m?.[1]) {
+      const abs = absolutizeUrl(m[1].trim(), baseUrl);
+      if (abs) return abs;
+    }
+  }
+  // Fallback: first <img> whose src looks like an image file.
+  const imgRe = /<img[^>]+\bsrc=["']([^"']+)["']/gi;
+  let im: RegExpExecArray | null;
+  while ((im = imgRe.exec(html)) !== null) {
+    const src = im[1]!.trim();
+    if (/^data:/i.test(src)) continue;
+    if (/\.(?:jpe?g|png|webp|gif|svg|avif)(?:[?#]|$)/i.test(src)) {
+      const abs = absolutizeUrl(src, baseUrl);
+      if (abs) return abs;
+    }
+  }
+  return null;
+}
+
+function absolutizeUrl(candidate: string, baseUrl: string): string | null {
+  try {
+    const abs = new URL(candidate, baseUrl).href;
+    return /^https?:\/\//i.test(abs) ? abs : null;
+  } catch {
+    return null;
+  }
+}
+
+/** SSRF guard shared with web_fetch: reject private/internal hosts (literal + DNS). */
+async function imageHostIsBlocked(url: string): Promise<boolean> {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (isPrivateHost(host)) return true;
+    try {
+      const addrs = await dnsResolve(host);
+      if (addrs.some((addr) => isPrivateHost(addr))) return true;
+    } catch {
+      // DNS failure — allow through (IP literal or unavailable resolver), same as web_fetch.
+    }
+  } catch {
+    return true; // unparseable URL
+  }
+  return false;
+}
+
+type ImageFetchOutcome =
+  | { kind: "image"; bytes: Uint8Array; contentType: string }
+  | { kind: "html"; html: string }
+  | { kind: "miss"; status: number; contentType: string };
+
+async function fetchImageOnce(url: string): Promise<ImageFetchOutcome> {
+  const res = await fetchWithTimeout(url, 20000, {
+    headers: { "User-Agent": IMAGE_FETCH_UA, "Accept": "image/*,text/html;q=0.9,*/*;q=0.8" },
+  });
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!res.ok) return { kind: "miss", status: res.status, contentType };
+  if (/^image\//i.test(contentType)) {
+    return { kind: "image", bytes: new Uint8Array(await res.arrayBuffer()), contentType };
+  }
+  if (/text\/html/i.test(contentType)) {
+    return { kind: "html", html: await res.text() };
+  }
+  return { kind: "miss", status: 200, contentType };
+}
+
+async function fetchImageWithRetry(url: string): Promise<ImageFetchOutcome> {
+  let outcome = await fetchImageOnce(url);
+  // A 429 is rate-limiting, not a dead link — back off briefly and try once more.
+  if (outcome.kind === "miss" && outcome.status === 429) {
+    await new Promise((r) => setTimeout(r, 1500));
+    outcome = await fetchImageOnce(url);
+  }
+  return outcome;
+}
+
+registerTool({
+  name: "fetch_image",
+  description:
+    "Download a real image into the workspace and VERIFY it is genuinely an image, so a deck/page/document embeds a LOCAL asset instead of a fragile hotlink. Accepts a direct image URL OR a page URL (e.g. a Wikimedia Commons 'File:' page, a stock/museum page); when given a page it extracts the real image (og:image, then the largest <img>) — you NEVER guess or construct a hashed thumbnail URL. It fetches the bytes, keeps them ONLY when the response is a real image (content-type image/*), optionally confirms the image depicts a given subject via the vision model, saves it under the workspace, and returns the saved workspace-relative path to embed as ![alt](path). On a 404 / non-image / rate-limited URL it fails with a clear reason so you leave that slot empty rather than embed a dead link.",
+  embeddingDescription:
+    "download image, fetch and save a picture or photo to the workspace, verify an image url is real and resolves, cache an image locally, resolve og:image from a page, Bild herunterladen prüfen speichern, verifiziertes Bild lokal ablegen, save verified image",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Direct image URL, or a page URL that contains/links the image (e.g. a Commons 'File:' page)." },
+      outputDir: { type: "string", description: "Workspace-relative directory to save the image into. Defaults to 'assets/images'. For a deck, pass the deck folder's images dir (e.g. '<deck>/images') so the saved file sits beside index.html." },
+      filename: { type: "string", description: "Optional base filename (the extension is derived from the verified content-type). Defaults to a slug of the source URL." },
+      subject: { type: "string", description: "Optional: what the image must depict. When a vision model is configured the saved image is checked against this; a clear mismatch fails the call." },
+    },
+    required: ["url"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const url = String(args["url"] ?? "").trim();
+    const outputDir = (String(args["outputDir"] ?? "").trim() || "assets/images");
+    const subject = typeof args["subject"] === "string" ? args["subject"].trim() : "";
+    const requestedName = typeof args["filename"] === "string" ? args["filename"].trim() : "";
+
+    if (!/^https?:\/\//i.test(url)) {
+      return { success: false, output: "", error: "url must be a public http(s) URL" };
+    }
+    if (await imageHostIsBlocked(url)) {
+      return { success: false, output: "", error: "Fetching private/internal network addresses is not allowed" };
+    }
+
+    try {
+      let outcome = await fetchImageWithRetry(url);
+      let resolvedImageUrl = url;
+
+      if (outcome.kind === "html") {
+        const extracted = extractImageUrlFromHtml(outcome.html, url);
+        if (!extracted) {
+          return { success: false, output: "", error: `The page at ${url} does not expose an embeddable image (no og:image or <img>). Open a direct image URL or a different source.`, metadata: { saved: false, reason: "no_image_on_page", sourceUrl: url } };
+        }
+        if (await imageHostIsBlocked(extracted)) {
+          return { success: false, output: "", error: "Resolved image is on a private/internal address — refusing to fetch." };
+        }
+        resolvedImageUrl = extracted;
+        outcome = await fetchImageWithRetry(extracted);
+      }
+
+      if (outcome.kind !== "image") {
+        const status = outcome.kind === "miss" ? outcome.status : 0;
+        const detail = status === 429
+          ? "rate-limited (HTTP 429) — try again later or use a different source"
+          : status === 404
+            ? "not found (HTTP 404)"
+            : `not an image (HTTP ${status}, content-type ${outcome.kind === "miss" ? outcome.contentType || "unknown" : "unknown"})`;
+        return { success: false, output: "", error: `Could not verify an image at ${resolvedImageUrl}: ${detail}. Do NOT embed this URL — leave the slot empty or try another source.`, metadata: { saved: false, reason: "not_an_image", status, sourceUrl: url, resolvedImageUrl } };
+      }
+
+      const { bytes, contentType } = outcome;
+      if (bytes.length < IMAGE_MIN_BYTES) {
+        return { success: false, output: "", error: `The fetched resource at ${resolvedImageUrl} is too small (${bytes.length} bytes) to be a real image.`, metadata: { saved: false, reason: "too_small", sourceUrl: url, resolvedImageUrl } };
+      }
+      if (bytes.length > IMAGE_MAX_BYTES) {
+        return { success: false, output: "", error: `Image at ${resolvedImageUrl} is too large (${Math.round(bytes.length / 1024 / 1024)} MB; max ${IMAGE_MAX_BYTES / 1024 / 1024} MB).`, metadata: { saved: false, reason: "too_large", sourceUrl: url, resolvedImageUrl } };
+      }
+
+      // Optional best-effort visual subject confirmation.
+      let subjectMatch: string | undefined;
+      if (subject) {
+        const visionModel = getConfig().multimodal.files.visionModel;
+        if (visionModel) {
+          try {
+            const verdict = await analyzeImageBytes(
+              bytes,
+              contentType,
+              visionModel,
+              `Does this image primarily depict: ${subject}? Answer with "yes" or "no" first, then a short reason.`,
+            );
+            const saysNo = /^\s*(?:no\b|nein\b)/i.test(verdict) || /\b(?:does not depict|not depict|unrelated|n't (?:show|depict))\b/i.test(verdict);
+            subjectMatch = saysNo ? "mismatch" : "match";
+            if (saysNo) {
+              return { success: false, output: "", error: `The image at ${resolvedImageUrl} does not depict "${subject}" (vision check: ${verdict.slice(0, 200)}). Not saved — try another source.`, metadata: { saved: false, reason: "subject_mismatch", sourceUrl: url, resolvedImageUrl } };
+            }
+          } catch {
+            subjectMatch = "unverified"; // vision unavailable/failed — keep the verified-image result
+          }
+        } else {
+          subjectMatch = "unverified_no_vision_model";
+        }
+      }
+
+      const ext = imageExtFromContentType(contentType);
+      const baseName = slugifyImageName(requestedName || imageBaseNameFromUrl(resolvedImageUrl));
+      const relPath = posix.join(outputDir.replace(/\\/g, "/"), `${baseName}${ext}`);
+      let resolved: { resolved: string; relativePath: string };
+      try {
+        resolved = resolvePathWithinWorkspace(relPath, ctx.workspacePath);
+      } catch {
+        return { success: false, output: "", error: "outputDir must resolve inside the workspace" };
+      }
+      await mkdir(dirname(resolved.resolved), { recursive: true });
+      await writeFile(resolved.resolved, bytes);
+
+      const subjectNote = subjectMatch === "match"
+        ? " Subject confirmed via vision."
+        : subjectMatch === "unverified" || subjectMatch === "unverified_no_vision_model"
+          ? " (Subject not visually confirmed.)"
+          : "";
+      return {
+        success: true,
+        output: `Saved verified image (${contentType}, ${bytes.length} bytes) to ${resolved.relativePath}.${subjectNote} Embed it as ![alt](${resolved.relativePath}) — copy the path exactly.`,
+        metadata: {
+          saved: true,
+          outputPath: resolved.relativePath,
+          filename: `${baseName}${ext}`,
+          contentType,
+          bytes: bytes.length,
+          sourceUrl: url,
+          resolvedImageUrl,
+          subjectMatch,
+          previewMode: "image",
+        },
+      };
+    } catch (err) {
+      log.warn({ err, url }, "fetch_image failed");
+      return { success: false, output: "", error: `fetch_image failed: ${String(err)}`, metadata: { saved: false, reason: "exception", sourceUrl: url } };
     }
   },
 });
