@@ -1,5 +1,32 @@
 {
   "jobs": {
+    "sourced_presentation": {
+      "description": "Build a source-backed presentation package (reveal.js HTML slide deck + per-slide detail notes + a written paper) where the facts are researched and cited AND the images are real, verified web images saved locally. Runs three specialists in a GUARANTEED fixed order so no step is skipped: a researcher gathers and cites the facts, an image specialist sources/verifies/saves the pictures, and a writer builds the deliverables. Use it for any 'create a researched/cited presentation with verified images' request. Example queries: 'erstelle eine belegte Präsentation über X mit echten Bildern und Quellen', 'build a sourced reveal.js deck on Y with verified images plus a details markdown and a paper', 'make a cited slide deck about Z with real photos and a write-up'.",
+      "params": {
+        "topic": { "description": "Subject of the presentation", "default": "(the topic named in the request)" },
+        "outputDir": { "description": "Workspace folder to build the deck + its images into (deck at <outputDir>/index.html, images at <outputDir>/images)", "default": "presentation" },
+        "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
+        "deliverables": { "description": "Which artifacts to produce", "default": "a reveal.js HTML presentation, a Markdown file of per-slide bullet details, and a ~1000-word paper that cites the verified sources" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      },
+      "steps": [
+        { "scene": "deck_research", "label": "Research and cite the facts", "params": { "topic": "{{topic}}", "language": "{{language}}" } },
+        { "scene": "deck_images", "label": "Source and verify the images", "params": { "topic": "{{topic}}", "outputDir": "{{outputDir}}" } },
+        { "scene": "deck_build", "label": "Build deck, slide notes, and paper", "params": { "topic": "{{topic}}", "outputDir": "{{outputDir}}", "slideCount": "{{slideCount}}", "deliverables": "{{deliverables}}", "language": "{{language}}" } }
+      ],
+      "catalogTriggers": {
+        "requiresActionVerb": true,
+        "patterns": [
+          {
+            "all": [
+              "\\b(?:pr(?:ä|ae|a)sentation(?:en)?|presentations?|slide[\\s-]?decks?|slides?|folien(?:satz)?|reveal\\.?js)\\b",
+              "\\b(?:bild(?:er|ern|material)?|fotos?|images?|pictures?|photos?)\\b",
+              "\\b(?:quelle|quellen|zitier\\w*|verifizier\\w*|recherch\\w*|referenz\\w*|source|sources|cite|cited|citation|verif\\w*|research)\\b"
+            ]
+          }
+        ]
+      }
+    },
     "daily_ops_brief": {
       "description": "Prepare a verified research brief and then distribute it through the configured channels. Example triggers: 'send the daily ops brief', 'tägliches Ops-Briefing verteilen', '/ops-brief platform status', 'operations digest mit aktuellen Risiken'.",
       "params": {

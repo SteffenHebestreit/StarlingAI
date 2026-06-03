@@ -983,7 +983,7 @@ async function runJobInline(
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; executedSteps: number }> {
+): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>> }> {
   const steps = resolveJobSteps(job, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(job.description || job.name, params, workflowContext, ctx.swarmState?.objective);
   const workflowTaskId = `workflow:job:${job.name}`;
@@ -1048,11 +1048,16 @@ async function runJobInline(
       response || `Workflow ${job.name} ${blocked ? "blocked" : "completed"}.`,
     );
 
+    // All steps ran on the SAME session, so the collector (which walks back to the
+    // last user message) returns the final build step's artifacts — the deck + its
+    // notes + paper. Surface them so the parent turn shows downloads and the
+    // source-sensitive auto-build doesn't re-fire (same rationale as runSceneInline).
     return {
       response,
       blocked,
       toolCallsExecuted,
       executedSteps,
+      artifacts: collectTurnArtifactAttachments(session),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1312,6 +1317,9 @@ registerTool({
         toolCallsExecuted: result.toolCallsExecuted,
         stepCount: job!.steps.length,
         executedSteps: result.executedSteps,
+        // Propagate the build step's artifacts so the parent turn surfaces downloads
+        // and the auto-build doesn't re-fire (see runJobInline).
+        ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
       },
     };
   },

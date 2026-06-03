@@ -78,6 +78,7 @@ afterEach(() => {
   unregisterTool("search_workflows");
   unregisterTool("run_workflow");
   unregisterTool("parallel_delegate");
+  unregisterTool("swarm_delegate");
   streamMock.mockReset();
   completeMock.mockClear();
   vi.mocked(logAudit).mockClear();
@@ -171,6 +172,78 @@ describe("workflow-run force-after-search", () => {
     );
     expect(forced).toHaveLength(1);
     expect(auditCalls("workflow_run_released_after_search")).toHaveLength(0);
+  });
+
+  it("forces the workflow run when the model bypasses the gate via swarm_delegate (audit b8e3b68f)", async () => {
+    // swarm_delegate is NOT in ORCHESTRATION_LAUNCHER_TOOL_NAMES, so before the fix the
+    // model used it to run research directly — that forced synthesis BEFORE the late
+    // run_workflow force could fire, and the deck shipped guessed images. The force must
+    // treat swarm_delegate as a non-workflow launcher and rewrite it before it executes.
+    const STRONG_MATCH = {
+      name: "sourced_presentation",
+      workflowType: "scene" as const,
+      score: 0.74,
+      matchedTerms: ["presentation", "bilder", "quellen"],
+    };
+    const userMessage = "Erstelle eine Präsentation über Dresden mit Bildern und verifizierten Quellen.";
+
+    const runWorkflowExecute = vi.fn(async (args: Record<string, unknown>) => ({
+      success: true,
+      output: `Workflow ${String(args["name"])} [scene] completed.`,
+      metadata: {
+        workflowName: String(args["name"]),
+        workflowType: "scene",
+        blocked: false,
+        artifacts: [{ outputPath: "presentation/index.html", filename: "index.html", sourceTool: "delegate_to_agent" }],
+      },
+    }));
+    const swarmDelegateExecute = vi.fn(async () => ({
+      success: true,
+      output: "researched directly (should never run — the force rewrites this away)",
+      metadata: { delegationOutcome: "partial", terminalState: "timeout" },
+    }));
+
+    registerTool({
+      name: "search_workflows",
+      description: "search",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({ success: true, output: "found", metadata: { workflowMatches: [STRONG_MATCH] } }),
+    });
+    registerTool({
+      name: "run_workflow",
+      description: "run",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowExecute,
+    });
+    registerTool({
+      name: "swarm_delegate",
+      description: "swarm delegate",
+      parameters: { type: "object", properties: {} },
+      execute: swarmDelegateExecute,
+    });
+
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("s1", "search_workflows", { query: "presentation" });
+      if (call === 2) return toolCallStream("d1", "swarm_delegate", { task: "research dresden" });
+      if (call === 3) return toolCallStream("d2", "swarm_delegate", { task: "research dresden again" });
+      return textStream("Die belegte Präsentation wurde erstellt.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    const result = await runTurn({ session, userMessage });
+
+    expect(result.blocked).toBe(false);
+    // The bypass research delegation never executed — it was rewritten into run_workflow.
+    expect(swarmDelegateExecute).not.toHaveBeenCalled();
+    expect(runWorkflowExecute).toHaveBeenCalledTimes(1);
+    expect(runWorkflowExecute.mock.calls[0]![0]["name"]).toBe("sourced_presentation");
+    expect(String(runWorkflowExecute.mock.calls[0]![0]["context"])).toContain("Dresden");
+    const forced = vi.mocked(logAudit).mock.calls.filter(
+      (c) => (c[1] as { reason?: string } | undefined)?.reason === "workflow_run_forced_after_search",
+    );
+    expect(forced).toHaveLength(1);
   });
 
   it("releases (does not force again) if the model keeps avoiding the workflow after one forced run", async () => {
