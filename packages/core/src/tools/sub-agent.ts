@@ -1844,6 +1844,11 @@ function isResearchLikeDelegation(
   const text = `${routingQuery ?? ""}\n${task}`.toLowerCase();
   const tools = agentCfg?.tools ?? [];
   const capabilities = agentCfg?.capabilities ?? [];
+  // An agent whose job is to fetch+save images (image_sourcer) is NOT a research
+  // delegation, even though it uses web_search to FIND image pages: its deliverable is
+  // saved local image files, not reusable research facts. Never short-circuit it on
+  // cached session evidence — that would skip the actual fetch_image run (audit cdd731d6).
+  if (tools.includes("fetch_image")) return false;
   const researchAgentName = /(research|citation|librarian|evidence|source_verifier)/i.test(candidate);
   const researchTools = tools.includes("web_search") || tools.includes("web_fetch");
   const researchCapabilities = capabilities.some((capability) => /research|documentation|source|fact.?check|citation/i.test(capability));
@@ -2035,6 +2040,11 @@ const ARTIFACT_PRODUCING_TOOLS = new Set([
   "write_file", "edit_file", "create_dir",
   "generate_document", "generate_website", "generate_presentation", "generate_docx", "generate_pptx", "generate_pdf",
   "bundle_artifact_zip", "export_workspace_artifact",
+  // fetch_image downloads + SAVES a real local image file — that saved asset is the
+  // deliverable, which cached research facts can never satisfy. Without this, an
+  // image-sourcing delegation gets short-circuited by findReusableSessionEvidence and
+  // never actually runs (audit cdd731d6: image_sourcer "reusedFromSessionMemory", 0 images).
+  "fetch_image",
   "shell_exec",
 ]);
 
