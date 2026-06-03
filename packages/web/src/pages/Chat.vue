@@ -30,7 +30,15 @@
       <div class="flex items-center gap-2 sm:gap-3 text-xs text-gray-500 min-w-0">
         <span v-if="gateway.currentSessionId" class="shrink-0">
           Session
-          <code class="font-mono text-gray-400 ml-1">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
+          <button
+            type="button"
+            @click="copySessionId"
+            :title="sessionIdCopied ? 'Copied!' : `Copy session id: ${gateway.currentSessionId}`"
+            class="font-mono text-gray-400 ml-1 inline-flex items-center gap-1 rounded px-1 -mx-1 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer"
+          >
+            <code class="font-mono">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
+            <span class="text-[10px]" aria-hidden="true">{{ sessionIdCopied ? '✓' : '⧉' }}</span>
+          </button>
         </span>
         <span v-else class="italic shrink-0">No active session</span>
         <select
@@ -926,6 +934,32 @@ const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
 const steeringNote = ref("");   // transient note shown after a mid-turn steering message is sent
+const sessionIdCopied = ref(false); // transient "Copied!" feedback for the session-id click-to-copy
+
+/** Copy the full current session id to the clipboard (clicking the shortened id). */
+async function copySessionId(): Promise<void> {
+  const id = gateway.currentSessionId;
+  if (!id) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(id);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = id;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    sessionIdCopied.value = true;
+    window.setTimeout(() => { sessionIdCopied.value = false; }, 1500);
+  } catch {
+    // Clipboard blocked (e.g. insecure context) — leave the id visible for manual copy.
+  }
+}
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null);
 const messagesEl = ref<HTMLElement | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
