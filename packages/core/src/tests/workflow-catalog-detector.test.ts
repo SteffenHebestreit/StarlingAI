@@ -159,6 +159,52 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     expect(signal.reason).toBe("explicit_request");
   });
 
+  it("CONFIRM-routes a 'researched presentation with verified images' request to sourced_presentation", async () => {
+    // Mirrors the real workspace scene's triggers: deck-noun AND image-noun AND
+    // source/verify-noun, action-verb-gated. Without these the orchestrator never
+    // searched/ran the workflow (the deck shipped with zero images).
+    const SOURCED_PRESENTATION_SCENE = {
+      description: "Source-backed presentation package with verified images.",
+      task: "Run researcher -> image_sourcer -> content_writer.",
+      triggers: {
+        requiresActionVerb: true,
+        patterns: [
+          {
+            all: [
+              "\\b(?:pr(?:ä|ae|a)sentation(?:en)?|presentations?|slide[\\s-]?decks?|slides?|folien(?:satz)?|reveal\\.?js)\\b",
+              "\\b(?:bild(?:er|ern|material)?|fotos?|images?|pictures?|photos?)\\b",
+              "\\b(?:quelle|quellen|zitier\\w*|verifizier\\w*|recherch\\w*|referenz\\w*|source|sources|cite|cited|citation|verif\\w*|research)\\b",
+            ],
+          },
+        ],
+      },
+    };
+    writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: { sourced_presentation: SOURCED_PRESENTATION_SCENE },
+    });
+    const { detectWorkflowCatalogSignal } = await loadDetector();
+
+    // German request with the dative plural "Bildern" (the case the first regex draft missed).
+    const de = detectWorkflowCatalogSignal(
+      "Erstelle mir eine Präsentation über die Architektur von Dresden mit Bildern, verifiziere die online-quellen und referenziere diese. Nutze reveal.js.",
+    );
+    expect(de.required).toBe(true);
+    expect(de.reason).toBe("catalog_match");
+    expect(de.strongestMatch?.name).toBe("sourced_presentation");
+
+    // English request.
+    const en = detectWorkflowCatalogSignal(
+      "Build a reveal.js presentation about X with verified images and cited sources.",
+    );
+    expect(en.reason).toBe("catalog_match");
+
+    // Plain deck (no images, no sources) must NOT route here.
+    expect(detectWorkflowCatalogSignal("Create a slide deck about our Q3 roadmap.").required).toBe(false);
+    // Deck + images but no source/verification requirement must NOT route here.
+    expect(detectWorkflowCatalogSignal("Create a presentation with some images about dogs.").reason).not.toBe("catalog_match");
+  });
+
   it("uncertain_match guidance asks the user instead of forcing routing", async () => {
     writeTempConfig({
       agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },

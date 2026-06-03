@@ -76,14 +76,24 @@ registerTool({
     if (approvalResult) return approvalResult;
 
     const delegateStepCount = plan.steps.filter((s) => s.kind === "delegate").length;
+    const reuseStepCount = plan.steps.filter((s) => s.kind === "reuse").length;
+    // Counter the "I planned, so I'm done" off-ramp: recording a plan is NOT
+    // execution. Nudge the EXACT execution tool per step kind — reuse steps run via
+    // run_workflow, delegate steps via the delegation tools — so a planned reuse step
+    // actually fires the scene/job instead of being silently dropped.
+    const execParts: string[] = [];
+    if (reuseStepCount > 0) {
+      execParts.push(`run the ${reuseStepCount} reuse step${reuseStepCount === 1 ? "" : "s"} via run_workflow (the planned scene/job)`);
+    }
+    if (delegateStepCount > 0) {
+      execParts.push(`run the ${delegateStepCount} delegate step${delegateStepCount === 1 ? "" : "s"} — parallel_delegate for genuinely independent work, delegate_to_agent or run_task_graph otherwise`);
+    }
     return {
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
-        + (delegateStepCount > 0
-          // Counter the "I planned, so I'm done" off-ramp: recording a plan is NOT
-          // execution. The model must now actually call the delegation tools.
-          ? `Recording a plan is NOT execution. Now CALL the orchestration tools to run the ${delegateStepCount} delegate step${delegateStepCount === 1 ? "" : "s"} — parallel_delegate for genuinely independent work, delegate_to_agent or run_task_graph otherwise. Do NOT write the final answer until those delegations have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
-          : `Now execute it: prefer reuse steps first and make sure the final answer meets the acceptance criteria.`),
+        + (execParts.length > 0
+          ? `Recording a plan is NOT execution. Now CALL the orchestration tools to ${execParts.join(", and ")}. Do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
+          : `Now execute it and make sure the final answer meets the acceptance criteria.`),
       metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide },
     };
   },
