@@ -325,6 +325,57 @@ describe("swarm orchestration tools", () => {
     expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
   }, 30_000);
 
+  it("does NOT reuse session memory for an image-sourcing (fetch_image) delegation — it must actually run", async () => {
+    // Regression (audit cdd731d6): image_sourcer has web_search so it looked
+    // "research-like", and its "find/save images" task matched cached Zwinger
+    // research facts, so the delegation was served from session memory and
+    // image_sourcer never ran fetch_image — the deck shipped with no images.
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-image-no-reuse-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        image_sourcer: {
+          description: "Sources and saves verified free-license images.",
+          tools: ["web_search", "web_fetch", "fetch_image", "url_inspect", "read_shared_facts", "share_finding"],
+          capabilities: ["image sourcing"],
+          maxIterations: 6,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const memory = await import("../swarm/memory.js");
+    // Plenty of matching research facts — these WOULD trigger reuse for a real
+    // research delegation. The image step must NOT be short-circuited by them.
+    await memory.writeSharedFact("session-image-no-reuse", "zwinger_facts_1", "Der Dresdner Zwinger ist ein Barockbau von Pöppelmann, erbaut 1711-1728 für August den Starken.");
+    await memory.writeSharedFact("session-image-no-reuse", "zwinger_facts_2", "Das Kronentor und die Langgalerie sind zentrale Bauteile des Zwinger-Komplexes in Dresden.");
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+
+    const result = await delegate!.execute({
+      agentName: "image_sourcer",
+      task: "Find free-license images for the Zwinger Dresden and its sub-subjects (Kronentor, Langgalerie) and SAVE each locally via fetch_image to presentation/images.",
+      routingQuery: "Zwinger Dresden images Kronentor Langgalerie",
+    }, {
+      sessionId: "session-image-no-reuse",
+      workspacePath: tempDir,
+    });
+
+    expect(result.metadata?.["reusedFromSessionMemory"]).not.toBe(true);
+    // image_sourcer actually ran (not short-circuited on cached research facts).
+    expect(runSubAgentWithStatsMock).toHaveBeenCalled();
+    expect(runSubAgentWithStatsMock.mock.calls.map((c) => c[0].agentName)).toContain("image_sourcer");
+  }, 30_000);
+
   it("ignores undefined fallback agents instead of attempting them", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-delegate-"));
     tempDirs.push(tempDir);
