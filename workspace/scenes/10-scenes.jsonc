@@ -383,53 +383,34 @@
         }
       }
     },
-    "sourced_presentation": {
-      "description": "Build a source-backed presentation package (slide deck + per-slide detail notes + a written paper) where the facts are researched and cited AND the images are real, verified web images. Keeps each specialist in its lane: a researcher gathers the facts, an image specialist sources/verifies the pictures, and a writer builds the deliverables. Use it for any 'create a researched/cited presentation with verified images' request. Example queries: 'erstelle eine belegte Präsentation über X mit echten Bildern und Quellen', 'build a sourced reveal.js deck on Y with verified images plus a details markdown and a paper', 'make a cited slide deck about Z with real photos and a write-up'.",
-      // High-precision catalog-routing trigger: fires only when the request is a
-      // PRESENTATION/deck AND wants IMAGES AND wants SOURCES/verification — the exact
-      // shape this scene serves. Bilingual; action-verb-gated so a passive question
-      // ("what makes a good cited deck?") only suggests rather than auto-routes.
-      "triggers": {
-        "requiresActionVerb": true,
-        "patterns": [
-          {
-            "all": [
-              "\\b(?:pr(?:ä|ae|a)sentation(?:en)?|presentations?|slide[\\s-]?decks?|slides?|folien(?:satz)?|reveal\\.?js)\\b",
-              "\\b(?:bild(?:er|ern|material)?|fotos?|images?|pictures?|photos?)\\b",
-              "\\b(?:quelle|quellen|zitier\\w*|verifizier\\w*|recherch\\w*|referenz\\w*|source|sources|cite|cited|citation|verif\\w*|research)\\b"
-            ]
-          }
-        ]
-      },
-      "task": "Produce a source-backed presentation package on \"{{topic}}\" by running THREE scoped specialists IN ORDER. The whole point is the division of labour — never let one agent do another's job. Build everything under the workspace folder \"{{outputDir}}\" so the deck and its images ship together:\n1. RESEARCH (researcher) — gather and verify the FACTUAL evidence ONLY: names, dates, figures, definitions, and authoritative source URLs for {{topic}}. The researcher does NOT source or verify images. Publish each confirmed fact with its source URL via share_finding; mark anything unconfirmed as unverified rather than guessing.\n2. IMAGES (image_sourcer) — source and VERIFY real, free-license images ONLY, and SAVE each as a LOCAL file. For each subject that needs a picture, call fetch_image(url: <a free-license source page or direct image URL>, subject: <the subject>, outputDir: \"{{outputDir}}/images\") — fetch_image downloads the bytes, confirms it is a real image, checks the subject when a vision model is available, and saves a local copy. It resolves the real image from a page itself, so NEVER guess or construct a direct/hashed URL. Publish each saved image via share_finding with the workspace PATH it returned (e.g. {{outputDir}}/images/<file>), the source page, and the license. The image_sourcer does NOT gather facts; if a subject can't be verified, report it unverified and leave it imageless.\n3. BUILD (content_writer) — read ALL shared facts, then build the requested deliverables ({{deliverables}}) into \"{{outputDir}}\" from ONLY the verified facts and the SAVED local images. Use generate_presentation (outputDir \"{{outputDir}}\", {{slideCount}}, each slide just its core point); embed any picture as a Markdown image in the slide content using the slide-relative path to the saved file — `![alt](images/<file>)` — taken from a shared image finding. Leave a slide image-free if no saved image exists rather than inventing one. Cite the researched sources in the paper. The content_writer does NOT research facts or source images itself.\nWrite all content in {{language}}. Each step consumes the shared facts of the prior step; if the research step could verify nothing, say so honestly instead of fabricating, and do not claim images are verified unless image_sourcer actually saved them.",
-      "allowedAgents": [
-        "researcher",
-        "image_sourcer",
-        "content_writer",
-        "source_verifier",
-        "summarizer"
-      ],
+    "deck_research": {
+      "description": "Gather and cite the FACTUAL evidence for a slide deck or written brief: names, dates, figures, definitions, and authoritative source URLs. Facts only — no image sourcing. Used as the research step of the sourced_presentation pipeline.",
+      "task": "Gather and verify the FACTUAL evidence ONLY for \"{{topic}}\": names, dates, figures, definitions, and authoritative source URLs. Do NOT source, verify, or describe images — that is a separate later step. Delegate to a research specialist (researcher). Publish each confirmed fact with its source URL via share_finding so the later steps can read it; mark anything you could not confirm as unverified rather than guessing. Write findings in {{language}}.",
+      "allowedAgents": ["researcher", "source_verifier"],
       "params": {
-        "topic": {
-          "description": "Subject of the presentation",
-          "default": "(the topic named in the request)"
-        },
-        "outputDir": {
-          "description": "Workspace folder to build the deck + its images into (deck at <outputDir>/index.html, images at <outputDir>/images)",
-          "default": "presentation"
-        },
-        "slideCount": {
-          "description": "How many slides the deck should have",
-          "default": "about 10 slides"
-        },
-        "deliverables": {
-          "description": "Which artifacts to produce",
-          "default": "a reveal.js HTML presentation, a Markdown file of per-slide bullet details, and a ~1000-word paper that cites the verified sources"
-        },
-        "language": {
-          "description": "Output language",
-          "default": "the language of the user's request"
-        }
+        "topic": { "description": "Subject of the deck", "default": "(the topic named in the request)" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      }
+    },
+    "deck_images": {
+      "description": "Source, verify, and locally SAVE real free-license images for a slide deck, one per subject, via fetch_image. Images only — no fact research. Used as the image step of the sourced_presentation pipeline.",
+      "task": "Source and VERIFY real, free-license images ONLY for \"{{topic}}\", and SAVE each as a LOCAL file. Delegate to image_sourcer. For each subject that needs a picture, call fetch_image(url: <a free-license source page or direct image URL>, subject: <the subject>, outputDir: \"{{outputDir}}/images\") — fetch_image downloads the bytes, confirms it is a real image, checks the subject when a vision model is available, and saves a local copy. It resolves the real image from a page itself, so NEVER guess or construct a direct/hashed URL. Publish each saved image via share_finding with the workspace PATH it returned (e.g. {{outputDir}}/images/<file>), the source page, and the license. Do NOT gather facts. If a subject's image cannot be verified, report it unverified and leave it imageless rather than inventing a URL.",
+      "allowedAgents": ["image_sourcer"],
+      "params": {
+        "topic": { "description": "Subject of the deck", "default": "(the topic named in the request)" },
+        "outputDir": { "description": "Workspace folder whose images/ subfolder receives the saved images", "default": "presentation" }
+      }
+    },
+    "deck_build": {
+      "description": "Build the requested deck deliverables (reveal.js HTML presentation, per-slide detail notes, written paper) from ONLY the already-verified shared facts and locally saved images. Build step — does not research or source. Used as the final step of the sourced_presentation pipeline.",
+      "task": "Read ALL shared facts (the verified research findings AND the saved image paths from the prior steps), then build the requested deliverables ({{deliverables}}) into \"{{outputDir}}\" from ONLY those verified facts and the SAVED local images. Delegate to content_writer. Use generate_presentation (outputDir \"{{outputDir}}\", {{slideCount}}, each slide showing just its core point); embed any picture as a Markdown image in the slide content using the slide-relative path to the saved file — `![alt](images/<file>)` — taken from a shared image finding. Leave a slide image-free if no saved image exists rather than inventing one. Cite the researched sources in the paper. Do NOT research facts or source images yourself. Write all content in {{language}}; if the research step verified nothing, say so honestly instead of fabricating, and do not claim images are verified unless they were actually saved.",
+      "allowedAgents": ["content_writer"],
+      "params": {
+        "topic": { "description": "Subject of the deck", "default": "(the topic named in the request)" },
+        "outputDir": { "description": "Workspace folder to build into (deck at <outputDir>/index.html, images at <outputDir>/images)", "default": "presentation" },
+        "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
+        "deliverables": { "description": "Which artifacts to produce", "default": "a reveal.js HTML presentation, a Markdown file of per-slide bullet details, and a ~1000-word paper that cites the verified sources" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
       }
     }
   }

@@ -205,6 +205,44 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     expect(detectWorkflowCatalogSignal("Create a presentation with some images about dogs.").reason).not.toBe("catalog_match");
   });
 
+  it("CONFIRM-routes the same request to a JOB that declares catalogTriggers (deterministic pipeline)", async () => {
+    // The real workspace ships sourced_presentation as a JOB (research -> images ->
+    // build) so the slow inner orchestrator can't skip the image step. Jobs carry the
+    // SAME catalog-routing triggers via `catalogTriggers`, so detection must still fire.
+    const SOURCED_PRESENTATION_JOB = {
+      description: "Source-backed presentation pipeline (research -> images -> build).",
+      steps: [
+        { scene: "deck_research" },
+        { scene: "deck_images" },
+        { scene: "deck_build" },
+      ],
+      catalogTriggers: {
+        requiresActionVerb: true,
+        patterns: [
+          {
+            all: [
+              "\\b(?:pr(?:ä|ae|a)sentation(?:en)?|presentations?|slide[\\s-]?decks?|slides?|folien(?:satz)?|reveal\\.?js)\\b",
+              "\\b(?:bild(?:er|ern|material)?|fotos?|images?|pictures?|photos?)\\b",
+              "\\b(?:quelle|quellen|zitier\\w*|verifizier\\w*|recherch\\w*|referenz\\w*|source|sources|cite|cited|citation|verif\\w*|research)\\b",
+            ],
+          },
+        ],
+      },
+    };
+    writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      jobs: { sourced_presentation: SOURCED_PRESENTATION_JOB },
+    });
+    const { detectWorkflowCatalogSignal } = await loadDetector();
+    const de = detectWorkflowCatalogSignal(
+      "Erstelle mir eine Präsentation über die Architektur von Dresden mit Bildern, verifiziere die online-quellen und referenziere diese. Nutze reveal.js.",
+    );
+    expect(de.required).toBe(true);
+    expect(de.reason).toBe("catalog_match");
+    expect(de.strongestMatch?.name).toBe("sourced_presentation");
+    expect(de.strongestMatch?.workflowType).toBe("job");
+  });
+
   it("uncertain_match guidance asks the user instead of forcing routing", async () => {
     writeTempConfig({
       agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },

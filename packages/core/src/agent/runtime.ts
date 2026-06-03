@@ -4210,8 +4210,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       );
     }
 
+    // Set when the deterministic workflow-run force (below) rewrites this iteration's
+    // tool calls into a single run_workflow. That forced call must be exempt from the
+    // synthesis-required / user-response-required terminal guards further down — running
+    // the curated workflow IS the deliverable path, not a re-research loop (audit
+    // b8e3b68f: the force fired but was rejected by the synthesis-required guard).
+    let forcedWorkflowRunThisIteration = false;
     const nonWorkflowOrchestrationRequested = llmResponse.tool_calls.some((toolCall) =>
-      ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "run_workflow"
+      // Use the broader swarm-state set, not just ORCHESTRATION_LAUNCHER_TOOL_NAMES, so
+      // swarm_delegate counts too: otherwise the model bypasses the workflow-run force by
+      // delegating research directly (audit b8e3b68f: 2x swarm_delegate ran the source
+      // research first, forcing synthesis BEFORE the late run_workflow force could fire,
+      // so the sourced_presentation scene never ran and the deck shipped guessed images).
+      PERSISTED_SWARM_STATE_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "run_workflow"
     );
     const nonWorkflowDiscoveryRequested = llmResponse.tool_calls.some((toolCall) =>
       AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "search_workflows"
@@ -4251,6 +4262,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const forcedWorkflowMatch = workflowSearchMatches[0];
       if (!workflowExecutionForceUsed && forcedWorkflowMatch) {
         workflowExecutionForceUsed = true;
+        forcedWorkflowRunThisIteration = true;
         workflowExecutionEnforcementPrompt = "";
         const forcedToolCallId = llmResponse.tool_calls[0]?.id ?? `forced_run_workflow_${iterationCount}`;
         llmResponse.tool_calls = [{
@@ -4333,7 +4345,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       && message.content.startsWith("[USER RESPONSE REQUIRED]"),
     );
 
-    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0) {
+    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration) {
       // Fix 3: If the prior delegation was a partial/timeout whose surfaced
       // substance is below the usability floor (e.g. 900-char truncation
       // stub), the model's recovery delegation is the correct response —
@@ -4381,7 +4393,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
     }
 
-    if (userResponseRequiredInHistory && llmResponse.tool_calls.length > 0) {
+    if (userResponseRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration) {
       logAudit("guardrail_flagged", {
         type: "tool_calls_after_user_response_required",
         toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
