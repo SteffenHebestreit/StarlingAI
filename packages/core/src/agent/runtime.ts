@@ -3706,7 +3706,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // the operator dock can surface a high-stakes plan for approval. Soft and
     // droppable; trivial and single-domain turns are unaffected.
     let planGuidance = (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true) && looksMultiDomainResearch(userMessage))
-      ? "PLAN FIRST: this spans several steps/areas. Before fanning out, call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
+      ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step that runs it via run_workflow; otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
       : "";
     const collapsedHistory = session.getCollapsedHistory();
 
