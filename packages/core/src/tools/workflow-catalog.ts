@@ -1011,7 +1011,12 @@ async function runJobInline(
         throw new Error(`Workflow '${job.name}' step '${step.label}' is restricted to agents that are not available in the current scope.`);
       }
 
-      const stepTask = index === 0 ? appendWorkflowContext(step.task, enrichedWorkflowContext) : step.task;
+      // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)
+      // to EVERY step, not just the first. Later steps otherwise never learn the subject:
+      // an image step would have no topic to search for and would depend on parsing the
+      // research step's raw shared facts to guess subjects (fragile). Each step's own task
+      // hard-clamps its scope, so the shared context is read as background/topic only.
+      const stepTask = appendWorkflowContext(step.task, enrichedWorkflowContext);
       const result = await runTurn({
         session,
         userMessage: stepTask,
