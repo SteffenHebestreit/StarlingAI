@@ -117,6 +117,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
 
@@ -194,6 +195,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
 
@@ -489,6 +491,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -597,6 +600,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -699,6 +703,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -809,6 +814,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: vi.fn(),
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -896,6 +902,7 @@ describe("workflow catalog tools", () => {
     });
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -990,6 +997,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -1073,6 +1081,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
     vi.doMock("../agent/sub-agent.js", () => ({
@@ -1387,6 +1396,7 @@ describe("workflow catalog tools", () => {
     const runTurnMock = vi.fn();
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
 
@@ -1469,6 +1479,7 @@ describe("workflow catalog tools", () => {
     }));
 
     vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
     }));
 

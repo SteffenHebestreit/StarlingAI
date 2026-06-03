@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { requestApprovalViaChannel } from "../approval/index.js";
 import { archiveSession, createSession } from "../agent/session.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
-import { runTurn } from "../agent/runtime.js";
+import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary, type ResolvedJobStep } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
@@ -837,7 +837,7 @@ async function runSceneInline(
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string }> {
+): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string; artifacts?: Array<Record<string, unknown>> }> {
   const mergedParams = mergeSceneParams(scene, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(scene.task, mergedParams, workflowContext, ctx.swarmState?.objective);
   const task = appendWorkflowContext(applyTemplate(scene.task, mergedParams), enrichedWorkflowContext);
@@ -956,10 +956,18 @@ async function runSceneInline(
       result.response,
     );
 
+    // Surface the artifacts the scene built (e.g. the deck + its images) so the
+    // parent turn sees them: collectTurnArtifactAttachments reads tool-role
+    // history, but the scene ran in its OWN session that is about to be archived,
+    // so the parent's collector would otherwise find nothing — leaving the user
+    // without a clickable download AND letting the source-sensitive auto-build
+    // spuriously re-fire (it keys on "zero artifacts this turn"). run_workflow
+    // threads these into its result metadata.artifacts.
     return {
       response: result.response,
       blocked: resultBlocked,
       toolCallsExecuted: result.toolCallsExecuted,
+      artifacts: collectTurnArtifactAttachments(session),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1284,6 +1292,9 @@ registerTool({
           toolCallsExecuted: result.toolCallsExecuted,
           stepCount: 1,
           bootstrapAgent: result.bootstrapAgent,
+          // Propagate scene-built artifacts (deck/images/paper) so the parent turn
+          // surfaces them as clickable downloads and the auto-build doesn't re-fire.
+          ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
         },
       };
     }

@@ -3518,6 +3518,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   })();
   let workflowCatalogAttemptedThisTurn = workflowCatalogAttemptedInPriorTurn;
   let workflowExecutionRetryUsed = false;
+  let workflowExecutionForceUsed = false;
   let workflowExecutionCorrectionRetryUsed = false;
   let workflowExecutionEnforcementPrompt = "";
   let approvedRunCandidateRetryUsed = false;
@@ -4236,16 +4237,56 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
-      // Nudged once: the model searched the catalog but chose a non-workflow
-      // path (e.g. direct delegation) anyway. Trust that choice rather than
-      // blocking into an empty answer — release and let the tool calls run.
-      workflowExecutionEnforcementPrompt = "";
-      guardrailEvents.push({ type: "workflow_required", details: "workflow_run_released_after_search" });
-      logAudit("guardrail_flagged", {
-        type: "workflow_run_released_after_search",
-        toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
-        workflowMatches: workflowSearchMatches.slice(0, 3),
-      }, { sessionId: session.id, severity: "info" });
+      // Nudged once but the model STILL chose a non-workflow path (e.g. direct
+      // delegation) despite a strong reusable match. The slow local model often
+      // won't comply with a prompt nudge, and the source-sensitive auto-research
+      // /auto-build path it falls into here ships a worse result than the curated
+      // workflow — e.g. the `sourced_presentation` scene verifies image URLs via
+      // fetch_image instead of letting an auto-build embed guessed hotlinks. So on
+      // the SECOND miss, deterministically rewrite the orchestration call to the
+      // strong match's run_workflow, mirroring the source-sensitive original-request
+      // rewrite (which also can't rely on the model's compliance). The original user
+      // request rides along as `context` so the scene's agents see the real topic
+      // even though the scene template only carries default param placeholders.
+      const forcedWorkflowMatch = workflowSearchMatches[0];
+      if (!workflowExecutionForceUsed && forcedWorkflowMatch) {
+        workflowExecutionForceUsed = true;
+        workflowExecutionEnforcementPrompt = "";
+        const forcedToolCallId = llmResponse.tool_calls[0]?.id ?? `forced_run_workflow_${iterationCount}`;
+        llmResponse.tool_calls = [{
+          id: forcedToolCallId,
+          name: "run_workflow",
+          arguments: {
+            name: forcedWorkflowMatch.name,
+            workflowType: forcedWorkflowMatch.workflowType,
+            context: userMessage,
+          },
+        }];
+        guardrailEvents.push({ type: "workflow_required", details: "workflow_run_forced_after_search" });
+        logAudit("tool_call_recovered", {
+          originalTool: "non_workflow_orchestration",
+          rewrittenTo: "run_workflow",
+          reason: "workflow_run_forced_after_search",
+          workflowName: forcedWorkflowMatch.name,
+          workflowType: forcedWorkflowMatch.workflowType,
+          score: forcedWorkflowMatch.score,
+        }, { sessionId: session.id, severity: "warn" });
+        // Fall through (no `continue`): the rewritten run_workflow call executes
+        // in this iteration via the tool-dispatch loop below. On success this sets
+        // workflowRunCompletedThisTurn so this block never re-fires; on a concrete
+        // failure the model pivots and the `else` arm below releases.
+      } else {
+        // Already forced once and we're back here — the forced workflow run did
+        // not resolve the turn (it failed for a concrete reason and the model
+        // pivoted to ad-hoc delegation). Trust that choice rather than dead-ending.
+        workflowExecutionEnforcementPrompt = "";
+        guardrailEvents.push({ type: "workflow_required", details: "workflow_run_released_after_search" });
+        logAudit("guardrail_flagged", {
+          type: "workflow_run_released_after_search",
+          toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
+          workflowMatches: workflowSearchMatches.slice(0, 3),
+        }, { sessionId: session.id, severity: "info" });
+      }
     }
 
     if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
