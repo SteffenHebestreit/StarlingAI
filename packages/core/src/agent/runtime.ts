@@ -1304,19 +1304,30 @@ type RequiredResearchFallbackRoute = {
   label: string;
 };
 
-function buildRequiredResearchFallbackRoute(
+export function buildRequiredResearchFallbackRoute(
   userMessage: string,
   guidance: DynamicTurnGuidance | null | undefined,
   allowedToolNameSet: Set<string>,
+  allowedAgents?: string[] | null,
 ): RequiredResearchFallbackRoute | null {
   // De-layer single-domain research: a coordinator only earns its extra hop when
   // the task genuinely spans multiple areas (Anthropic/Cognition consensus).
   // Otherwise route straight to the researcher specialist. Freshness single-shot
   // lookups keep web_task_coordinator (its purpose-built lane).
   const multiDomain = looksMultiDomainResearch(userMessage);
-  const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
+  const basePreference = guidance?.freshnessSensitive && !guidance?.sourceSensitive
     ? ["web_task_coordinator", "researcher", "mission_coordinator"]
     : (multiDomain ? ["mission_coordinator", "researcher"] : ["researcher", "mission_coordinator"]);
+  // Inside a scoped scene/job step the session restricts which agents may run. Routing
+  // to an agent outside that set hard-fails ("not permitted in this scene"), so respect
+  // it: keep only allowed preferences, and when none of the default research agents are
+  // allowed, fall back to the step's OWN allowed agents (the step task names them — e.g.
+  // an image step's only agent is image_sourcer). Unrestricted turns keep the old list.
+  const allowSet = allowedAgents && allowedAgents.length > 0 ? new Set(allowedAgents) : null;
+  const preferredAgents = allowSet
+    ? (basePreference.filter((name) => allowSet.has(name)).concat(allowedAgents!.filter((name) => !basePreference.includes(name))))
+    : basePreference;
+  if (preferredAgents.length === 0) return null;
   const selectedAgent = chooseConfiguredAgent(preferredAgents) ?? preferredAgents[0]!;
   const fallbackAgents = preferredAgents.filter((agentName) => agentName !== selectedAgent && chooseConfiguredAgent([agentName]));
 
@@ -3439,6 +3450,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const softRoutingEnforcement = getConfig().agents.performance.softRoutingEnforcement === true;
   const applyRoutingTone = (text: string): string =>
     softRoutingEnforcement && text ? toSoftRoutingHint(text) : text;
+  // A workflow-channel session is a scoped scene/job STEP: the author already wrote its
+  // task (which names the exact agent) and its allowedAgents. The top-level source-sensitive
+  // TASK rewrite must NOT fire here — it re-frames the step's delegation as a generic "WEB
+  // RESEARCH TASK" and appends researcher/mission_coordinator fallbacks the step forbids,
+  // so e.g. the image step gets routed to researcher and hard-fails (audit 158f1435). The
+  // research-routing NUDGE stays on, but its fallback route is now allowedAgents-aware
+  // (buildRequiredResearchFallbackRoute) so it targets the step's OWN agent, never an agent
+  // outside the scene. The TOP-LEVEL launching turn (user channel) keeps full enforcement.
+  const inWorkflowStep = session.channel === "workflow";
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(
       initialDynamicGuidance?.sourceSensitive
@@ -4051,6 +4071,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     const sourceSensitiveOriginalRequestEnforcementActive = Boolean(
       initialDynamicGuidance?.sourceSensitive
+      && !inWorkflowStep
       && (!findRecentDelegateEvidence(session.getHistory()) || _consecutiveDelegationFailures > 0),
     );
     if (sourceSensitiveOriginalRequestEnforcementActive) {
@@ -4558,7 +4579,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       if (!releasedAfterRoutingNudge && requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -4591,7 +4612,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // dead-ending (audit bdbace34: a hardware build shipped fabricated mic specs
         // with zero delegations after the single nudge release).
         const autoRoute = ((getConfig().orchestration?.autoResearchOnRefusal ?? true) && !signal.aborted)
-          ? (requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet))
+          ? (requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents))
           : null;
         if (autoRoute) {
           logAudit("guardrail_flagged", {
@@ -5346,7 +5367,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
         if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(cachedToolCall.metadata)) {
           searchAgentsNoMatchCount += 1;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
+          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -5417,7 +5438,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
       if (tc.name === "search_agents" && requiresDelegatedResearch && searchAgentsReturnedNoMatch(result.metadata)) {
         searchAgentsNoMatchCount += 1;
-        const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet);
+        const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
         if (route) {
           requiredResearchFallbackRoute = route;
           searchAgentsNoMatchFallbackPrompt = buildSearchAgentsNoMatchFallbackPrompt(route);
