@@ -34,7 +34,7 @@ import type {
   DisplayTopology,
 } from "../computer-session.js";
 import { computeScreenshotHash } from "../computer-vision.js";
-import { VncClient, resolveKeysym, encodeRgbaToPng } from "./vnc-protocol.js";
+import { VncClient, resolveKeysym } from "./vnc-protocol.js";
 import { randomUUID } from "node:crypto";
 
 const log = childLogger("agent:computer-adapter:vnc");

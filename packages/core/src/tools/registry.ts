@@ -59,6 +59,14 @@ export interface SwarmTaskState {
   output?: string;
   error?: string;
   /**
+   * How many times this task's completed/partial output has been served back via
+   * cross-call signature reuse (instead of re-running it). Bounds a coordinator
+   * that keeps re-delegating the same already-gathered research: after the first
+   * reuse the delegation pipeline stops replaying the cache and returns a hard
+   * "already gathered — author/synthesize now" stop instead (audit 1fd36e04).
+   */
+  reuseServedCount?: number;
+  /**
    * Per-task budget rollup across all attempts.
    * Lazily maintained by the delegation pipeline so observability tools can
    * answer "what did this task cost?" without re-walking attempts each time.

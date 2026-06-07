@@ -32,7 +32,7 @@ const log = childLogger("agent:computer-adapter:vscode");
 // We dynamically import nut-tree so the adapter file can be loaded even when
 // the optional dependency is not installed (e.g. in container workers).
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 let _nutMouse: any = null;
 let _nutKeyboard: any = null;
 let _nutScreen: any = null;

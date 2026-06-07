@@ -8,12 +8,18 @@
 ```bash
 pnpm install            # install all workspaces
 pnpm check              # root-layout guard + typecheck every package (tsc / vue-tsc)
+pnpm lint               # eslint flat config — bug-class rules on core + mail-service
 pnpm test               # run every package's tests
 pnpm build              # production build of every package
 pnpm config:build       # compile config/ + workspace/ -> starlingai.json
+pnpm config:audit-flags # report config flags defined in schema but never read
 ```
 
-CI (`.github/workflows/ci.yml`) runs `check`, `test`, `build`, and `config:build` on push to `main`/`develop`/`private/**` and on PRs to `main`/`develop`.
+CI (`.github/workflows/ci.yml`) runs `check`, `lint`, `test`, `build`, and `config:build` on push to `main`/`develop`/`private/**` and on PRs to `main`/`develop`.
+
+### Lint gate
+
+`pnpm lint` runs an [eslint flat config](eslint.config.mjs) (`eslint.config.mjs`) over **production** TypeScript in `@starlingai/core` and `@starlingai/mail-service`. It is a **bug gate, not a style gate**: `error`-level rules are the regression classes — unhandled/floating promises (`no-floating-promises`, `no-misused-promises`), unused imports, empty blocks, constant conditions. Stylistic concerns (`any`, escapes, dead locals, `preserve-caught-error`) are `warn` or off and do not block CI. Tests and the Vue web package are out of scope for now. Errors must be zero; warnings are tracked for incremental cleanup.
 
 ### Running tests — important
 
@@ -56,5 +62,5 @@ Three long-lived branches:
 ## Commits & PRs
 
 - Conventional-style prefixes: `feat`, `fix`, `chore`, `docs`, `test`, `ci`.
-- A PR must pass `pnpm check && pnpm test && pnpm build` locally before review.
+- A PR must pass `pnpm check && pnpm lint && pnpm test && pnpm build` locally before review.
 - Root stays tidy — the `check-root-layout` guard rejects stray files at the repo root; put generated output under `artifacts/` and helper scripts under `scripts/`.

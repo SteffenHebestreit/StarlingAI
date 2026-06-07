@@ -6,8 +6,6 @@ import { registerTool, getAllTools, type ToolContext, type ToolResult } from "./
 import {
   recordCapabilityGap,
   listCapabilityGaps,
-  getCapabilityGap,
-  buildToolProposalPrompt,
 } from "../agent/self-improve.js";
 import { getConfig } from "../config/loader.js";
 import { validateWorkspaceConfig } from "../config/validate-workspace.js";

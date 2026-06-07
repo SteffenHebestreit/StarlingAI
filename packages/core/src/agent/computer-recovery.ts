@@ -13,7 +13,7 @@
  *   - session_restart:  Stop and restart the computer session
  */
 
-import type { ComputerAdapter, ActionResult } from "./computer-adapters/base.js";
+import type { ComputerAdapter } from "./computer-adapters/base.js";
 import { computerSessionManager } from "./computer-session.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";

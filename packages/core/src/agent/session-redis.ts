@@ -27,7 +27,7 @@ const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const MAX_HYDRATE = 1_000;
 
 // ioredis is a peer dep — use dynamic import to avoid hard failure when not available.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 type RedisClient = any;
 
 /**

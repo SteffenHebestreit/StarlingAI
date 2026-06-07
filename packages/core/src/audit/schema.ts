@@ -36,6 +36,7 @@ export type AuditEventType =
   | "agent_reasoning"
   | "parallel_delegate_started"
   | "parallel_delegate_deduplicated"
+  | "delegated_deliverable_relayed"
   | "turn_performance"
   | "event_loop_lag"
   | "provider_stall"

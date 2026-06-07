@@ -53,7 +53,7 @@ vi.mock("../audit/logger.js", () => ({
 import { AgentSession, resetSessionsForTests } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
 import { buildModelVisibleToolResult, runTurn } from "../agent/runtime.js";
-import { resetConfigForTests } from "../config/loader.js";
+import { getConfig, resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 
 interface DelegationLoopFixtures {
@@ -486,6 +486,8 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("falls back to delegated evidence when both the final draft and forced synthesis are empty", async () => {
+    // Exercise the recovery machinery, not the single-deliverable relay (cost-center 2).
+    getConfig().orchestration.relaySingleDeliverable = false;
     const delegatedEvidence = [
       "## Recherche-Ergebnis: Robuste Edge-Service-Integration",
       "",
@@ -696,6 +698,8 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("rewrites next-turn handoff responses into a direct synthesized answer", async () => {
+    // Exercise the recovery machinery, not the single-deliverable relay (cost-center 2).
+    getConfig().orchestration.relaySingleDeliverable = false;
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -929,6 +933,8 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("uses rich delegated evidence directly when the model tries another delegation after synthesis is required", async () => {
+    // Exercise the recovery machinery, not the single-deliverable relay (cost-center 2).
+    getConfig().orchestration.relaySingleDeliverable = false;
     const richEvidence = [
       "# Verified integration guide",
       "",

@@ -12,7 +12,7 @@ import { v4 as uuid } from "uuid";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
-import { ephemeralPut, ephemeralGet, ephemeralQuery, ephemeralDelete } from "../runtime/ephemeral-store/index.js";
+import { ephemeralPut, ephemeralQuery } from "../runtime/ephemeral-store/index.js";
 
 const log = childLogger("tool-dev-session");
 

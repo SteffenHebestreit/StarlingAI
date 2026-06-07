@@ -179,7 +179,7 @@ export const postgresBackend: EphemeralBackendDriver = {
   },
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function rowToEntry(row: any): EphemeralEntry {
   return {
     namespace: row.namespace,

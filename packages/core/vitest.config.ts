@@ -16,5 +16,36 @@ export default defineConfig({
     env: {
       STARLINGAI_DEFAULT_CONTAINERIZED: "false",
     },
+    coverage: {
+      provider: "v8",
+      reporter: ["text-summary", "json-summary", "html"],
+      include: ["src/**/*.ts"],
+      // Excluded from the metric so the % reflects TESTABLE logic, not process
+      // glue: tests; type decls; process entry points (bootstrap wiring, no
+      // branching logic); CLI/eval scripts; and external-system adapters that
+      // can't be exercised without the live remote (VNC/RDP/SSH/remote bridge).
+      exclude: [
+        "src/tests/**",
+        "src/**/*.test.ts",
+        "src/**/*.d.ts",
+        "src/index.ts",
+        "src/mcp-stdio.ts",
+        "src/scene-worker-main.ts",
+        "src/computer-remote-main.ts",
+        "src/scripts/**",
+        "src/agent/computer-adapters/**",
+        "src/agent/computer-remote/**",
+      ],
+      // Regression ratchet: fail `test:coverage` if coverage drops below these
+      // floors. Set a hair under the current actuals (lines/branches ~68.8%,
+      // functions ~78.7%) so normal variation doesn't flake the gate, but a real
+      // drop does. Raise these as coverage improves — never lower them.
+      thresholds: {
+        lines: 68,
+        statements: 68,
+        branches: 68,
+        functions: 78,
+      },
+    },
   },
 });

@@ -182,7 +182,7 @@ async function runMysql(
 
   try {
     const t0 = Date.now();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const [rawRows, rawFields] = await conn.execute(sql, params as any);
     const durationMs = Date.now() - t0;
 

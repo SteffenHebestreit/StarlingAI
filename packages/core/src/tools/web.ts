@@ -832,7 +832,7 @@ export function isPrivateHost(host: string): boolean {
 
 function stripHtml(html: string): string {
   // Remove scripts, styles, comments
-  let text = html
+  const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<!--[\s\S]*?-->/g, "")

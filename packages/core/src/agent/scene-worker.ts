@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SwarmState } from "../tools/registry.js";
 import type { InterventionNotice } from "./interventions.js";
-import { createSession, endSession } from "./session.js";
+import { createSession } from "./session.js";
 import { archiveSession } from "./session.js";
 import { runTurn, type TurnOutput, type TurnPerformanceMetrics } from "./runtime.js";
 import {

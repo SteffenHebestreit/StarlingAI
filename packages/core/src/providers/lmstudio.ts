@@ -3,6 +3,7 @@ import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, C
 import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
+import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 
 const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
@@ -196,7 +197,12 @@ export interface ChatProvider {
   checkHealth(): Promise<{ healthy: boolean; loadedModel?: string; error?: string }>;
   verifyToolCallSupport(modelId: string): Promise<boolean>;
   complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse>;
-  stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): AsyncGenerator<StreamChunk>;
+  /** Optional: a complete()-shaped result obtained by consuming the streaming
+   *  endpoint and accumulating deltas. Callers that want live token-progress
+   *  (provider activity monitor) and the per-chunk inactivity abort on otherwise
+   *  non-streaming calls prefer this when present, falling back to complete(). */
+  completeViaStream?(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse>;
+  stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk>;
   embed(texts: string[], model: string): Promise<Float32Array[]>;
   isHealthy(): boolean;
 }
@@ -313,6 +319,24 @@ export class LMStudioProvider {
     this.lastError = error instanceof Error ? error.message : String(error);
   }
 
+  /**
+   * Build the OpenAI `extra_body` for this model, merging the Qwen thinking
+   * toggle and the opt-in llama.cpp/LM Studio prompt-cache reuse. Returns
+   * undefined when neither applies (so we don't send an empty extra_body).
+   */
+  private buildExtraBody(modelId: string): Record<string, unknown> | undefined {
+    const extraBody: Record<string, unknown> = {};
+    if (supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined) {
+      extraBody["chat_template_kwargs"] = { enable_thinking: this.modelConfig.enableThinking };
+    }
+    if (this.modelConfig.promptCache) {
+      // llama.cpp / LM Studio: reuse the KV cache for the common prompt prefix
+      // (the stable ~22KB base system message) instead of re-prefilling it.
+      extraBody["cache_prompt"] = true;
+    }
+    return Object.keys(extraBody).length > 0 ? extraBody : undefined;
+  }
+
   // The OpenAI SDK's `timeout` option has been observed not to fire when
   // LM Studio holds the HTTP connection open without sending data (we saw a
   // single `complete()` call run for 20 min past a 5-min SDK timeout). This
@@ -425,6 +449,11 @@ export class LMStudioProvider {
 
     while (attempt < maxAttempts) {
       const startedAt = Date.now();
+      // In-flight visibility: a non-streaming complete() is a black box (no token
+      // deltas), so the monitor can only report how long it has been awaiting a
+      // response — but that alone surfaces a remote that's stuck on a 20K-token
+      // prompt or hung. (Token-level producing-vs-prefill needs the streaming path.)
+      const callId = beginProviderCall({ model: modelId, mode: "complete" });
       try {
         const response = await this.withHardTimeout(signal, this.requestTimeoutMs + 5000, (s) => this.client.chat.completions.create(
           {
@@ -439,14 +468,14 @@ export class LMStudioProvider {
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
             ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
             ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
-            // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
-            // The outer `as Parameters<...>[0]` cast suppresses the unknown-property error.
-            ...(supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined && {
-              extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
-            }),
+            // extra_body is a LM Studio / vLLM extension: Qwen thinking toggle +
+            // opt-in llama.cpp prompt-cache reuse. Outer cast suppresses the
+            // unknown-property error.
+            ...(this.buildExtraBody(modelId) ? { extra_body: this.buildExtraBody(modelId) } : {}),
           } as Parameters<typeof this.client.chat.completions.create>[0],
           { signal: s }
         )) as ChatCompletion;
+        endProviderCall(callId);
 
         const choice = response.choices[0];
         if (!choice) throw new Error("Empty response from OpenAI-compatible provider");
@@ -483,6 +512,7 @@ export class LMStudioProvider {
           finishReason: choice.finish_reason ?? "stop",
         };
       } catch (err: unknown) {
+        endProviderCall(callId);
         this.recordRequestFailure(startedAt, err);
         // A hard-timeout is terminal: retrying a hung/too-slow provider only
         // multiplies the wall-clock hang (e.g. 4 × 5-min = 20-min delegation).
@@ -505,10 +535,84 @@ export class LMStudioProvider {
     throw new Error("OpenAI-compatible completion failed after max retries");
   }
 
+  /**
+   * A complete()-shaped result obtained by consuming the streaming endpoint and
+   * accumulating the deltas into one LLMResponse. Used by the sub-agent loop so
+   * the long research/synthesis calls get (a) live token progress for the
+   * provider activity monitor — telling "producing" from "stuck on the prompt"
+   * from "stalled" — and (b) the per-chunk inactivity abort that stream()
+   * enforces, which the plain non-streaming complete() lacks. The output shape
+   * matches complete(): reasoning is already de-thought by stream(), so we only
+   * concatenate the deltas. No internal retry — a hung/slow remote should surface
+   * (mirrors complete()'s hard-timeout-is-terminal policy).
+   */
+  async completeViaStream(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    signal?: AbortSignal,
+  ): Promise<LLMResponse> {
+    let content = "";
+    const reasoningParts: string[] = [];
+    const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
+    const toolOrder: string[] = [];
+    let finishReason = "stop";
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    for await (const chunk of this.stream(messages, tools, signal)) {
+      switch (chunk.type) {
+        case "text_delta":
+          content += chunk.content ?? "";
+          break;
+        case "reasoning_delta":
+          if (chunk.content) reasoningParts.push(chunk.content);
+          break;
+        case "tool_call_start": {
+          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+          if (!toolBuffers.has(id)) {
+            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+            toolOrder.push(id);
+          }
+          break;
+        }
+        case "tool_call_delta": {
+          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+          if (buf) buf.args += chunk.argumentsDelta ?? "";
+          break;
+        }
+        case "done":
+          finishReason = chunk.finishReason ?? finishReason;
+          if (chunk.usage) usage = chunk.usage;
+          break;
+      }
+    }
+
+    const tool_calls = toolOrder.map((id) => {
+      const buf = toolBuffers.get(id)!;
+      let args: Record<string, unknown>;
+      try {
+        args = buf.args.trim() ? (JSON.parse(buf.args) as Record<string, unknown>) : {};
+      } catch {
+        log.warn({ toolName: buf.name, rawArgs: buf.args.slice(0, 200) }, "Failed to parse streamed tool call arguments");
+        args = { _parse_error: true, _raw: buf.args };
+      }
+      return { id: buf.id, name: buf.name, arguments: args };
+    });
+
+    const reasoning = reasoningParts.join("").trim();
+    return {
+      content: content.length > 0 ? content : null,
+      ...(reasoning ? { reasoning } : {}),
+      tool_calls,
+      usage,
+      finishReason,
+    };
+  }
+
   async *stream(
     messages: LLMMessage[],
     tools: LLMToolDef[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: { toolChoice?: "auto" | "required" | "none" }
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
     const openAIMessages = normalizeMessagesForModel(messages, modelId);
@@ -548,7 +652,11 @@ export class LMStudioProvider {
         model: modelId,
         messages: openAIMessages,
         tools: openAITools.length > 0 ? openAITools : undefined,
-        tool_choice: openAITools.length > 0 ? "auto" : undefined,
+        // Default "auto"; callers may force "required" to stop the model from
+        // emitting a tool-free prose answer when the turn must orchestrate first
+        // (source-sensitive / required-research) — that wasted full draft is a
+        // multi-minute cost on the slow local model (audit 5d51862f).
+        tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
         temperature: streamEffectiveTemp,
         max_tokens: this.modelConfig.maxTokens,
         ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
@@ -556,10 +664,8 @@ export class LMStudioProvider {
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
         ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
-        // Qwen3.5 thinking toggle — extra_body is a LM Studio / vLLM extension.
-        ...(supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined && {
-          extra_body: { chat_template_kwargs: { enable_thinking: this.modelConfig.enableThinking } },
-        }),
+        // extra_body: Qwen thinking toggle + opt-in llama.cpp prompt-cache reuse.
+        ...(this.buildExtraBody(modelId) ? { extra_body: this.buildExtraBody(modelId) } : {}),
         stream: true,
         stream_options: { include_usage: true },
       } as Parameters<typeof createStream>[0],
@@ -570,6 +676,9 @@ export class LMStudioProvider {
     let collectedFinishReason: string | undefined;
     let collectedUsage: StreamChunk["usage"] | undefined;
     const startedAt = Date.now();
+    // In-flight visibility: track token progress so the monitor can tell
+    // producing (tokens flowing) from prefill (no first token yet) from stalled.
+    const callId = beginProviderCall({ model: modelId, mode: "stream" });
     // Inline <think> stripping for providers that stream reasoning inside the
     // normal content field rather than a dedicated reasoning_content delta.
     let insideThink = false;
@@ -599,6 +708,9 @@ export class LMStudioProvider {
 
         const delta = chunk.choices[0]?.delta;
         if (!delta) continue;
+        if (delta.content || (delta as { reasoning_content?: string }).reasoning_content || delta.tool_calls) {
+          recordProviderToken(callId);
+        }
 
         // Dedicated reasoning delta (LM Studio / vLLM thinking models). Not in
         // the OpenAI SDK delta type, so read via a cast.
@@ -666,6 +778,7 @@ export class LMStudioProvider {
       log.error({ err, model: modelId }, "OpenAI-compatible streaming failed");
       throw new Error(`OpenAI-compatible stream failed (model: ${modelId}): ${String(err)}`);
     } finally {
+      endProviderCall(callId);
       if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
       if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
     }

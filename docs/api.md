@@ -43,9 +43,11 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/healthz` | returns `{ "status": "ok" }` |
-| `GET` | `/readyz` | returns readiness plus active-session count |
+| `GET` | `/readyz` | returns readiness, active-session count, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled) |
 | `GET` | `/api/status` | authenticated summary of uptime and active sessions |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
+| `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity); 503 if any subsystem is unavailable |
+| `GET` | `/api/observability/recovery-nets` | authenticated firing counts per orchestration recovery net (which autopilots actually fire) |
 
 ## REST Endpoints
 

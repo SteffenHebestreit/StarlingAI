@@ -17,11 +17,11 @@ import { mountFederationRoutes } from "./federation-router.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
+import { getEventLoopLagSnapshot } from "../observability/event-loop-monitor.js";
+import { getProviderActivitySnapshot } from "../observability/provider-activity-monitor.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
-  buildSessionAuditMarkdown,
   buildSessionAuditMarkdownDetached,
-  buildSessionDebugMarkdown,
   buildSessionDebugMarkdownDetached,
   SessionExportBusyError,
 } from "../agent/debug-session-export.js";
@@ -68,7 +68,7 @@ import { getWardenAlerts } from "../agent/warden.js";
 import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
-import { handleMcpHttpRequest, shutdownMcpHttpSessions, getMcpHttpSessionCount } from "../mcp/server-http.js";
+import { handleMcpHttpRequest, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { browserSessionManager } from "../agent/browser-session.js";
@@ -1270,7 +1270,17 @@ export function createGateway() {
   app.get("/healthz", (c) => c.json({ status: "ok" }));
   app.get("/readyz", (c) => {
     const sessions = getAllSessions().length;
-    return c.json({ status: "ready", sessions });
+    // Latest event-loop lag sample (cheap, no probes) so operators can poll
+    // whether the main thread is stalling without hitting the authed deep checks.
+    const eventLoopLag = getEventLoopLagSnapshot();
+    // In-flight provider activity (is the remote LLM producing / prefilling / stalled).
+    const providerActivity = getProviderActivitySnapshot();
+    return c.json({
+      status: "ready",
+      sessions,
+      ...(eventLoopLag ? { eventLoopLag } : {}),
+      providerActivity,
+    });
   });
 
   // Deep subsystem self-checks (authed) — actively probe embeddings (non-zero
@@ -1283,6 +1293,15 @@ export function createGateway() {
     const { runSubsystemChecks } = await import("../observability/health-checks.js");
     const report = await runSubsystemChecks();
     return c.json(report, report.healthy ? 200 : 503);
+  });
+
+  // Recovery-net firing counts (authed). Shows which of the ~34 orchestration
+  // autopilots actually fire — the evidence needed to retire dead scaffolding.
+  app.get("/api/observability/recovery-nets", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const { getRecoveryMetricsSnapshot } = await import("../observability/recovery-metrics.js");
+    return c.json(getRecoveryMetricsSnapshot());
   });
 
   // ── Role-based access control (Wave B) ───────────────────────────────────

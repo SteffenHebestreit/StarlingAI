@@ -8,7 +8,7 @@
 import { getConfig } from "../config/loader.js";
 import type { GitHubInstanceSchema } from "../config/schema.js";
 import type { z } from "zod";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { fetchWithTimeout, resolveSecretRef } from "./infrastructure-shared.js";
 

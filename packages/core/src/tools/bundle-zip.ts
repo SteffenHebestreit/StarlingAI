@@ -6,13 +6,13 @@
  * generate_website / generate_svg / generate_pdf / generate_docx /
  * generate_pptx into a single download for the user.
  */
-import { mkdir, readdir, stat, writeFile, unlink } from "node:fs/promises";
+import { mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { dirname, extname, join, posix, relative, sep } from "node:path";
 import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
 import { childLogger } from "../logger.js";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:bundle-zip");

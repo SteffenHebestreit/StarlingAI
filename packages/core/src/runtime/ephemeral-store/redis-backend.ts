@@ -19,7 +19,7 @@ import type {
 const log = childLogger("ephemeral:redis");
 const KEY_PREFIX = "starlingai:eph:";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let _redis: any = null;
 let _redisReady = false;
 
@@ -31,7 +31,7 @@ async function getRedis(): Promise<unknown | null> {
   if (!url) return null;
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const ioredis = (await import("ioredis")) as any;
     const IORedis = ioredis.default ?? ioredis;
     _redis = new IORedis(url, {
@@ -69,7 +69,7 @@ export const redisBackend: EphemeralBackendDriver = {
     const expireUnix = Math.floor(new Date(entry.expiresAt).getTime() / 1000);
     const payload = JSON.stringify(entry);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const redis = r as any;
     await redis.set(rk, payload);
     await redis.expireat(rk, expireUnix);
@@ -79,7 +79,7 @@ export const redisBackend: EphemeralBackendDriver = {
     const r = await getRedis();
     if (!r) return null;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const raw = await (r as any).get(redisKey(namespace, key));
     if (!raw) return null;
 
@@ -99,7 +99,7 @@ export const redisBackend: EphemeralBackendDriver = {
       ? `${KEY_PREFIX}${filter.namespace}:${filter.keyPrefix}*`
       : `${KEY_PREFIX}${filter.namespace}:*`;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const redis = r as any;
     const results: EphemeralEntry[] = [];
     let cursor = "0";
@@ -132,7 +132,7 @@ export const redisBackend: EphemeralBackendDriver = {
     const r = await getRedis();
     if (!r) return false;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const count = await (r as any).del(redisKey(namespace, key));
     return count > 0;
   },
@@ -146,7 +146,7 @@ export const redisBackend: EphemeralBackendDriver = {
       return { backend: "redis", deletedCount: 0, durationMs: 0, error: "not connected" };
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const redis = r as any;
     const now = Date.now();
     let deletedCount = 0;
@@ -188,7 +188,7 @@ export const redisBackend: EphemeralBackendDriver = {
   async close(): Promise<void> {
     if (_redis && _redisReady) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         
         await (_redis as any).quit();
       } catch {
         // ignore

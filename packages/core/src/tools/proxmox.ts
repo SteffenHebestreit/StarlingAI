@@ -1,7 +1,7 @@
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { normalizeExecutionTimeout, resolveSecretRef, resolveSecretRefs } from "./infrastructure-shared.js";
+import { normalizeExecutionTimeout, resolveSecretRef } from "./infrastructure-shared.js";
 
 const log = childLogger("tool:proxmox");
 const DEFAULT_TIMEOUT_MS = 120_000;

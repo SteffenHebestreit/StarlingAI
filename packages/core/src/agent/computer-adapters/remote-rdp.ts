@@ -22,7 +22,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { Buffer } from "node:buffer";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile, unlink } from "node:fs/promises";

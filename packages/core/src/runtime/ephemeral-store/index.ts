@@ -14,7 +14,6 @@ import { redisBackend } from "./redis-backend.js";
 import { postgresBackend } from "./postgres-backend.js";
 import {
   routeNamespace,
-  DEFAULT_BACKEND,
   type EphemeralBackend,
   type EphemeralBackendDriver,
   type EphemeralCleanupResult,

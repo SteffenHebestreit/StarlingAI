@@ -11,6 +11,9 @@ import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
+import { startEventLoopMonitor, stopEventLoopMonitor } from "./observability/event-loop-monitor.js";
+import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./observability/provider-activity-monitor.js";
+import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { loadConfig } from "./config/loader.js";
 import { stopAllCronJobs } from "./runtime/scheduler.js";
 
@@ -58,6 +61,9 @@ export async function main() {
   const config = loadConfig();
   log.info({ model: config.agents.defaults.model.primary }, "Standalone scene worker starting");
 
+  startEventLoopMonitor();
+  startProviderActivityMonitor();
+  startRecoveryMetrics();
   await initPostgresAudit();
   await initProviders();
   syncWebhookTools();
@@ -70,6 +76,9 @@ export async function main() {
 
   const shutdown = async (signal: string) => {
     log.info({ signal }, "Stopping standalone scene worker");
+    stopEventLoopMonitor();
+    stopProviderActivityMonitor();
+    stopRecoveryMetrics();
     await stopSceneJobWorker();
     stopAutonomousBidding();
     await stopSwarmBus();
