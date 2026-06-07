@@ -111,3 +111,33 @@ authors). A standalone coordinator delegates authoring the same way a scene rout
 Tests assert agent prompt/tool **content** by merging `agents/*.jsonc` (see
 `config-loader.test.ts` / `workspace-catalog.test.ts`), so they are layout-agnostic — adding a role
 shard does not require touching them.
+
+## 6. Memory vault — the reviewable Markdown layer
+
+Durable memory lives as one JSON file per key under `<workspace>/.starlingai/memory/` (workspace
+scope) and `SAI_USER_MEMORY_PATH` / `~/.starlingai/user-memory/` (user scope); skills are already
+portable `SKILL.md`. The **memory vault** (`packages/core/src/memory/vault.ts`) mirrors all of that
+into an **Obsidian-style Markdown vault** so a human can review, correct, and git/iCloud back up agent
+memory in a plain-Markdown tool they trust — the same "Obsidian is the reviewable layer; memory stays
+the execution context" split, but the **export is deterministic code** (never the slow local model),
+so it can't drift.
+
+```
+<workspace>/vault/              (default; CLI can target an external Obsidian path)
+  README.md                     index/hub
+  memory/workspace/<key>.md     correctable durable facts (frontmatter starlingai_managed: true)
+  memory/user/<key>.md
+  tags/<tag>.md                 backlink/graph index ([[wikilinks]] to members)
+  skills/<slug>.md              read-only mirror of SKILL.md
+  sessions/<id>.md              read-only session summaries (best-effort)
+```
+
+- **Export** (`memory_export` tool, or `sai memory export [--vault <path>]`) is idempotent: it refreshes
+  notes and **prunes** managed notes whose source record is gone.
+- **Correction loop** — edit a managed note's body **above** the `%% starlingai:managed-footer %%`
+  line, then **import** (`memory_import`, or `sai memory import`) to re-ingest edits (matched by
+  `starlingai_key`) into the durable store. Read-only mirrors (`skills/`, `sessions/`, `tags/`) are
+  never re-ingested.
+- The agent-callable tools keep the vault inside the workspace; the CLI can point at an external vault.
+  The `obsidian-vault` skill (seeded on first export) teaches the agent the review/correction loop.
+- The default `vault/` is a generated review artifact — add your chosen vault path to `.gitignore`.

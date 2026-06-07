@@ -478,6 +478,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  memory_export: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Mirror durable memory into an Obsidian-style Markdown vault for review",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  memory_import: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Re-ingest edited memory-vault notes back into the durable store",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   record_skill: {
     tier: ToolTier.ONE_WRITE,
     description: "Author a reusable procedure (skill) in the Skill Library from experience",

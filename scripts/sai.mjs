@@ -46,6 +46,7 @@ switch (command) {
   case "stop":    await cmdStop(); break;
   case "wipe":    await cmdWipe(); break;
   case "config":  await cmdConfig(); break;
+  case "memory":  await cmdMemory(); break;
   case "env-check": await cmdEnvCheck(); break;
   case "token":   await cmdToken(); break;
   case "health":  await cmdHealth(); break;
@@ -290,6 +291,24 @@ async function cmdConfig() {
   }
 }
 
+async function cmdMemory() {
+  if (subCommand !== "export" && subCommand !== "import") {
+    fail("Usage: sai memory <export|import> [--vault <path>] [--no-sessions]");
+    return;
+  }
+  const workspace = process.env.SAI_WORKSPACE_CONFIG_PATH?.trim()
+    ? resolve(process.env.SAI_WORKSPACE_CONFIG_PATH)
+    : resolve(repoRoot, "workspace");
+  // restArgs = [subCommand, ...flags]; pass the flags through to the tsx CLI.
+  const passThrough = restArgs.slice(1);
+  await run("pnpm", [
+    "--filter", "@starlingai/core", "exec",
+    "tsx", "src/cli/memory-vault.ts", subCommand,
+    "--workspace", workspace,
+    ...passThrough,
+  ]);
+}
+
 async function cmdEnvCheck() {
   hdr("Env reference check");
   // Pass through flags (e.g. --strict) after "env-check".
@@ -354,6 +373,9 @@ ${BOLD}Commands:${RESET}
                                      while containers keep running; config kept
   config build                       Merge config/ + workspace/ → starlingai.json
   config split [source.json]         Decompose into two-zone layout
+  memory export [--vault <path>]     Mirror durable memory → Obsidian-style Markdown vault
+    [--no-sessions]                    (skip recent-session summaries)
+  memory import [--vault <path>]     Re-ingest edited managed vault notes into the store
   env-check [--strict]               Report config $VAR refs not satisfied by .env
   token [--user X] [--role X]        Generate dashboard JWT
   health                             Check service health endpoints
