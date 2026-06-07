@@ -179,7 +179,7 @@ registerTool({
     }
 
     // Fill fields
-    let form = pdfDoc.getForm();
+    const form = pdfDoc.getForm();
     const fieldsFilled: string[] = [];
     const fieldsSkipped: Array<{ name: string; reason: string }> = [];
 

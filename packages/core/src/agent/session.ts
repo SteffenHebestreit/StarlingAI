@@ -615,7 +615,7 @@ export class AgentSession {
 
     // Cap the digest body. When over budget, drop the OLDEST digest lines and
     // mark the elision — recent context is the most useful for continuing.
-    let kept = body;
+    const kept = body;
     let elided = 0;
     while (kept.join("\n").length > MAX_EARLIER_SUMMARY_CHARS && kept.length > 1) {
       kept.shift();

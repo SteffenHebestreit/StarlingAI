@@ -53,3 +53,10 @@ packages/core/tmp/
 # Some tests write process.cwd()-relative paths; when vitest runs from
 # packages/core this lands in a doubled path. Nothing legitimate lives here.
 packages/core/packages/
+# Stray test/scratch output
+test-output.txt
+
+# npm lockfiles — this is a pnpm workspace (packageManager: pnpm). A stray
+# package-lock.json causes install drift and forces CI to --no-frozen-lockfile.
+package-lock.json
+packages/*/package-lock.json

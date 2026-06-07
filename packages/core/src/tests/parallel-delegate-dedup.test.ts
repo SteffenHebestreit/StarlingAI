@@ -33,7 +33,7 @@ describe("normalizeDelegationBodyForDedup", () => {
 });
 
 describe("deduplicateRunnableDelegations", () => {
-  it("collapses the audit-49372c7a same-agent identical slices (3x researcher -> 1), keeps the coordinator", () => {
+  it("collapses identical slices across agents to ONE, dropping the nesting coordinator (audit e2071dce)", () => {
     const tasks = [
       { agentName: "researcher", task: SLICE(1) },
       { agentName: "researcher", task: SLICE(2) },
@@ -41,15 +41,28 @@ describe("deduplicateRunnableDelegations", () => {
       { agentName: "mission_coordinator", task: SLICE(4) },
     ];
     const { kept, removed } = deduplicateRunnableDelegations(tasks);
-    // 3 identical "researcher" slices collapse to 1; the different-agent coordinator is kept.
-    expect(kept).toHaveLength(2);
-    expect(removed).toBe(2);
-    expect(kept.map((k) => k.agentName)).toEqual(["researcher", "mission_coordinator"]);
+    // Single-GPU: the identical full-request body is one piece of work. Collapse to a single
+    // researcher; the coordinator (which would re-spawn researchers) is the same body → dropped.
+    expect(kept).toHaveLength(1);
+    expect(removed).toBe(3);
+    expect(kept[0]!.agentName).toBe("researcher");
   });
 
-  it("KEEPS identical bodies on DIFFERENT agents (legitimate capped decomposition)", () => {
-    // This is the source-sensitive cap shape the runtime tests rely on: distinct agents,
-    // identical canonical body — different specialists may surface different findings.
+  it("prefers a non-coordinator when collapsing identical bodies (coordinator listed first)", () => {
+    const tasks = [
+      { agentName: "mission_coordinator", task: SLICE(1) },
+      { agentName: "researcher", task: SLICE(2) },
+    ];
+    const { kept, removed } = deduplicateRunnableDelegations(tasks);
+    // Identical body → collapse to one, and prefer the researcher over the nesting coordinator.
+    expect(kept).toHaveLength(1);
+    expect(removed).toBe(1);
+    expect(kept[0]!.agentName).toBe("researcher");
+  });
+
+  it("KEEPS identical bodies across a NON-coordinator researcher pool (deliberate cross-check)", () => {
+    // The source-sensitive cap fans the canonical task to a distinct-researcher pool on
+    // purpose; those are leaf researchers (no nesting), so all are preserved.
     const tasks = [
       { agentName: "researcher_a", task: SLICE(1) },
       { agentName: "researcher_b", task: SLICE(2) },

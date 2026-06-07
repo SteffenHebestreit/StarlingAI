@@ -5,7 +5,7 @@ import { EmailParser } from "./email-parser.js";
 import { MailAccountClient } from "./imap-client.js";
 import { log } from "./logger.js";
 import { sendDraft } from "./smtp-client.js";
-import type { CategoryRecord, DraftRecord, MailAccountConfig, MailSummary } from "./types.js";
+import type { CategoryRecord, MailAccountConfig, MailSummary } from "./types.js";
 import { DraftStore } from "./draft-store.js";
 import { calendarRoutes } from "./calendar-routes.js";
 import { contactsRoutes } from "./contacts-routes.js";

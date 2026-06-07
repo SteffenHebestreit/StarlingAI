@@ -5,7 +5,7 @@
  * Usage:
  *   sai setup                              Check prerequisites, generate .env secrets
  *   sai start [--pentest] ...              Build config + start Docker services
- *   sai stop  [--volumes]                  Stop services (optionally wipe data)
+ *   sai stop  [--volumes]                  Stop services (--volumes also wipes DB volumes + flat-file memory)
  *   sai wipe  --yes                        Wipe runtime data in place (all DBs), keep containers
  *   sai config build                       Merge config/ + workspace/ → starlingai.json
  *   sai config split [--from <file>]       Decompose monolithic config into two zones
@@ -14,7 +14,7 @@
  *   sai dev [gateway|web]                  Start development mode
  */
 import { execSync, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -189,12 +189,57 @@ async function cmdStart() {
 
   ${BOLD}Useful commands:${RESET}
     sai stop                      Stop all services
-    sai stop --volumes            Stop + wipe all data
+    sai stop --volumes            Stop + wipe all data (DB volumes + flat-file memory store/skills)
     sai start --build             Force rebuild
     sai start --pentest           Start with Kali pentest service
     sai health                    Check service health
     docker compose logs -f        Follow logs
 `);
+}
+
+// Flat-file agent memory that lives on the host bind mount (NOT in a docker
+// volume), so `docker compose down -v` never removes it. `sai stop --volumes`
+// wipes these too for a true clean slate. The DB-backed memory (Redis session
+// facts, MemGraph knowledge graph, Postgres agent store + embeddings, QuestDB
+// research notes) is already gone with the volumes. Secrets (credentials.enc,
+// .jwt_secret, token) and the audit log are deliberately PRESERVED — they are not
+// "memory" and losing them is irreversible; delete .starlingai by hand for a full
+// factory reset. Both config zones are covered: the gateway cwd (.starlingai) and
+// the workspace (workspace/.starlingai, where the durable memory store lives).
+const MEMORY_FLATFILE_TARGETS = [
+  "memory",                            // durable memory store
+  "skills",                            // learned procedural skills
+  "flow_memory.ndjson",                // decision-flow memory
+  "agent_outcomes.ndjson",             // per-agent outcome history
+  "promoted_agents.json",              // promoted ephemeral agents
+  "config_assistant_proposals.json",   // pending self-improvement proposals
+];
+const MEMORY_FLATFILE_ZONES = [
+  ".starlingai",                       // gateway cwd zone
+  "workspace/.starlingai",             // workspace zone (durable memory store)
+  "packages/core/.starlingai",         // residue from running vitest / sai memory in packages/core
+  "packages/core/workspace/.starlingai",
+];
+
+function wipeFlatFileMemory() {
+  let removed = 0;
+  for (const zone of MEMORY_FLATFILE_ZONES) {
+    for (const target of MEMORY_FLATFILE_TARGETS) {
+      const rel = `${zone}/${target}`;
+      const abs = resolve(repoRoot, rel);
+      // Safety: never delete anything outside the repo root.
+      if (!abs.startsWith(repoRoot)) continue;
+      if (!existsSync(abs)) continue;
+      try {
+        rmSync(abs, { recursive: true, force: true });
+        ok(`Removed ${rel}`);
+        removed += 1;
+      } catch (err) {
+        warn(`Could not remove ${rel} — ${(err?.message || "error").slice(0, 120)}`);
+      }
+    }
+  }
+  if (removed === 0) info("No flat-file memory found on disk (already clean).");
 }
 
 async function cmdStop() {
@@ -214,7 +259,14 @@ async function cmdStop() {
   await run(["docker", "compose", ...composeFiles, ...allProfiles, ...downArgs]);
 
   if (values.volumes) {
-    ok("All containers, networks, and volumes removed.");
+    // `down -v` cleared the DB-backed memory (Redis session facts, MemGraph
+    // knowledge graph, Postgres agent store + embeddings, QuestDB research notes).
+    // The flat-file durable memory store + learned skills survive on the host bind
+    // mount, so wipe them here for a real clean slate.
+    hdr("Clearing flat-file agent memory (memory store, skills, learning history)...");
+    wipeFlatFileMemory();
+    ok("Clean slate: containers, networks, DB volumes, and flat-file memory removed.");
+    info("Preserved: credentials, JWT secret, dashboard token, audit log — delete .starlingai by hand for a full factory reset.");
   } else {
     ok("All containers and networks removed. Data volumes preserved.");
   }
@@ -367,7 +419,7 @@ ${BOLD}Commands:${RESET}
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
-  stop  [--volumes]                  Stop services (--volumes wipes data)
+  stop  [--volumes]                  Stop services (--volumes wipes DB volumes + flat-file memory)
   wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
                                      incl. pgvector, QuestDB, MemGraph, audit log)
                                      while containers keep running; config kept

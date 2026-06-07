@@ -7,7 +7,7 @@
  * All code execution happens in isolated Docker containers — never on host.
  */
 import { childLogger } from "../logger.js";
-import { getTool, executeTool, type ToolContext, type ToolResult } from "./registry.js";
+import { getTool, executeTool, type ToolContext } from "./registry.js";
 import type { TestRun } from "../agent/tool-dev-session.js";
 import { heartbeatSession, recordContainerSpawn } from "../agent/tool-dev-session.js";
 

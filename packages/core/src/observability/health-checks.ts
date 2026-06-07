@@ -11,6 +11,8 @@
  * fast and never flaps on a degraded-but-live subsystem.
  */
 import { childLogger } from "../logger.js";
+import { getEventLoopLagSnapshot, DEFAULT_WARN_MS, DEFAULT_SEVERE_MS, type EventLoopLagSnapshot } from "./event-loop-monitor.js";
+import { getProviderActivitySnapshot, type ProviderActivitySnapshot } from "./provider-activity-monitor.js";
 import { isEmbeddingAvailable, computeQueryEmbedding } from "../providers/embeddings.js";
 import { initVectorStore, vectorStoreDimension } from "../db/vector-store.js";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
@@ -48,6 +50,69 @@ export function classifyEmbeddingProbe(vec: Float32Array | number[] | null | und
   return nonZero
     ? { name: "embeddings", status: "ok", detail: `dim ${vec.length}` }
     : { name: "embeddings", status: "degraded", detail: "all-zero vectors — embedding encoding/model is broken" };
+}
+
+/**
+ * Pure classifier for the event-loop lag snapshot. Reports `degraded` (never
+ * `unavailable`, so a transient GC spike can't flip the whole gateway to 503)
+ * once a sampling window contains a stall past the warn floor; the detail spells
+ * out whether it was merely elevated or a freeze long enough to flap health. The
+ * snapshot reflects the last sampled window, so a stall in progress right now may
+ * not show until the sampler runs again — the `event_loop_lag` audit row is the
+ * point-in-time record.
+ */
+export function classifyEventLoopLag(
+  snap: EventLoopLagSnapshot | null,
+  warnMs = DEFAULT_WARN_MS,
+  severeMs = DEFAULT_SEVERE_MS,
+): SubsystemCheck {
+  if (!snap) return { name: "event_loop", status: "ok", detail: "no sample yet" };
+  if (snap.maxMs >= severeMs) {
+    return {
+      name: "event_loop",
+      status: "degraded",
+      detail: `loop blocked ${snap.maxMs}ms in the last ${Math.round(snap.windowMs / 1000)}s (peak ${snap.peakMs}ms) — synchronous main-thread hotspot, not I/O wait`,
+    };
+  }
+  if (snap.maxMs >= warnMs) {
+    return {
+      name: "event_loop",
+      status: "degraded",
+      detail: `elevated loop lag: worst ${snap.maxMs}ms, mean ${snap.meanMs}ms, p99 ${snap.p99Ms}ms`,
+    };
+  }
+  return { name: "event_loop", status: "ok", detail: `worst ${snap.maxMs}ms, mean ${snap.meanMs}ms` };
+}
+
+function checkEventLoop(): SubsystemCheck {
+  return classifyEventLoopLag(getEventLoopLagSnapshot());
+}
+
+/**
+ * Pure classifier for in-flight provider activity. `degraded` (never
+ * `unavailable` — a slow-but-working remote must not flip the gateway to 503)
+ * when an in-flight call is stalled or has produced no output for a worrying
+ * while; the detail says which. Idle (no calls) is `ok`.
+ */
+export function classifyProviderActivity(snap: ProviderActivitySnapshot | null): SubsystemCheck {
+  if (!snap || snap.inFlight === 0 || !snap.worst) {
+    return { name: "provider_activity", status: "ok", detail: snap ? `${snap?.inFlight ?? 0} call(s) in flight` : "no sample yet" };
+  }
+  const w = snap.worst;
+  const secs = Math.round(w.elapsedMs / 1000);
+  if (w.state === "stalled") {
+    return { name: "provider_activity", status: "degraded", detail: `remote produced tokens then went silent ${Math.round((w.silentMs ?? 0) / 1000)}s ago (${w.model}, ${secs}s elapsed) — stream stalled` };
+  }
+  if (w.state === "awaiting_output") {
+    return { name: "provider_activity", status: "degraded", detail: w.mode === "stream"
+      ? `remote has produced no tokens after ${secs}s (${w.model}) — still processing the prompt or stuck`
+      : `non-streaming call awaiting a response for ${secs}s (${w.model}) — no token granularity` };
+  }
+  return { name: "provider_activity", status: "ok", detail: `${snap.inFlight} call(s) in flight; worst ${w.state} (${w.model}, ${secs}s)` };
+}
+
+function checkProviderActivity(): SubsystemCheck {
+  return classifyProviderActivity(getProviderActivitySnapshot());
 }
 
 async function checkEmbeddings(): Promise<SubsystemCheck> {
@@ -130,6 +195,8 @@ async function checkBrowserVnc(): Promise<SubsystemCheck> {
 /** Run all subsystem probes in parallel and aggregate. */
 export async function runSubsystemChecks(): Promise<SubsystemHealth> {
   const checks = await Promise.all([
+    Promise.resolve(checkEventLoop()),
+    Promise.resolve(checkProviderActivity()),
     checkEmbeddings(),
     checkVectorStore(),
     checkGraph(),

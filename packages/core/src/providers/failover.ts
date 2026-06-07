@@ -169,7 +169,7 @@ export class FailoverChatProvider implements ChatProvider {
     throw new Error(`All configured providers failed: ${attempts.join(" | ")}`);
   }
 
-  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): AsyncGenerator<StreamChunk> {
+  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk> {
     const candidates = this.availableBindings();
     const attempts: string[] = [];
 
@@ -178,7 +178,7 @@ export class FailoverChatProvider implements ChatProvider {
       let emitted = false;
 
       try {
-        for await (const chunk of binding.provider.stream(messages, tools, signal)) {
+        for await (const chunk of binding.provider.stream(messages, tools, signal, options)) {
           emitted = true;
           yield chunk;
         }

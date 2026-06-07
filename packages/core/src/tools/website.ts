@@ -981,7 +981,7 @@ function renderInlineNoCode(text: string): string {
   t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   t = t.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
   // Manual line breaks (two trailing spaces)
-  t = t.replace(/  \n/g, "<br>\n");
+  t = t.replace(/ {2}\n/g, "<br>\n");
   return t;
 }
 

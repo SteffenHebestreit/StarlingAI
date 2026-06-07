@@ -13,7 +13,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type ToolResult } from "./registry.js";
 import { callPlaywrightTool } from "./multimodal.js";
 import { fetchWithTimeout, resolveSecretRef } from "./infrastructure-shared.js";
 

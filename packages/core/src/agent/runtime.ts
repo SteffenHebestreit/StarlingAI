@@ -47,7 +47,8 @@ import {
   looksMultiDomainResearch,
 } from "./intent-classifier.js";
 import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
-import { looksEvidenceAnchored } from "./evidence-anchoring.js";
+import { looksEvidenceAnchored, sharesEvidenceVocabulary } from "./evidence-anchoring.js";
+import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
 
 const log = childLogger("agent:runtime");
 
@@ -651,7 +652,11 @@ async function synthesizeSourceSensitiveEvidenceBackstop(
   const synthesized = await forceSynthesis(session, provider, signal, instruction);
   if (!synthesized) return null;
   const cleaned = stripPresentationFormatting(synthesized).trim();
-  if (!looksEvidenceAnchored(cleaned, evidence)) return null;
+  // Lighter gate than the model's free draft: this pass is prompt-constrained to
+  // evidence-only with explicit unverified-marking, so accept it as long as it
+  // demonstrably USED the evidence. Requiring the full per-spec anchoring here just
+  // discards a usable hedged partial for the raw-dump fallback (audit f7928f57).
+  if (!sharesEvidenceVocabulary(cleaned, evidence)) return null;
   return cleaned;
 }
 
@@ -1811,7 +1816,11 @@ export { __workflowCatalog };
 export { __swarmStateContinuity };
 
 function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
-  return sanitizeAssistantContent(value, toolIterations > 0);
+  const cleaned = sanitizeAssistantContent(value, toolIterations > 0);
+  // Final safety net: a slow local model can collapse into a repetition loop during
+  // synthesis and emit the same section many times. Never ship that verbatim — keep
+  // the first occurrence of each unique section (audit 9fd16384: 17× repeated block).
+  return looksLikeDegenerateRepetition(cleaned) ? collapseRepeatedMarkdownSections(cleaned) : cleaned;
 }
 
 const EMPTY_ASSISTANT_RESPONSE_FALLBACK = "I wasn't able to generate a usable reply for that turn. Please try again.";
@@ -2481,6 +2490,84 @@ function findRecentDelegateEvidence(
     : null;
 }
 
+/**
+ * Cost-center 2 (audit 5d51862f): a meta-reasoning preamble the specialist sometimes
+ * prepends to its deliverable ("Now I have comprehensive evidence. Let me synthesize…")
+ * before the real content. When relaying the deliverable verbatim we strip that short
+ * lead-in so the user sees the answer, not the agent's thinking. Conservative: only
+ * removes a short (<400 char) meta lead-in that sits before an early `---` rule or `#`
+ * heading; otherwise the text is returned unchanged.
+ */
+const REASONING_PREAMBLE_STARTERS = /^(now\b|let me\b|here(?:'s| is| are)\b|based on\b|i['’]?(?:ll| ve| have)\b|i will\b|i now\b|okay\b|alright\b|sure\b|with (?:the|these|all)\b|to (?:answer|address|fulfil|fulfill|summari[sz]e)\b)/i;
+
+export function stripLeadingReasoningPreamble(text: string): string {
+  const t = text.trimStart();
+  if (/^(#{1,6}\s|\||[-*+]\s|\d+[.)]\s|>\s)/.test(t)) return t; // already real content
+  if (!REASONING_PREAMBLE_STARTERS.test(t)) return t;
+  const window = t.slice(0, 800);
+  const hr = /\n\s*-{3,}\s*\n/.exec(window);
+  const heading = /\n#{1,6}\s/.exec(window);
+  let cut = -1;
+  if (hr) cut = hr.index + hr[0].length;
+  if (heading && (cut === -1 || heading.index + 1 < cut)) cut = heading.index + 1;
+  if (cut <= 0 || cut > 400) return t;
+  return t.slice(cut).trimStart();
+}
+
+// Repetition-collapse helpers live in ./text-dedup.js so the runtime relay/final
+// sanitizer AND the sub-agent passthrough share one guard. Re-exported here to keep
+// the existing public import surface (tests, callers) stable.
+export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections };
+
+/**
+ * Decide whether a turn's single delegation already produced a complete, presentable
+ * deliverable that can be surfaced AS-IS — so the main assistant does not run a second
+ * full synthesis pass over it (the biggest avoidable per-turn cost on the slow local
+ * model, and the source of coordinator↔assistant divergence; audit 5d51862f). Returns
+ * the clean deliverable text, or null when the normal synthesis path should run.
+ *
+ * Deliberately strict: exactly ONE successful delegation this turn, its tool result was
+ * tagged a long deliverable ("present … VERBATIM"), and the evidence is a real structured
+ * answer (headings/table/bullets) that is not a raw dump / provider error / scaffold.
+ */
+export function extractSingleRelayableDeliverable(
+  toolResultMessages: readonly { role: string; content?: string | null }[],
+  turnDelegationCount: number,
+): string | null {
+  if (turnDelegationCount !== 1) return null;
+  const delegateResults = toolResultMessages.filter(
+    (m) => m.role === "tool" && typeof m.content === "string" && DELEGATE_TOOL_RESULT_RE.test(String(m.content)),
+  );
+  if (delegateResults.length !== 1) return null;
+  const content = String(delegateResults[0]!.content ?? "");
+  if (!/TASK COMPLETED\b/i.test(content)) return null;
+  if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(content)) return null;
+  // Only the long-deliverable formatting carries this marker; short relays still synthesize.
+  if (!/Present the full content below VERBATIM/i.test(content)) return null;
+  const m = EVIDENCE_SECTION_RE.exec(content);
+  if (!m) return null;
+  const evidence = stripLeadingReasoningPreamble(content.slice(m.index + m[0].length).trim());
+  if (evidence.length < 800) return null;
+  // A degenerate, repetition-looped deliverable must NOT be relayed verbatim. Return
+  // null so the normal synthesis pass runs and cleans it into a usable answer — the
+  // behaviour that worked before this relay shortcut existed (audit 9fd16384: the slow
+  // model looped "Microphone Selection: …" 17× and the relay shipped it as-is).
+  if (looksLikeDegenerateRepetition(evidence)) return null;
+  if (REASONING_PREAMBLE_STARTERS.test(evidence)) return null; // couldn't clean the lead-in
+  if (
+    looksLikeRawToolEvidenceDump(evidence)
+    || looksLikeRawSharedFactsDump(evidence)
+    || looksLikeProviderErrorEcho(evidence)
+    || looksLikeRawWorkspaceToolDump(evidence)
+    || looksLikeOrchestrationOnlyEvidence(evidence)
+  ) return null;
+  const tableRows = (evidence.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
+  const headings = (evidence.match(/^#{1,6}\s/gm) ?? []).length;
+  const bullets = (evidence.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
+  if (tableRows < 4 && headings < 2 && bullets < 6) return null;
+  return evidence;
+}
+
 const EXPLICIT_SOURCE_RECHECK_RE = /\b(verify|verification|check|recheck|validate|validation|source|sources|citation|citations|cite|official|datasheet|spec(?:ification)?s?|price|prices|supplier|suppliers|mouser|digikey|lcsc|aliexpress|search|lookup|look\s+up|find\s+online|recherch|pruef|pruefe|pruefen|verifiz|validier|quelle|quellen|beleg|belege)\b/i;
 const CONTEXTUAL_DECISION_FOLLOW_UP_RE = /\b(ok|okay|thx|thanks|thank\s+you|danke|got\s+it|verstanden|we\s+will|we'll|wir\s+werden|wir\s+nutzen|wir\s+nehmen|i\s+will|ich\s+werde|ich\s+nehme|let'?s|lass\s+uns|use\s+them|using\s+them|go\s+with|nehmen\s+wir)\b/i;
 
@@ -2532,6 +2619,40 @@ const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "all_tool_calls_blocked",
   "max_tool_iterations",
 ]);
+
+/**
+ * ALLOWLIST of tools that actually ADVANCE a "must orchestrate before answering"
+ * turn — delegation launchers + the discovery tools that feed them. When the
+ * runtime forces a tool call to COMPEL orchestration (cost-center 1), the forced
+ * candidate set is restricted to THESE only.
+ *
+ * This is deliberately an allowlist, not a blocklist: tool_choice:"required" forces
+ * SOME tool, and the slow local model otherwise satisfies it with whatever cheap
+ * no-op tool is in scope and loops on it without ever delegating — first
+ * memory_store (audit be828e39: ×3 → max_tool_iterations → unsourced fabrication),
+ * then record_plan (audit, 5-mic probe: ×3 → "writing final from evidence" with
+ * zero research). A blocklist just moves the escape hatch to the next no-op tool;
+ * an allowlist closes them all, including any added later. Memory/self/plan/state
+ * tools (memory_*, recall_context, record_plan, get_swarm_state, …) are excluded
+ * by omission — they're still freely available on non-forced iterations.
+ */
+const FORCE_ORCHESTRATION_TOOLS = new Set([
+  "delegate_to_agent",
+  "parallel_delegate",
+  "swarm_delegate",
+  "run_workflow",
+  "run_task_graph",
+  "search_agents",
+  "search_workflows",
+  "list_agents",
+  "create_ephemeral_agent",
+]);
+
+/** Keep only orchestration/delegation tools so a forced tool call can ONLY be
+ * satisfied by an action that advances the turn. Exported for testing. */
+export function filterForcedOrchestrationTools<T extends { name: string }>(tools: readonly T[]): T[] {
+  return tools.filter((tool) => FORCE_ORCHESTRATION_TOOLS.has(tool.name));
+}
 
 function shouldBypassTerminalSynthesisWithEvidence(
   finishReason: string,
@@ -3916,10 +4037,37 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const activeTools = (searchAgentsNoMatchFallbackPrompt && !softRoutingEnforcement)
         ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
         : tools;
-      llmResponse = await collectStream(provider.stream(messages, activeTools, signal), chunkSink, {
-        deferTextUntilToolDecision: activeTools.length > 0,
-        onReasoning: opts.onReasoning,
-      });
+      // Cost-center 1 (audit 5d51862f): while the turn still MUST orchestrate and has NOT
+      // yet delegated, force a tool call so the slow local model can't burn ~2 min drafting
+      // a tool-free prose answer that the source-sensitive / required-research guardrail
+      // then rejects and re-runs. Gated on !delegatedResearchRetryUsed so it releases the
+      // moment the routing-nudge fallback path takes over (no dead-end), and on
+      // _turnDelegationCount===0 so the model can synthesize freely once a specialist ran.
+      const mustOrchestrateBeforeAnswering =
+        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation)
+        && !inWorkflowStep
+        && !delegatedResearchRetryUsed
+        && _turnDelegationCount === 0
+        && !workflowRunCompletedThisTurn
+        && ((_turnToolCallCounts.get("run_workflow") ?? 0) === 0);
+      const wantForceToolChoice = mustOrchestrateBeforeAnswering
+        && activeTools.length > 0
+        && (getConfig().orchestration?.forceToolChoiceWhenOrchestrationRequired ?? true);
+      // When forcing a tool call to compel orchestration, drop the always-available
+      // direct memory/self tools so tool_choice:"required" can only be satisfied by a
+      // real orchestration/delegation tool. Without this the slow model loops on
+      // memory_store and never delegates (audit be828e39).
+      const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools) : activeTools;
+      const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
+      const streamTools = forceToolChoice ? forcedTools : activeTools;
+      llmResponse = await collectStream(
+        provider.stream(messages, streamTools, signal, forceToolChoice ? { toolChoice: "required" } : undefined),
+        chunkSink,
+        {
+          deferTextUntilToolDecision: streamTools.length > 0,
+          onReasoning: opts.onReasoning,
+        },
+      );
       const llmDurationMs = Date.now() - llmStartedAt;
       llmTimeMs += llmDurationMs;
       if (firstModelResponseMs === undefined) {
@@ -5725,6 +5873,57 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
       if (disposition === "synthesize") {
         _consecutiveDelegationFailures = 0;
+        // Cost-center 2 (audit 5d51862f): if this turn's ONLY orchestration was a single
+        // delegation that returned a complete, presentable deliverable, surface it directly
+        // instead of paying for a SECOND full synthesis pass on the slow local model (which
+        // also caused coordinator↔assistant divergence). Strictly gated to the clean
+        // single-deliverable case; everything else still synthesizes below.
+        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true)
+          ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
+          : null;
+        if (relayDeliverable) {
+          const finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+          if (opts.onChunk) opts.onChunk(finalResponse);
+          const performance = buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: finalResponse.length,
+            finishReason: "single_deliverable_relayed",
+            blocked: false,
+            toolIterations: iterationCount,
+          });
+          logAudit("delegated_deliverable_relayed", {
+            chars: finalResponse.length,
+            toolIterations: iterationCount,
+            delegationCount: _turnDelegationCount,
+          }, { sessionId: session.id, channel: session.channel, severity: "info" });
+          logAudit("turn_performance", { ...performance, usage: totalUsage }, { sessionId: session.id, channel: session.channel });
+          logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, { sessionId: session.id, channel: session.channel });
+          logAudit("turn_scorecard", {
+            delegationCount: _turnDelegationCount,
+            shareFindingCount: _turnShareFindingCount,
+            forcedSynthesisFired: _forcedSynthesisFired,
+            wardenFailureCount: _consecutiveDelegationFailures,
+            finalAnswerLength: finalResponse.length,
+            toolIterations: iterationCount,
+            finishReason: "single_deliverable_relayed",
+          }, { sessionId: session.id, channel: session.channel });
+          return {
+            response: finalResponse,
+            toolCallsExecuted: iterationCount,
+            guardrailEvents,
+            usage: totalUsage,
+            blocked: false,
+            swarmState: getTurnSwarmState(),
+            performance,
+          };
+        }
         session.addMessage({
           role: "system",
           content:

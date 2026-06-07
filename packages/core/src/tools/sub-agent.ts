@@ -1801,6 +1801,36 @@ function recomputeTaskTotals(task: SwarmTaskState): void {
   };
 }
 
+// How many times the same already-gathered task may be served back from
+// cross-call signature reuse before the pipeline stops replaying the cache and
+// returns a hard "already gathered — author/synthesize now" stop. The first
+// reuse hands the evidence over; a second identical re-delegation is a loop
+// (audit 1fd36e04: a coordinator re-delegated the same research 3× after the
+// first, every one served the same cache while burning a slow-model generation,
+// and the prompt's own anti-loop rule did not stop it). A non-productive stop
+// counts toward the caller's bounded failure budget, so the loop is capped.
+const REUSE_SERVE_LIMIT = 1;
+
+function buildExhaustedReuseStop(task: SwarmTaskState, attemptedAgents: string[]): ToolResult {
+  // The guidance must live in BOTH fields: parallel_delegate surfaces only a failed
+  // slice's `error` to the coordinator, while the single-delegation path surfaces
+  // `output` — so put the actionable stop in each.
+  const message =
+    "[ALREADY GATHERED — do not re-delegate] This exact research was already completed and its findings were returned to you earlier in this run; re-delegating it yields no new evidence. STOP re-researching: call read_shared_facts to use the evidence you already have, then delegate the WRITING to an author (content_writer / paper_author) or synthesize the final answer now.";
+  return {
+    success: false,
+    output: message,
+    error: message,
+    metadata: {
+      agentName: task.selectedAgent,
+      taskId: task.id,
+      attemptedAgents,
+      reused: true,
+      reuseExhausted: true,
+    },
+  };
+}
+
 function buildTaskSignature(title: string, task: string, dependsOn: string[] = []): string {
   const normalizedTitle = summarizeText(title, 120).toLowerCase();
   const normalizedTask = summarizeText(task, 240).toLowerCase();
@@ -2953,6 +2983,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const reusableTaskAttemptedAgents = reusableTask?.attempts.map((attempt) => attempt.agentName) ?? [];
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
+    reusableTask.reuseServedCount = (reusableTask.reuseServedCount ?? 0) + 1;
+    if (reusableTask.reuseServedCount > REUSE_SERVE_LIMIT) {
+      return buildExhaustedReuseStop(reusableTask, reusableTaskAttemptedAgents);
+    }
     return {
       success: true,
       output: reusableTask.output,
@@ -2967,6 +3001,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   }
 
   if (reusableTask?.status === "partial" && reusableTask.output) {
+    reusableTask.reuseServedCount = (reusableTask.reuseServedCount ?? 0) + 1;
+    if (reusableTask.reuseServedCount > REUSE_SERVE_LIMIT) {
+      return buildExhaustedReuseStop(reusableTask, reusableTaskAttemptedAgents);
+    }
     return {
       success: true,
       output: reusableTask.output,
@@ -5287,18 +5325,19 @@ function delegationBodiesAreNearDuplicate(a: Set<string>, b: Set<string>): boole
 export function deduplicateRunnableDelegations<T extends { task: string; context?: string; agentName?: string; routingQuery?: string }>(
   tasks: T[],
 ): { kept: T[]; removed: number } {
+  // Pass 1 — per-lane near-duplicate collapse. Lane = the explicit agent (routingQuery is
+  // ignored once agentName is set), else the routingQuery that picks the specialist. Near-
+  // identical bodies in the SAME lane are the same agent doing the same work -> collapse.
+  // Identical bodies across DIFFERENT agents are preserved here: the source-sensitive cap
+  // deliberately fans the canonical task to a RESEARCHER POOL for cross-check coverage.
   const keptTokensByLane = new Map<string, Set<string>[]>();
-  const kept: T[] = [];
+  const laneKept: Array<{ spec: T; tokens: Set<string> | null }> = [];
   for (const taskSpec of tasks) {
     const body = normalizeDelegationBodyForDedup(taskSpec.task);
     if (body.length < 120) {
-      kept.push(taskSpec); // too short to confidently call redundant — keep
+      laneKept.push({ spec: taskSpec, tokens: null }); // too short to confidently call redundant — keep
       continue;
     }
-    // Lane = the explicit agent (routingQuery is ignored once agentName is set), else the
-    // routingQuery that picks the specialist for an undirected task. Near-identical bodies in
-    // the SAME lane resolve to the same agent doing the same work -> collapse; bodies across
-    // DIFFERENT agents are a legitimate capped decomposition and are kept.
     const lane = taskSpec.agentName && taskSpec.agentName.trim()
       ? `@${taskSpec.agentName.trim().toLowerCase()}`
       : `~${normalizeDelegationBodyForDedup(taskSpec.routingQuery ?? "")}`;
@@ -5309,8 +5348,23 @@ export function deduplicateRunnableDelegations<T extends { task: string; context
     }
     laneTokens.push(tokens);
     keptTokensByLane.set(lane, laneTokens);
-    kept.push(taskSpec);
+    laneKept.push({ spec: taskSpec, tokens });
   }
+  // Pass 2 — drop COORDINATOR slices whose body near-duplicates a NON-coordinator slice. A
+  // coordinator handed the identical canonical research task just re-spawns its own
+  // researchers, compounding the tree on a single GPU (audit e2071dce: a researcher + coder +
+  // mission_coordinator fan-out of one identical request → coordinators nested more
+  // researchers → ~10 min). The researcher pool already covers the work; the coordinator copy
+  // is pure redundant nesting. A group that is ALL coordinators is left untouched.
+  const nonCoordinatorTokens = laneKept
+    .filter((k) => k.tokens && !agentNameIsCoordinator(String(k.spec.agentName ?? "")))
+    .map((k) => k.tokens as Set<string>);
+  const kept = laneKept
+    .filter((k) => {
+      if (!k.tokens || !agentNameIsCoordinator(String(k.spec.agentName ?? ""))) return true;
+      return !nonCoordinatorTokens.some((nt) => delegationBodiesAreNearDuplicate(k.tokens as Set<string>, nt));
+    })
+    .map((k) => k.spec);
   return { kept, removed: tasks.length - kept.length };
 }
 

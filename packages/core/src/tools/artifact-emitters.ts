@@ -11,7 +11,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { childLogger } from "../logger.js";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, type ToolResult } from "./registry.js";
 import { resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:artifact-emitters");

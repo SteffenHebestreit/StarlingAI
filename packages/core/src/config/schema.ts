@@ -76,6 +76,15 @@ export const ModelConfigSchema = z.object({
    *  build a ModelConfig object inline (not via `.parse()`) MUST include
    *  `enableThinking` explicitly — the default only applies on schema parse. */
   enableThinking: z.boolean().default(false),
+  /** Reuse the provider's KV/prefix cache across calls (sends
+   *  `extra_body.cache_prompt: true`). The ~22KB base system prompt is the
+   *  stable first message on every call, so on llama.cpp / LM Studio this skips
+   *  re-prefilling it each iteration/turn — a large latency win on a slow local
+   *  GPU. OPT-IN (off when unset) because non-llama.cpp backends (some vLLM
+   *  builds) reject unknown `extra_body` keys; enable it only for a provider you
+   *  know supports prompt caching. Optional so inline ModelConfig literals
+   *  don't all have to set it. */
+  promptCache: z.boolean().optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as
@@ -1328,6 +1337,22 @@ export const OrchestrationSchema = z.object({
    *  on that path (the turn runs longer: research + build). Falls back to the honest
    *  research-gathered message if the build produces nothing. Default on. */
   autoBuildAfterResearch: z.boolean().default(true),
+  /** When true, while a turn still MUST orchestrate (source-sensitive / required-research
+   *  / required-artifact / workflow) and has NOT yet delegated, the runtime forces the
+   *  model to emit a tool call (tool_choice="required") instead of letting it spend minutes
+   *  drafting a tool-free prose answer that the guardrail then rejects and re-runs (audit
+   *  5d51862f: ~2 min wasted on a discarded draft before delegation). Released automatically
+   *  once a delegation/workflow has run so the model can synthesize, and only forces before
+   *  the routing-nudge fallback. Default on. */
+  forceToolChoiceWhenOrchestrationRequired: z.boolean().default(true),
+  /** When true, a turn whose ONLY orchestration was a single successful delegation that
+   *  returned a complete, presentable deliverable surfaces that deliverable directly instead
+   *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow
+   *  local model doubles turn latency and sometimes diverges from the specialist's conclusion
+   *  (audit 5d51862f: coordinator picked ESP32-C61, the re-synthesized answer shipped a
+   *  different MCU). Only fires for exactly one successful long-deliverable delegation whose
+   *  evidence is clean (not a raw dump); multi-delegation turns still synthesize. Default on. */
+  relaySingleDeliverable: z.boolean().default(true),
   /** When true, a message the user sends WHILE a turn is running is folded into
    *  that turn as steering at the next tool-loop iteration (instead of only being
    *  able to Stop). The runtime drains a per-turn queue before each model call and

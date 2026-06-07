@@ -20,7 +20,6 @@ import {
   computerSessionManager,
   type ComputerSession,
   type ComputerSessionAdapter,
-  type ComputerSessionId,
   type ComputerSessionSnapshot,
 } from "../agent/computer-session.js";
 import type { ComputerUseConfig } from "../config/computer-use-schema.js";

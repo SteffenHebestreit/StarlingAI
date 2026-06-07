@@ -20,6 +20,9 @@ import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeCo
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
+import { startEventLoopMonitor, stopEventLoopMonitor } from "./observability/event-loop-monitor.js";
+import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./observability/provider-activity-monitor.js";
+import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
 import { initSessionRedis } from "./agent/session.js";
@@ -237,6 +240,17 @@ export async function main() {
     log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
   }
 
+  // Start the event-loop lag monitor before the gateway accepts traffic so any
+  // main-thread stall (the real "gateway went unhealthy during a long local-model
+  // call" cause) is measured and audited from the first request.
+  startEventLoopMonitor();
+  // In-flight provider visibility: is the remote LLM producing tokens, still
+  // processing the prompt, or stalled? (The provider runs on a separate machine.)
+  startProviderActivityMonitor();
+  // Count which orchestration recovery nets actually fire (audit-stream subscriber)
+  // so dead scaffolding can be retired with evidence.
+  startRecoveryMetrics();
+
   // Start gateway (WS + REST)
   const gateway = createGateway();
   await gateway.start();
@@ -341,6 +355,9 @@ export async function main() {
   const shutdown = async (signal: string) => {
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
+    stopEventLoopMonitor();
+    stopProviderActivityMonitor();
+    stopRecoveryMetrics();
     stopWarden();
     try {
       const { stopSkillImprovementDriver } = await import("./skills/driver.js");

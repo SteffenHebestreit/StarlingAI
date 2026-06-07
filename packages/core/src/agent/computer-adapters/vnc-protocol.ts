@@ -17,8 +17,12 @@
 
 import { Socket } from "node:net";
 import { createCipheriv } from "node:crypto";
-import { deflateSync } from "node:zlib";
+import { deflate, deflateSync } from "node:zlib";
+import { promisify } from "node:util";
 import { Buffer } from "node:buffer";
+
+// Async deflate runs on the libuv threadpool (C++), off the JS main thread.
+const deflateAsync = promisify(deflate);
 import { EventEmitter } from "node:events";
 import { childLogger } from "../../logger.js";
 
@@ -109,10 +113,8 @@ function pngChunk(type: string, data: Buffer): Buffer {
  * Encode raw BGRA/RGBA pixel data to PNG using only node:zlib.
  * The VNC framebuffer uses the pixel format we negotiate (RGBA 32bpp).
  */
-export function encodeRgbaToPng(width: number, height: number, rgba: Buffer): Buffer {
-  const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-
-  // IHDR
+/** Build the PNG IHDR chunk header bytes. */
+function pngIhdr(width: number, height: number): Buffer {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
@@ -121,8 +123,11 @@ export function encodeRgbaToPng(width: number, height: number, rgba: Buffer): Bu
   ihdr[10] = 0; // compression: deflate
   ihdr[11] = 0; // filter: adaptive
   ihdr[12] = 0; // interlace: none
+  return ihdr;
+}
 
-  // IDAT — prepend filter byte 0 (None) to each scanline, then deflate
+/** Prepend filter byte 0 (None) to each scanline — the pre-compression IDAT bytes. */
+function pngRawScanlines(width: number, height: number, rgba: Buffer): Buffer {
   const rowBytes = width * 4;
   const rawData = Buffer.alloc(height * (1 + rowBytes));
   for (let y = 0; y < height; y++) {
@@ -130,17 +135,34 @@ export function encodeRgbaToPng(width: number, height: number, rgba: Buffer): Bu
     rawData[dstOffset] = 0; // filter: None
     rgba.copy(rawData, dstOffset + 1, y * rowBytes, (y + 1) * rowBytes);
   }
-  const compressed = deflateSync(rawData, { level: 1 }); // fast compression
+  return rawData;
+}
 
-  // IEND
-  const iend = Buffer.alloc(0);
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
+function assemblePng(width: number, height: number, compressedIdat: Buffer): Buffer {
   return Buffer.concat([
     PNG_SIGNATURE,
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", compressed),
-    pngChunk("IEND", iend),
+    pngChunk("IHDR", pngIhdr(width, height)),
+    pngChunk("IDAT", compressedIdat),
+    pngChunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+export function encodeRgbaToPng(width: number, height: number, rgba: Buffer): Buffer {
+  const compressed = deflateSync(pngRawScanlines(width, height, rgba), { level: 1 }); // fast compression
+  return assemblePng(width, height, compressed);
+}
+
+/**
+ * Async variant of {@link encodeRgbaToPng}: the dominant cost — deflate of a full
+ * framebuffer (a 1080p frame is ~8 MB) — runs on the libuv threadpool instead of
+ * blocking the gateway's JS event loop. Used by the per-screenshot capture path
+ * so repeated VNC screenshots during a computer-use session don't stall the loop.
+ */
+export async function encodeRgbaToPngAsync(width: number, height: number, rgba: Buffer): Promise<Buffer> {
+  const compressed = await deflateAsync(pngRawScanlines(width, height, rgba), { level: 1 });
+  return assemblePng(width, height, compressed);
 }
 
 // ── VNC DES Authentication ────────────────────────────────────────────────────
@@ -389,7 +411,7 @@ export class VncClient extends EventEmitter {
   /** Capture framebuffer and encode as PNG. Returns base64 data URL. */
   async captureScreenshot(): Promise<{ dataUrl: string; width: number; height: number }> {
     const fb = await this.captureFramebuffer();
-    const png = encodeRgbaToPng(fb.width, fb.height, fb.data);
+    const png = await encodeRgbaToPngAsync(fb.width, fb.height, fb.data);
     return {
       dataUrl: `data:image/png;base64,${png.toString("base64")}`,
       width: fb.width,

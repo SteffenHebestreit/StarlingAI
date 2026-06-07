@@ -39,11 +39,27 @@ jobs:
       - name: Typecheck
         run: pnpm check
 
+      # Lint gate (eslint flat config). Scoped to core + mail-service prod TS;
+      # errors are the bug classes (floating/misused promises, unused imports,
+      # empty blocks, constant conditions). Warnings (dead locals, escapes) are
+      # tracked but non-blocking for now.
+      - name: Lint
+        run: pnpm lint
+
       # pnpm -r test runs each package's vitest from ITS OWN directory. This
       # matters: the core tests resolve config relative to packages/core, so
       # running them from the repo root produces false path-resolution failures.
-      - name: Test
-        run: pnpm test
+      # Core is excluded here because it runs once under the Coverage step below
+      # (same tests, plus instrumentation + the threshold gate) — no double run.
+      - name: Test (non-core packages)
+        run: pnpm -r --filter '!@starlingai/core' test
+
+      # Coverage ratchet for core: runs the full core suite with v8 coverage and
+      # fails if any metric drops below the floors in packages/core/vitest.config.ts.
+      # Uses --filter so vitest runs from packages/core (correct config + path
+      # resolution), matching the local `test:coverage`.
+      - name: Coverage gate (core)
+        run: pnpm --filter @starlingai/core test:coverage
 
       # Production build (tsc -p tsconfig.build.json + vite build).
       - name: Build

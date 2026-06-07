@@ -15,7 +15,7 @@
 
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { archiveSession, getSession, createSession, resolveSession } from "../agent/session.js";
+import { archiveSession, createSession, resolveSession } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";

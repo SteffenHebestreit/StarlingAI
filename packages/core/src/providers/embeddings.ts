@@ -879,14 +879,14 @@ export function computeAgentTaskShapeAdjustment(query: string, cfg: SubAgentConf
 let _index: EmbeddingEntry[] = [];
 let _available = false;
 let _embeddingModel = "";
-let _queryCache = new Map<string, CachedEmbeddingQuery>();
+const _queryCache = new Map<string, CachedEmbeddingQuery>();
 // Raw query-vector cache (distinct from `_queryCache`, which holds post-search
 // `EmbeddingSearchResult[]`). Keyed by `${embeddingModel}::${normalized query}`.
 // Hit by tool rerank, trajectory cache, and memory service — all of which
 // previously fired an HTTP embedding call per invocation.
 type CachedQueryVector = { storedAt: number; vector: Float32Array };
-let _queryVectorCache = new Map<string, CachedQueryVector>();
-let _queryVectorInflight = new Map<string, Promise<Float32Array | null>>();
+const _queryVectorCache = new Map<string, CachedQueryVector>();
+const _queryVectorInflight = new Map<string, Promise<Float32Array | null>>();
 let _lastProvider: LMStudioProvider | null = null;
 let _lastSubAgents: Record<string, SubAgentConfig> = {};
 let _lastEmbeddingError: string | undefined;

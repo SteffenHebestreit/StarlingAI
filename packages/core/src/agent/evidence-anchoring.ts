@@ -37,6 +37,34 @@ function sourceSensitiveEvidenceTokens(evidence: string): string[] {
   return [...tokens].slice(0, 80);
 }
 
+/**
+ * Lighter sibling of looksEvidenceAnchored: true when the draft demonstrably
+ * USED the evidence (shares its distinctive vocabulary), WITHOUT the strict
+ * per-spec-token consistency check (condition 2).
+ *
+ * Used only for the source-sensitive RECOVERY synthesis — a second pass already
+ * constrained by prompt to "use ONLY this evidence; mark anything unsupported as
+ * unverified". There, condition 2 wrongly discards a correctly-hedged partial
+ * answer the moment it names a requested topic the (often thin/partial) evidence
+ * didn't cover, and the fallback is a raw tool-trace dump — strictly worse for the
+ * user (audit f7928f57: a usable German "verified / not-yet-verified / next step"
+ * synthesis was thrown away for the raw evidence list). The full
+ * looksEvidenceAnchored stays the guard for the model's own free draft, where the
+ * fabrication risk (e.g. flipping analog→I²S) actually lives.
+ */
+export function sharesEvidenceVocabulary(draft: string, evidence: string): boolean {
+  const normalizedDraft = draft.toLowerCase();
+  if (normalizedDraft.length < 120) return false;
+  const anchors = sourceSensitiveEvidenceTokens(evidence);
+  if (anchors.length === 0) return false;
+  let sharedHits = 0;
+  for (const anchor of anchors) {
+    if (normalizedDraft.includes(anchor)) sharedHits += 1;
+    if (sharedHits >= Math.min(3, anchors.length)) return true;
+  }
+  return false;
+}
+
 export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string): boolean {
   // Two-condition anchor, topic-neutral. The original bug shipped a draft
   // that named the right part but flipped a spec ("I²S-Digital" against

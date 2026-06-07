@@ -8,6 +8,7 @@ import {
   hasRecentSourceSensitivePartialDelegation,
 } from "../agent/runtime.js";
 import { writeSharedFact } from "../swarm/memory.js";
+import { looksEvidenceAnchored, sharesEvidenceVocabulary } from "../agent/evidence-anchoring.js";
 
 /**
  * Source-sensitive evidence backstop (May 2026 regression).
@@ -172,5 +173,32 @@ describe("evidence backstop — spec-token consistency", () => {
     // the anchor pass.
     const CONTRASTIVE = "The Infineon IM73A135V01 is an analog differential MEMS microphone with 73 dB(A) SNR. Because it is analog, not a PDM or I2S digital part, it requires an external ADC to interface with an ESP32-S3 — route the analog output through the ADC and sample it in firmware.";
     expect(answerNeedsEvidenceAnchoringRepair(CONTRASTIVE, HARDWARE_EVIDENCE)).toBe(false);
+  });
+});
+
+/**
+ * Recovery-synthesis gate (audit f7928f57): the source-sensitive recovery
+ * synthesis is prompt-constrained to evidence-only with explicit unverified
+ * marking. It must NOT be discarded (→ raw tool-dump fallback) just because it
+ * hedges a requested-but-unverified spec token. sharesEvidenceVocabulary is the
+ * lighter gate it uses; looksEvidenceAnchored stays strict for the model's own draft.
+ */
+describe("sharesEvidenceVocabulary — recovery-synthesis gate", () => {
+  const EVIDENCE = "Infineon IM73A135V01: analog differential MEMS microphone, IP57 dust/water resistant, requires an external ADC for the ESP32 (Source: https://www.alldatasheet.com/datasheet-pdf/view/1388108/INFINEON/IM73A135V01.html).";
+  // A correctly-hedged partial: verified facts from the evidence + clearly-flagged
+  // unverified parts that name tokens (bq25895, pcm1808) the thin evidence lacks.
+  const HEDGED_PARTIAL = "Verifiziert: Das IM73A135V01 ist ein analoges MEMS-Mikrofon mit IP57 und benoetigt einen externen ADC fuer den ESP32 (Quelle: alldatasheet.com). Noch nicht belegt: konkrete Lade-IC-Spezifikationen (z. B. bq25895) und das genaue pcm1808-Interface bleiben unverifiziert. Naechster Schritt: die offiziellen Datenblaetter pruefen.";
+
+  it("strict anchoring REJECTS the hedged partial (its unverified tokens aren't in evidence)", () => {
+    expect(looksEvidenceAnchored(HEDGED_PARTIAL, EVIDENCE)).toBe(false);
+  });
+
+  it("the lighter gate ACCEPTS it because it demonstrably used the evidence", () => {
+    expect(sharesEvidenceVocabulary(HEDGED_PARTIAL, EVIDENCE)).toBe(true);
+  });
+
+  it("still rejects a synthesis that shares nothing with the evidence", () => {
+    const UNRELATED = "Hier ist eine allgemeine Anleitung zum Backen eines Schokoladenkuchens mit Mehl, Zucker und Eiern, die ueberhaupt nichts mit dem gesammelten Beleg zu tun hat und keine einzige Quelle nennt.";
+    expect(sharesEvidenceVocabulary(UNRELATED, EVIDENCE)).toBe(false);
   });
 });

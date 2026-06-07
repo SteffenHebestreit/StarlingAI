@@ -42,6 +42,7 @@ import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripE
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
+import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
 // that register their own mocks before importing this module.
@@ -81,6 +82,21 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "browser_select_option",
   "site_fill_credentials",
 ]);
+
+// Fetch tools whose results are checked for productivity (cost-center 3): a 404,
+// block, rate-limit, error page, or non-extractable PDF yields no evidence.
+const FETCH_PRODUCTIVITY_TOOL_NAMES = new Set(["web_fetch", "url_inspect", "browser_navigate"]);
+const NON_PRODUCTIVE_FETCH_STREAK_LIMIT = 4;
+const NON_PRODUCTIVE_FETCH_RE = /could not be extracted|document-extraction service is unavailable|page not found|404 not found|\b403 forbidden\b|\b429\b|too many requests|access denied|rate.?limit|no content|empty (?:page|response)/i;
+
+/** True when a fetch result carried no usable content (cost-center 3, audit 5d51862f). */
+export function fetchResultIsNonProductive(success: boolean, content: string): boolean {
+  if (!success) return true;
+  const head = content.slice(0, 600);
+  if (NON_PRODUCTIVE_FETCH_RE.test(head)) return true;
+  // A "successful" fetch that returned almost nothing is also non-productive.
+  return content.trim().length < 80;
+}
 
 // Single-delegation passthrough — when a coordinator's only substantive tool
 // output is one delegation result of this size or larger, return it verbatim
@@ -193,6 +209,32 @@ function extractMostRecentSubstantialDelegationBody(
     const content = typeof msg.content === "string" ? msg.content : "";
     if (!content || content.length < minBytes) continue;
     if (!DELEGATE_TOOL_RESULT_PREFIX_RE.test(content)) continue;
+    return { content, bytes: content.length };
+  }
+  return null;
+}
+
+/** Lever #2 (audit 1fd36e04): the most-recent COMPLETE (TASK COMPLETED — not
+ * partial/failed) substantial delegation deliverable in `history`, or null.
+ * Unlike tryExtractSingleDelegationPassthrough this does NOT require the
+ * delegation to be the agent's ONLY substantial work: a coordinator that
+ * gathered research AND THEN delegated the write to an author should relay the
+ * author's finished deliverable at a terminal point instead of re-condensing it
+ * with a rushed/timed-out final synthesis (audit 1fd36e04: a 17 KB content_writer
+ * guide was re-written down to 9.7 KB at the coordinator's timeout). Restricted
+ * to complete successes so partial/failed delegations still take the normal
+ * partial-evidence path. */
+export function tryExtractLatestCompleteDeliverable(
+  history: readonly LLMMessage[],
+  minBytes: number = PASSTHROUGH_DELEGATION_MIN_BYTES,
+): { content: string; bytes: number } | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]!;
+    if (msg.role !== "tool") continue;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    if (!content || content.length < minBytes) continue;
+    if (!DELEGATE_TOOL_RESULT_PREFIX_RE.test(content)) continue;
+    if (/—\s*TASK FAILED|—\s*FAILED|—\s*PARTIAL PROGRESS|—\s*PARTIAL/i.test(content)) continue;
     return { content, bytes: content.length };
   }
   return null;
@@ -2458,6 +2500,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // E21: Source-diversity — detect when research plateaus on repeated domains
     const visitedSourceDomains = new Set<string>();
     let consecutiveStaleDomainFetches = 0;
+    // Cost-center 3 (audit 5d51862f): consecutive fetches that returned NO usable content
+    // (404 / blocked / non-extractable PDF / error page). These slip past the success-only
+    // stale-domain plateau, so the model keeps guessing alternate URLs for the same document
+    // until the soft deadline. Bound the streak and nudge it to stop / pivot.
+    let nonProductiveFetchStreak = 0;
+    let nonProductiveFetchNudged = false;
     // E18: Soft-deadline nudge — fire once when softDeadlineMs is reached
     let softDeadlineInjected = false;
     // E19 wave 2 follow-up: mid-turn graceful-degradation enforcement.
@@ -2609,14 +2657,36 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       reasonTag: string,
     ): SubAgentRunResult | null => {
       if (signal?.aborted) return null;
-      const candidate = tryExtractSingleDelegationPassthrough({
+      let candidate = tryExtractSingleDelegationPassthrough({
         history,
         bytesByTool,
         toolNames: [...toolNames],
       });
+      if (!candidate) {
+        // Lever #2: relay the most-recent COMPLETE author deliverable even when
+        // research delegations also ran, rather than condensing it with a rushed
+        // terminal synthesis (audit 1fd36e04). Bounded to these give-up points
+        // (timeout / soft-deadline / evidence-strip / max-iterations): it only
+        // fires when a finished deliverable is already in hand, so it can never
+        // discard live aggregation work.
+        const latest = tryExtractLatestCompleteDeliverable(history);
+        if (latest) {
+          candidate = {
+            output: latest.content,
+            delegationToolName: "delegate_to_agent",
+            bytes: latest.bytes,
+            inferredOutcome: "success",
+          };
+        }
+      }
       if (!candidate) return null;
 
-      const result = candidate.output;
+      // A passthrough/relayed deliverable can itself be a degenerate repetition loop
+      // from a child agent (audit 9fd16384). Collapse it here so the loop never
+      // propagates to the parent's synthesis input or to the user.
+      const result = looksLikeDegenerateRepetition(candidate.output)
+        ? collapseRepeatedMarkdownSections(candidate.output)
+        : candidate.output;
       const stats = buildStats("completed", candidate.inferredOutcome);
 
       recordOutcome({
@@ -4515,6 +4585,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
 
+        // Cost-center 3: track the dead-fetch streak (404 / blocked / non-extractable
+        // PDF / error page). Counts failed fetches too (success-only checks miss them);
+        // a productive fetch resets the streak.
+        if (FETCH_PRODUCTIVITY_TOOL_NAMES.has(tc.name)) {
+          if (fetchResultIsNonProductive(result.success, resultContent)) {
+            nonProductiveFetchStreak += 1;
+          } else {
+            nonProductiveFetchStreak = 0;
+          }
+        }
+
         // When web_search reports degraded/hard-blocked, remove it from the
         // tools array so the LLM cannot call it on subsequent iterations.
         if (tc.name === "web_search" && result.metadata?.searchDegraded && !result.success) {
@@ -4667,6 +4748,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           visitedSourceDomains.size + " unique domain(s) with no new source in the last " +
           consecutiveStaleDomainFetches + " fetches. " +
           "Source coverage has plateaued. Stop fetching — call share_finding with your best evidence and synthesize a final answer.";
+      }
+
+      // Cost-center 3: dead-fetch streak — many consecutive fetches returned no usable
+      // content. Stop guessing alternate URLs for the same document; cite what you have or
+      // pivot to one new search. Fires once per run.
+      if (nonProductiveFetchStreak >= NON_PRODUCTIVE_FETCH_STREAK_LIMIT && !nonProductiveFetchNudged && toolResults.length > 0) {
+        nonProductiveFetchNudged = true;
+        const lastTR = toolResults[toolResults.length - 1]!;
+        lastTR.content += "\n\n[FETCHES NOT LANDING] " + nonProductiveFetchStreak +
+          " consecutive fetches returned no usable content (404 / blocked / non-extractable PDF / error page). " +
+          "Do NOT keep guessing alternate URLs for the same document — cite the product or search-result page you already opened and synthesize from the evidence gathered so far, or run ONE different web_search for a new source.";
+        logAudit(
+          "sub_agent_synthesis_forced",
+          { agentName: opts.agentName, reason: "non_productive_fetch_plateau", nonProductiveFetches: nonProductiveFetchStreak, iterations },
+          { sessionId: subSessionId, severity: "info" },
+        );
       }
 
       // I13: In-loop sufficiency / cascade-failure guard. Runs after tool

@@ -60,7 +60,7 @@ registerTool({
     // Validate cron expression by attempting to parse it
     try {
       const { CronTime } = await import("cron");
-      // eslint-disable-next-line no-new
+       
       new CronTime(expression);
     } catch {
       return { success: false, output: "", error: `Invalid cron expression: ${expression}` };
