@@ -1,0 +1,152 @@
+{
+  // Content & media deliveries — decks, content pipelines, onboarding.
+  "jobs": {
+    "sourced_presentation": {
+      "description": "Build a source-backed presentation package (reveal.js HTML slide deck + per-slide detail notes + a written paper) where the facts are researched and cited AND the images are real, verified web images saved locally. Runs three specialists in a GUARANTEED fixed order so no step is skipped: a researcher gathers and cites the facts, an image specialist sources/verifies/saves the pictures, and a writer builds the deliverables. Use it for any 'create a researched/cited presentation with verified images' request. Example queries: 'erstelle eine belegte Präsentation über X mit echten Bildern und Quellen', 'build a sourced reveal.js deck on Y with verified images plus a details markdown and a paper', 'make a cited slide deck about Z with real photos and a write-up'.",
+      "params": {
+        "topic": { "description": "Subject of the presentation", "default": "(the topic named in the request)" },
+        "outputDir": { "description": "Workspace folder to build the deck + its images into (deck at <outputDir>/index.html, images at <outputDir>/images)", "default": "presentation" },
+        "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
+        "deliverables": { "description": "Which artifacts to produce", "default": "a reveal.js HTML presentation, a Markdown file of per-slide bullet details, and a ~1000-word paper that cites the verified sources" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      },
+      "steps": [
+        { "scene": "deck_research", "label": "Research and cite the facts", "params": { "topic": "{{topic}}", "language": "{{language}}" } },
+        { "scene": "deck_images", "label": "Source and verify the images", "params": { "topic": "{{topic}}", "outputDir": "{{outputDir}}" } },
+        { "scene": "deck_build", "label": "Build deck, slide notes, and paper", "params": { "topic": "{{topic}}", "outputDir": "{{outputDir}}", "slideCount": "{{slideCount}}", "deliverables": "{{deliverables}}", "language": "{{language}}" } }
+      ],
+      "catalogTriggers": {
+        "requiresActionVerb": true,
+        "patterns": [
+          {
+            "all": [
+              "\\b(?:pr(?:ä|ae|a)sentation(?:en)?|presentations?|slide[\\s-]?decks?|slides?|folien(?:satz)?|reveal\\.?js)\\b",
+              "\\b(?:bild(?:er|ern|material)?|fotos?|images?|pictures?|photos?)\\b",
+              "\\b(?:quelle|quellen|zitier\\w*|verifizier\\w*|recherch\\w*|referenz\\w*|source|sources|cite|cited|citation|verif\\w*|research)\\b"
+            ]
+          }
+        ]
+      }
+    },
+    "content_pipeline": {
+      "description": "Research a topic, produce audience-ready written content, and publish a summary notification to the configured channel. Example triggers: '/content launch announcement', 'Content-Pipeline für Blogartikel starten', 'produce a blog post about our new release', 'Content-Workflow: Recherche und Entwurf'.",
+      "params": {
+        "topic": {
+          "description": "Topic, angle, or key message for the content",
+          "default": ""
+        },
+        "contentType": {
+          "description": "blog-post, newsletter, product-copy, or documentation",
+          "default": "blog-post"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "general technical audience"
+        },
+        "channels": {
+          "description": "Channel to notify on completion",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "content_creation",
+          "label": "Research and draft content",
+          "params": {
+            "contentType": "{{contentType}}",
+            "topic": "{{topic}}",
+            "audience": "{{audience}}",
+            "tone": "professional and engaging",
+            "requiresResearch": "yes"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Notify on content completion",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_CONTENT_PIPELINE_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/content",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "contentType": "blog-post",
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "onboarding_delivery": {
+      "description": "Build an onboarding packet for a new team member or project and deliver it via the configured channel. Example triggers: '/onboard StarlingAI platform', 'Onboarding-Paket für neuen Entwickler erstellen', 'create an onboarding packet for the new PM', 'Einarbeitungsdokument mit Quick-Reference verteilen'.",
+      "params": {
+        "topic": {
+          "description": "What the person is being onboarded to",
+          "default": ""
+        },
+        "audience": {
+          "description": "Who is being onboarded and their background",
+          "default": "new team member with intermediate technical background"
+        },
+        "outputLanguage": {
+          "description": "Language for the final packet",
+          "default": "English"
+        },
+        "channels": {
+          "description": "Channel to deliver the packet link or summary to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "onboarding_packet",
+          "label": "Build structured onboarding document",
+          "params": {
+            "topic": "{{topic}}",
+            "audience": "{{audience}}",
+            "outputLanguage": "{{outputLanguage}}",
+            "outputFormat": "structured Markdown with sections and a quick-reference table"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Notify about new onboarding packet",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_ONBOARDING_DELIVERY_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/onboard",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    }
+  }
+}

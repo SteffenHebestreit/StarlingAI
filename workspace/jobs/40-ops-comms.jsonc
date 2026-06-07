@@ -1,0 +1,178 @@
+{
+  // Operations & comms — daily ops brief, release broadcast, incident postmortem.
+  "jobs": {
+    "daily_ops_brief": {
+      "description": "Prepare a verified research brief and then distribute it through the configured channels. Example triggers: 'send the daily ops brief', 'tägliches Ops-Briefing verteilen', '/ops-brief platform status', 'operations digest mit aktuellen Risiken'.",
+      "params": {
+        "topic": {
+          "description": "Topic or incident to summarize",
+          "default": "platform status and key risks"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "source_backed_paper",
+          "label": "Research and verify",
+          "params": {
+            "audience": "operations leadership",
+            "outputStyle": "concise brief",
+            "freshnessRequirement": "use only same-day or most recent official updates relevant to {{topic}}"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast summary",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DAILY_OPS_BRIEF_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/ops-brief",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|platform status}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    },
+    "release_broadcast": {
+      "description": "Generate release notes from git history for a specified version range and broadcast them to the configured channels. Example triggers: '/release v2.3', 'Release Notes für Version 2.3 verteilen', 'publish the release announcement', 'Versionshinweise broadcasten'.",
+      "params": {
+        "version": {
+          "description": "Release version label",
+          "default": "next"
+        },
+        "targetRef": {
+          "description": "Git ref range to generate notes from",
+          "default": "HEAD~20..HEAD"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "audience": {
+          "description": "Intended audience for the notes: internal, public, or technical",
+          "default": "internal team"
+        }
+      },
+      "steps": [
+        {
+          "scene": "release_notes_draft",
+          "label": "Draft release notes from git",
+          "params": {
+            "version": "{{version}}",
+            "targetRef": "{{targetRef}}",
+            "audience": "{{audience}}",
+            "broadcast": "no"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast release notes",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_RELEASE_BROADCAST_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/release",
+          "mode": "prefix",
+          "captureRemainderAs": "version",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for release {{version|next}} as {{jobId}}.",
+          "params": {
+            "channels": "slack",
+            "targetRef": "HEAD~20..HEAD"
+          }
+        }
+      ]
+    },
+    "incident_postmortem": {
+      "description": "Triage a live or recent incident, guide remediation, and produce a structured post-incident report that is broadcast to the ops channel. Example triggers: '/incident database outage at 14:00', 'Postmortem für den Ausfall erstellen', 'run incident response and generate postmortem', 'Vorfallsbericht mit Zeitleiste erzeugen'.",
+      "params": {
+        "incident": {
+          "description": "Description of the failure or alert",
+          "default": ""
+        },
+        "affectedService": {
+          "description": "Service or container showing the failure",
+          "default": "discover from logs"
+        },
+        "channels": {
+          "description": "Comma-separated channels to broadcast the postmortem to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "incident_response",
+          "label": "Triage, remediate, and capture findings",
+          "params": {
+            "incident": "{{incident}}",
+            "severity": "high",
+            "affectedService": "{{affectedService}}"
+          }
+        },
+        {
+          "scene": "source_backed_paper",
+          "label": "Draft post-incident report",
+          "params": {
+            "outputStyle": "post-incident report with timeline, root cause, remediation steps, and follow-up actions",
+            "audience": "engineering and operations team",
+            "freshnessRequirement": "use findings from the triage step; no additional web research needed"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast postmortem",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "formal"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_INCIDENT_POSTMORTEM_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/incident",
+          "mode": "prefix",
+          "captureRemainderAs": "incident",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for incident: {{incident|the reported issue}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    }
+  }
+}

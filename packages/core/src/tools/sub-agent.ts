@@ -5,11 +5,11 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, getAllTools, rerankToolsForTask, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, getAllTools, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
+import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -1416,6 +1416,14 @@ interface DelegationRequest {
   taskId?: string;
   taskTitle?: string;
   dependsOn?: string[];
+  /**
+   * Allow reuse of an EARLIER same-signature task's evidence even though this request carries
+   * a taskId. parallel_delegate auto-allocates a fresh `parallel_N` id per slice, so without
+   * this its slices never consult cross-call signature reuse and a coordinator re-running the
+   * same canonical research in a later round repeats the whole thing (audit d20a9a5e). Graph
+   * nodes (caller-pinned ids) leave this off so distinct nodes are never cross-matched.
+   */
+  allowSignatureReuse?: boolean;
 }
 
 interface TaskGraphNodeInput {
@@ -2005,7 +2013,7 @@ function looksLikeRawWorkspaceConfigDump(result: string): boolean {
   const text = result.trim();
   if (!text) return false;
   const compact = text.replace(/\s+/g, " ").slice(0, 12_000);
-  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+20-subagents-general\.jsonc/i.test(compact)) {
+  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+2\d-[a-z-]+\.jsonc/i.test(compact)) {
     return true;
   }
   if (/[{]\s*"(?:agents|subAgents)"\s*:\s*[{]/i.test(compact)
@@ -2015,7 +2023,7 @@ function looksLikeRawWorkspaceConfigDump(result: string): boolean {
   }
   return /####\s+Tool Calls/i.test(text)
     && /\b(?:read_file|list_files|search_agents|agent_catalog)\b/i.test(text)
-    && /\b(?:agents\/|10-core-agents\.jsonc|20-subagents-general\.jsonc|"subAgents"|"agents")\b/i.test(text);
+    && /\b(?:agents\/|10-core-agents\.jsonc|2\d-[a-z-]+\.jsonc|"subAgents"|"agents")\b/i.test(text);
 }
 
 function looksLikeReadOnlyMutationMiss(
@@ -2934,9 +2942,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const reusableTaskById = request.taskId
     ? ctx.swarmState?.tasks[request.taskId]
     : undefined;
+  // Cross-call signature reuse is normally skipped when a taskId is present (graph nodes are
+  // caller-pinned — never cross-match a distinct node to another's signature). parallel_delegate
+  // sets allowSignatureReuse because its `parallel_N` ids are auto-allocated, so a later round
+  // that re-issues the same canonical research reuses the earlier slice's evidence instead of
+  // re-running it (audit d20a9a5e: the coordinator researched the same request twice = ~2x turn).
   const reusableTask = reusableTaskById?.signature === signature
     ? reusableTaskById
-    : (request.taskId ? undefined : findReusableSwarmTask(ctx, signature));
+    : ((request.taskId && !request.allowSignatureReuse) ? undefined : findReusableSwarmTask(ctx, signature));
   const reusableTaskAttemptedAgents = reusableTask?.attempts.map((attempt) => attempt.agentName) ?? [];
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
@@ -3919,12 +3932,24 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // Tell the coordinator plainly so it stops re-delegating the same work.
   const allCandidatesCapped = taskState.attempts.length === 0
     && cappedCandidates.length > 0;
+  // A coordinator whose every routed candidate was ANOTHER coordinator (and so
+  // got coordinator→coordinator-blocked) with no leaf specialist ever attempted.
+  // Without an explicit diagnostic this falls to the generic "No suitable agent"
+  // message, which reads as a routing miss and makes the coordinator re-decompose
+  // and try again — the recursion-blocked re-delegation loop in audit 4db1f294
+  // (mission_coordinator kept re-firing parallel_delegate for ~5 min, every
+  // candidate blocked, the turn never synthesized). Tell it plainly to stop.
+  const allCandidatesCoordinatorBlocked = taskState.attempts.length === 0
+    && cappedCandidates.length === 0
+    && skippedCoordinatorCandidates.length > 0;
   const baseError = taskState.error ?? "No suitable agent completed the task.";
   let errorBody = baseError;
   if (allAttemptsTimedOut) {
     errorBody = `${baseError}\n\nTimeout cascade: every delegated attempt hit its per-agent turnTimeoutMs (${timeoutAttempts.length} attempt(s) on ${[...new Set(timeoutAttempts.map((a) => a.agentName))].join(", ")}). The model did not finish within the configured budget — this is a timeout, not a routing failure. Either raise turnTimeoutMs for these agents in starlingai.json, switch them to a faster model, or split the task into smaller pieces. Do NOT re-delegate the same work in this turn.`;
   } else if (allCandidatesCapped) {
     errorBody = `Per-agent delegation cap exhausted: every routed candidate (${cappedCandidates.join(", ")}) has already been delegated to its per-turn maximum (${DEFAULT_MAX_AGENT_CALLS_PER_TURN} call(s)) earlier in this turn. This is NOT a routing failure — the same agents already ran for this work. Stop re-delegating to them. Either accept what those earlier delegations returned (look back at the prior parallel_delegate / delegate_to_agent results in this conversation), or escalate the task back to the user with what you have.`;
+  } else if (allCandidatesCoordinatorBlocked) {
+    errorBody = `Coordinator hierarchy dead-end: you are a coordinator (${ctx.currentAgentName ?? "coordinator"}) and every routed candidate for this task is itself a coordinator (${skippedCoordinatorCandidates.join(", ")}), which is blocked so the hierarchy stays flat — no leaf specialist ran. This is NOT a routing failure and re-delegating will hit the same wall. Either delegate to a LEAF specialist by explicit agentName (e.g. researcher, content_writer, coder), or — preferred when findings already exist — STOP delegating and write your final answer from the shared facts gathered this turn (call read_shared_facts first). Do NOT re-delegate this task to another coordinator.`;
   }
 
   return {
@@ -3947,6 +3972,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           delegationOutcome: "per_agent_cap_exhausted",
           perAgentCapExhausted: true,
           cappedCandidates: [...cappedCandidates],
+        }
+        : {}),
+      ...(allCandidatesCoordinatorBlocked
+        ? {
+          delegationOutcome: "coordinator_hierarchy_dead_end",
+          coordinatorHierarchyDeadEnd: true,
+          blockedCoordinators: [...skippedCoordinatorCandidates],
         }
         : {}),
     },
@@ -5203,6 +5235,85 @@ registerTool({
 
 // ─── parallel_delegate ────────────────────────────────────────────────────────
 
+/**
+ * Normalize a delegation task body so two "slices" carrying the SAME underlying request
+ * compare equal. Drops the source-sensitive SLICE markers, the generic per-slice focus
+ * line, and the leading WEB-RESEARCH framing the source-sensitive rewrite prepends, then
+ * collapses whitespace/case. Used only for redundancy detection — the original task text
+ * is what actually runs.
+ */
+export function normalizeDelegationBodyForDedup(task: string): string {
+  return String(task ?? "")
+    .replace(/SOURCE-SENSITIVE DELEGATION[^\n:]*:/gi, "")
+    .replace(/\bSLICE\s+\d+\s*\/\s*\d+\b/gi, "")
+    .replace(/Focus for this slice[^\n]*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Collapse redundant parallel-delegate tasks: when the orchestrator fans out several tasks
+ * that share the SAME normalized body+context, running them concurrently is pure waste — on
+ * a single GPU it multiplies turn latency N× for one piece of work (audit 49372c7a: a turn
+ * fanned out 4 "slices" each carrying the full original request + an identical generic focus,
+ * differing only by a "SLICE n/4" marker and the routingQuery; all four redundantly
+ * researched everything and the turn took ~17 min). Keeps the FIRST occurrence of each
+ * distinct body+context and drops the rest. Only substantial bodies (>=120 normalized chars)
+ * are eligible so trivially-short micro-tasks are never merged. Genuine decomposition
+ * (distinct bodies) and intentional same-agent partitions with distinct text are untouched —
+ * parallel_delegate is for DISTINCT work, so identical bodies are a mis-expression, not a plan.
+ */
+/** Word-token set of a normalized body, for near-duplicate comparison. */
+function delegationBodyTokenSet(normalized: string): Set<string> {
+  return new Set(normalized.split(" ").filter((token) => token.length > 0));
+}
+
+/**
+ * Two normalized bodies are NEAR-duplicates when their containment overlap
+ * (|A ∩ B| / |smaller set|) is >= 0.9. Containment (not Jaccard) so a copy that merely
+ * dropped/added a word or two — the slow 35B paraphrases its own "identical" slices, e.g.
+ * "and we can make a sync button" vs "and and make a sync button" (audit d20a9a5e) — still
+ * collapses, while genuinely distinct sub-tasks (low overlap) are kept.
+ */
+function delegationBodiesAreNearDuplicate(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let intersection = 0;
+  for (const token of small) if (large.has(token)) intersection += 1;
+  return intersection / small.size >= 0.9;
+}
+
+export function deduplicateRunnableDelegations<T extends { task: string; context?: string; agentName?: string; routingQuery?: string }>(
+  tasks: T[],
+): { kept: T[]; removed: number } {
+  const keptTokensByLane = new Map<string, Set<string>[]>();
+  const kept: T[] = [];
+  for (const taskSpec of tasks) {
+    const body = normalizeDelegationBodyForDedup(taskSpec.task);
+    if (body.length < 120) {
+      kept.push(taskSpec); // too short to confidently call redundant — keep
+      continue;
+    }
+    // Lane = the explicit agent (routingQuery is ignored once agentName is set), else the
+    // routingQuery that picks the specialist for an undirected task. Near-identical bodies in
+    // the SAME lane resolve to the same agent doing the same work -> collapse; bodies across
+    // DIFFERENT agents are a legitimate capped decomposition and are kept.
+    const lane = taskSpec.agentName && taskSpec.agentName.trim()
+      ? `@${taskSpec.agentName.trim().toLowerCase()}`
+      : `~${normalizeDelegationBodyForDedup(taskSpec.routingQuery ?? "")}`;
+    const tokens = delegationBodyTokenSet(`${body} ${normalizeDelegationBodyForDedup(taskSpec.context ?? "")}`);
+    const laneTokens = keptTokensByLane.get(lane) ?? [];
+    if (laneTokens.some((keptTokens) => delegationBodiesAreNearDuplicate(tokens, keptTokens))) {
+      continue; // near-duplicate of an already-kept task in this lane
+    }
+    laneTokens.push(tokens);
+    keptTokensByLane.set(lane, laneTokens);
+    kept.push(taskSpec);
+  }
+  return { kept, removed: tasks.length - kept.length };
+}
+
 registerTool({
   name: "parallel_delegate",
   description: "Run multiple independent sub-agent tasks in parallel and collect all results. Use when the orchestrator needs outputs from 2–5 independent partitions. Repeating the same agent is allowed when each task is a distinct partition of the work. Returns all results concatenated with separators.",
@@ -5283,29 +5394,43 @@ registerTool({
       runnableTasks.push(taskSpec);
     }
 
+    // Collapse redundant duplicate-body slices before dispatch (audit 49372c7a). Running
+    // the SAME research task N× in parallel is pure waste and N×'s the turn on a single GPU.
+    const { kept: dispatchTasks, removed: duplicatesRemoved } = deduplicateRunnableDelegations(runnableTasks);
+    if (duplicatesRemoved > 0) {
+      logAudit(
+        "parallel_delegate_deduplicated",
+        { requested: runnableTasks.length, dispatched: dispatchTasks.length, removed: duplicatesRemoved },
+        { sessionId: ctx.sessionId, severity: "warn" },
+      );
+    }
+
     logAudit(
       "parallel_delegate_started",
-      { taskCount: tasks.length, agents: runnableTasks.map((taskSpec) => taskSpec.agentName ?? "auto") },
+      { taskCount: dispatchTasks.length, agents: dispatchTasks.map((taskSpec) => taskSpec.agentName ?? "auto") },
       { sessionId: ctx.sessionId }
     );
 
     const delegatedCtx = withDelegationFanoutAllowance(
       ctx,
-      runnableTasks.map((taskSpec) => taskSpec.agentName),
-      tasks.length,
+      dispatchTasks.map((taskSpec) => taskSpec.agentName),
+      dispatchTasks.length,
     );
-    const taskIds = allocateParallelTaskIds(delegatedCtx, runnableTasks.length);
+    const taskIds = allocateParallelTaskIds(delegatedCtx, dispatchTasks.length);
 
     const results = await Promise.all(
-      runnableTasks.map((taskSpec, index) => executeDelegationWithFallback({
+      dispatchTasks.map((taskSpec, index) => executeDelegationWithFallback({
         ...taskSpec,
         taskId: taskIds[index],
         taskTitle: summarizeText(taskSpec.task, 80),
+        // Auto-allocated parallel id — let a later round reuse an earlier same-signature
+        // slice's evidence instead of re-researching it.
+        allowSignatureReuse: true,
       }, delegatedCtx))
     );
 
     const formatted = results.map((result, index) => {
-      const label = tasks[index]?.agentName ?? `task_${index + 1}`;
+      const label = dispatchTasks[index]?.agentName ?? `task_${index + 1}`;
       if (result.success) return `**[${label}]**:\n${result.output}`;
       return `**[${label}]** (failed): ${result.error ?? "unknown error"}`;
     });
@@ -5315,7 +5440,12 @@ registerTool({
     return {
       success: succeeded > 0,
       output: formatted.join("\n\n---\n\n"),
-      metadata: { taskCount: tasks.length, succeeded, failed: tasks.length - succeeded },
+      metadata: {
+        taskCount: dispatchTasks.length,
+        succeeded,
+        failed: results.length - succeeded,
+        ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
+      },
     };
   },
 });

@@ -70,4 +70,19 @@ describe("distillFindingForSharedFacts", () => {
     expect(userMsg).toContain("find the SNR spec");
     expect(userMsg).toContain("73 dB(A)");
   });
+
+  it("instructs the model not to add its own notes/commentary (anti-editorializing)", async () => {
+    const complete = vi.fn(async () => ({ content: "- fact", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } }));
+    const provider = { complete } as unknown as ChatProvider;
+    await distillFindingForSharedFacts({
+      objective: "manufacturer of the part",
+      toolName: "web_search",
+      rawEvidence: "Infineon Technologies AG — IM73A135V01 XENSIV MEMS microphone.",
+      provider,
+    });
+    const firstCall = complete.mock.calls[0] as unknown as [LLMMessage[]];
+    const sysMsg = firstCall[0].find((m) => m.role === "system")?.content ?? "";
+    expect(sysMsg).toMatch(/Do NOT add your own notes, caveats, corrections/i);
+    expect(sysMsg).toMatch(/Copy each value exactly as the source states it/i);
+  });
 });

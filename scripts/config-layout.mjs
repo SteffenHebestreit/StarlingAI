@@ -12,6 +12,50 @@ const defaultTargetFile = join(repoRoot, "starlingai.json");
 // Legacy single-directory layout
 const legacySourceDir = join(repoRoot, "starling_config");
 
+// Role-based sharding for general sub-agents (separation of concerns). `build` globs every
+// shard so it is layout-agnostic; `split` uses this map to regenerate the role files. Any
+// sub-agent not listed here is written to 99-uncategorized.jsonc so a round-trip never drops one.
+const AGENT_ROLE_FILES = {
+  "21-orchestration.jsonc": ["mission_coordinator", "web_task_coordinator", "devops_coordinator", "project_planner", "agent_factory"],
+  "22-research-analysis.jsonc": ["researcher", "evidence_analyst", "data_analyst", "research_librarian", "document_intake", "log_analyst", "finance_analyst", "distance_specialist"],
+  "23-authoring-content.jsonc": ["content_writer", "paper_author", "meeting_briefing_agent", "summarizer", "translator", "diagram_designer", "chart_designer", "image_creator", "image_sourcer"],
+  "24-engineering.jsonc": ["coder", "code_analyst", "test_generator", "diff_reviewer", "integration_builder", "api_integrator", "git_developer", "sql_specialist"],
+  "25-infra-ops.jsonc": ["shell_agent", "infrastructure_agent", "ops_triage"],
+  "26-web-browser.jsonc": ["browser_agent", "vision_browser_analyst", "accessibility_tester", "computer_use_agent"],
+  "27-quality-review.jsonc": ["qa_guard", "quality_supervisor", "source_verifier", "policy_compliance_reviewer", "contract_analyst"],
+  "28-comms-productivity.jsonc": ["notification_agent", "mail_agent", "calendar_agent", "productivity_agent"],
+  "29-platform.jsonc": ["swarm_maintainer", "tool_developer", "prompt_optimizer", "agent_architect"],
+};
+
+// Scenes and jobs are sharded by category the same way. Anything not listed falls into
+// 90-uncategorized.jsonc so a split round-trip never drops a scene/job.
+const SCENE_CATEGORY_FILES = {
+  "10-research.jsonc": ["source_backed_paper", "verified_research_brief", "deep_research", "competitive_analysis", "security_audit"],
+  "20-content-media.jsonc": ["content_creation", "release_notes_draft", "onboarding_packet", "meeting_briefing_packet", "deck_research", "deck_images", "deck_build", "validate_image"],
+  "30-engineering-data.jsonc": ["code_review", "data_pipeline_review"],
+  "40-ops-comms.jsonc": ["incident_response", "multi_channel_broadcast", "apply_jobs"],
+};
+const JOB_CATEGORY_FILES = {
+  "10-research.jsonc": ["deep_research_packet", "source_grounded_paper_packet", "research_visual_digest", "competitive_snapshot", "morning_briefing", "weekly_security_digest"],
+  "20-content-media.jsonc": ["sourced_presentation", "content_pipeline", "onboarding_delivery"],
+  "30-engineering-data.jsonc": ["scheduled_code_review", "data_quality_report", "database_analysis"],
+  "40-ops-comms.jsonc": ["daily_ops_brief", "release_broadcast", "incident_postmortem"],
+};
+
+// Shard a flat {name: def} map into category files under `subdir`, with a `wrapper` top-level
+// key; unmapped entries → 90-uncategorized.jsonc. Mirrors how `build` reassembles every shard.
+function writeCategoryShards(subdir, wrapper, entries, categoryFiles) {
+  const mapped = new Set(Object.values(categoryFiles).flat());
+  for (const [file, names] of Object.entries(categoryFiles)) {
+    const bucket = {};
+    for (const name of names) if (name in entries) bucket[name] = entries[name];
+    writeShard(defaultWorkspaceDir, join(subdir, file), { [wrapper]: bucket });
+  }
+  const rest = {};
+  for (const [name, value] of Object.entries(entries)) if (!mapped.has(name)) rest[name] = value;
+  if (Object.keys(rest).length) writeShard(defaultWorkspaceDir, join(subdir, "90-uncategorized.jsonc"), { [wrapper]: rest });
+}
+
 const command = process.argv[2] ?? "build";
 
 if (command === "split") {
@@ -115,9 +159,21 @@ function splitTwoZone(sourceFile) {
   rmSync(defaultWorkspaceDir, { recursive: true, force: true });
 
   writeShard(defaultWorkspaceDir, join("agents", "10-core-agents.jsonc"), { agents: source.agents });
-  writeShard(defaultWorkspaceDir, join("agents", "20-subagents-general.jsonc"), { subAgents: generalSubAgents });
+  // General sub-agents → role-based shards (see AGENT_ROLE_FILES); unmapped → 99-uncategorized.
+  const mappedNames = new Set(Object.values(AGENT_ROLE_FILES).flat());
+  for (const [file, names] of Object.entries(AGENT_ROLE_FILES)) {
+    const bucket = {};
+    for (const name of names) if (name in generalSubAgents) bucket[name] = generalSubAgents[name];
+    writeShard(defaultWorkspaceDir, join("agents", file), { subAgents: bucket });
+  }
+  const uncategorized = {};
+  for (const [name, value] of Object.entries(generalSubAgents)) {
+    if (!mappedNames.has(name)) uncategorized[name] = value;
+  }
+  writeShard(defaultWorkspaceDir, join("agents", "99-uncategorized.jsonc"), { subAgents: uncategorized });
   writeShard(defaultWorkspaceDir, join("agents", "30-subagents-pentest.jsonc"), { subAgents: pentestSubAgents });
-  writeShard(defaultWorkspaceDir, join("scenes", "10-scenes.jsonc"), { scenes: source.scenes });
+  writeCategoryShards("scenes", "scenes", source.scenes ?? {}, SCENE_CATEGORY_FILES);
+  writeCategoryShards("jobs", "jobs", source.jobs ?? {}, JOB_CATEGORY_FILES);
 
   // Restore runtime.overrides.json or create empty runtime/ dir
   mkdirSync(join(defaultWorkspaceDir, "runtime"), { recursive: true });

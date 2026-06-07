@@ -27,7 +27,7 @@ setInterval(() => {
 
 // ── Redis client (lazy init) ─────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let _redis: any = null;
 let _redisConnected = false;
 
@@ -39,7 +39,7 @@ async function getRedis(): Promise<unknown | null> {
   if (!url) return null;
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const ioredis = await import("ioredis") as any;
     const IORedis = ioredis.default ?? ioredis;
     _redis = new IORedis(url, { lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false });

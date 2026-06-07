@@ -1,8 +1,9 @@
-$files = @(
-  'F:\StarlingAI\workspace\scenes\10-scenes.jsonc',
-  'F:\StarlingAI\workspace\jobs\10-jobs.jsonc',
-  'F:\StarlingAI\workspace\agents\20-subagents-general.jsonc'
-)
+# Agents, scenes, and jobs each live in category-based shards — glob them all rather than
+# hardcoding a monolith, so the validator stays correct as the layout evolves.
+$agentFiles = Get-ChildItem 'F:\StarlingAI\workspace\agents\*.jsonc' | ForEach-Object { $_.FullName } | Sort-Object
+$sceneFiles = Get-ChildItem 'F:\StarlingAI\workspace\scenes\*.jsonc' | ForEach-Object { $_.FullName } | Sort-Object
+$jobFiles   = Get-ChildItem 'F:\StarlingAI\workspace\jobs\*.jsonc'   | ForEach-Object { $_.FullName } | Sort-Object
+$files = $sceneFiles + $jobFiles + $agentFiles
 $ok = $true
 foreach ($f in $files) {
   $raw = Get-Content $f -Raw

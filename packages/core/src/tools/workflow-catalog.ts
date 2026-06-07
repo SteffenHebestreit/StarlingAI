@@ -4,7 +4,7 @@ import { archiveSession, createSession } from "../agent/session.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
-import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary, type ResolvedJobStep } from "../credentials/jobs.js";
+import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { registerTool, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";

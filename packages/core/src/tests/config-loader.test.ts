@@ -1,11 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSON5 from "json5";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+// Sub-agents are organized into role-based files under workspace/agents/ (orchestration,
+// research-analysis, authoring-content, engineering, …). These tests assert prompt/tool
+// CONTENT, not file layout, so merge every *.jsonc subAgents map rather than hardcoding a file.
+function loadWorkspaceSubAgents(): Record<string, { systemPrompt?: string; tools?: string[] }> {
+  const dir = resolve(process.cwd(), "../../workspace/agents");
+  const merged: Record<string, { systemPrompt?: string; tools?: string[] }> = {};
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".jsonc")) continue;
+    const raw = JSON5.parse(readFileSync(join(dir, file), "utf8")) as {
+      subAgents?: Record<string, { systemPrompt?: string; tools?: string[] }>;
+    };
+    Object.assign(merged, raw.subAgents ?? {});
+  }
+  return merged;
 }
 
 describe("config loader mutable overlay", () => {
@@ -372,14 +388,11 @@ describe("config loader mutable overlay", () => {
   });
 
   it("ships writer-style workspace agents that escalate missing evidence instead of drafting placeholders", () => {
-    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
-    const raw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string; tools?: string[] }>;
-    };
+    const subAgents = loadWorkspaceSubAgents();
 
-    const paperAuthor = raw.subAgents?.["paper_author"];
-    const summarizer = raw.subAgents?.["summarizer"];
-    const meetingBriefingAgent = raw.subAgents?.["meeting_briefing_agent"];
+    const paperAuthor = subAgents["paper_author"];
+    const summarizer = subAgents["summarizer"];
+    const meetingBriefingAgent = subAgents["meeting_briefing_agent"];
 
     expect(paperAuthor?.tools).toEqual(expect.arrayContaining(["search_agents", "delegate_to_agent"]));
     expect(summarizer?.tools).toEqual(expect.arrayContaining(["search_agents", "delegate_to_agent"]));
@@ -392,13 +405,10 @@ describe("config loader mutable overlay", () => {
   });
 
   it("ships coordinator and review prompts that treat missing artifact access as a review-input issue", () => {
-    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
-    const raw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string }>;
-    };
+    const subAgents = loadWorkspaceSubAgents();
 
-    const missionCoordinator = raw.subAgents?.["mission_coordinator"];
-    const qualitySupervisor = raw.subAgents?.["quality_supervisor"];
+    const missionCoordinator = subAgents["mission_coordinator"];
+    const qualitySupervisor = subAgents["quality_supervisor"];
 
     expect(missionCoordinator?.systemPrompt).toContain("If a draft, diagram, or other artifact already exists and the blocker is missing path or read access to that artifact");
     expect(qualitySupervisor?.systemPrompt).toContain("Use any artifact paths or filenames present in shared facts, partial results, or task context before guessing filenames");
@@ -407,17 +417,13 @@ describe("config loader mutable overlay", () => {
 
   it("ships anti-hallucination prompt rules for evidence-bearing delegations", () => {
     const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
-    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
 
     const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
       agents?: { mainAssistant?: { customInstructions?: string } };
     };
-    const workspaceRaw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string }>;
-    };
 
     const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
-    const webTaskCoordinator = workspaceRaw.subAgents?.["web_task_coordinator"];
+    const webTaskCoordinator = loadWorkspaceSubAgents()["web_task_coordinator"];
 
     expect(mainAssistantInstructions).toContain("Retrieved evidence overrides prior assumptions");
     expect(mainAssistantInstructions).toContain("Never state a source, manufacturer, URL, spec, or number that is not in the current evidence");
@@ -431,17 +437,13 @@ describe("config loader mutable overlay", () => {
 
   it("keeps main and desktop prompts access-method driven rather than app-script specific", () => {
     const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
-    const workspaceAgentsPath = resolve(process.cwd(), "../../workspace/agents/20-subagents-general.jsonc");
 
     const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
       agents?: { mainAssistant?: { customInstructions?: string } };
     };
-    const workspaceRaw = JSON5.parse(readFileSync(workspaceAgentsPath, "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string }>;
-    };
 
     const mainAssistantInstructions = coreRaw.agents?.mainAssistant?.customInstructions ?? "";
-    const computerUseAgent = workspaceRaw.subAgents?.["computer_use_agent"];
+    const computerUseAgent = loadWorkspaceSubAgents()["computer_use_agent"];
     const computerUsePrompt = computerUseAgent?.systemPrompt ?? "";
 
     expect(mainAssistantInstructions).toContain("networked-service API on a known host");

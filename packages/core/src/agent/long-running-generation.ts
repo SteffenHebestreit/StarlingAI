@@ -252,6 +252,89 @@ class LongRunningGenerationManager extends EventEmitter {
   }
 
   /**
+   * Non-blocking counterpart to {@link requestContinuation}. Surfaces a
+   * long-running run to the operator dock — so the operator CAN stop it or
+   * grant unbounded budget — and returns immediately instead of awaiting a
+   * decision.
+   *
+   * Why this exists: awaiting the operator inline paused the sub-agent for
+   * up to `waitTimeoutMs` while it kept holding BOTH its per-agent and the
+   * shared global concurrency slot (swarm/concurrency.ts). A paused agent
+   * therefore stalled every sibling and parent in the swarm, and on
+   * no-response the default `stop` truncated productive work. On a
+   * single-GPU local model essentially every substantial run crosses the
+   * soft threshold, so the pause fired constantly and one slow agent
+   * repeatedly brought the whole turn to a halt — the opposite of the
+   * handoff's intent. The dock entry is now advisory: it lives for the life
+   * of the run (the run ends it via {@link stop} in its `finally`), and the
+   * sub-agent loop polls {@link isStopRequested} / {@link isUnbounded} to
+   * honour an operator decision asynchronously.
+   *
+   * Idempotent per run: a no-op when the run is already unbounded, the turn
+   * has already been stopped, or a request for this run is already pending.
+   *
+   * @returns whether THIS call surfaced a new dock entry.
+   */
+  notifyLongRunning(opts: {
+    agentName: string;
+    runSessionId: string;
+    parentSessionId?: string;
+    reason: string;
+    elapsedMs: number;
+    completionTokens: number;
+    iterations: number;
+  }): { surfaced: boolean } {
+    if (this._unboundedRuns.has(opts.runSessionId)) return { surfaced: false };
+    if (this._stopRequestedRoots.has(rootOf(opts.runSessionId))) return { surfaced: false };
+    const existing = [...this._requests.values()].find(
+      (r) => r.state === "pending" && r.runSessionId === opts.runSessionId,
+    );
+    if (existing) return { surfaced: false };
+
+    const now = Date.now();
+    const request: LongRunningRequest = {
+      id: randomUUID(),
+      agentName: opts.agentName,
+      runSessionId: opts.runSessionId,
+      ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+      reason: opts.reason,
+      state: "pending",
+      elapsedMs: opts.elapsedMs,
+      completionTokens: opts.completionTokens,
+      iterations: opts.iterations,
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Surfaced to _requests only — NOT _pending. There is no awaiter and no
+    // timer; resolveRequest()/stop()/listPending() all guard on the absence
+    // of a _pending entry, and the run's own finally calls stop() to clear
+    // this advisory entry when it ends.
+    this._requests.set(request.id, request);
+
+    logAudit("long_running_generation_requested", {
+      requestId: request.id,
+      agentName: request.agentName,
+      runSessionId: request.runSessionId,
+      reason: request.reason,
+      elapsedMs: request.elapsedMs,
+      completionTokens: request.completionTokens,
+      iterations: request.iterations,
+      // Marks this as the advisory (non-pausing) surfacing so the dashboard
+      // and audit readers can tell it apart from the legacy blocking prompt.
+      blocking: false,
+    }, { sessionId: request.parentSessionId, severity: "warn" });
+    log.warn({
+      requestId: request.id,
+      agentName: opts.agentName,
+      runSessionId: opts.runSessionId,
+      elapsedMs: opts.elapsedMs,
+      completionTokens: opts.completionTokens,
+    }, "Long-running generation surfaced to operator dock (non-blocking)");
+    this.emit("lrg:requested", request);
+    return { surfaced: true };
+  }
+
+  /**
    * Operator picked an action in the dashboard. Returns the request that
    * was resolved so the caller can audit it, or null when the id is stale.
    */

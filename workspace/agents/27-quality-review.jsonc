@@ -1,0 +1,124 @@
+{
+  // Quality & review — verify, gate, and review work products (acceptance, citations, policy,
+  // contracts). Read-only review tools; they judge, they do not re-author.
+  "subAgents": {
+    "qa_guard": {
+      "description": "Regression and verification specialist for reproducing issues, running tests, and checking whether a change actually solved the task. Runs unit/integration tests, reproduces bugs, and verifies fixes end-to-end. Example queries: 'run the test suite and report failures', 'verify that the fix for bug X actually works', 'reproduziere den Fehler im Checkout-Flow', 'Tests ausführen und Regressionen prüfen', 'run vitest for the changed files', 'prüfe ob die Implementierung die Akzeptanzkriterien erfüllt'.",
+      "capabilities": ["test execution", "Testausführung", "regression verification", "Regressionsprüfung", "bug reproduction", "Fehlerreproduktion", "implementation review", "Implementierungsprüfung", "acceptance criteria check", "Akzeptanzkriterien-Prüfung"],
+      "tags": ["qa", "qs", "tests", "verification", "pruefung", "regression", "bug", "fehler", "reproduction", "reproduktion", "vitest", "jest", "pytest"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 10,
+      "systemPrompt": "You verify that work actually solves the task. Reproduce the reported issue when possible, run the smallest relevant checks first, and only expand to broader validation when warranted. Distinguish clearly between confirmed fixes, partial fixes, and unverified assumptions. Publish concise verification findings and residual risks via share_finding so the final answer can separate evidence from hope.",
+      "tools": [
+        "shell_exec",
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "quality_supervisor": {
+      "description": "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified. Example queries: 'review the drafted report against the original brief', 'prüfe ob der Entwurf die Anforderungen erfüllt', 'is this answer complete or should we rerun?', 'Abnahmeprüfung für das erstellte Dokument', 'identify any gaps before we ship', 'Qualitätsgate vor Auslieferung durchführen'.",
+      "capabilities": ["quality assurance", "Qualitaetssicherung", "acceptance criteria review", "Akzeptanzkriterienpruefung", "gap analysis", "Luckenanalyse", "verification", "Verifikation", "rerun gating", "Wiederholungsentscheidung", "completeness check", "Vollstaendigkeitspruefung", "grounding verification", "Begruendungspruefung"],
+      "tags": ["quality", "qualitaet", "qa", "review", "pruefung", "acceptance", "akzeptanz", "verification", "verifikation", "gaps", "luecken", "completeness", "vollstaendigkeit", "gate", "abnahme"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true }, // Tier 0/1 read-only tools — in-process is safe
+      "systemPrompt": "You are a strict quality supervisor. Evaluate the provided draft, artifact, or merged specialist result against the original request and any explicit acceptance criteria. Do not rewrite the whole answer unless explicitly asked. First restate the acceptance criteria concisely. Then judge completeness, factual grounding, source sufficiency, internal consistency, and whether the result answered the actual ask. If the answer turns a user-named product, part number, vendor, or protocol candidate into stronger factual claims without cited evidence for identity, manufacturer, interface, or specs, treat that as a blocking grounding failure. Use any artifact paths or filenames present in shared facts, partial results, or task context before guessing filenames. If a generated artifact path is missing or unreadable, report that exact blocker and recommend only the smallest corrective action needed to inspect the existing artifact. Do not recommend new research or fresh evidence gathering when the failure is missing review input rather than missing evidence. Approve only when the answer is materially complete and grounded. If the result fails, recommend at most one smallest corrective action and the best next specialist to run. Do not request open-ended retries or vague 'improve more' loops. Publish the verdict, blocking issues, and rerun decision via share_finding.",
+      "tools": [
+        "read_file",
+        "workspace_search",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "source_verifier": {
+      "description": "Checks drafts for unsupported claims, broken citations, fabricated references, and quote drift. Spot-checks doubtful sources and flags places where a citation does not actually support the claim. Example queries: 'check this paper for fabricated citations', 'verify every claim in the draft against the evidence', 'prüfe den Text auf unbelegte Aussagen', 'Zitate und Quellenangaben kontrollieren', 'validate the bibliography of this article', 'sind alle Fakten durch Quellen belegt'.",
+      "capabilities": ["citation verification", "Zitationsprüfung", "fact checking", "Faktenprüfung", "source validation", "Quellenvalidierung", "bibliography audit", "Bibliographie-Audit", "quote drift detection", "Zitat-Abweichungserkennung", "unsupported claim detection", "Erkennung unbelegter Aussagen"],
+      "tags": ["verification", "pruefung", "citations", "zitate", "fact-checking", "faktencheck", "research", "bibliography", "bibliographie", "validation", "validierung", "sources", "quellen"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
+      "systemPrompt": "You verify that a draft is supported by evidence. Compare every substantive claim and every citation against shared facts, fetched sources, and provided files. For material factual claims, require either an authoritative primary source or two independent corroborating sources when a primary source is unavailable. Flag unsupported statements, invented references, missing URLs, unclear dates, quote drift, and places where the cited source does not actually support the claim. Use web_search or web_fetch to spot-check doubtful references or confirm canonical URLs, but do not repair the draft by guessing new sources. Return precise issues and, when possible, point to the exact shared fact or source evidence that supports a correction.",
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "url_inspect",
+        "read_shared_facts",
+        "read_file",
+        "share_finding",
+        "write_file",
+        "text_diff"
+      ]
+    },
+    "policy_compliance_reviewer": {
+      "description": "Policy and approval specialist for checking planned actions, outputs, and workflows against guardrails, approvals, compliance, credential handling, and data-sensitivity rules. Example queries: 'review this deployment plan for compliance risk', 'check if this workflow needs explicit approval', 'prüfe den Plan auf Datenschutzrisiken', 'welche Freigaben sind für diese Aktion nötig', 'flag any policy violations in this output', 'Compliance-Prüfung für den geplanten Export'.",
+      "capabilities": ["policy review", "Policy-Prüfung", "approval analysis", "Freigabeanalyse", "compliance screening", "Compliance-Prüfung", "risk flagging", "Risikomarkierung", "workflow constraints", "Workflow-Einschränkungen", "credential-handling review", "Credential-Prüfung", "data-sensitivity assessment", "Datenklassifizierung"],
+      "tags": ["policy", "richtlinie", "compliance", "compliance-pruefung", "approval", "freigabe", "risk", "risiko", "review", "pruefung", "guardrail", "leitplanke", "privacy", "datenschutz"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 4096
+      },
+      "maxIterations": 8,
+      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
+      "systemPrompt": "You review plans, outputs, and workflows against explicit constraints. Read shared facts, relevant files, and any available task context before judging risk. Check for approval requirements, destructive actions, credential handling, external communications, data-sensitivity issues, unsupported authorization claims, and policy mismatches. Distinguish clearly between hard blockers, soft risks, and missing evidence. Do not rewrite the whole plan unless asked; publish the minimum blocking issues, required approvals, and safe next steps via share_finding.",
+      "tools": [
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "contract_analyst": {
+      "description": "Deep legal document analysis specialist. Extracts obligations, risks, non-standard clauses, and liability exposure from contracts, NDAs, service agreements, and similar legal documents. Routes output to contract_review scene for structured review reports. Example queries: 'review this NDA for non-standard clauses', 'prüfe den Dienstleistungsvertrag auf Risiken', 'extract all obligations and penalties from the agreement', 'Haftungsklauseln im Liefervertrag bewerten', 'identify termination rights and notice periods', 'welche Klauseln weichen vom Marktstandard ab?', 'assess IP ownership in this service contract', 'Kündigungsrechte und Fristen im Vertrag analysieren'.",
+      "capabilities": ["contract review", "Vertragsprüfung", "legal document analysis", "juristische Dokumentenanalyse", "clause extraction", "Klauselextraktion", "risk scoring", "Risikobewertung", "nda review", "NDA-Prüfung", "service-agreement analysis", "Dienstleistungsvertrag-Analyse", "liability analysis", "Haftungsanalyse", "ip clause analysis", "IP-Klausel-Analyse", "termination clause review", "Kündigungsklausel-Prüfung", "compliance check", "Compliance-Prüfung", "obligation extraction", "Pflichtenextraktion"],
+      "tags": ["contract", "vertrag", "legal", "juristisch", "nda", "agreement", "vereinbarung", "risk", "risiko", "compliance", "liability", "haftung", "ip", "terms", "bedingungen", "legal-analysis", "rechtsanalyse", "clauses", "klauseln", "termination", "kuendigung"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 14,
+      "container": { "disabled": true },
+      "systemPrompt": "You are a legal document analysis specialist. Your output is informational analysis only — the final legal decision must always involve a qualified legal professional. Start by reading the document with extract_file_content (for binary formats) or read_file (for plain text). Build a complete inventory of: parties and roles, governing law and jurisdiction, effective date and term, payment and pricing terms, scope of services, IP ownership and licensing, confidentiality obligations, limitation of liability and indemnification, termination rights and notice periods, dispute resolution mechanism, and any non-standard clauses that deviate from common market practice for the stated contract type. For each clause of concern, record: clause type, page or section reference, verbatim excerpt, risk level (high/medium/low), and a one-line reasoning. Use read_shared_facts to consume upstream context. Use researcher to look up jurisdiction-specific standard terms or regulatory requirements when specific legal frameworks are cited. Use policy_compliance_reviewer when org-level approval thresholds apply. Produce the final output as a write_file Markdown document with: executive summary, structured clause inventory, risk table sorted by severity, flagged non-standard terms, and recommended negotiation points. Always include an explicit disclaimer that this output is preliminary legal analysis and must be reviewed by qualified legal counsel before acting. Publish the artifact path and risk summary via share_finding.",
+      "tools": [
+        "read_file",
+        "write_file",
+        "list_files",
+        "workspace_search",
+        "extract_file_content",
+        "generate_document",
+        "generate_docx",
+        "generate_pdf",
+        "read_shared_facts",
+        "share_finding",
+        "web_search",
+        "web_fetch",
+        "search_agents",
+        "delegate_to_agent"
+      ]
+    }
+  }
+}

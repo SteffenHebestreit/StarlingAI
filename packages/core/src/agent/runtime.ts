@@ -47,6 +47,7 @@ import {
   looksMultiDomainResearch,
 } from "./intent-classifier.js";
 import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
+import { looksEvidenceAnchored } from "./evidence-anchoring.js";
 
 const log = childLogger("agent:runtime");
 
@@ -307,7 +308,7 @@ export async function getSharedFactsEvidenceForFinalSynthesis(
  *
  * Either shape is debug-shaped output unsuitable for the user.
  */
-function looksLikeRawSharedFactsDump(evidence: string): boolean {
+export function looksLikeRawSharedFactsDump(evidence: string): boolean {
   const trimmed = evidence.trim();
   if (!trimmed) return false;
   if (/^[ \t]*-\s+auto_[a-z0-9_]+:\s*/im.test(trimmed)) return true;
@@ -322,11 +323,11 @@ function looksLikeRawSharedFactsDump(evidence: string): boolean {
   return false;
 }
 
-function looksLikeRawWorkspaceToolDump(evidence: string): boolean {
+export function looksLikeRawWorkspaceToolDump(evidence: string): boolean {
   const trimmed = evidence.trim();
   if (!trimmed) return false;
   const compact = trimmed.replace(/\s+/g, " ").slice(0, 12_000);
-  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+20-subagents-general\.jsonc/i.test(compact)) {
+  if (/\.starlingai\/\s+agent_outcomes\.ndjson\s+README\.md\s+agents\/\s+10-core-agents\.jsonc\s+2\d-[a-z-]+\.jsonc/i.test(compact)) {
     return true;
   }
   if (/[{]\s*"(?:agents|subAgents)"\s*:\s*[{]/i.test(compact)
@@ -336,7 +337,7 @@ function looksLikeRawWorkspaceToolDump(evidence: string): boolean {
   }
   return /####\s+Tool Calls/i.test(trimmed)
     && /\b(?:read_file|list_files|search_agents|agent_catalog)\b/i.test(trimmed)
-    && /\b(?:agents\/|10-core-agents\.jsonc|20-subagents-general\.jsonc|"subAgents"|"agents")\b/i.test(trimmed);
+    && /\b(?:agents\/|10-core-agents\.jsonc|2\d-[a-z-]+\.jsonc|"subAgents"|"agents")\b/i.test(trimmed);
 }
 
 function formatRawWorkspaceToolDumpFailure(): string {
@@ -451,6 +452,17 @@ export function looksLikeRawToolEvidenceDump(value: string): boolean {
   if (/^[\s>*#`_-]{0,8}(?:Web Search Results for:|Content from:\s*https?:\/\/|Recovered evidence snippets|Partial progress before interruption)/i.test(v)) {
     return true;
   }
+  // A user-facing answer that LEADS with an agent-label echo ("[researcher]:",
+  // "**[mission_coordinator]**:", often doubled "[researcher]:\n[researcher]:") is a
+  // verbatim regurgitation of a delegate / parallel_delegate evidence block, never a
+  // synthesized answer (audit 49372c7a: a hardware-BOM turn shipped "[researcher]:\n
+  // [researcher]: Based on the curated findings …" truncated mid-source). The bracketed
+  // token is a lowercase agent identifier; a real synthesis never opens this way, and a
+  // markdown link is "[text](url)" / a reference def starts with a non-letter or never
+  // leads a final answer. Structural + agent-agnostic.
+  if (/^[\s>*#`_-]{0,8}\[[a-z][a-z0-9_]{2,}\]\*{0,2}:/i.test(v)) {
+    return true;
+  }
   let hits = 0;
   if (/(?:^|\n|\s)Content from:\s*https?:\/\//i.test(v)) hits += 1;
   if (/Web Search Results for:/i.test(v)) hits += 1;
@@ -542,12 +554,22 @@ export function looksLikeInlinedArtifactFabrication(value: string): boolean {
   return false;
 }
 
-function buildResearchGatheredFallback(curatedEvidence: string | null): string {
-  const head = [
-    "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
-    + "Die Inhalte wurden jedoch recherchiert und mit Quellen belegt — bestätige bitte, dann lasse ich die Datei vom zuständigen Spezialisten erstellen.",
-    "I couldn't finish the requested artifact (e.g. the HTML file) this turn, but the content was researched and sourced — confirm and I'll have the content specialist build the file.",
-  ].join("\n\n");
+function buildResearchGatheredFallback(curatedEvidence: string | null, isArtifactRequest = true): string {
+  // The preamble must match what the user actually asked for. An artifact-creation turn
+  // that couldn't finish the file gets the "build pending" framing; a plain research /
+  // advice request never asked for a file, so apologizing about an unbuilt "HTML file" is
+  // wrong and confusing (audit 49372c7a: a hardware-BOM Q&A is not an artifact build).
+  // There the curated, sourced facts ARE the deliverable — present them as the answer.
+  const head = isArtifactRequest
+    ? [
+        "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
+        + "Die Inhalte wurden jedoch recherchiert und mit Quellen belegt — bestätige bitte, dann lasse ich die Datei vom zuständigen Spezialisten erstellen.",
+        "I couldn't finish the requested artifact (e.g. the HTML file) this turn, but the content was researched and sourced — confirm and I'll have the content specialist build the file.",
+      ].join("\n\n")
+    : [
+        "Hier sind die recherchierten, mit Quellen belegten Fakten zu deiner Anfrage.",
+        "Here are the researched, sourced facts for your request.",
+      ].join("\n\n");
   const curated = curatedEvidence?.trim();
   if (curated) {
     return `${head}\n\n## Recherchierte Fakten & Quellen / Researched facts & sources\n\n${formatSharedFactsRecoveryForUserDisplay(curated)}`;
@@ -588,41 +610,10 @@ export function formatSourceSensitiveEvidenceBackstop(evidence: string): string 
   ].join("\n\n");
 }
 
-function sourceSensitiveEvidenceTokens(evidence: string): string[] {
-  const stopwords = new Set([
-    "about", "after", "agent", "available", "before", "completed", "content", "current", "evidence", "fetch", "finding", "from", "generic", "matched", "observed", "official", "output", "partial", "progress", "research", "result", "source", "state", "strongly", "task", "title", "tools", "url", "with",
-    "alle", "aus", "bisher", "bleiben", "diesem", "diese", "evidenz", "lauf", "quelle", "quellen", "recherche", "unvollstaendig", "unverifiziert", "wurde",
-  ]);
-  const tokens = new Set<string>();
-  for (const match of evidence.matchAll(/[A-Za-z0-9][A-Za-z0-9._/-]{3,}/g)) {
-    const token = match[0]!.toLowerCase();
-    if (stopwords.has(token)) continue;
-    if (/^https?:\/\//i.test(token)) {
-      try {
-        tokens.add(new URL(match[0]!).hostname.replace(/^www\./i, "").toLowerCase());
-      } catch {
-        tokens.add(token.slice(0, 80));
-      }
-      continue;
-    }
-    if (/^[a-z]{1,2}\d+$/i.test(token)) continue;
-    tokens.add(token.slice(0, 80));
-  }
-  return [...tokens].slice(0, 80);
-}
-
-function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string): boolean {
-  const normalizedDraft = sourceSensitiveDraft.toLowerCase();
-  if (normalizedDraft.length < 120) return false;
-  const anchors = sourceSensitiveEvidenceTokens(evidence);
-  if (anchors.length === 0) return false;
-  let hits = 0;
-  for (const anchor of anchors) {
-    if (normalizedDraft.includes(anchor)) hits += 1;
-    if (hits >= Math.min(3, anchors.length)) return true;
-  }
-  return false;
-}
+// Source-sensitive evidence anchoring (sourceSensitiveEvidenceTokens,
+// looksEvidenceAnchored, extractSpecTokensFromDraft, isClaimNegatedIn,
+// NEGATION_MARKERS) was extracted to ./evidence-anchoring.ts (first god-file
+// decomposition seam). looksEvidenceAnchored is imported at the top.
 
 /**
  * QA evidence-anchoring decision (gated by orchestration.qaEvidenceAnchoring).
@@ -661,7 +652,6 @@ async function synthesizeSourceSensitiveEvidenceBackstop(
   if (!synthesized) return null;
   const cleaned = stripPresentationFormatting(synthesized).trim();
   if (!looksEvidenceAnchored(cleaned, evidence)) return null;
-  if (/\b(VendorX|I2S-only)\b/i.test(cleaned) && !/\b(VendorX|I2S-only)\b/i.test(evidence)) return null;
   return cleaned;
 }
 
@@ -3386,7 +3376,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     turnUsedSwarmTools,
   );
 
-  let totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  const totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let iterationCount = 0;
   // Per-tool output tracking within this turn — detects stuck loops (same result ≥N times).
   const _recentOutputsByTool = new Map<string, string[]>();
@@ -5965,8 +5955,42 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // synthesis is underpowered AND we have evidence available, prefer the
   // evidence.  Strictly post-hoc — doesn't change cases where synthesis
   // genuinely produced a real answer.
+  //
+  // Raw-dump guard (Fix 4 — audit bcb417e4): the backstop evidence is often a raw
+  // tool-result dump (raw web search block, recovered page chrome, or a delegate
+  // preview whose tool-result content was selected instead of a curated summary).
+  // When the synthesis call ran but produced nothing, the old code shipped that
+  // dump verbatim to the user as the "answer". The same trap exists for the
+  // suppressed-text path below. Disable the backstop when its candidate looks
+  // like a raw dump; the later `looksLikeRawToolEvidenceDump` guard will then
+  // reformat the (now raw) final candidate into the honest research-gathered
+  // fallback, and the "raw_tool_evidence_dump_suppressed" audit event fires.
+  const evidenceLooksRaw = terminalEvidenceBackstop
+    ? (looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
+        || looksLikeRawToolEvidenceDump(terminalEvidenceBackstop.evidence)
+        || looksLikeRawWorkspaceToolDump(terminalEvidenceBackstop.evidence))
+    : false;
+  const suppressedTextLooksRaw = lastSuppressedAssistantText !== null
+    && lastSuppressedAssistantText.length >= 200
+    && looksLikeRawToolEvidenceDump(lastSuppressedAssistantText);
+  if (evidenceLooksRaw) {
+    logAudit("guardrail_flagged", {
+      type: "raw_evidence_backstop_disabled",
+      finishReason: terminalFinishReason,
+      evidenceLength: terminalEvidenceBackstop?.evidence.length ?? 0,
+      evidenceItems: terminalEvidenceBackstop?.itemCount ?? 0,
+    }, { sessionId: session.id, severity: "warn" });
+  }
+  if (suppressedTextLooksRaw) {
+    logAudit("guardrail_flagged", {
+      type: "raw_suppressed_text_backstop_disabled",
+      finishReason: terminalFinishReason,
+      suppressedTextLength: lastSuppressedAssistantText?.length ?? 0,
+    }, { sessionId: session.id, severity: "warn" });
+  }
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
     && terminalEvidenceBackstop
+    && !evidenceLooksRaw
     && looksLikeUnderpoweredSynthesis(synthesized);
   // Last-resort: the runtime suppresses the model's text when it's
   // emitted alongside tool calls (correct in the common case — that text
@@ -5979,6 +6003,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const useSuppressedTextOverSynthesis = !bypassTerminalSynthesis
     && !useEvidenceOverSynthesis
     && lastSuppressedAssistantText !== null
+    && !suppressedTextLooksRaw
     && lastSuppressedAssistantText.length >= 200
     && looksLikeUnderpoweredSynthesis(synthesized);
   if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
@@ -6128,7 +6153,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       dumpLength: presentableFinalMsg.length,
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-    presentableFinalMsg = buildResearchGatheredFallback(curated);
+    presentableFinalMsg = buildResearchGatheredFallback(curated, looksLikeArtifactCreationRequest(userMessage));
   }
   // Fabricated-inline-artifact guard: on a source-sensitive artifact-creation turn that
   // produced NO real artifact (the build was stopped/blocked/never ran), the model

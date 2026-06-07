@@ -1,0 +1,51 @@
+{
+  // Engineering & data — code review and data-pipeline quality.
+  "scenes": {
+    "code_review": {
+      "description": "Perform a structured review of recent code changes and produce a merge-readiness report.",
+      "task": "Use diff_reviewer to inspect the requested change set, code_analyst when a suspicious hunk needs deeper code-at-rest context, and qa_guard for one verification-oriented pass on missing tests or risky follow-ups. Produce a concise review report with concrete risks, missing tests, and a merge-readiness verdict.",
+      "allowedAgents": [
+        "diff_reviewer",
+        "code_analyst",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "targetRef": {
+          "description": "Git ref range to review",
+          "default": "HEAD~10..HEAD"
+        },
+        "focusAreas": {
+          "description": "Review focus areas",
+          "default": "all"
+        }
+      }
+    },
+    "data_pipeline_review": {
+      "description": "Inspect files or databases for schema quality, completeness, anomalies, and actionable data-quality issues.",
+      "task": "Use document_intake first for attached files, data_analyst for tabular files and exported reports, sql_specialist for live database/schema inspection when a database source is provided, and evidence_analyst or summarizer to merge the findings into the requested quality report. Use qa_guard for one verification pass when the output must map cleanly to explicit validation rules.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "sql_specialist",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "dataSource": {
+          "description": "File path, database, or dataset description",
+          "default": "attached files or configured database"
+        },
+        "validationRules": {
+          "description": "Rules or checks to apply",
+          "default": "null rates, type consistency, referential integrity, value distributions"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown data quality report with issue table"
+        }
+      }
+    }
+  }
+}

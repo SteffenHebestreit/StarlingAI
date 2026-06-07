@@ -6,10 +6,14 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 
 | Folder | What it configures |
 |---|---|
-| `agents/` | Main assistant settings, sub-agent definitions (prompts, models, capabilities) |
+| `agents/` | Main assistant settings + sub-agent definitions, **sharded by role** (`21-orchestration`, `22-research-analysis`, `23-authoring-content`, …) |
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
 | `runtime/` | `runtime.overrides.json` — live overrides written by the config-assistant |
+
+> See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full role taxonomy, the agent→file map, the
+> tool organization, and the **separation-of-concerns contract** (coordinators orchestrate; only
+> authoring agents persist deliverables).
 
 ## How it works
 
@@ -26,9 +30,9 @@ StarlingAI has two reusable workflow layers:
 - `scenes/`: one reusable workflow prompt or mission template
 - `jobs/`: an ordered chain of scenes with optional triggers
 
-Create a scene when you want one reusable orchestration pattern with a stable goal, stable allowed agents, and optional templated params. The main examples live in `workspace/scenes/10-scenes.jsonc`.
+Create a scene when you want one reusable orchestration pattern with a stable goal, stable allowed agents, and optional templated params. Scenes are sharded by category under `workspace/scenes/` (`10-research`, `20-content-media`, `30-engineering-data`, `40-ops-comms`) — add yours to the best-fit shard.
 
-Create a job when you want multiple scenes to run in sequence. The main examples live in `workspace/jobs/10-jobs.jsonc`.
+Create a job when you want multiple scenes to run in sequence. Jobs are sharded by the same categories under `workspace/jobs/`.
 
 Scene checklist:
 

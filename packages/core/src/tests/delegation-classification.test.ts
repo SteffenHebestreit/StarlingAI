@@ -457,7 +457,7 @@ describe("classifyDelegationResult — D14", () => {
 
   it("returns failure for read-only raw config dumps when a maintenance edit was requested", () => {
     const rawConfigDump = [
-      ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 20-subagents-general.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
+      ".starlingai/ agent_outcomes.ndjson README.md agents/ 10-core-agents.jsonc 21-orchestration.jsonc jobs/ 10-jobs.jsonc scenes/ 10-scenes.jsonc",
       "",
       "{ \"subAgents\": { \"browser_agent\": { \"model\": { \"primary\": \"lmstudio/qwen/qwen3.6-35b-a3b\" }, \"systemPrompt\": \"You are a browser automation specialist.\" } } }",
       "",

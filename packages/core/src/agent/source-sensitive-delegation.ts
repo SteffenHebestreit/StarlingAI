@@ -50,6 +50,15 @@ export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, 
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
     "The parent task below is the canonical request. Search user-supplied identifiers exactly as given; do not treat coordinator-added names, identifiers, dates, quantities, prices, URLs, or specification claims as confirmed unless they appear in this parent task or in completed tool evidence.",
     "State a concrete fact only after an authoritative or official source confirms it; if evidence is missing, report uncertainty instead of filling gaps.",
+    // Per-claim citation discipline: the source-sensitive backstop cross-checks
+    // every concrete spec value in the final draft against the gathered shared
+    // findings. When a draft mentions a spec that is NOT in the findings, it is
+    // either re-grounded or marked unverifiziert. Researchers must therefore
+    // attach each concrete spec to the source line that supports it — generic
+    // "the manufacturer says X" prose is not enough; the exact value (e.g.
+    // "analog differential", "73 dB(A)", "IP57") must be attributable.
+    "For every concrete spec, name, date, figure, quantity, price, or interface you report, you MUST include the exact value as the source states it and a direct source URL — example shape: `<attribute>: <exact value as stated> (Source: https://<official-source>/<page>)`.",
+    "If a spec is widely-quoted but the official source uses a different value, cite the OFFICIAL value and explicitly note the discrepancy; never average, round, or rephrase a spec into a different category (e.g. never call an analog differential mic `I²S-Digital` because downstream boards use I²S — the mic's own interface is the source of truth).",
     "",
     "Parent task:",
     parentTask.trim(),
@@ -119,6 +128,9 @@ export function buildSourceSensitiveOriginalRequestTask(userMessage: string, lab
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
     "The user's original request below is the only canonical task. Search user-supplied identifiers exactly as given; do not copy coordinator-added assumptions into searches or final claims, and treat every name, identifier, date, quantity, price, URL, and specification as unconfirmed until a completed tool result or shared finding confirms it.",
     "State a concrete fact only after an authoritative or official source confirms it; if evidence contradicts an assumption in the request, the evidence wins, and if evidence is missing, report it as unverified rather than filling the gap.",
+    // Per-claim citation discipline (mirrors buildCanonicalSourceSensitiveDelegationTask).
+    "For every concrete spec, name, date, figure, quantity, price, or interface you report, you MUST include the exact value as the source states it and a direct source URL — example shape: `<attribute>: <exact value as stated> (Source: https://<official-source>/<page>)`.",
+    "If a spec is widely-quoted but the official source uses a different value, cite the OFFICIAL value and explicitly note the discrepancy; never average, round, or rephrase a spec into a different category (e.g. never call an analog differential mic `I²S-Digital` because downstream boards use I²S — the mic's own interface is the source of truth).",
     "",
     "Original user request:",
     userMessage.trim(),

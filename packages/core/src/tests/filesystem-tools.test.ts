@@ -155,6 +155,28 @@ describe("filesystem tools", () => {
     expect(existsSync(join(tempDir, "generated", "deck", "index.html"))).toBe(true);
   });
 
+  it("rejects an empty-content / empty-path write instead of producing a 0-byte junk artifact (audit ca36debc)", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const { existsSync } = await import("node:fs");
+    const tool = getTool("write_file")!;
+    const ctx = { sessionId: "session-empty-write", workspacePath: tempDir };
+
+    // The slow 35B blew its completion budget mid-tool-call (finishReason:"length"), so
+    // write_file arrived with empty path + empty content; it used to write a 0-byte
+    // "generated" file and surface it to the user as a download. Now it fails cleanly.
+    const emptyPath = await tool.execute({ path: "", content: "" }, ctx);
+    expect(emptyPath.success).toBe(false);
+    expect(emptyPath.error).toMatch(/path is required/i);
+    expect(emptyPath.metadata).toBeUndefined();
+
+    const emptyContent = await tool.execute({ path: "reports/plan.md", content: "   " }, ctx);
+    expect(emptyContent.success).toBe(false);
+    expect(emptyContent.error).toMatch(/content is required/i);
+    expect(emptyContent.metadata).toBeUndefined();
+    // No 0-byte file was created on the empty-content path.
+    expect(existsSync(join(tempDir, "generated", "reports", "plan.md"))).toBe(false);
+  });
+
   it("mode:'append' creates the file when it does not exist yet", async () => {
     const { getTool } = await import("../tools/registry.js");
     const { readFileSync } = await import("node:fs");

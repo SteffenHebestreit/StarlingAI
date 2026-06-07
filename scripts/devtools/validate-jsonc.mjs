@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 
 function stripJsonc(s) {
   let out = '', i = 0, inStr = false, escape = false;
@@ -18,11 +18,18 @@ function stripJsonc(s) {
   return out;
 }
 
-const files = [
-  'workspace/scenes/10-scenes.jsonc',
-  'workspace/jobs/10-jobs.jsonc',
-  'workspace/agents/20-subagents-general.jsonc',
-];
+// Sub-agents live in role-based files under workspace/agents/ — glob them all rather than
+// hardcoding a single monolith, so the validator stays correct as the layout evolves.
+function shardFiles(subdir) {
+  return readdirSync(`F:/StarlingAI/workspace/${subdir}`)
+    .filter((f) => f.endsWith('.jsonc'))
+    .map((f) => `workspace/${subdir}/${f}`)
+    .sort();
+}
+
+const sceneFiles = shardFiles('scenes');
+const jobFiles = shardFiles('jobs');
+const files = [...sceneFiles, ...jobFiles, ...shardFiles('agents')];
 
 let ok = true;
 const parsed = new Map();
@@ -38,8 +45,11 @@ for (const f of files) {
 }
 
 if (ok) {
-  const scenes = parsed.get('workspace/scenes/10-scenes.jsonc')?.scenes ?? {};
-  const jobs = parsed.get('workspace/jobs/10-jobs.jsonc')?.jobs ?? {};
+  // Scenes and jobs are sharded across category files — merge them for the reference check.
+  const scenes = {};
+  for (const f of sceneFiles) Object.assign(scenes, parsed.get(f)?.scenes ?? {});
+  const jobs = {};
+  for (const f of jobFiles) Object.assign(jobs, parsed.get(f)?.jobs ?? {});
   const sceneNames = new Set(Object.keys(scenes));
   const missingSceneRefs = [];
 
