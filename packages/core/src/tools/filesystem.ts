@@ -282,6 +282,20 @@ registerTool({
     const rawMode = String(args["mode"] ?? "overwrite").toLowerCase();
     const mode: "overwrite" | "append" | "create" =
       rawMode === "append" || rawMode === "create" ? rawMode : "overwrite";
+
+    // Reject malformed calls instead of silently producing junk (audit ca36debc: the slow
+    // 35B blew its completion budget emitting a 12 KB doc inline, the tool call was truncated
+    // with finishReason:"length", and write_file got an empty path + empty content — it then
+    // wrote a 0-byte file named "generated" and surfaced it to the user as a download. An
+    // empty write is never a real deliverable; fail with the same clear signal generate_document
+    // gives ("content is required") so no 0-byte artifact is created and the model can recover.
+    if (!path.trim()) {
+      return { success: false, output: "", error: "path is required — provide the relative file path to write (e.g. \"report.md\")." };
+    }
+    if (!content.trim()) {
+      return { success: false, output: "", error: "content is required — write_file needs the file content (or, for mode:\"append\", the chunk to append). Refusing to write a 0-byte file. If the content is large, build it in bounded chunks with mode:\"append\"." };
+    }
+
     const { safe, resolved, relativePath } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) {

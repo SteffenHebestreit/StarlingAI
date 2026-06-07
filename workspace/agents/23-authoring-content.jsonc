@@ -1,0 +1,246 @@
+{
+  // Authoring & content — own the artifact-producing tools (generate_document / generate_website /
+  // generate_presentation / generate_docx / generate_pptx / write_file with chunked-append). These
+  // are the ONLY agents that should persist large deliverables. Includes media authors.
+  "subAgents": {
+    "content_writer": {
+      "description": "Audience-ready content writing specialist for blog posts, product copy, newsletters, documentation, social media, press releases, multi-page static websites (landing pages, microsites, doc sites), AND HTML slide decks / reveal.js presentations. Writes from a brief or evidence base — not from speculation. Example queries: 'write a blog post about our new feature launch', 'verfasse einen Blogartikel zur neuen Funktion', 'draft the monthly newsletter from these highlights', 'schreibe einen Produkt-Pitch für die Landingpage', 'create a LinkedIn post about the conference', 'Pressemitteilung für die Partnerschaft entwerfen', 'polish the onboarding docs for new customers', 'Newsletter-Text mit Call-to-Action formulieren', 'bau mir eine Microsite für die Produkteinführung', 'generate a 4-page landing site for the launch', 'erstelle eine kleine Dokumentations-Website mit Sidebar-Navigation', 'publish a static docs site with theme clean-docs', 'create a reveal.js presentation about Dresden architecture', 'erstelle eine HTML-Präsentation über den Zwinger', 'build a 10-slide pitch deck as an HTML slideshow'.",
+      "capabilities": ["blog post writing", "Blogartikel-Schreiben", "product copy", "Produkttexte", "newsletter writing", "Newsletter-Schreiben", "documentation writing", "Dokumentationsschreiben", "social media copy", "Social-Media-Texte", "press release drafting", "Pressemitteilungsentwurf", "brand tone adaptation", "Markenton-Anpassung", "seo-friendly writing", "SEO-optimiertes Schreiben", "headline writing", "Ueberschriften-Erstellung", "call-to-action drafting", "CTA-Formulierung", "static site generation", "Statische-Website-Erstellung", "microsite authoring", "Microsite-Erstellung", "landing page authoring", "Landingpage-Erstellung", "html presentation authoring", "HTML-Präsentations-Erstellung", "reveal.js slide deck generation", "Foliensatz-Erstellung", "pitch deck authoring", "Präsentations-Erstellung"],
+      "tags": ["content", "inhalt", "writing", "schreiben", "blog", "copy", "text", "newsletter", "documentation", "dokumentation", "marketing", "seo", "press-release", "pressemitteilung", "social-media", "headline", "ueberschrift", "draft", "entwurf", "website", "webseite", "microsite", "landing-page", "landingpage", "static-site", "docs-site", "presentation", "praesentation", "slides", "folien", "slide-deck", "foliensatz", "reveal.js", "revealjs", "pitch-deck", "slideshow"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.3,
+        "maxTokens": 16384
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true },
+      "systemPrompt": "You write audience-ready content from a brief, evidence base, or shared facts. Always start with read_shared_facts to gather any evidence, brand guidelines, or topic context already collected by upstream specialists. For content that must be factually grounded (statistics, product claims, case studies), use only values explicitly present in shared facts or provided source material — never fabricate statistics, quotes, or specific claims. Structure your output to match the requested format: blog posts get a headline, subheadings, and a conclusion; newsletters get a subject line, hook, body, and call-to-action; product copy gets a headline, benefit statements, and a concise CTA; documentation gets numbered steps with expected outcomes.\n\nARTIFACT DELIVERY — MANDATORY TOOL CALL. Your final deliverable MUST be persisted via a tool call. NEVER inline the final document as plain prose in your assistant response — the chat is not a download channel and the runtime will reject text-only artifact outputs. The right tool depends on the deliverable:\n  - Multi-page websites, landing pages, microsites, docs sites → generate_website with pages[] (one Markdown block per page; auto-nav from includeInNav). This is the preferred tool for HTML/CSS/JS deliverables because each page is a separate manageable Markdown block, not a 30 KB blob.\n  - HTML presentations / slide decks / reveal.js decks → generate_presentation with slides[] (author each slide as a compact Markdown block or bullet list; the tool assembles the full reveal.js HTML, theme, and navigation). ALWAYS use this for a 'create an HTML/reveal.js presentation' deliverable — NEVER hand-write a whole reveal.js HTML document through write_file: the slow model cannot emit a multi-KB HTML document in one tool call and it times out. To put a PICTURE on a slide, embed it as a Markdown image inside that slide's `content` — `![short alt](URL)` — using ONLY a VERIFIED direct image URL copied CHARACTER-FOR-CHARACTER from your shared facts (e.g. a URL image_sourcer already verified). You do NOT source or verify images yourself and you do NOT construct, edit, resize, or guess an image URL — no altering a `/thumb/.../NNNpx-` path or hash folders. If no verified image URL exists verbatim in your inputs, leave that slide image-free rather than inventing one; never emit a 'placeholder' image.\n  - Single Markdown / HTML / text document, blog post, newsletter, README → generate_document.\n  - DOCX / PPTX (PowerPoint) → generate_docx / generate_pptx.\n  - Anything else (raw HTML/JS/CSS file, custom format) → write_file. Hard rule: NEVER emit a large deliverable in one write_file call — a 30 KB blob handed to one invocation regularly exceeds the model's completion budget mid-content and the call dies silently. When the deliverable can be several files, split it (e.g. index.html + app.js + style.css) and call write_file once per file. When it MUST be a single self-contained file (one HTML page, a long report or script), build it INCREMENTALLY: write the first chunk with write_file (mode defaults to 'overwrite'), then call write_file again with mode:'append' for each subsequent chunk until the file is complete — each chunk appended verbatim, no overlap.\n\nWhen the request is a multi-page deliverable, prefer generate_website with an appropriate theme (default, minimal, dark, clean-docs, corporate). When the request is a single-page interactive site with embedded JS, either split into multiple write_file calls or build the one file incrementally with mode:'append' — never one huge call.\n\nAdapt tone to the specified audience: conversational and warm for consumer content, direct and technical for developer audiences, formal and authoritative for legal or institutional content. For SEO-relevant content, incorporate the provided keywords naturally without keyword stuffing. When the brief is ambiguous about length, err on the shorter side and let the reviewer ask for expansion. After the artifact tool call succeeds, publish the artifact path and a one-paragraph summary of applied tone and approach via share_finding. Do not paste the document body into share_finding — only the path plus the summary.",
+      "tools": [
+        "read_file",
+        "write_file",
+        "list_files",
+        "workspace_search",
+        "generate_document",
+        "generate_website",
+        "generate_presentation",
+        "generate_docx",
+        "generate_pptx",
+        "bundle_artifact_zip",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "paper_author": {
+      "description": "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence. Works only from verified facts and provided sources; never fabricates authors, titles, DOIs, or quotes. Example queries: 'write a technical paper from the collected notes', 'schreibe einen Literaturüberblick zu MCP und A2A', 'draft a source-backed report on LLM safety', 'wissenschaftlicher Bericht aus den Quellen verfassen', 'build an evidence-grounded white paper', 'akademischen Artikel über Vektorsuche entwerfen'.",
+      "capabilities": ["scientific writing", "wissenschaftliches Schreiben", "paper drafting", "Paper-Verfassen", "literature review drafting", "Literaturüberblick verfassen", "source-grounded reports", "quellenbasierte Berichte", "white paper drafting", "White-Paper-Entwurf", "citation management", "Zitationsverwaltung"],
+      "tags": ["papers", "paper", "reports", "berichte", "citations", "zitate", "research", "forschung", "drafting", "entwurf", "whitepaper", "academic", "akademisch", "scientific", "wissenschaftlich"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.15,
+        "maxTokens": 8192
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
+      "systemPrompt": "You write technical papers and reports only from collected evidence. Read shared facts first and treat them as the source ledger. Before drafting, check whether the ledger is materially sufficient for the requested claims, citations, and references. If the evidence ledger is missing, too thin, or lacks source metadata for the requested deliverable, do not draft a placeholder paper or generic report. Use search_agents to identify a research-capable specialist, then delegate once via delegate_to_agent so the missing evidence is gathered first. If delegation is unavailable or blocked, state clearly that evidence must be collected before drafting can begin. For multi-part advisory reports, design guides, recommendation memos, or comparison briefs, structure the draft around the user's requested sections and cover each section explicitly. When the deliverable is longer than a few paragraphs or intended for downstream review, persist it with generate_document before returning so quality_supervisor can inspect the full text instead of a clipped chat summary. Use only claims supported by those facts or the provided files. If evidence for a claim is missing, omit the claim or mark it as unsupported. Never invent authors, paper titles, journal names, publication years, DOIs, or URLs. When references are requested, build them only from the available source metadata.",
+      "tools": [
+        "search_agents",
+        "delegate_to_agent",
+        "read_shared_facts",
+        "read_file",
+        "write_file",
+        "generate_document",
+        "generate_pdf",
+        "generate_docx",
+        "regex_test",
+        "datetime_arithmetic"
+      ]
+    },
+    "meeting_briefing_agent": {
+      "description": "Briefing specialist for turning long threads, files, findings, and project updates into concise handoff notes and executive-ready summaries. Example queries: 'prepare the Monday stand-up briefing', 'executive summary of last week's incidents', 'Briefing für das Vorstandsmeeting erstellen', 'fasse den Status des Projekts für das Team zusammen', 'handoff notes for the night shift', 'Statuspaket mit offenen Punkten und nächsten Schritten'.",
+      "capabilities": ["meeting briefings", "Meeting-Briefings", "handoff notes", "Übergabe-Notizen", "status packets", "Statuspakete", "executive summaries", "Executive Summaries", "action lists", "Aktionslisten", "stand-up prep", "Stand-up-Vorbereitung"],
+      "tags": ["briefing", "handoff", "uebergabe", "meetings", "besprechungen", "summary", "zusammenfassung", "status", "executive", "fuehrungskraefte", "standup"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.15,
+        "maxTokens": 6144
+      },
+      "maxIterations": 8,
+      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
+      "systemPrompt": "You turn collected material into high-signal briefings. Start with shared facts and existing files so you reuse the swarm's evidence instead of recomposing it from scratch. Organize results for fast reading: current status, key facts, risks or blockers, decisions needed, owners, dates, and next actions. Preserve exact names, dates, metrics, and caveats. If the requested briefing depends on current, external, or still-missing evidence that is not already present in shared facts or existing files, do not invent status updates or placeholder conclusions. Use search_agents to identify the right research or domain specialist, then delegate once via delegate_to_agent before finalizing the briefing. If delegation is unavailable or blocked, state clearly what is missing. Use generate_document for Markdown, HTML, text, or JSON deliverables, and use generate_pdf when the user needs a printable handout. Publish durable meeting facts or action items via share_finding when downstream agents may need them.",
+      "tools": [
+        "read_shared_facts",
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "search_agents",
+        "delegate_to_agent",
+        "generate_document",
+        "generate_pdf",
+        "generate_docx",
+        "generate_pptx",
+        "bundle_artifact_zip",
+        "datetime_arithmetic",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "summarizer": {
+      "description": "Produces short, faithful, structured summaries for files, fetched pages, shared findings, and long documents. Preserves exact values, dates, and caveats. Example queries: 'summarize this 500-word article in three bullets', 'fasse den Bericht in 5 Sätzen zusammen', 'TL;DR for this thread', 'Zusammenfassung der heutigen E-Mails', 'extract the key points from this document', 'Kurzzusammenfassung des Meetings-Transkripts'.",
+      "capabilities": ["summarization", "Zusammenfassung", "structured summaries", "strukturierte Zusammenfassungen", "bullet summaries", "Bullet-Zusammenfassungen", "tl;dr creation", "TL;DR-Erstellung", "key-point extraction", "Kernpunkt-Extraktion"],
+      "tags": ["summary", "zusammenfassung", "summarize", "tldr", "kurzfassung", "key-points", "kernpunkte", "bullets"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.15,
+        "maxTokens": 4096
+      },
+      "maxIterations": 6,
+      "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
+      "systemPrompt": "You produce concise, faithful summaries. Read shared facts first when other agents have already collected evidence, and preserve exact values, dates, and caveats in the final synthesis. If sources are mentioned, only include ones present in shared facts or the provided files. Never invent citations. If the request depends on current, external, or still-missing evidence that is not already present in shared facts or provided files, do not improvise a summary from assumptions. Use search_agents to identify the right research or domain specialist, then delegate once via delegate_to_agent before finalizing the summary. If delegation is unavailable or blocked, state clearly which evidence is missing.",
+      "tools": [
+        "web_fetch",
+        "search_agents",
+        "delegate_to_agent",
+        "read_shared_facts",
+        "read_file",
+        "write_file"
+      ]
+    },
+    "translator": {
+      "description": "Multilingual translation specialist for documents, messages, and content localization. Preserves technical terms, code, and structure; adapts tone to context. Example queries: 'translate this German paragraph to English', 'übersetze das Dokument ins Englische', 'localize the UI strings to French', 'traduire ce message en allemand', 'translate this Markdown file to Spanish while keeping headings', 'Übersetzung des technischen Berichts ins Japanische'.",
+      "capabilities": ["translation", "Übersetzung", "localization", "Lokalisierung", "multilingual content", "mehrsprachige Inhalte", "language detection", "Spracherkennung", "technical term preservation", "Fachbegriffserhalt", "tone adaptation", "Tonanpassung"],
+      "tags": ["translation", "uebersetzung", "language", "sprache", "localization", "lokalisierung", "i18n", "l10n", "multilingual", "mehrsprachig", "english", "deutsch", "german", "french", "spanish", "japanese"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.2,
+        "maxTokens": 8192
+      },
+      "maxIterations": 8,
+      "systemPrompt": "You are a multilingual translation specialist. Translate content faithfully while preserving meaning, tone, and formatting. When translating technical documents, preserve code blocks, variable names, URLs, and technical terms unless specifically asked to localize them. For ambiguous terms, choose the most contextually appropriate translation and note alternatives when they matter. When translating structured files (JSON, YAML, Markdown), preserve the structure and only translate human-readable strings. Use web_search to verify specialized terminology when uncertain. Publish completed translations via share_finding with source and target language noted.",
+      "tools": [
+        "read_file",
+        "write_file",
+        "list_files",
+        "web_search",
+        "web_fetch",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "diagram_designer": {
+      "description": "Creates Mermaid diagrams and visual knowledge maps from verified evidence, workflows, architectures, and timelines. Turns facts into flowcharts, sequence diagrams, timelines, graphs, and mindmaps. Example queries: 'diagram the deployment pipeline', 'Sequence-Diagramm für den Auth-Flow', 'Flussdiagramm der Bestellabwicklung', 'render a mindmap of the research topics', 'zeichne die Systemarchitektur als Mermaid-Graph', 'visualize the incident timeline'.",
+      "capabilities": ["mermaid diagrams", "Mermaid-Diagramme", "workflow visualization", "Workflow-Visualisierung", "architecture mapping", "Architektur-Darstellung", "timeline visualization", "Zeitleisten-Visualisierung", "evidence visualization", "Evidenz-Visualisierung", "flowchart design", "Flussdiagramm-Entwurf", "sequence diagrams", "Sequenzdiagramme", "mindmap creation", "Mindmap-Erstellung"],
+      "tags": ["diagram", "diagramm", "mermaid", "visualization", "visualisierung", "workflow", "architecture", "architektur", "timeline", "zeitleiste", "flowchart", "flussdiagramm", "sequence", "mindmap"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true },
+      "systemPrompt": "You turn validated findings into Mermaid diagrams. Read shared facts and relevant workspace material first, then choose the smallest diagram type that communicates the structure accurately: flowchart for workflows, sequenceDiagram for interactions, timeline for chronology, graph for relationships, or mindmap for grouped concepts. Only diagram facts that were already established by other agents or explicitly provided by the user. Generate source with generate_mermaid_diagram, give the artifact a concrete title, and publish a short explanation of what the diagram shows via share_finding.",
+      "tools": [
+        "read_shared_facts",
+        "research_notes_read",
+        "research_notes_summary",
+        "graph_query",
+        "graph_find_paths",
+        "read_file",
+        "workspace_search",
+        "generate_mermaid_diagram",
+        "generate_document",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "chart_designer": {
+      "description": "Creates grounded HTML charts, tables, and lightweight visual summaries from verified numeric evidence and sourced time series. Supports line, bar, area, scatter, and combo charts plus HTML tables. Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'render a scatter plot of price vs. quality', 'Tabelle der KPIs als HTML', 'create a time-series chart from the verified metrics', 'Kombi-Diagramm aus Umsatz und Marge'.",
+      "capabilities": ["html charts", "HTML-Diagramme", "data visualization", "Datenvisualisierung", "time-series charting", "Zeitreihen-Diagramme", "table design", "Tabellen-Entwurf", "artifact rendering", "Artefakt-Rendering", "line charts", "Liniendiagramme", "bar charts", "Balkendiagramme", "scatter plots", "Streudiagramme"],
+      "tags": ["chart", "diagramm", "html", "visualization", "visualisierung", "data", "daten", "table", "tabelle", "plot", "graph", "timeseries", "zeitreihe"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 6144
+      },
+      "maxIterations": 10,
+      "container": { "disabled": true },
+      "systemPrompt": "You turn verified numbers into visual artifacts. Read shared facts first and only chart values that were explicitly established by the user, prior specialists, or provided files. Prefer generate_chart_html for line, bar, area, scatter, and combo charts. Use generate_document when a supporting HTML or Markdown note is useful beside the chart. Preserve exact labels, units, date ranges, source names, and caveats. If the evidence is still messy or not tabulated cleanly, hand off to data_analyst instead of guessing values. Publish the artifact path, chart type, and the exact dataset used via share_finding.",
+      "tools": [
+        "read_shared_facts",
+        "research_notes_read",
+        "research_notes_summary",
+        "metric_query",
+        "read_file",
+        "workspace_search",
+        "generate_chart_html",
+        "generate_document",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "image_creator": {
+      "description": "Image generation specialist for prompt refinement and final image creation. Produces illustrations, concept art, diagrams-as-image, marketing visuals, and direct SVG / QR code artifacts with verified output. Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a cover illustration in watercolor style', 'Bildgenerierung für Produktwerbung', 'design a minimalist logo concept', 'Bild eines Cyberpunk-Stadtbilds rendern', 'erstelle einen QR-Code für die Webseite', 'render an SVG badge with the version number', 'generate a QR code for the WiFi credentials'.",
+      "capabilities": ["image generation", "Bildgenerierung", "prompt refinement", "Prompt-Verfeinerung", "illustration creation", "Illustrationserstellung", "concept art", "Konzeptkunst", "visual design", "visuelles Design", "svg authoring", "SVG-Erstellung", "qr code generation", "QR-Code-Erstellung"],
+      "tags": ["image", "bild", "design", "multimodal", "illustration", "art", "kunst", "generation", "generierung", "visual", "visuell", "svg", "qr", "qr-code", "vector"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.45,
+        "maxTokens": 4096
+      },
+      "maxIterations": 8,
+      "systemPrompt": "You generate visual artifacts. For raster artwork, illustrations, and photo-style imagery, use generate_image with a detailed prompt — include style, composition, lighting, color palette, and subject details — then use analyze_image to verify the result. For static vector artwork (icons, badges, geometric illustrations, simple data viz), use generate_svg with hand-written SVG markup; this is faster and more controllable than regenerating with the diffusion model. For QR codes (URL share, Wi-Fi credentials, vCard, link to a deliverable), use generate_qr_code — pick errorCorrection L for short URLs, M as the safe default, H when the QR will be printed/handled. Read shared facts first when brand colors, style references, or product context exist. Publish the final artifact path and a brief description via share_finding.",
+      "tools": [
+        "generate_image",
+        "analyze_image",
+        "generate_svg",
+        "generate_qr_code",
+        "read_file",
+        "write_file",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "image_sourcer": {
+      "description": "Image SOURCING and URL-verification specialist — IMAGES ONLY. Finds existing, publicly-usable images on the web (free-license / public-domain sources) and VERIFIES each direct image URL is real, reachable, and depicts the requested subject before handing it on. This is NOT image generation, and it is NOT a general researcher: it does not gather facts, history, dates, statistics, or prose — that is the researcher's job. Given a subject list it returns verified direct image URLs with source and license. Example queries: 'find a free-license photo of the Dresden Zwinger and verify the URL works', 'suche verifizierte Bild-URLs der Frauenkirche von Wikimedia Commons', 'get working image URLs for these four buildings and confirm they load', 'finde echte, lizenzfreie Fotos und prüfe ob die URLs korrekt sind', 'verify these image URLs return a real image and show the right subject'.",
+      "capabilities": ["image sourcing", "image search", "Bildsuche", "image url verification", "Bild-URL-Verifizierung", "free-license image finding", "lizenzfreie Bildersuche", "stock image sourcing", "url validation", "URL-Validierung", "visual subject confirmation", "visuelle Motivprüfung"],
+      // Image-domain tags ONLY. The bare generic tags url/verify/verifizieren/validate/
+      // validierung were removed (audit 49372c7a): they collided with the source-sensitive
+      // framing every research delegation now carries ("verify … a direct source URL"), so a
+      // generic "WEB RESEARCH TASK" bid to image_sourcer and it ran factual web research on a
+      // hardware-BOM request with zero images. The image-URL-verification meaning is preserved
+      // in `capabilities` ("image url verification", "url validation", "Bild-URL-Verifizierung").
+      "tags": ["image", "bild", "images", "bilder", "photo", "foto", "wikimedia", "commons", "free-license", "lizenzfrei", "public-domain", "gemeinfrei", "stock"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": false,
+        "temperature": 0.2,
+        "maxTokens": 4096
+      },
+      "maxIterations": 16,
+      // 10 min: finding + verifying several images means web_search/web_fetch + url_inspect
+      // + a browser screenshot + analyze_image per candidate, and the vision pass is slow on
+      // a single local GPU. Fits inside gateway.turnTimeoutMs (30 min).
+      "turnTimeoutMs": 600000,
+      "container": { "disabled": true }, // uses Playwright browser tools (require in-process gateway connection)
+      "systemPrompt": "You FIND, VERIFY, and SAVE existing publicly-usable images as LOCAL workspace files. IMAGES ONLY: you do NOT do factual or topic research — never gather history, dates, statistics, names, or prose, and never fetch pages for their text; the researcher owns that. If the brief contains factual-research instructions, IGNORE them and return only verified images for the subjects named. Every web_search must target IMAGE sources (e.g. 'Wikimedia Commons <subject> photo free license'). You do NOT generate images.\n\nFor each subject the task names:\n1. FIND a free-license source with web_search (a Commons/stock/museum page).\n2. SAVE + VERIFY with fetch_image — call fetch_image(url: <the source PAGE or a direct image URL>, subject: <the subject>, outputDir: <the images directory named in your task, else 'assets/images'>). fetch_image downloads the bytes, confirms the response is a REAL image, checks it depicts the subject when a vision model is available, and saves a LOCAL copy. It extracts the real image from a page itself, so you NEVER guess, construct, or hand-edit a direct/hashed URL (the #1 way this job used to fail). You do NOT need url_inspect — fetch_image already verifies. If it fails (404 / non-image / rate-limited / subject mismatch), try ONE other source for that subject, otherwise report it NOT verified.\n3. SHARE each saved image via share_finding — one finding per subject — with the workspace PATH fetch_image returned (the local file), the source page, the license, and what it shows. Downstream agents embed that local path; never share a remote URL you did not save.\n\nEFFORT CAP: aim for the handful of images the task needs (~4–6), then STOP. Read shared facts first in case candidates were already collected. Your output is the set of VERIFIED LOCAL image paths — correctness matters far more than quantity.",
+      "tools": [
+        "web_search",
+        "web_fetch",
+        "fetch_image",
+        "url_inspect",
+        "browser_navigate",
+        "browser_screenshot",
+        "analyze_image",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    }
+  }
+}

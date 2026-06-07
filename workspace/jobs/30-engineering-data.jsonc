@@ -1,0 +1,151 @@
+{
+  // Engineering & data reports — code review, data-quality, database analysis.
+  "jobs": {
+    "scheduled_code_review": {
+      "description": "Perform a structured code review of recent commits, produce a review report, and broadcast it to the engineering channel. Example triggers: '/code-review HEAD~10..HEAD', 'geplantes Code-Review der letzten Commits', 'review recent changes and notify the team', 'Code-Review-Bericht an Engineering-Kanal'.",
+      "params": {
+        "targetRef": {
+          "description": "Git ref range to review",
+          "default": "HEAD~10..HEAD"
+        },
+        "focusAreas": {
+          "description": "Review focus: security, performance, style, logic, all",
+          "default": "all"
+        },
+        "channels": {
+          "description": "Channels to deliver the report to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "code_review",
+          "label": "Inspect changes and produce review",
+          "params": {
+            "targetRef": "{{targetRef}}",
+            "focusAreas": "{{focusAreas}}"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast code review report",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_SCHEDULED_CODE_REVIEW_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/code-review",
+          "mode": "prefix",
+          "captureRemainderAs": "targetRef",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{targetRef|recent commits}} as {{jobId}}.",
+          "params": {
+            "channels": "slack",
+            "focusAreas": "all"
+          }
+        }
+      ]
+    },
+    "data_quality_report": {
+      "description": "Inspect a data source or attached files for schema quality, completeness, and anomalies, then broadcast a structured data quality report. Example triggers: 'run a data quality check on the orders table', 'Datenqualitätsprüfung für die Kundendatei', 'analyze schema and null rates in the attached CSV', 'Datenqualitätsbericht mit Auffälligkeiten erstellen'.",
+      "params": {
+        "dataSource": {
+          "description": "File path, database name, or description of the data source",
+          "default": "attached files or configured database"
+        },
+        "channels": {
+          "description": "Comma-separated channels for delivery",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "data_pipeline_review",
+          "label": "Analyze data quality",
+          "params": {
+            "dataSource": "{{dataSource}}",
+            "validationRules": "null rates, type consistency, referential integrity, value distributions",
+            "outputFormat": "markdown data quality report with issue table"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast data quality report",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DATA_QUALITY_REPORT_KEY"
+        }
+      ]
+    },
+    "database_analysis": {
+      "description": "Run a scheduled schema inspection and data quality check against a configured database, then broadcast a weekly digest summarising findings, anomalies, and recommended actions. Example triggers: '/db-analysis production', 'wöchentliche Datenbankanalyse durchführen', 'inspect the schema and broadcast the quality report', 'Schema-Prüfung und Qualitätsdigest verteilen'.",
+      "params": {
+        "dataSource": {
+          "description": "Database name, connection alias, or file path to analyse",
+          "default": "configured default database"
+        },
+        "validationRules": {
+          "description": "Comma-separated validation rules to enforce",
+          "default": "null rates, type consistency, referential integrity, row-count drift, value distributions, duplicate keys"
+        },
+        "channels": {
+          "description": "Comma-separated channels to deliver the digest to",
+          "default": "slack"
+        }
+      },
+      "steps": [
+        {
+          "scene": "data_pipeline_review",
+          "label": "Inspect schema and data quality",
+          "params": {
+            "dataSource": "{{dataSource}}",
+            "validationRules": "{{validationRules}}",
+            "outputFormat": "markdown database analysis report with findings table and recommended actions"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast weekly database digest",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DATABASE_ANALYSIS_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/db-analysis",
+          "mode": "prefix",
+          "captureRemainderAs": "dataSource",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{dataSource|the default database}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    }
+  }
+}

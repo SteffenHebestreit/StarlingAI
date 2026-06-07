@@ -163,3 +163,62 @@ describe("longRunningGenerationManager — operator stop latches the turn", () =
     expect(longRunningGenerationManager.listPending()).toHaveLength(1);
   });
 });
+
+describe("longRunningGenerationManager.notifyLongRunning — non-blocking surfacing", () => {
+  beforeEach(() => longRunningGenerationManager.resetForTests());
+  afterEach(() => longRunningGenerationManager.resetForTests());
+
+  const run = "sub:turnX:researcher:1";
+  const notify = (runSessionId = run) => longRunningGenerationManager.notifyLongRunning({
+    agentName: "researcher",
+    runSessionId,
+    parentSessionId: "turnX",
+    reason: "still going",
+    elapsedMs: DEFAULT_SOFT_THRESHOLD_MS + 1,
+    completionTokens: 9000,
+    iterations: 3,
+  });
+
+  it("surfaces a dock entry synchronously without an awaiter", () => {
+    expect(notify()).toEqual({ surfaced: true });
+    const pending = longRunningGenerationManager.listPending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.runSessionId).toBe(run);
+  });
+
+  it("is idempotent per run while a request is already pending", () => {
+    expect(notify().surfaced).toBe(true);
+    expect(notify().surfaced).toBe(false);
+    expect(longRunningGenerationManager.listPending()).toHaveLength(1);
+  });
+
+  it("is a no-op once the run has been granted unbounded", () => {
+    expect(notify().surfaced).toBe(true);
+    longRunningGenerationManager.resolveRequest(longRunningGenerationManager.listPending()[0]!.id, "unbounded");
+    expect(longRunningGenerationManager.isUnbounded(run)).toBe(true);
+    expect(notify().surfaced).toBe(false);
+  });
+
+  it("is a no-op once the turn has been stopped", () => {
+    expect(notify().surfaced).toBe(true);
+    longRunningGenerationManager.resolveRequest(longRunningGenerationManager.listPending()[0]!.id, "stop", "admin");
+    expect(longRunningGenerationManager.isStopRequested(run)).toBe(true);
+    expect(notify().surfaced).toBe(false);
+  });
+
+  it("lets the operator stop an advisory (non-pending-awaiter) entry; latch fires for the run", () => {
+    notify();
+    const id = longRunningGenerationManager.listPending()[0]!.id;
+    const resolved = longRunningGenerationManager.resolveRequest(id, "stop", "admin");
+    expect(resolved?.resolvedOutcome).toBe("stop");
+    expect(longRunningGenerationManager.isStopRequested(run)).toBe(true);
+    expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+  });
+
+  it("run-end stop() clears the advisory dock entry", () => {
+    notify();
+    expect(longRunningGenerationManager.listPending()).toHaveLength(1);
+    longRunningGenerationManager.stop(run, "run_ended");
+    expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+  });
+});

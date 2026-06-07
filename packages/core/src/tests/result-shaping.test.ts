@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractedFindingIsLowValue, extractKeyFacts } from "../tools/result-shaping.js";
+import { extractedFindingIsLowValue, extractKeyFacts, stripEditorialNotes } from "../tools/result-shaping.js";
 
 /**
  * Auto-share quality gate (May 2026). Shared facts kept filling up with raw
@@ -66,5 +66,51 @@ describe("auto-share quality gate — extractedFindingIsLowValue", () => {
       "web_search",
     );
     expect(extractedFindingIsLowValue(extracted)).toBe(false);
+  });
+});
+
+/**
+ * stripEditorialNotes — remove the distiller's own "(Note: …)" commentary from a
+ * shared finding. On a weak model these notes are often wrong/backwards (audit:
+ * it stored "Manufacturer: Infineon (Note: … the component is manufactured by
+ * STMicroelectronics)" — false; the part is Infineon). Findings are source facts
+ * only; the strip is deterministic so it doesn't depend on the model obeying a
+ * prompt rule.
+ */
+describe("stripEditorialNotes", () => {
+  it("removes the exact backwards manufacturer note from the audit, leaving the correct fact", () => {
+    const input =
+      "* **Manufacturer**: Infineon Technologies AG (Note: Search results incorrectly attribute the IM73A135V01 to Infineon; the component is manufactured by STMicroelectronics)\n"
+      + "* **Package Type**: LGA";
+    const out = stripEditorialNotes(input);
+    expect(out).toContain("Infineon Technologies AG");
+    expect(out).toContain("LGA");
+    expect(out).not.toMatch(/Note:/i);
+    expect(out).not.toContain("STMicroelectronics");
+  });
+
+  it("strips bracketed and German note markers", () => {
+    expect(stripEditorialNotes("Hersteller: Infineon [Hinweis: Quelle widerspricht sich]")).toBe("Hersteller: Infineon");
+    expect(stripEditorialNotes("Value 5 V (Anmerkung: laut Modell)")).toBe("Value 5 V");
+    expect(stripEditorialNotes("X (NB: editor guess)")).toBe("X");
+  });
+
+  it("strips a standalone note line but keeps the surrounding facts", () => {
+    const out = stripEditorialNotes("* SNR: 73 dB(A)\nNote: I think the search was wrong\n* AOP: 124 dB");
+    expect(out).toContain("SNR: 73 dB(A)");
+    expect(out).toContain("AOP: 124 dB");
+    expect(out).not.toMatch(/I think the search was wrong/);
+  });
+
+  it("does NOT touch real spec parentheticals (no over-reach)", () => {
+    // These open with data, not a note marker, so they must survive verbatim.
+    expect(stripEditorialNotes("SNR 73 dB(A), AOP 124 dB (typ.)")).toBe("SNR 73 dB(A), AOP 124 dB (typ.)");
+    expect(stripEditorialNotes("Supply 2.3–3.0 V (operating range)")).toBe("Supply 2.3–3.0 V (operating range)");
+    expect(stripEditorialNotes("Built 1709–1728 (Pöppelmann)")).toBe("Built 1709–1728 (Pöppelmann)");
+  });
+
+  it("is a no-op for empty / note-free text", () => {
+    expect(stripEditorialNotes("")).toBe("");
+    expect(stripEditorialNotes("Manufacturer: Infineon; SNR 73 dB(A)")).toBe("Manufacturer: Infineon; SNR 73 dB(A)");
   });
 });

@@ -1,0 +1,140 @@
+{
+  // Research & evidence pipelines — gather, verify, and synthesize sourced findings.
+  "scenes": {
+    "source_backed_paper": {
+      "description": "Produce a paper or report grounded in official sources and verified citations.",
+      "task": "Use document_intake first when the input includes attached reports or files, researcher to gather authoritative sources, evidence_analyst to normalize the evidence ledger, paper_author to draft only from collected evidence, and source_verifier to check every citation and factual claim before finalizing.",
+      "allowedAgents": [
+        "document_intake",
+        "evidence_analyst",
+        "paper_author",
+        "source_verifier",
+        "researcher",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "outputStyle": {
+          "description": "Requested style or citation format",
+          "default": "technical report with inline references"
+        }
+      }
+    },
+    "verified_research_brief": {
+      "description": "Produce a concise fact-checked research brief with named sources and explicit unresolved uncertainties.",
+      "task": "Use document_intake first when the request starts from attached material, researcher for broad source discovery and authoritative references, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief with source mentions and open questions.",
+      "allowedAgents": [
+        "document_intake",
+        "researcher",
+        "evidence_analyst",
+        "source_verifier",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Intended audience for the brief",
+          "default": "technical stakeholder"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable sources available and call out publication dates"
+        }
+      }
+    },
+    "deep_research": {
+      "description": "Build a source-backed research dossier or design guide on a topic, with optional Mermaid visualizations. Used by the deep_research_packet and research_visual_digest jobs.",
+      "task": "Run mission_coordinator. Phase 1 - researcher gathers authoritative sources and publishes structured share_finding records (topic, source title, URL, exact facts, caveats). Phase 2 - evidence_analyst reconciles the ledger and resolves conflicts. Phase 3 - paper_author drafts the dossier per the requested deliverable shape, then quality_supervisor runs one acceptance pass. Persist the final dossier with generate_document so it survives chat truncation.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "deliverable": {
+          "description": "Preferred output shape (dossier, design guide, comparison memo, etc.)",
+          "default": "source-backed dossier with Mermaid diagrams where useful"
+        },
+        "audience": {
+          "description": "Intended audience for the dossier",
+          "default": "decision maker"
+        },
+        "freshnessRequirement": {
+          "description": "How fresh the evidence needs to be",
+          "default": "use the freshest reliable evidence available and call out publication dates"
+        },
+        "includeVisuals": {
+          "description": "Whether to include Mermaid diagrams ('yes' or 'no')",
+          "default": "yes"
+        },
+        "visualFocus": {
+          "description": "Hint for what the visual should clarify",
+          "default": "choose the clearest Mermaid visual structure for the topic"
+        }
+      }
+    },
+    "competitive_analysis": {
+      "description": "Research and compare multiple competitors or products into a decision-oriented comparison brief.",
+      "task": "Use mission_coordinator to partition the competitor research when needed, researcher to collect current evidence, evidence_analyst to reconcile comparison dimensions, and paper_author to draft the final comparison brief. Use quality_supervisor for one pass to ensure the comparison answers the requested dimensions without unsupported claims.",
+      "allowedAgents": [
+        "mission_coordinator",
+        "researcher",
+        "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
+        "summarizer"
+      ],
+      "params": {
+        "competitors": {
+          "description": "Comma-separated competitor names or products",
+          "default": ""
+        },
+        "dimensions": {
+          "description": "Comparison dimensions",
+          "default": "pricing, features, market-position"
+        },
+        "deliverable": {
+          "description": "Preferred output shape",
+          "default": "competitive intelligence brief with comparison table and key differentiators"
+        },
+        "audience": {
+          "description": "Intended audience",
+          "default": "product and strategy stakeholders"
+        }
+      }
+    },
+    "security_audit": {
+      "description": "Produce a current security risk digest from authoritative advisories, CVEs, and supporting evidence.",
+      "task": "Use researcher to gather current advisories, CVEs, and official remediation guidance for the requested target scope. Use evidence_analyst to reconcile overlaps and rank the concrete risks, then summarizer to produce the final markdown risk report with remediation priorities. Use quality_supervisor or qa_guard for one acceptance pass when severity ranking or scope coverage looks uncertain.",
+      "allowedAgents": [
+        "researcher",
+        "evidence_analyst",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "target": {
+          "description": "Software stack, service, or dependency set to review",
+          "default": "configured platform stack"
+        },
+        "auditScope": {
+          "description": "What to inspect within the target",
+          "default": "dependencies"
+        },
+        "severityThreshold": {
+          "description": "Minimum severity to include",
+          "default": "medium"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown with risk table and remediation plan"
+        }
+      }
+    }
+  }
+}

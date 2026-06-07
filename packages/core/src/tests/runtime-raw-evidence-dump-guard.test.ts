@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeRawToolEvidenceDump, looksLikeArtifactCreationRequest, looksLikeInlinedArtifactFabrication } from "../agent/runtime.js";
+import {
+  looksLikeRawToolEvidenceDump,
+  looksLikeRawSharedFactsDump,
+  looksLikeRawWorkspaceToolDump,
+  looksLikeArtifactCreationRequest,
+  looksLikeInlinedArtifactFabrication,
+} from "../agent/runtime.js";
 
 /**
  * Last-resort terminal guard (audit 003f5aeb). When the "create a verified reveal.js
@@ -63,6 +69,36 @@ describe("terminal junk guard — looksLikeRawToolEvidenceDump", () => {
       + "als Hauptwerk des sächsischen Barock — eine zusammenhängende Darstellung ohne weitere Rohausgabe.";
     expect(looksLikeRawToolEvidenceDump(real)).toBe(false);
   });
+
+  // audit 49372c7a: a hardware-BOM turn (synthesis_required_tool_call_rejected) shipped the
+  // parallel_delegate evidence block verbatim as the final answer — it LED with a doubled
+  // agent-label echo "[researcher]:\n[researcher]: Based on the curated findings …" and was
+  // truncated mid-source. None of the prior markers matched, so the dump shipped.
+  it("flags an answer that LEADS with an agent-label echo ([researcher]: …)", () => {
+    const labelEcho =
+      "[researcher]:\n[researcher]: Based on the curated findings, here is the technical blueprint for "
+      + "your portable, high-quality audio recording device. 1. Microphone Selection & Array Configuration. "
+      + "Recommendation: The Infineon IM73A135V01 is an excellent choice due to its ultra-flat profile and "
+      + "ruggedness. Dimensions: 4mm x 3mm x 1.2mm (Source: https://www.infineon.com/dgdl/Infineon-IM73A135";
+    expect(looksLikeRawToolEvidenceDump(labelEcho)).toBe(true);
+  });
+
+  it("flags a single bold agent-label echo (**[mission_coordinator]**: …)", () => {
+    const boldEcho =
+      "**[mission_coordinator]**: Based on the curated findings from official datasheets and technical "
+      + "documentation, here is the concrete evidence regarding the components, interface specifications, and "
+      + "architectural requirements for your portable, waterproof, OTA-synced audio device build. The mic is analog.";
+    expect(looksLikeRawToolEvidenceDump(boldEcho)).toBe(true);
+  });
+
+  it("does NOT flag a synthesized answer that opens with a markdown list or heading", () => {
+    // Real answers open with prose, a heading, or a bullet — never "[agent]:".
+    const list =
+      "- Der Infineon IM73A135V01 ist ein analoges differenzielles MEMS-Mikrofon (Quelle: infineon.com).\n"
+      + "- Er benötigt einen externen ADC; für rein digitale MCUs ist ein PDM-zu-I²S-Wandler nötig.\n"
+      + "- Versorgungsspannung: 3,3 V. Insgesamt ein robuster Baustein für tragbare Aufnahmegeräte mit hoher Qualität.";
+    expect(looksLikeRawToolEvidenceDump(list)).toBe(false);
+  });
 });
 
 // Auto-build-after-research (audit 33df2aec): a source-sensitive turn whose request asks
@@ -120,5 +156,86 @@ describe("looksLikeInlinedArtifactFabrication — inlined full deliverable", () 
     expect(looksLikeInlinedArtifactFabrication("Die Datei wurde erstellt: dresden/index.html.")).toBe(false);
     // A small inline code snippet (e.g. a config line) is not a fabricated full artifact.
     expect(looksLikeInlinedArtifactFabrication("Run this:\n\n```bash\nnpm run build\n```")).toBe(false);
+  });
+});
+
+// Raw-dump evidence backstop (Fix 4 — audit bcb417e4). When a research turn runs out of
+// time and forceSynthesis returns nothing useful, the "use evidence over synthesis" path
+// will pick the terminalEvidenceBackstop as the final answer. The OLD code only guarded
+// against the shared-facts shape (looksLikeRawSharedFactsDump), so a raw delegate-evidence
+// blob (raw web search block, recovered page chrome, raw workspace/catalog read output)
+// was shipped verbatim. The new code disables the backstop when ANY of three raw-dump
+// detectors trips, letting the later `looksLikeRawToolEvidenceDump` guard replace the
+// final candidate with the honest research-gathered fallback. This block tests the
+// three detectors in combination, mirroring the `evidenceLooksRaw` expression.
+describe("raw-dump evidence backstop (audit bcb417e4) — combined detector", () => {
+  const evidenceLooksRaw = (s: string) =>
+    looksLikeRawSharedFactsDump(s)
+    || looksLikeRawToolEvidenceDump(s)
+    || looksLikeRawWorkspaceToolDump(s);
+
+  it("flags a shared-facts dump (- auto_xxx: ... bullets)", () => {
+    const sharedFacts =
+      "- auto_researcher_web_search_abc: Infineon IM73A135V01 is an analog differential MEMS mic\n"
+      + "- auto_researcher_web_search_def: The Bosch BMI270 IMU runs on I²C at address 0x68\n"
+      + "- auto_researcher_web_search_ghi: Power consumption under load: 0.95 mA at 3.3 V";
+    expect(looksLikeRawSharedFactsDump(sharedFacts)).toBe(true);
+    expect(evidenceLooksRaw(sharedFacts)).toBe(true);
+  });
+
+  it("flags a read_shared_facts heading-style dump", () => {
+    const readShared =
+      "- read_shared_facts: ## Shared Session Facts (3) "
+      + "**auto_mic_specs**: analog differential, **auto_pdm_supported**: false, "
+      + "**auto_supply_voltage**: 3.3 V";
+    expect(evidenceLooksRaw(readShared)).toBe(true);
+  });
+
+  it("flags a raw web-search + page-chrome dump (not detected as shared-facts)", () => {
+    // This is the audit bcb417e4 shape: the delegate's "evidence" is a raw web search
+    // block. looksLikeRawSharedFactsDump returns false (no auto_ prefix), but
+    // looksLikeRawToolEvidenceDump returns true (leading "Web Search Results for:").
+    const delegateRaw =
+      "Web Search Results for: \"CES 2026 MEMS microphone Infineon\" (via duckduckgo) "
+      + "Infineon IM73A135V01 Datasheet https://www.infineon.com/dgdl/Infineon-IM73A135V01-DataSheet-v01_00-EN.pdf "
+      + "Content from: https://www.infineon.com/ IM73A135V01 - High performance analog "
+      + "differential MEMS microphone Jump to content Skip to main content move to sidebar "
+      + "Create account Log in Personal tools Donate";
+    expect(looksLikeRawSharedFactsDump(delegateRaw)).toBe(false);
+    expect(looksLikeRawToolEvidenceDump(delegateRaw)).toBe(true);
+    expect(evidenceLooksRaw(delegateRaw)).toBe(true);
+  });
+
+  it("flags a raw workspace/catalog read dump (not detected as shared-facts or tool-dump)", () => {
+    // A delegate whose only output is a read_file dump of the .starlingai catalog
+    // scaffolding. Looks like neither shared-facts nor web-search chrome to the first
+    // two detectors, but matches looksLikeRawWorkspaceToolDump.
+    const workspaceDump =
+      "#### Tool Calls\n"
+      + "read_file  F:/StarlingAI/.starlingai/ agent_outcomes.ndjson  README.md  agents/ 10-core-agents.jsonc 21-orchestration.jsonc\n"
+      + "list_files  agents/ config/ docs/";
+    expect(looksLikeRawSharedFactsDump(workspaceDump)).toBe(false);
+    expect(looksLikeRawToolEvidenceDump(workspaceDump)).toBe(false);
+    expect(looksLikeRawWorkspaceToolDump(workspaceDump)).toBe(true);
+    expect(evidenceLooksRaw(workspaceDump)).toBe(true);
+  });
+
+  it("does NOT flag a curated, sourced findings blob (delegate did the synthesis work)", () => {
+    const curated =
+      "## Findings\n"
+      + "- The Infineon IM73A135V01 is an **analog differential** MEMS microphone "
+      + "(https://www.infineon.com/dgdl/Infineon-IM73A135V01-DataSheet-v01_00-EN.pdf, S.1).\n"
+      + "- It does NOT expose a digital (PDM/I²S) interface. The analog differential output "
+      + "requires an external ADC; for digital-only MCUs an external PDM-to-I²S chip is needed.\n"
+      + "- Supply voltage: 3.3 V, sensitivity: -38 dBV/Pa (typical).";
+    expect(evidenceLooksRaw(curated)).toBe(false);
+  });
+
+  it("does NOT flag a short empty-evidence case", () => {
+    // If the backstop evidence is empty/null the runtime never reaches this code path,
+    // but the combined predicate should still be a no-op for empty input — guarding
+    // against a refactor that passes terminalEvidenceBackstop.evidence unconditionally.
+    expect(evidenceLooksRaw("")).toBe(false);
+    expect(evidenceLooksRaw("   \n  ")).toBe(false);
   });
 });

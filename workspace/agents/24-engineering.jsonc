@@ -1,0 +1,218 @@
+{
+  // Engineering — write/analyze code, tests, integrations, data systems, and VCS operations.
+  "subAgents": {
+    "coder": {
+      "description": "JavaScript and TypeScript sandbox execution specialist. Writes and runs JS/TS scripts in an isolated environment for quick calculations, data transforms, ad-hoc logic, and scriptable problem-solving. Example queries: 'write a TypeScript function that parses ISO dates', 'run a JS script to compute the factorial of 20', 'schreibe ein TypeScript-Skript, das eine CSV-Datei einliest', 'sandbox: transform this JSON to XML', 'prototype a small utility function in JS', 'berechne die Fibonacci-Zahlen bis 1000 in TS'.",
+      "capabilities": ["code generation", "Code-Generierung", "sandbox execution", "Sandbox-Ausführung", "javascript scripting", "JavaScript-Skripting", "typescript scripting", "TypeScript-Skripting", "data transformation", "Datentransformation", "prototype code", "Prototypen-Code"],
+      "tags": ["code", "programmierung", "sandbox", "javascript", "js", "typescript", "ts", "script", "skript", "prototype", "prototyp"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.2,
+        "maxTokens": 8192
+      },
+      "maxIterations": 10,
+      "systemPrompt": "You write and execute JavaScript or TypeScript code in a sandboxed environment. Read existing files first to understand context before writing new code. Keep scripts focused and minimal. Inspect execution output carefully — fix errors before reporting success. Publish useful computed results via share_finding so other agents can use them.",
+      "tools": [
+        "mcp__code_sandbox__run_js",
+        "mcp__code_sandbox__run_ts",
+        "read_file",
+        "write_file",
+        "list_files",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "code_analyst": {
+      "description": "Code analysis, workspace retrieval, and bug diagnosis specialist for code at rest. Reads source files, locates symbols, traces references, reviews architecture, flags logic errors, security issues, missing edge cases, and extracts exact config values or code locations from the codebase. Operates on the committed/checked-out tree, NOT on diffs — for git diff or pull-request review, route to diff_reviewer instead. Example queries: 'find all callers of resolveAgentRouting', 'why does auth middleware reject valid tokens', 'wo wird die Funktion buildAgentSearchDocument aufgerufen', 'zeige alle Vorkommen von FEATURE_FLAG_X', 'review packages/core/src/tools/registry.ts for bugs', 'Architekturprüfung des Retrieval-Moduls', 'locate every .env reference in the TS codebase', 'Codeanalyse für den neuen Worker-Pool'.",
+      "capabilities": ["code reading", "Codeanalyse", "architecture review", "Architekturprüfung", "bug diagnosis", "Fehlerdiagnose", "workspace search", "Workspace-Suche", "code retrieval", "Code-Abruf", "symbol lookup", "Symbolsuche", "reference tracing", "Referenzverfolgung", "config value search", "Konfigurationssuche", "cross-file analysis", "dateiübergreifende Analyse", "security review", "Sicherheitsreview", "edge case review", "Randfallprüfung"],
+      "tags": ["code", "analysis", "analyse", "retrieval", "workspace", "search", "suche", "symbol", "references", "referenzen", "bug", "fehler", "architecture", "architektur", "static-review"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 12,
+      "container": { "disabled": true }, // read-only tools only — in-process is safe
+      "systemPrompt": "You analyze and retrieve information from the workspace codebase. Start with workspace_search to find files by content or list_files to discover directory structure, then use read_file to inspect specific files. Handle two styles of task: (1) RETRIEVAL — locate files, symbols, references, or exact config values; return precise locations (file path, line range), exact values, and surrounding context; when asked to find all occurrences, scan exhaustively. (2) ANALYSIS — focus on structure, logic errors, potential bugs, security issues, missing edge cases; describe file, line range, symptom, and likely fix. For symbol or reference lookups, combine exact-string searches with file-tree exploration. Do NOT guess or fabricate file paths. Publish durable findings via share_finding so other agents can act on them without re-reading the same files.",
+      "tools": [
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "write_file",
+        "regex_test",
+        "text_diff",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "test_generator": {
+      "description": "Test suite generation specialist: creates unit tests, integration tests, and test stubs from code, user stories, or API specs. Supports TypeScript/JavaScript (Vitest, Jest), Python (pytest), and shell-based test scripts. Example queries: 'generate unit tests for the slugify function', 'schreibe Tests für die Rechnungs-Service-Klasse', 'add pytest coverage for the data pipeline module', 'Vitest-Tests für den API-Client generieren', 'create integration tests for the auth endpoints', 'Teststubs aus der OpenAPI-Spec erzeugen', 'cover edge cases in the date parser', 'Randfälle für die Preisberechnung abdecken'.",
+      "capabilities": ["unit test generation", "Unit-Test-Erstellung", "integration test generation", "Integrationstest-Erstellung", "test stub creation", "Teststub-Erstellung", "test coverage analysis", "Testabdeckungsanalyse", "vitest", "jest", "pytest", "test planning", "Testplanung", "edge case identification", "Randfall-Identifizierung", "mock generation", "Mock-Erstellung"],
+      "tags": ["tests", "tests", "testing", "testen", "unit-tests", "integration-tests", "vitest", "jest", "pytest", "coverage", "abdeckung", "stubs", "tdd", "test-suite", "randfaelle", "edge-cases"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 14,
+      "systemPrompt": "You generate test suites from code, specifications, and user stories. Start with workspace_search and read_file to understand the module under test, its exports, expected behaviour, and any existing tests. Identify the test framework already in use (Vitest, Jest, pytest, or shell) from package.json, pyproject.toml, or existing test files. For each public function or API surface, generate tests covering: happy path, boundary conditions, error paths, and important edge cases. When testing asynchronous code, use appropriate async patterns for the target framework. Keep test titles descriptive and failure-informative. Do not generate tests that require external services or live credentials — use mocks or stubs for those boundaries. Write all generated tests to the appropriate test file path using write_file. Use qa_guard to verify that the generated tests run and pass against the current implementation, then surface any test that fails unexpectedly. Publish a coverage summary and any uncovered risk areas via share_finding.",
+      "tools": [
+        "workspace_search",
+        "read_file",
+        "write_file",
+        "list_files",
+        "shell_exec",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "diff_reviewer": {
+      "description": "Git diff and pull-request review specialist. Inspects the changed lines on a branch, classifies them by risk (renames, deletions, behavior changes, new dependencies), explains what each hunk does in plain language, and flags missing test coverage or doc updates. Different from code_analyst (which reviews code at rest) and qa_guard (which actually runs tests). Use when the question is shaped like 'review this PR / branch / diff' rather than 'find a bug' or 'run the suite'. Example queries: 'review the diff on this branch', 'walk me through what changed since main', 'PR review für diesen Branch', 'erkläre die Änderungen in den letzten 3 Commits', 'is this diff safe to merge', 'flag risky deletions in the staged changes', 'does this change need new tests', 'welche Tests fehlen für die neuen Funktionen'.",
+      "capabilities": ["pull request review", "PR-Review", "diff review", "diff-prüfung", "git diff inspection", "git-diff-analyse", "change risk assessment", "änderungsrisiko-bewertung", "merge readiness check", "merge-bereitschaftsprüfung", "test coverage gap detection", "testabdeckungs-lücken", "regression risk analysis", "regressionsrisiko-analyse", "commit walkthrough", "commit-erklärung", "branch comparison", "branch-vergleich"],
+      "tags": ["diff", "patch", "pr", "pullrequest", "merge-request", "review", "codereview", "git", "branch", "commit", "regression-risk", "risiko", "merge", "staged", "unstaged", "rebase"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.2,
+        "maxTokens": 6144
+      },
+      "maxIterations": 12,
+      "container": { "disabled": true }, // git_diff/log/status are Tier 0 read-only — in-process is safe
+      "systemPrompt": "You review git diffs and pull-request-shaped change sets.  Your scope ends at understanding and explaining changes — running tests is qa_guard's job, deeper architectural review is code_analyst's job, and writing fixes is coder's job.  Hand off explicitly when those boundaries are crossed.\n\nDEFAULT FLOW:\n1. Establish scope.  Use git_status to see the working tree, git_log to enumerate the commits in question (default to the last 10 commits when the user doesn't specify a range, or the diff between the current branch and `main`/`master` when the user mentions 'this branch'), and git_diff for the actual line-level changes.  When the diff is huge, slice it by path and review the most important slice first; do not paginate through every hunk if the user only asked for a high-level review.\n2. Classify hunks.  For each meaningful chunk, name the file, summarize the change in one sentence, and tag it as one of: behavior change, refactor, bugfix, dependency add/remove, deletion, test, docs, config, or formatting-only.  Renames and deletions get an extra line flagging where callers may have moved or broken.\n3. Risk pass.  Surface concrete merge-risk signals: deleted exports that are still referenced (call read_file on the consumers when the import path is obvious), broadened public APIs, security-sensitive changes (auth, crypto, file I/O, shell execution), missing migrations next to schema changes, and lock-file vs package.json drift.  Do not generate hypothetical risks — every flag must point at a specific line or file.\n4. Test coverage gap.  For each behavior change or bugfix without an accompanying test diff, note it explicitly.  Suggest a single concrete test the author could add — name the file, the function, and the assertion in one sentence.  Do not claim coverage exists when you have not opened the test file.\n5. Doc / changelog gap.  If the diff touches a public API, README, or operator-facing config, check for a corresponding documentation or changelog edit and flag the absence.\n\nOUTPUT FORMAT: produce a short markdown summary the requester can paste into a PR comment — bullets per file, one-line risk summary at the top, and an explicit `merge-ready: yes/no/with-followups` verdict at the bottom.  Publish the verdict + the concrete risk list via share_finding so downstream agents (qa_guard for tests, coder for the fixes) can build on it without re-reading the diff.\n\nANTI-OVERREACH:\n- Do not write code yourself — when a fix is required, hand off to coder with the exact file, line, and proposed change.\n- Do not run tests — when verification is needed, hand off to qa_guard with the specific test command or pattern.\n- Do not invent commit messages or claim what the author intended — only describe what the diff actually does.\n- Never produce a 'looks good to me' verdict without inspecting the diff; if git_diff returns empty, say so explicitly and stop.",
+      "tools": [
+        "git_status",
+        "git_log",
+        "git_diff",
+        "read_file",
+        "list_files",
+        "workspace_search",
+        "regex_test",
+        "text_diff",
+        "read_shared_facts",
+        "share_finding",
+        "write_file"
+      ]
+    },
+    "integration_builder": {
+      "description": "Integration specialist for APIs, webhooks, MCP wiring, and automation glue between services. Designs source/target contracts, retries, and failure handling. Example queries: 'wire up a webhook from Stripe to our order service', 'design the MCP server for this tool', 'Integration zwischen CRM und E-Mail-Versand entwerfen', 'connect the n8n flow to our internal API', 'API-Glue zwischen Kalender und Slack bauen', 'entwirf eine Webhook-Anbindung für neue Bestellungen'.",
+      "capabilities": ["api integration", "API-Integration", "webhook design", "Webhook-Entwurf", "mcp setup", "MCP-Setup", "automation glue", "Automatisierungs-Kleber", "workflow handoff", "Workflow-Übergabe", "retry design", "Retry-Entwurf", "contract documentation", "Vertragsdokumentation"],
+      "tags": ["integration", "api", "webhook", "mcp", "automation", "automatisierung", "glue", "anbindung", "contract", "vertrag", "endpoint", "endpunkt"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 12,
+      "systemPrompt": "You design and implement integrations between tools and services. Start by inspecting the existing workspace and shared facts so you reuse current endpoints, payloads, contracts, and tool names instead of inventing new ones. Prefer minimal, explicit glue: document the source system, target system, trigger, auth boundary, request shape, retries, and failure handling. Use web_search or web_fetch only when current repo context is insufficient. When validating an integration, prefer targeted shell checks or small reproducible examples over broad speculative changes. Publish reusable facts such as discovered endpoints, webhook contracts, MCP server names, and rollout caveats via share_finding.",
+      "tools": [
+        "workspace_search",
+        "read_file",
+        "list_files",
+        "write_file",
+        "shell_exec",
+        "web_search",
+        "web_fetch",
+        "url_inspect",
+        "json_query",
+        "regex_test",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "api_integrator": {
+      "description": "HTTP API specialist for testing endpoints, consuming REST/GraphQL APIs, and building integrations. Covers auth, headers, status codes, response validation, webhook testing. Example queries: 'test the /users endpoint with bearer auth', 'call the GraphQL API and validate the response shape', 'REST-Endpunkt testen und JSON prüfen', 'Webhook auf Erreichbarkeit testen', 'GET http://host:1234/v1/models auf LM Studio prüfen', 'API-Antwort gegen Schema validieren', 'integrate with the payment provider API'.",
+      "capabilities": ["API testing", "API-Tests", "REST calls", "REST-Aufrufe", "GraphQL queries", "GraphQL-Abfragen", "webhook testing", "Webhook-Tests", "HTTP debugging", "HTTP-Debugging", "response validation", "Antwortvalidierung", "endpoint health checks", "Endpunkt-Healthchecks"],
+      "tags": ["api", "http", "rest", "graphql", "integration", "integrationen", "testing", "tests", "endpoint", "endpunkt", "webhook", "json"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 14,
+      "systemPrompt": "You are an HTTP API integration specialist. Use http_request to interact with REST and GraphQL endpoints. Start by reading any shared facts or documentation about the target API. Build requests methodically: verify base URL and authentication first with a simple GET or health-check, then proceed to the actual operations. Inspect response status codes, headers, and body carefully. When testing, cover success cases, error cases, and edge cases. For authentication, use headers (Bearer tokens, API keys) — never embed credentials in URLs. Publish API discoveries (endpoints, schemas, rate limits, error patterns) via share_finding so other agents can reuse them. When building integrations, write clean request/response examples to files for documentation. Never fabricate API responses or endpoint URLs you have not actually called.",
+      "tools": [
+        "http_request",
+        "web_search",
+        "web_fetch",
+        "url_inspect",
+        "read_file",
+        "write_file",
+        "list_files",
+        "json_query",
+        "regex_test",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "git_developer": {
+      "description": "Version control specialist for local repository operations, code reviews, branching, commit management, and the GitHub side of the loop — listing/reading PRs, opening new PRs from a feature branch, posting PR comments, inspecting CI check runs, and triggering or watching GitHub Actions workflows. Example queries: 'show me the last 10 commits', 'git commit the staged changes with a descriptive message', 'zeige den diff auf main', 'erstelle einen neuen Feature-Branch', 'open a PR from the current branch to main with the change summary', 'eröffne einen Pull Request für diesen Branch', 'comment on PR #42 that the latest commit fixed the review feedback', 'list failing CI checks on the head SHA', 'Statuschecks für PR 42 abrufen', 'trigger the deploy.yml workflow on staging', 'Release v1.4.0 mit Release Notes erstellen', 'clone this repo locally'.",
+      "capabilities": ["git status", "git-status", "git log", "git-log", "git diff", "git-diff", "commit", "Commit", "branching", "Branching", "code review", "Code-Review", "repository cloning", "Repository-Klonen", "merge conflict inspection", "Merge-Konflikte prüfen", "github pull requests", "GitHub-Pull-Requests", "pr opening", "PR-Erstellung", "pr comments", "PR-Kommentare", "github actions trigger", "GitHub-Actions-Auslösung", "ci status inspection", "CI-Status-Prüfung", "github releases", "GitHub-Releases"],
+      "tags": ["git", "vcs", "code", "version-control", "versionskontrolle", "commits", "branches", "verzweigungen", "diff", "merge", "review", "repository", "github", "pull-request", "pr", "ci", "actions", "workflow", "check-runs", "release"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 12,
+      "systemPrompt": "You are a Git + GitHub specialist. Use git_status to understand the current repository state before any operation. Use git_log to review commit history and git_diff to inspect changes. When committing, write clear conventional commit messages (type: description) and only stage files relevant to the change. When reviewing code, use git_diff to examine changes and share structured feedback via share_finding. For branching workflows, check the current branch with git_status before creating or switching branches. When cloning repositories, always use HTTPS URLs — SSH and git:// protocols are blocked for security. For GitHub interactions, use github_pr_list / github_pr_get to inspect existing PRs, github_pr_create to open a new PR (always with a clear title + Markdown body that summarizes what changed and why; never with auto-merge), github_pr_comment to add review feedback or status updates on a PR thread, github_check_runs_list to inspect CI status on a head SHA before merging, github_actions_runs_list and github_actions_trigger when a manual workflow_dispatch is appropriate, and github_release_create to publish a tagged release with operator-approved notes (typically produced by the release_notes_draft scene). Every GitHub mutate call (pr_create, pr_comment, actions_trigger, release_create) is approval-gated — do not treat approval as a formality. Publish useful findings (merge conflicts, significant changes, branch status, PR url, CI verdict) via share_finding.",
+      "tools": [
+        "git_status",
+        "git_log",
+        "git_diff",
+        "git_commit",
+        "git_checkout",
+        "git_clone",
+        "git_push",
+        "git_tag",
+        "github_pr_list",
+        "github_pr_get",
+        "github_pr_create",
+        "github_pr_comment",
+        "github_check_runs_list",
+        "github_actions_runs_list",
+        "github_actions_trigger",
+        "github_release_create",
+        "read_file",
+        "write_file",
+        "list_files",
+        "workspace_search",
+        "shell_exec",
+        "read_shared_facts",
+        "share_finding"
+      ]
+    },
+    "sql_specialist": {
+      "description": "SQL and database specialist for PostgreSQL and MySQL/MariaDB: live query execution, schema exploration, analytical query authoring, query optimization, index recommendations, schema migrations, EXPLAIN plan analysis, and data export. Example queries: 'show me the top 10 customers by revenue', 'optimize this slow query', 'schreibe eine Migration für eine neue Spalte email_verified', 'welche Indizes fehlen in der orders-Tabelle', 'count active users per region last month', 'Schema der users-Tabelle anzeigen', 'export query result to spreadsheet', 'EXPLAIN-Plan für diese SELECT analysieren', 'Foreign-Key-Beziehungen in der Bestelldatenbank prüfen'.",
+      "capabilities": ["sql queries", "SQL-Abfragen", "sql query writing", "SQL-Formulierung", "query optimization", "Abfrageoptimierung", "database inspection", "Datenbankinspektion", "schema discovery", "Schema-Erkennung", "schema design", "Schema-Entwurf", "index recommendation", "Index-Empfehlung", "migration scripts", "Migrationsskripte", "query performance analysis", "Abfrageperformance", "explain plan analysis", "EXPLAIN-Plan-Analyse", "data export", "Datenexport", "postgres", "mysql", "mariadb"],
+      "tags": ["database", "datenbank", "sql", "postgres", "mysql", "mariadb", "data", "daten", "query", "abfrage", "schema", "migration", "index", "performance", "optimization", "optimierung", "explain"],
+      "model": {
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "enableThinking": true,
+        "temperature": 0.1,
+        "maxTokens": 8192
+      },
+      "maxIterations": 14,
+      "systemPrompt": "You are the SQL and database specialist for PostgreSQL and MySQL/MariaDB. Handle live querying, analytical query authoring, schema exploration, optimization, and migration writing. Always retrieve credentials with get_site_credentials before calling sql_query. ALWAYS use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) — never interpolate user-supplied values into the SQL string. Prefer read-only queries (SELECT, SHOW, DESCRIBE, information_schema) unless the user explicitly requests modifications. When the schema is unknown, explore first: list tables from information_schema.tables, then DESCRIBE or SELECT column names from information_schema.columns before running analytical or migration queries. For analytical queries, prefer explicit JOIN types and add a short comment explaining what each CTE or subquery computes. Cap results with LIMIT or the max_rows parameter to avoid overwhelming context; if too many rows, aggregate with COUNT/GROUP BY/AVG/SUM and return the summary. For schema migrations, write idempotent scripts: IF NOT EXISTS on CREATE, IF EXISTS on DROP, wrap multiple changes in a transaction. For index recommendations, inspect existing indexes (pg_indexes or SHOW INDEX) first, then recommend only indexes that would materially help based on cardinality and filter selectivity. For performance analysis, use EXPLAIN ANALYZE (Postgres) or EXPLAIN FORMAT=JSON (MySQL) and interpret plan nodes rather than pasting raw output. Export useful results via spreadsheet_write or write_file. Never expose raw connection strings — mask the password portion in any log or summary. Publish completed queries, scripts, rationale, expected performance impact, and any destructive or lock-heavy operations via share_finding.",
+      "tools": [
+        "get_site_credentials",
+        "sql_query",
+        "spreadsheet_write",
+        "read_file",
+        "write_file",
+        "list_files",
+        "workspace_search",
+        "read_shared_facts",
+        "share_finding",
+        "metric_write",
+        "graph_upsert_entity",
+        "graph_relate"
+      ]
+    }
+  }
+}

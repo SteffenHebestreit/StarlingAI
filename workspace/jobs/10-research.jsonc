@@ -1,0 +1,256 @@
+{
+  // Research & intel digests — scheduled/triggered research and briefing packets.
+  "jobs": {
+    "deep_research_packet": {
+      "description": "Run a deep-research dossier workflow with optional Mermaid visuals. Example triggers: '/deep-research electric grid storage', 'Tiefenrecherche zum Thema Quantencomputer', 'deep-dive dossier on the supply chain', 'Dossier mit Visualisierungen erstellen'.",
+      "params": {
+        "topic": {
+          "description": "Research topic or question",
+          "default": "emerging platform risk and opportunity"
+        },
+        "deliverable": {
+          "description": "Preferred output format",
+          "default": "source-backed dossier with Mermaid diagrams where useful"
+        }
+      },
+      "steps": [
+        {
+          "scene": "deep_research",
+          "label": "Build dossier with visuals",
+          "params": {
+            "deliverable": "{{deliverable}}",
+            "includeVisuals": "yes",
+            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}}",
+            "audience": "decision maker",
+            "visualFocus": "choose the clearest Mermaid visual structure for {{topic}}"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_DEEP_RESEARCH_PACKET_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/deep-research",
+          "mode": "prefix",
+          "captureRemainderAs": "topic",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{topic|the requested topic}} as {{jobId}}.",
+          "params": {
+            "deliverable": "source-backed dossier with Mermaid diagrams where useful"
+          }
+        }
+      ]
+    },
+    "source_grounded_paper_packet": {
+      "description": "Collect evidence and draft a source-grounded paper with one final quality gate. Example triggers: 'write a cited paper on federated learning', 'quellenbasiertes Paper zum Thema KI-Ethik verfassen', 'produce a technical report with references', 'Fachartikel mit Quellenangaben schreiben'.",
+      "params": {
+        "topic": {
+          "description": "Topic, protocol set, or question to cover",
+          "default": "the requested topic"
+        },
+        "outputStyle": {
+          "description": "Preferred output style or citation format",
+          "default": "technical report with inline references"
+        }
+      },
+      "steps": [
+        {
+          "scene": "source_backed_paper",
+          "label": "Collect evidence and draft paper",
+          "params": {
+            "outputStyle": "{{outputStyle}}",
+            "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}} and preserve publication dates"
+          }
+        }
+      ]
+    },
+    "research_visual_digest": {
+      "description": "Produce a fast visual research brief for a topic that benefits from one high-signal Mermaid diagram. Example triggers: 'give me a visual brief on our stack', 'visuelle Kurzrecherche mit Diagramm', 'one-diagram summary of the architecture', 'Kompakt-Briefing mit Mermaid-Diagramm'.",
+      "params": {
+        "topic": {
+          "description": "Topic or system to summarize visually",
+          "default": "current architecture and key dependencies"
+        }
+      },
+      "steps": [
+        {
+          "scene": "deep_research",
+          "label": "Research and diagram",
+          "params": {
+            "deliverable": "concise visual brief",
+            "includeVisuals": "yes",
+            "audience": "technical stakeholder",
+            "visualFocus": "create the single most useful Mermaid diagram for {{topic}}"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_RESEARCH_VISUAL_DIGEST_KEY"
+        }
+      ]
+    },
+    "competitive_snapshot": {
+      "description": "Run a competitive analysis for one or more products, produce a visual intelligence brief, and optionally broadcast it. Example triggers: '/competitive ProductA, ProductB, ProductC', 'Wettbewerbsanalyse für drei Produkte durchführen', 'compare these competitors on pricing and features', 'Wettbewerbsübersicht mit Vergleichstabelle'.",
+      "params": {
+        "competitors": {
+          "description": "Comma-separated competitor names or products",
+          "default": ""
+        },
+        "dimensions": {
+          "description": "Comparison dimensions",
+          "default": "pricing, features, market-position"
+        },
+        "channels": {
+          "description": "Comma-separated channels to broadcast to, or empty to skip broadcast",
+          "default": ""
+        }
+      },
+      "steps": [
+        {
+          "scene": "competitive_analysis",
+          "label": "Research and compare competitors",
+          "params": {
+            "competitors": "{{competitors}}",
+            "dimensions": "{{dimensions}}",
+            "deliverable": "competitive intelligence brief with comparison table and key differentiators",
+            "audience": "product and strategy stakeholders"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_COMPETITIVE_SNAPSHOT_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/competitive",
+          "mode": "prefix",
+          "captureRemainderAs": "competitors",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{competitors|the requested products}} as {{jobId}}.",
+          "params": {
+            "dimensions": "pricing, features, market-position"
+          }
+        }
+      ]
+    },
+    "morning_briefing": {
+      "description": "Produce a combined morning briefing: today's calendar, overnight ops alerts, key news or research on the configured topic, and any pending notifications — delivered to the configured channel. Example triggers: '/morning', 'Morgen-Briefing erstellen', 'send me the daily morning digest', 'täglicher Morgenüberblick mit Kalender und News'.",
+      "params": {
+        "topic": {
+          "description": "Background topic for the research section (platform news, industry, project)",
+          "default": "platform and technology news relevant to the current stack"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "telegram"
+        },
+        "calendarLookahead": {
+          "description": "How many days of calendar events to include",
+          "default": "1"
+        }
+      },
+      "steps": [
+        {
+          "scene": "deep_research",
+          "label": "Gather morning research brief",
+          "params": {
+            "deliverable": "concise morning digest — 3 to 5 bullet points per sub-topic, no padding",
+            "includeVisuals": "no",
+            "freshnessRequirement": "use only today's or yesterday's sources for news items",
+            "audience": "operator",
+            "visualFocus": "none"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Deliver morning briefing",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "informational"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_MORNING_BRIEFING_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["telegram"],
+          "pattern": "/morning",
+          "mode": "exact",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} as {{jobId}}.",
+          "params": {
+            "channels": "telegram"
+          }
+        }
+      ]
+    },
+    "weekly_security_digest": {
+      "description": "Research the latest CVEs, security advisories, and threat intelligence for the configured stack, produce a prioritized risk report, and broadcast it to the configured channels. Example triggers: '/security-digest Node.js', 'wöchentliches Sicherheits-Update verteilen', 'send the weekly CVE digest', 'Sicherheits-Digest mit Risiken broadcasten'.",
+      "params": {
+        "scope": {
+          "description": "Software stack, services, or dependency set to cover",
+          "default": "Node.js, Docker, nginx, PostgreSQL, and configured npm dependencies"
+        },
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "severityThreshold": {
+          "description": "Minimum severity to include",
+          "default": "medium"
+        }
+      },
+      "steps": [
+        {
+          "scene": "security_audit",
+          "label": "Collect CVEs and audit findings",
+          "params": {
+            "target": "{{scope}}",
+            "auditScope": "dependencies",
+            "severityThreshold": "{{severityThreshold}}",
+            "outputFormat": "markdown with risk table and remediation plan"
+          }
+        },
+        {
+          "scene": "multi_channel_broadcast",
+          "label": "Broadcast security digest",
+          "params": {
+            "channels": "{{channels}}",
+            "tone": "urgent"
+          }
+        }
+      ],
+      "triggers": [
+        {
+          "type": "api",
+          "webhookKey": "$JOB_WEEKLY_SECURITY_DIGEST_KEY"
+        },
+        {
+          "type": "channel",
+          "channels": ["slack"],
+          "pattern": "/security-digest",
+          "mode": "prefix",
+          "captureRemainderAs": "scope",
+          "parseParams": false,
+          "replyText": "Queued {{jobName}} for {{scope|configured stack}} as {{jobId}}.",
+          "params": {
+            "channels": "slack"
+          }
+        }
+      ]
+    }
+  }
+}

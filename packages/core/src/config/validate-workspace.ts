@@ -20,7 +20,7 @@
  * a misleading empty pass.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";

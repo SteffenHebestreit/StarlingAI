@@ -51,7 +51,7 @@ export function truncateToolResult(content: string, toolName: string): string {
  */
 export function extractKeyFacts(text: string, toolName: string, maxChars = 600): string {
   // Strip known boilerplate common across tool result types.
-  let cleaned = text
+  const cleaned = text
     // StarlingAI's own injected agent hint — appended to sub-agent web tool output
     // (web.ts shareSuffix). It is our text, never a fact; it must never be stored as a
     // shared finding or echoed back to the user (audit 65f46046: it surfaced verbatim
@@ -117,6 +117,45 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
   // Generic fallback: trim at a word boundary to avoid cutting mid-sentence.
   const cutoff = cleaned.lastIndexOf(" ", maxChars);
   return cleaned.slice(0, cutoff > maxChars * 0.8 ? cutoff : maxChars).trim();
+}
+
+/**
+ * Strip editorial "notes" the distiller (a weak local model) adds in its OWN
+ * voice when it tries to reconcile or second-guess the evidence. A shared
+ * finding must be source facts only; these notes are never facts, and on a weak
+ * model they come out confused or outright wrong:
+ *
+ *   "Manufacturer: Infineon Technologies AG (Note: Search results incorrectly
+ *    attribute the IM73A135V01 to Infineon; the component is manufactured by
+ *    STMicroelectronics)"
+ *
+ * — which is backwards (the part IS Infineon) and self-contradictory. The model
+ * was led there by its own wrong search ("STMicroelectronics IM73A135V01") and
+ * then "fixed" the conflict with a false parenthetical. A prompt rule alone
+ * doesn't reliably stop this on a 35B, so we deterministically remove the note
+ * span. Topic-agnostic: keyed only on the note marker, never on any domain
+ * vocabulary, so a real spec like "73 dB(A)" or "(typ.)" is untouched.
+ *
+ * Removes:
+ *   - parenthetical/bracketed notes that OPEN with a note marker —
+ *     "(Note: …)", "[Hinweis: …]", "(NB: …)", "(Anmerkung: …)", "(Correction: …)";
+ *   - a standalone line that opens with a note marker.
+ * When sources genuinely disagree the agent must report each source's value with
+ * its URL (the source-sensitive discipline), not a reconciling note.
+ */
+const EDITORIAL_NOTE_MARKERS = "Note|Notiz|Hinweis|Anmerkung|Anm\\.?|NB|N\\.B\\.|Correction|Korrektur|Editor'?s? note|Caveat";
+const PARENTHETICAL_NOTE_RE = new RegExp(`\\s*[([]\\s*(?:${EDITORIAL_NOTE_MARKERS})\\s*[:.\\-][^)\\]]*[)\\]]`, "gi");
+const STANDALONE_NOTE_LINE_RE = new RegExp(`(?:^|\\n)[ \\t>*-]*(?:${EDITORIAL_NOTE_MARKERS})\\s*[:][^\\n]*`, "gi");
+
+export function stripEditorialNotes(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(PARENTHETICAL_NOTE_RE, "")
+    .replace(STANDALONE_NOTE_LINE_RE, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** Universal web page-furniture words. A finding dominated by these is the

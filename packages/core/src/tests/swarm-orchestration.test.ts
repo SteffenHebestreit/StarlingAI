@@ -1366,6 +1366,74 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  it("tells a coordinator to STOP (not re-delegate) when every candidate is coordinator-blocked", async () => {
+    // Audit 4db1f294: a depth-1 mission_coordinator re-fired parallel_delegate for
+    // ~5 min, every candidate a coordinator (mission_coordinator / web_task_coordinator)
+    // and so coordinator→coordinator-blocked, no leaf ever ran, the turn never
+    // synthesized. The generic "No suitable agent" message read as a routing miss and
+    // invited re-decomposition. The dead-end must instead carry an explicit stop signal.
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-coordinator-deadend-"));
+    tempDirs.push(workspacePath);
+    const configPath = join(workspacePath, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      workspacePath,
+      agents: {
+        defaults: { model: { primary: "lmstudio/qwen3.5-4b", contextWindow: 32768, temperature: 0.3, maxTokens: 4096 } },
+      },
+      subAgents: {
+        mission_coordinator: {
+          description: "Mission coordinator",
+          tools: ["delegate_to_agent", "parallel_delegate"],
+          capabilities: ["coordination"],
+          tags: ["coordination"],
+        },
+        web_task_coordinator: {
+          description: "Coordinator for broad web research tasks",
+          tools: ["delegate_to_agent", "parallel_delegate"],
+          capabilities: ["coordination"],
+          tags: ["coordination"],
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const { resetConfigForTests } = await import("../config/loader.js");
+    resetConfigForTests();
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Assemble the final summary",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+
+    // A coordinator caller delegating to another coordinator, with no leaf candidate.
+    const result = await delegate!.execute({
+      agentName: "web_task_coordinator",
+      task: "Combine the existing meeting notes into one short summary document.",
+    }, {
+      sessionId: "session-coordinator-deadend",
+      workspacePath,
+      swarmState,
+      currentAgentName: "mission_coordinator",
+    });
+
+    // No sub-agent ran — the only candidate was a coordinator, blocked to keep the hierarchy flat.
+    expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.metadata?.["delegationOutcome"]).toBe("coordinator_hierarchy_dead_end");
+    expect(result.metadata?.["blockedCoordinators"]).toContain("web_task_coordinator");
+    expect(result.error ?? "").toMatch(/Do NOT re-delegate this task to another coordinator/i);
+    expect(result.error ?? "").toMatch(/leaf specialist/i);
+  }, 30_000);
+
   it("returns an explicit agent's partial result instead of silently escalating to a coordinator", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-explicit-partial-no-escalation-"));
     tempDirs.push(workspacePath);

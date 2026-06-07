@@ -31,8 +31,6 @@ import {
   longRunningGenerationManager,
   DEFAULT_SOFT_THRESHOLD_MS,
   DEFAULT_SOFT_THRESHOLD_TOKENS,
-  DEFAULT_CONTINUE_GRANT_MS,
-  DEFAULT_CONTINUE_GRANT_TOKENS,
 } from "./long-running-generation.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
@@ -40,7 +38,7 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import { isSessionDegraded } from "./warden.js";
 import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
-import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue } from "../tools/result-shaping.js";
+import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
@@ -535,6 +533,36 @@ async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Pr
   }
 }
 
+/**
+ * Build the facts-first synthesis prompt: the user's TASK plus the CURATED
+ * FINDINGS already gathered this run, instead of the ~20K-token raw history the
+ * slow 35B chokes on (audit 1dc806bf: researchers gathered 13-16 findings then
+ * "produced no final response"). Pure + exported for tests.
+ */
+export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: string): LLMMessage[] {
+  return [
+    {
+      role: "system",
+      content:
+        "You are writing the FINAL answer for the task below. You are given CURATED FINDINGS already gathered and verified during this run. "
+        + "Write the complete, well-structured final answer NOW from those findings. "
+        + "Include every concrete fact, name, number, spec, price, and source URL the findings contain; never invent anything not present, and mark anything the findings did not establish as unverified. "
+        // Anti-conflation: a weak model mixes specs across components — e.g. a run
+        // that gathered an ANALOG microphone's specs AND a separate chip's I2S
+        // interface concluded the microphone was "I2S/digital" (audit: IM73A135V01).
+        + "Attribute every spec to the exact component the findings tie it to; never carry a spec from one component over to another. "
+        + "Do NOT call any tools. Do NOT mention deadlines or these instructions. Reply in the user's language.",
+    },
+    {
+      role: "user",
+      content:
+        `TASK:\n${task.trim()}\n\n`
+        + `CURATED FINDINGS (already gathered + verified this run — your source material):\n${curatedFindings}\n\n`
+        + "Write the complete final answer now.",
+    },
+  ];
+}
+
 // Returns the extracted finding text that was stored, or null if skipped
 // (too short, duplicate, or boilerplate). The caller counts the returned
 // length toward cumulativeUsefulEvidenceBytes so the evidence cap tracks
@@ -567,7 +595,17 @@ export async function distillFindingForSharedFacts(params: {
         + "URL(s) they came from. Output a compact Markdown bullet list (at most 8 bullets). Preserve exact "
         + "numbers, units, and URLs verbatim. DROP navigation menus, cookie/consent/login banners, site "
         + "chrome, and anything not relevant to the objective. Do NOT add facts that are not in the raw "
-        + "content. If the raw content contains nothing relevant to the objective, reply with exactly: NONE",
+        + "content. "
+        // Anti-editorializing: a weak model tends to append its own interpretation
+        // — e.g. it stored "Manufacturer: Infineon (Note: search results for
+        // STMicroelectronics incorrectly attribute this to Infineon)", a confused
+        // caveat that is not a fact and pollutes shared facts. Each stored finding
+        // must be a clean fact as the source states it, with no commentary.
+        + "Copy each value exactly as the source states it. Do NOT add your own notes, caveats, "
+        + "corrections, interpretations, or parenthetical commentary, and do NOT try to reconcile or "
+        + "explain disagreements between sources — output only the facts themselves, each as a single "
+        + "bullet with its value and (where present) its source URL. "
+        + "If the raw content contains nothing relevant to the objective, reply with exactly: NONE",
     },
     {
       role: "user",
@@ -593,7 +631,7 @@ async function autoShareUsefulFinding(params: {
   objective: string;
   provider: ChatProvider;
   signal?: AbortSignal;
-  distill?: { enabled: boolean; minChars: number; budget: { remaining: number } };
+  distill?: { enabled: boolean; minChars: number; budget: { remaining: number }; provider?: ChatProvider };
 }): Promise<string | null> {
   // Normalize only for length check and dedup key — preserve structure for extraction
   const normalized = params.evidence.replace(/\s+/g, " ").trim();
@@ -640,7 +678,11 @@ async function autoShareUsefulFinding(params: {
       objective: params.objective,
       toolName: params.toolName,
       rawEvidence: params.evidence,
-      provider: params.provider,
+      // Distillation is a lightweight extraction — run it on the routing tier
+      // (a smaller/faster model) when one is configured, so the per-finding
+      // distill cost stays low on a single GPU. Falls back to the agent's own
+      // provider when no routing tier is set (no behavior change).
+      provider: distill.provider ?? params.provider,
       signal: params.signal,
     });
     if (distilled === "") {
@@ -653,12 +695,22 @@ async function autoShareUsefulFinding(params: {
     }
   }
 
+  // Deterministic last line of defense against the distiller editorializing —
+  // strip any "(Note: …)" / "Hinweis: …" the model added in its own voice (these
+  // are never source facts and on a weak model are often wrong/backwards). If the
+  // finding was nothing but a note, it collapses to low-value and is skipped.
+  const cleaned = stripEditorialNotes(toShare);
+  if (!cleaned || extractedFindingIsLowValue(cleaned)) {
+    params.sharedKeys.delete(key);
+    return null;
+  }
+
   await shareFinding(
     params.sessionId,
     key,
-    `[${params.agentName}/${params.toolName}] ${toShare}`,
+    `[${params.agentName}/${params.toolName}] ${cleaned}`,
   );
-  return toShare;
+  return cleaned;
 }
 
 // Per-tool call caps enforced inside sub-agent runs.
@@ -725,6 +777,28 @@ const PER_PATH_APPEND_CAP = 24;
 // calls are refunded from the success cap and counted under this separate, bounded
 // budget so a genuinely-stuck arg-rejection loop is still capped.
 const PER_TOOL_FAILURE_CAP = 4;
+
+// Artifact-persistence tools share a CROSS-TOOL thrash guard. The per-tool FAILURE cap (4)
+// already lets a single artifact tool recover from a few arg rejections — e.g. a deck builder
+// that mis-serializes `slides` 3× then fixes it (audit 2daf5f54), which must NOT be blocked.
+// The distinct failure is a coordinator that fundamentally cannot emit a large deliverable and
+// thrashes ACROSS the family (audit 5fec8427: generate_document ×2 "content is required" then
+// write_file ×3 "path is required" — the slow 35B hits finishReason:"length" emitting the doc
+// inline, so the required arg arrives empty; each tool stays under its own cap and only
+// max_iterations stops it, ~6 min wasted, zero artifacts). So we trip only when failures span
+// >=2 DISTINCT artifact tools AND total >=3 — then block the family with a nudge to deliver the
+// content inline (the correct fallback anyway; the synthesis ships it). Single-tool recovery is
+// untouched.
+const ARTIFACT_PERSIST_TOOLS = new Set<string>([
+  "write_file",
+  "generate_document",
+  "generate_pdf",
+  "generate_website",
+  "generate_presentation",
+  "export_workspace_artifact",
+]);
+const ARTIFACT_PERSIST_DISTINCT_TOOLS_TRIP = 2;
+const ARTIFACT_PERSIST_TOTAL_FAILURES_TRIP = 3;
 
 const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, number>> = {
   delegate_to_agent: 6,
@@ -2341,21 +2415,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
     // soft-deadline synthesis at most once per sub-agent run.
     let softDeadlineSynthesisAttempted = false;
-    // Long-running generation thresholds. Each `continue` grant from the
-    // operator bumps these up so the next prompt fires only after the
-    // newly-granted budget is also spent.
-    let lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
-    let lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
-    // When the operator explicitly set --timeout N (any non-zero value via
-    // turnTimeoutOverrideMs), they have already declared a budget for this
-    // turn. Suppress the pause-and-ask handoff entirely so we don't pester
-    // them halfway through a run they pre-authorized. Their own timeout
-    // catches the run when it actually expires.
-    const operatorPreAuthorizedBudget =
-      opts.turnTimeoutOverrideMs !== undefined && opts.turnTimeoutOverrideMs > DEFAULT_SOFT_THRESHOLD_MS;
-    // When the operator answers "stop", we set this so the next loop
-    // iteration goes straight to attemptTimeoutSynthesis instead of
-    // making another LLM call.
+    // Long-running generation soft thresholds — the point past which the run
+    // is SURFACED (non-blocking) to the operator dock. Static now that the
+    // handoff no longer pauses for an operator "continue" grant.
+    const lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
+    const lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
+    // When the operator answers "stop" (polled via isStopRequested), we set
+    // this so the next loop iteration goes straight to attemptTimeoutSynthesis
+    // instead of making another LLM call.
     let lrgOperatorStop = false;
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
@@ -2379,6 +2446,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // call refunds the success cap and increments this instead; exceeding
     // PER_TOOL_FAILURE_CAP blocks the tool so repeated arg-rejection can't loop forever.
     const perToolFailureCount = new Map<string, number>();
+    // Cross-tool artifact-persistence thrash guard (see ARTIFACT_PERSIST_TOOLS): tracks which
+    // distinct artifact tools have failed and the total failures. Once failures span >=2 tools
+    // AND total >=3, further artifact writes are blocked and the agent is told to deliver the
+    // content inline instead of re-trying a write it cannot emit.
+    const failedArtifactPersistTools = new Set<string>();
+    let artifactPersistFailureCount = 0;
     let workflowPassthroughOutput: string | null = null;
     // Observability: per-tool byte totals for context-budget runaway detection
     const bytesByTool = new Map<string, number>();
@@ -2424,6 +2497,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       enabled: config.orchestration.distillSharedFacts,
       minChars: config.orchestration.distillSharedFactsMinChars,
       budget: { remaining: config.orchestration.distillSharedFactsMaxPerRun },
+      // Run per-finding distillation on the lightweight routing tier when it's
+      // configured (smaller/faster model = lower per-call cost on one GPU);
+      // falls back to this agent's provider otherwise (no behavior change).
+      provider: getChatProviderForTier("routing") ?? provider,
     };
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
@@ -2719,6 +2796,45 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       return { result: recovered, forcedOutcome: "partial" };
     };
 
+    // Facts-first synthesis input. The forced-synthesis passes below previously
+    // fed the model the FULL raw history (~20K tokens of web_search/web_fetch
+    // dumps), which the slow 35B routinely fails to synthesize — it returns "no
+    // final response" even with unbounded time (audit 1dc806bf: researchers
+    // gathered 13-16 findings, produced nothing, the turn shipped a raw evidence
+    // list). The evidence is already in the curated shared facts (extracted,
+    // distilled, note-stripped) — a few KB the model CAN digest. Build the
+    // synthesis prompt from those when substantial; fall back to history otherwise.
+    const SYNTH_FACTS_MIN_CHARS = 400;
+    const readCuratedFindingsForSynthesis = async (budgetChars = 12_000): Promise<string> => {
+      try {
+        const facts = await readAllFacts(deriveRootSessionId(subSessionId));
+        const entries = Object.entries(facts)
+          .filter(([, v]) => typeof v === "string" && v.trim().length > 0)
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (entries.length === 0) return "";
+        const lines: string[] = [];
+        let used = 0;
+        for (const [, value] of entries) {
+          const line = `- ${String(value).replace(/\s+/g, " ").trim()}`;
+          if (used + line.length > budgetChars && lines.length > 0) break;
+          lines.push(line);
+          used += line.length;
+        }
+        return lines.join("\n");
+      } catch {
+        return "";
+      }
+    };
+    const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] =>
+      buildFactsFirstSynthesisMessages(opts.task, curated);
+    /** Run a forced-synthesis completion, preferring the streaming accumulator so
+     *  it gets token-progress + the per-chunk inactivity abort (a hung synthesis
+     *  is exactly the failure we're guarding against). */
+    const runSynthesisCompletion = (msgs: LLMMessage[], sig?: AbortSignal) =>
+      synthProvider.completeViaStream
+        ? synthProvider.completeViaStream(msgs, [], sig)
+        : synthProvider.complete(msgs, [], sig);
+
     const attemptTimeoutSynthesis = async (): Promise<SubAgentRunResult | null> => {
       if (!turnTimeoutMs || toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
         return null;
@@ -2748,18 +2864,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         : graceAbort.signal;
 
       try {
-        const synthMessages: LLMMessage[] = [
-          {
-            role: "system",
-            content: systemPrompt +
-              "\n\nYour execution time budget has expired. DO NOT call any more tools. " +
-              "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
-              "Include the key facts, URLs, and evidence you already retrieved. " +
-              "Do NOT mention the timeout unless the prior evidence itself requires it.",
-          },
-          ...history,
-        ];
-        const synthResponse = await synthProvider.complete(synthMessages, [], graceSignal);
+        const curatedFindings = await readCuratedFindingsForSynthesis();
+        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+          ? buildFactsFirstSynthMessages(curatedFindings)
+          : [
+            {
+              role: "system",
+              content: systemPrompt +
+                "\n\nYour execution time budget has expired. DO NOT call any more tools. " +
+                "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
+                "Include the key facts, URLs, and evidence you already retrieved. " +
+                "Do NOT mention the timeout unless the prior evidence itself requires it.",
+            },
+            ...history,
+          ];
+        const synthResponse = await runSynthesisCompletion(synthMessages, graceSignal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
@@ -2873,22 +2992,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         : synthAbort.signal;
 
       try {
-        const synthMessages: LLMMessage[] = [
-          {
-            role: "system",
-            content: systemPrompt +
-              "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
-              "You have used most of your execution budget. Stop calling tools. " +
-              "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
-              "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
-              "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
-              "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
-              "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
-              "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
-          },
-          ...history,
-        ];
-        const synthResponse = await synthProvider.complete(synthMessages, [], synthSignal);
+        const curatedFindings = await readCuratedFindingsForSynthesis();
+        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+          ? buildFactsFirstSynthMessages(curatedFindings)
+          : [
+            {
+              role: "system",
+              content: systemPrompt +
+                "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
+                "You have used most of your execution budget. Stop calling tools. " +
+                "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
+                "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
+                "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
+                "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
+                "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
+                "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
+            },
+            ...history,
+          ];
+        const synthResponse = await runSynthesisCompletion(synthMessages, synthSignal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
@@ -3195,48 +3317,48 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     }
 
     while (iterations < maxIterations) {
-      // Long-running-generation handoff. When this run has burned past
-      // the soft thresholds (wall time OR completion tokens), pause and
-      // ask the operator whether to keep going, get more budget, or
-      // synthesize what's been collected. Stops asking once the operator
-      // grants `unbounded`. See long-running-generation.ts for the
-      // rationale (session 00e55867 lost a half-built website to an
-      // unannounced upstream timeout).
-      if (
-        !lrgOperatorStop
-        && !longRunningGenerationManager.isUnbounded(subSessionId)
-        && (
-          (Date.now() - runStartedAt) > lrgWallThresholdMs
-          || usage.completionTokens > lrgTokenThreshold
-        )
-      ) {
-        const lrgOutcome = await longRunningGenerationManager.requestContinuation({
-          agentName: opts.agentName,
-          runSessionId: subSessionId,
-          ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
-          reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
-          elapsedMs: Date.now() - runStartedAt,
-          completionTokens: usage.completionTokens,
-          iterations,
-          // When the operator pre-authorized the run with --timeout N, the
-          // handoff still fires (so they see the run in the dock and can
-          // stop it if they want) but the default outcome on no-response is
-          // "continue" instead of "stop" — the run grants itself another
-          // round of budget and keeps going.
-          ...(operatorPreAuthorizedBudget ? { defaultOutcome: "continue" as const } : {}),
-        });
-        if (lrgOutcome === "continue") {
-          lrgWallThresholdMs += DEFAULT_CONTINUE_GRANT_MS;
-          lrgTokenThreshold += DEFAULT_CONTINUE_GRANT_TOKENS;
-        } else if (lrgOutcome === "stop" || lrgOutcome === "timeout") {
-          // Operator (or fallback timer) asked us to stop. Mark the run
-          // for synthesis on the next iteration — reuses the existing
-          // timeout-synthesis path so collected evidence is relayed.
+      // Long-running-generation handoff — NON-BLOCKING. When this run has
+      // burned past the soft thresholds (wall time OR completion tokens),
+      // SURFACE it to the operator dock (so the operator can stop it or
+      // grant unbounded budget) but never PAUSE the agent waiting for a
+      // response.
+      //
+      // The old code `await`ed the operator inline. A paused agent keeps
+      // holding BOTH its per-agent and the shared global concurrency slot
+      // (swarm/concurrency.ts) while it sits idle, so it stalls every
+      // sibling and parent in the swarm; and on no-response the default
+      // `stop` truncated productive work. On a single-GPU local model
+      // essentially every substantial run crosses the soft threshold, so
+      // the pause fired constantly and a single slow agent repeatedly
+      // brought the whole turn to a halt — the opposite of the handoff's
+      // intent. The operator's decision is now honoured asynchronously:
+      // `isStopRequested` (a turn-level latch that any sibling stop also
+      // sets) winds this run down on the next iteration, and `isUnbounded`
+      // suppresses further surfacing. The hard `turnTimeoutMs` and the
+      // soft-deadline synthesis above remain the real safety bounds.
+      if (!lrgOperatorStop && !longRunningGenerationManager.isUnbounded(subSessionId)) {
+        if (longRunningGenerationManager.isStopRequested(subSessionId)) {
+          // Operator stopped this run (or the whole turn). Mark the run for
+          // synthesis on the next iteration — reuses the existing
+          // timeout-synthesis path so collected evidence is relayed instead
+          // of making another LLM call.
           lrgOperatorStop = true;
           turnTimeoutReached = true;
+        } else if (
+          (Date.now() - runStartedAt) > lrgWallThresholdMs
+          || usage.completionTokens > lrgTokenThreshold
+        ) {
+          // Idempotent per run: only the first crossing surfaces a dock entry.
+          longRunningGenerationManager.notifyLongRunning({
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+            reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
+            elapsedMs: Date.now() - runStartedAt,
+            completionTokens: usage.completionTokens,
+            iterations,
+          });
         }
-        // "unbounded" → the manager's _unboundedRuns set was updated;
-        // this branch is now a no-op for the rest of the run.
       }
 
       // I11: Pre-emptive soft-deadline synthesis.
@@ -3501,7 +3623,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       let response;
       try {
-        response = await provider.complete(messages, effectiveTools, signal);
+        // Prefer the streaming accumulator on the long sub-agent calls: it gives
+        // the provider-activity monitor live token progress (producing vs stuck
+        // on the prompt vs stalled) and inherits stream()'s per-chunk inactivity
+        // abort, which the plain non-streaming complete() lacks. Falls back to
+        // complete() for any provider/mock that doesn't implement it.
+        response = provider.completeViaStream
+          ? await provider.completeViaStream(messages, effectiveTools, signal)
+          : await provider.complete(messages, effectiveTools, signal);
       } catch (err) {
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
@@ -4048,6 +4177,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           });
           continue;
         }
+        if (
+          ARTIFACT_PERSIST_TOOLS.has(tc.name)
+          && failedArtifactPersistTools.size >= ARTIFACT_PERSIST_DISTINCT_TOOLS_TRIP
+          && artifactPersistFailureCount >= ARTIFACT_PERSIST_TOTAL_FAILURES_TRIP
+        ) {
+          const blockMsg = `Artifact persistence has failed ${artifactPersistFailureCount} times across ${failedArtifactPersistTools.size} different file tools this run (the file was NOT created). Do NOT try to write or generate a file again — deliver the full content directly in your final text answer instead.`;
+          log.warn(
+            { agentName: opts.agentName, tool: tc.name, artifactFailures: artifactPersistFailureCount, distinctTools: failedArtifactPersistTools.size },
+            "Sub-agent thrashed across the artifact-persistence family — blocking further artifact writes",
+          );
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: blockMsg,
+            skippedReason: "artifact_persist_failure_cap",
+          });
+          toolResults.push({ role: "tool", content: blockMsg, tool_call_id: tc.id });
+          continue;
+        }
         perToolCallCount.set(tc.name, priorCount + 1);
 
         // ABA-duplicate detection (idempotent tools only): if the same tool
@@ -4147,6 +4298,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             if (pc > 0) perWritePathCount.set(refundKey, pc - 1);
           }
           perToolFailureCount.set(tc.name, (perToolFailureCount.get(tc.name) ?? 0) + 1);
+          if (ARTIFACT_PERSIST_TOOLS.has(tc.name)) {
+            failedArtifactPersistTools.add(tc.name);
+            artifactPersistFailureCount += 1;
+          }
         }
         emitSubAgentToolAudit({
           agentName: opts.agentName,
@@ -4762,21 +4917,24 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       const passthrough = tryReturnSingleDelegationPassthrough("max_iterations_synthesis");
       if (passthrough) return passthrough;
       try {
-        const synthMessages: LLMMessage[] = [
-          {
-            role: "system",
-            content: systemPrompt +
-              "\n\nYou have exhausted your tool-call budget. " +
-              "DO NOT call any more tools. " +
-              "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
-              "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
-              "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
-              "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
-              "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
-          },
-          ...history,
-        ];
-        const synthResponse = await synthProvider.complete(synthMessages, [], signal);
+        const curatedFindings = await readCuratedFindingsForSynthesis();
+        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+          ? buildFactsFirstSynthMessages(curatedFindings)
+          : [
+            {
+              role: "system",
+              content: systemPrompt +
+                "\n\nYou have exhausted your tool-call budget. " +
+                "DO NOT call any more tools. " +
+                "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
+                "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
+                "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
+                "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
+                "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
+            },
+            ...history,
+          ];
+        const synthResponse = await runSynthesisCompletion(synthMessages, signal);
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;

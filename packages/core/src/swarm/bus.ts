@@ -66,9 +66,9 @@ const REDIS_CHANNEL = "starlingai:swarm:events";
 const _emitter = new EventEmitter();
 _emitter.setMaxListeners(100);
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let _publisher: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let _subscriber: any = null;
 let _redisAvailable = false;
 
@@ -82,7 +82,7 @@ export async function startSwarmBus(): Promise<void> {
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const ioredis = await import("ioredis") as any;
     const IORedis = ioredis.default ?? ioredis;
 

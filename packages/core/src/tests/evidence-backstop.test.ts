@@ -132,3 +132,45 @@ describe("evidence backstop — answer anchoring decision (qaEvidenceAnchoring g
     expect(answerNeedsEvidenceAnchoringRepair("It depends on your exact build constraints.", EVIDENCE)).toBe(false);
   });
 });
+
+/**
+ * Spec-token consistency (the original bug). The shared-vocabulary check
+ * alone passed a draft that named the right part but flipped a key spec
+ * (the live session shipped "I²S-Digital" against evidence that says
+ * "analog differential"). The anchor now ALSO requires every spec-shaped
+ * token in the draft to either appear in the evidence, or be mutually
+ * negated in both texts. These three tests pin that contract: one
+ * positive case (the consistent answer), one flipped-spec case (the
+ * original bug), and one contrastive-phrasing case (the legitimate
+ * "not I²S" answer is still considered anchored).
+ */
+describe("evidence backstop — spec-token consistency", () => {
+  const HARDWARE_EVIDENCE = [
+    "Infineon IM73A135V01: Analog differential output MEMS mic, NOT PDM. SNR 73 dB(A), AOP 124 dB, IP57.",
+    "Interface: analog (requires external ADC for ESP32-S3).",
+  ].join(" ");
+
+  it("flags a draft that names the part but flips a key spec (the original bug)", () => {
+    // The original failure mode: a draft that shares part number + SNR
+    // tokens with the evidence but invents an I²S-Digital interface the
+    // evidence does not claim. "i2s-digital" is a spec-shaped token
+    // (digit + letter, hyphen) that appears in the draft and is NOT in
+    // the evidence and is NOT negated in the draft → anchor fails.
+    const FLAWED = "The Infineon IM73A135V01 is an I2S-Digital MEMS mic with 73 dB(A) SNR and IP57 rating. It comes in a 4.0 x 3.0 x 1.2 mm LGA package with a sealed acoustic port. Use it directly with the ESP32-S3 over the I2S peripheral and feed its digital output straight into the chip's PDM input.";
+    expect(answerNeedsEvidenceAnchoringRepair(FLAWED, HARDWARE_EVIDENCE)).toBe(true);
+  });
+
+  it("accepts a draft that mirrors the evidence claims", () => {
+    const CONSISTENT = "The Infineon IM73A135V01 is an analog differential MEMS microphone with 73 dB(A) SNR. It needs an external ADC to work with an ESP32-S3.";
+    expect(answerNeedsEvidenceAnchoringRepair(CONSISTENT, HARDWARE_EVIDENCE)).toBe(false);
+  });
+
+  it("accepts a contrastive phrasing where both draft and evidence deny the same term", () => {
+    // "not a PDM or I2S digital part" / evidence "NOT PDM" — the spec
+    // tokens I2S appears in the draft only inside a negation, and the
+    // evidence is also a negation of PDM. The both-negated path lets
+    // the anchor pass.
+    const CONTRASTIVE = "The Infineon IM73A135V01 is an analog differential MEMS microphone with 73 dB(A) SNR. Because it is analog, not a PDM or I2S digital part, it requires an external ADC to interface with an ESP32-S3 — route the analog output through the ADC and sample it in firmware.";
+    expect(answerNeedsEvidenceAnchoringRepair(CONTRASTIVE, HARDWARE_EVIDENCE)).toBe(false);
+  });
+});
