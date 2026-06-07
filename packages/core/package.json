@@ -20,11 +20,13 @@
     "start:scene-worker": "node dist/scene-worker-main.js",
     "start:mcp-stdio": "node dist/mcp-stdio.js",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:qwen-speech-smoke": "tsx src/scripts/qwen-speech-smoke.ts",
     "runtime-guidance:evaluate": "tsx src/scripts/runtime-guidance-live-eval.ts",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
     "lint": "eslint src",
+    "memory:vault": "tsx src/cli/memory-vault.ts",
     "agents:evaluate": "tsx src/agent/evaluation-cli.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",
     "worker:scene": "tsx src/scene-worker-main.ts"

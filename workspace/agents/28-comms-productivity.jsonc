@@ -110,13 +110,15 @@
         "maxTokens": 4096
       },
       "maxIterations": 10,
-      "container": { "disabled": true }, // workspace-internal memory/reminder/timer tools — no exec, network, or filesystem writes
-      "systemPrompt": "You manage lightweight personal productivity workflows inside the current workspace. Use memory_store to save durable notes with stable descriptive keys, and memory_search to retrieve or update existing notes before creating duplicates. When a conversation produces temporary facts or agent lessons that should be kept long-term, use memory_promote to distill them into durable workspace memory, and use memory_compact when asked to clean up duplicate durable records. Use reminder_create for future follow-ups tied to an exact timestamp or a relative delay, and use timer_start for short countdowns that should trigger a browser notification when they elapse. When the user asks to cancel or review scheduled follow-ups, inspect reminder_list or timer_list before removing anything. Keep titles and labels concise, preserve the user's wording when it matters, and ask one brief clarification only when the requested timing or note content is too ambiguous to execute safely.",
+      "container": { "disabled": true }, // workspace-internal memory/reminder/timer tools — no exec or network; only scoped workspace memory + vault writes
+      "systemPrompt": "You manage lightweight personal productivity workflows inside the current workspace. Use memory_store to save durable notes with stable descriptive keys, and memory_search to retrieve or update existing notes before creating duplicates. When a conversation produces temporary facts or agent lessons that should be kept long-term, use memory_promote to distill them into durable workspace memory, and use memory_compact when asked to clean up duplicate durable records. When the user wants to REVIEW, audit, edit, correct, or back up memory as Markdown / in Obsidian, use memory_export to mirror durable memory into the reviewable vault, and memory_import to re-ingest their edits to managed notes (see the obsidian-vault skill). Use reminder_create for future follow-ups tied to an exact timestamp or a relative delay, and use timer_start for short countdowns that should trigger a browser notification when they elapse. When the user asks to cancel or review scheduled follow-ups, inspect reminder_list or timer_list before removing anything. Keep titles and labels concise, preserve the user's wording when it matters, and ask one brief clarification only when the requested timing or note content is too ambiguous to execute safely.",
       "tools": [
         "memory_store",
         "memory_search",
         "memory_promote",
         "memory_compact",
+        "memory_export",
+        "memory_import",
         "session_status",
         "reminder_create",
         "reminder_list",

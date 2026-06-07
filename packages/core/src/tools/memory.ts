@@ -39,6 +39,9 @@ import {
   type MainAssistantPersonalityUpdate,
 } from "../personality/service.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+// Register the memory-vault tools (memory_export / memory_import) alongside the
+// core memory tools — they share the durable-memory store and ship together.
+import "./memory-vault.js";
 
 const log = childLogger("tool:memory");
 

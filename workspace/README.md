@@ -10,6 +10,7 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
 | `runtime/` | `runtime.overrides.json` — live overrides written by the config-assistant |
+| `vault/` | *(generated, gitignore it)* Obsidian-style Markdown mirror of durable memory/skills/sessions — `sai memory export` / `import` or the `memory_export` / `memory_import` tools. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §6 |
 
 > See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full role taxonomy, the agent→file map, the
 > tool organization, and the **separation-of-concerns contract** (coordinators orchestrate; only
