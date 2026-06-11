@@ -1035,10 +1035,37 @@ export function buildAgentSearchDocument(agentName: string, cfg: SubAgentConfig)
   ].filter(Boolean).join("\n");
 }
 
+/**
+ * BM25-style inverse document frequency over the agent corpus, for the LEXICAL
+ * routing fallback. Without IDF, common tokens ("web", "search", "research")
+ * match nearly every agent and a degraded-embeddings ranking goes flat — the
+ * 0.25-everywhere collapse that pushed routing into architect-fallback ephemerals
+ * (audit 9b5196ad). Rare tokens are what actually discriminate specialists.
+ * ~59 small docs → trivial to compute per search; no caching needed.
+ */
+export function buildAgentTokenIdf(agents: Array<[string, SubAgentConfig]>): Map<string, number> {
+  const docCount = agents.length;
+  const df = new Map<string, number>();
+  for (const [name, cfg] of agents) {
+    const tokens = new Set<string>(tokenizeSearchText([
+      name,
+      cfg.description,
+      ...(cfg.capabilities ?? []),
+      ...(cfg.tags ?? []),
+      ...(cfg.tools ?? []),
+    ].join(" ")));
+    for (const t of tokens) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  const idf = new Map<string, number>();
+  for (const [t, n] of df) idf.set(t, Math.log(1 + (docCount - n + 0.5) / (n + 0.5)));
+  return idf;
+}
+
 export function scoreAgentKeywordMatch(
   query: string,
   agentName: string,
-  cfg: SubAgentConfig
+  cfg: SubAgentConfig,
+  idf?: Map<string, number>,
 ): { score: number; matchedTerms: string[] } {
   const normalizedQuery = normalizeSearchText(query);
   const queryTokens = tokenizeSearchText(query);
@@ -1046,6 +1073,18 @@ export function scoreAgentKeywordMatch(
   if (!normalizedQuery || queryTokens.length === 0) {
     return { score: 0, matchedTerms: [] };
   }
+
+  // Per-query-normalized IDF weight in [0.35, 1]: rare tokens dominate, but common
+  // tokens still contribute (an all-common query must not zero out). A token absent
+  // from the corpus is treated as maximally rare — it discriminates by definition.
+  const maxIdf = idf && idf.size > 0 ? Math.max(...queryTokens.map((t) => idf.get(t) ?? Number.NEGATIVE_INFINITY)) : 0;
+  const corpusMaxIdf = idf && idf.size > 0 ? Math.max(...idf.values()) : 0;
+  const idfWeight = (token: string): number => {
+    if (!idf || idf.size === 0) return 1;
+    const tokenIdf = idf.get(token) ?? corpusMaxIdf;
+    const reference = Math.max(maxIdf, tokenIdf, 1e-9);
+    return 0.35 + 0.65 * (tokenIdf / reference);
+  };
 
   const nameText = normalizeSearchText(agentName);
   const descriptionText = normalizeSearchText(cfg.description);
@@ -1080,7 +1119,7 @@ export function scoreAgentKeywordMatch(
     }
 
     if (tokenScore > 0) {
-      score += tokenScore;
+      score += tokenScore * idfWeight(token);
       matchedTerms.add(token);
     }
   }
@@ -1234,11 +1273,30 @@ async function _buildAgentIndexInner(
       description: cfg.description,
       vector: base64ToFloat32(cachedAgents[name]!.vector),
     }));
-    _available = true;
-    _retryDelayMs = 0;
-    clearEmbeddingFailure();
-    clearEmbeddingRetryTimer();
-    log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index loaded from cache (no changes)");
+    // Live endpoint probe: the index loaded ENTIRELY from the on-disk cache, so NO live embed
+    // happened this load. If the configured model has since been unloaded/removed from the
+    // endpoint, blindly setting `_available = true` would be a lie — every query embed would
+    // then fail at runtime and semantic routing/recall silently degrades to keyword scoring
+    // (audit 9b5196ad: stale cache + a model that returns "No models loaded" → every catalog
+    // agent scored ~0.25 → architect-fallback ephemeral with no obvious cause). Verify the
+    // endpoint actually serves the configured model before trusting the cache.
+    try {
+      const [probe] = await provider.embed(["embedding endpoint health probe"], embeddingModel);
+      if (!probe || probe.length === 0) throw new Error("embedding endpoint returned an empty vector");
+      _available = true;
+      _retryDelayMs = 0;
+      clearEmbeddingFailure();
+      clearEmbeddingRetryTimer();
+      log.info({ model: embeddingModel, agentCount: _index.length }, "Agent embedding index loaded from cache (no changes); endpoint probe OK");
+    } catch (err) {
+      _available = false;
+      recordEmbeddingFailure(err);
+      log.warn(
+        { err, model: embeddingModel, agentCount: _index.length },
+        "Agent embedding index loaded from cache BUT the configured embedding model is NOT serving — semantic agent routing, skill/memory recall, and RAG will degrade to keyword matching until it returns. Load the model on the endpoint or repoint agents.defaults.model.embeddingModel.",
+      );
+      scheduleEmbeddingRetry();
+    }
     return;
   }
 

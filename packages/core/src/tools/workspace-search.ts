@@ -7,6 +7,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:workspace-search");
@@ -111,11 +112,15 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
     const maxResults = Math.min(30, Math.max(1, Number(args["maxResults"] ?? 10) || 10));
 
-    if (!existsSync(ctx.workspacePath)) {
-      return { success: false, output: "", error: `Workspace not found: ${ctx.workspacePath}` };
+    // Workspace zoning: resolve the search root through the scope-aware resolver
+    // so a scope-confined agent searches its working zone (generated/), not the
+    // platform's config zones and docs.
+    const searchRoot = resolvePathWithinWorkspace(".", ctx.workspacePath).resolved;
+    if (!existsSync(searchRoot)) {
+      return { success: true, output: `No workspace files contain "${query}".`, metadata: { count: 0 } };
     }
 
-    const matches = searchWorkspace(ctx.workspacePath, query, maxResults);
+    const matches = searchWorkspace(searchRoot, query, maxResults);
 
     if (matches.length === 0) {
       return { success: true, output: `No workspace files contain "${query}".`, metadata: { count: 0 } };

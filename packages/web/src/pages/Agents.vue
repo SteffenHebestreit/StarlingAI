@@ -2,6 +2,7 @@
   <div class="agents-page" style="height: 100%">
     <header class="agents-page__header">
       <div>
+        <p class="eyebrow agents-page__eyebrow">Capability Directory</p>
         <h1 class="agents-page__title">Agent Catalog</h1>
         <p class="agents-page__subtitle">
           The specialist sub-agents the swarm can delegate to, and what each one does. This is the read-only
@@ -75,7 +76,8 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
 .agents-page {
   display: flex;
   flex-direction: column;
-  background: rgba(8, 10, 18, 0.92);
+  /* Near-transparent scrim — the themed app canvas glows through. */
+  background: rgba(8, 10, 18, 0.30);
   color: rgb(229 231 235);
   overflow: hidden;
 }
@@ -85,11 +87,14 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
   border-bottom: 1px solid rgba(168, 85, 247, 0.18);
 }
 
+.agents-page__eyebrow {
+  margin: 0 0 0.35rem;
+}
 .agents-page__title {
-  font-size: 1.4rem;
+  font-size: 1.5rem;
   font-weight: 700;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.25rem;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.3rem;
 }
 
 .agents-page__subtitle {
@@ -140,24 +145,41 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
 }
 .agents-controls__input {
   appearance: none;
-  background: rgba(31, 41, 55, 0.6);
+  background: var(--surface-input);
   color: rgb(229 231 235);
-  border: 1px solid rgba(168, 85, 247, 0.25);
-  border-radius: 0.55rem;
-  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.8rem;
   font-size: 0.85rem;
   flex: 1 1 auto;
+  transition: border-color 200ms var(--ease-out), box-shadow 200ms var(--ease-out);
 }
-.agents-count { font-size: 0.78rem; color: rgb(156 163 175); }
+.agents-controls__input:focus {
+  outline: none;
+  border-color: var(--hairline-strong);
+  box-shadow: 0 0 0 3px rgba(var(--accent-purple), 0.16);
+}
+.agents-count {
+  font-size: 0.78rem;
+  color: rgb(156 163 175);
+  font-variant-numeric: tabular-nums;
+}
 .agents-controls__refresh {
   appearance: none;
-  background: rgba(168, 85, 247, 0.22);
+  background: rgba(168, 85, 247, 0.18);
   color: rgb(243 232 255);
-  border: 1px solid rgba(168, 85, 247, 0.45);
-  border-radius: 999px;
-  padding: 0.35rem 0.95rem;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  border-radius: var(--radius-pill);
+  padding: 0.4rem 1rem;
   font-size: 0.82rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 200ms var(--ease-out), border-color 200ms var(--ease-out), transform 200ms var(--ease-out);
+}
+.agents-controls__refresh:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.28);
+  border-color: var(--hairline-strong);
+  transform: translateY(-1px);
 }
 .agents-controls__refresh:disabled { opacity: 0.55; cursor: not-allowed; }
 
@@ -169,10 +191,18 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
 }
 
 .agent-card {
-  border: 1px solid rgba(168, 85, 247, 0.18);
-  background: rgba(15, 23, 42, 0.55);
-  border-radius: 0.85rem;
-  padding: 0.7rem 0.95rem 0.85rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1), inset 0 1px 0 var(--highlight-top);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 0.85rem 1rem 0.95rem;
+  transition: border-color 200ms var(--ease-out), box-shadow 200ms var(--ease-out);
+}
+.agent-card:hover {
+  border-color: var(--hairline-strong);
+  box-shadow: var(--shadow-2), inset 0 1px 0 var(--highlight-top);
 }
 .agent-card__header {
   display: flex;
@@ -182,8 +212,10 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
 }
 .agent-card__name {
   margin: 0;
-  font-size: 0.98rem;
-  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.95rem;
+  font-weight: 500;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -0.01em;
   color: rgb(243 232 255);
 }
 .agent-card__model {

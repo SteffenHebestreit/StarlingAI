@@ -1471,16 +1471,28 @@ describe("workflow catalog tools", () => {
     vi.resetModules();
 
     const runTurnMock = vi.fn(async (opts: { userMessage: string; allowedAgents?: string[] }) => ({
-      response: `handled: ${opts.userMessage}`,
+      response: `orchestrated: ${opts.userMessage}`,
       toolCallsExecuted: 1,
       guardrailEvents: [],
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       blocked: false,
     }));
 
+    // Both steps are scoped to a single LEAF agent, so they now run that agent DIRECTLY
+    // via runSubAgentWithStats (not the orchestrator runTurn) — the fix for a single-agent
+    // build step whose orchestrator answered tool-free and never delegated.
+    const runSubAgentMock = vi.fn(async (opts: { agentName: string; task: string }) => ({
+      output: `handled: ${opts.task}`,
+      stats: { outcome: "success", toolCount: 1, iterations: 1, toolNames: [] },
+      artifacts: [],
+    }));
+
     vi.doMock("../agent/runtime.js", () => ({
       collectTurnArtifactAttachments: () => [],
       runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentMock,
     }));
 
     const [{ getTool }, _workflowTools] = await Promise.all([
@@ -1509,14 +1521,18 @@ describe("workflow catalog tools", () => {
       expect(result.output).toContain("Workflow source_grounded_paper_packet [job] completed");
       expect(result.output).toContain("## Collect evidence");
       expect(result.output).toContain("## Draft paper");
-      expect(runTurnMock).toHaveBeenCalledTimes(2);
-      expect(runTurnMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
-        userMessage: expect.stringContaining("Keep the comparison source-grounded."),
+      // Single-leaf steps run the agent directly; the orchestrator path is not used here.
+      expect(runTurnMock).not.toHaveBeenCalled();
+      expect(runSubAgentMock).toHaveBeenCalledTimes(2);
+      expect(runSubAgentMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+        agentName: "researcher",
+        task: expect.stringContaining("Keep the comparison source-grounded."),
         allowedAgents: ["researcher"],
         _workflowExecutionStack: ["job:source_grounded_paper_packet"],
       }));
-      expect(runTurnMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
-        userMessage: expect.stringContaining("Draft the comparison for MCP vs A2A"),
+      expect(runSubAgentMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+        agentName: "paper_author",
+        task: expect.stringContaining("Draft the comparison for MCP vs A2A"),
         allowedAgents: ["paper_author"],
         _workflowExecutionStack: ["job:source_grounded_paper_packet"],
       }));

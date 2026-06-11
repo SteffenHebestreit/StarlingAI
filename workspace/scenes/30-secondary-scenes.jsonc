@@ -1,0 +1,193 @@
+{
+  // Secondary scenes — narrow / very specific workflows (deck pipeline steps, onboarding, release notes, image validation, job application, data-pipeline review).
+  "scenes": {
+    "release_notes_draft": {
+      "description": "Draft release notes from repository history for a version or ref range.",
+      "task": "Use git_developer to inspect the requested ref range, collect the relevant commits and notable changes, then use content_writer to turn that evidence into audience-appropriate release notes. Use quality_supervisor for one completeness pass before finalizing.",
+      "allowedAgents": [
+        "git_developer",
+        "content_writer",
+        "quality_supervisor",
+        "summarizer"
+      ],
+      "params": {
+        "version": {
+          "description": "Release version label",
+          "default": "next"
+        },
+        "targetRef": {
+          "description": "Git ref range to summarize",
+          "default": "HEAD~20..HEAD"
+        },
+        "audience": {
+          "description": "Intended audience for the notes",
+          "default": "internal team"
+        },
+        "broadcast": {
+          "description": "Whether a follow-up broadcast is planned",
+          "default": "no"
+        }
+      }
+    },
+    "onboarding_packet": {
+      "description": "Build a structured onboarding packet for a topic, project, or new team member.",
+      "task": "Use document_intake first when source material or existing docs are provided, meeting_briefing_agent to structure the packet, and content_writer to polish the final onboarding guide for the requested audience and language. Use qa_guard when the packet needs an explicit completeness check.",
+      "allowedAgents": [
+        "document_intake",
+        "meeting_briefing_agent",
+        "content_writer",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "topic": {
+          "description": "What the packet covers",
+          "default": ""
+        },
+        "audience": {
+          "description": "Who the packet is for",
+          "default": "new team member with intermediate technical background"
+        },
+        "outputLanguage": {
+          "description": "Language for the final packet",
+          "default": "English"
+        },
+        "outputFormat": {
+          "description": "Preferred delivery format",
+          "default": "structured Markdown with sections and a quick-reference table"
+        }
+      }
+    },
+    "meeting_briefing_packet": {
+      "description": "Produce a concise meeting brief or handoff packet from attached material, prior findings, and project context.",
+      "task": "Use document_intake first when source material includes files or long notes, data_analyst for tabular attachments, evidence_analyst to reconcile the evidence ledger, policy_compliance_reviewer when approvals or constraints matter, and meeting_briefing_agent to produce the final brief or handoff packet. Use qa_guard when the packet needs an explicit verification pass.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "evidence_analyst",
+        "policy_compliance_reviewer",
+        "meeting_briefing_agent",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "audience": {
+          "description": "Target audience for the packet",
+          "default": "project stakeholders"
+        },
+        "outputFormat": {
+          "description": "Preferred delivery format",
+          "default": "markdown brief with actions, decisions, and open risks"
+        }
+      }
+    },
+    "deck_research": {
+      "description": "Gather and cite the FACTUAL evidence for a slide deck or written brief: names, dates, figures, definitions, and authoritative source URLs. Facts only — no image sourcing, no building. Internal research step of the deck pipeline.",
+      "task": "This is the FACT-RESEARCH step of a multi-step pipeline; image sourcing and building the deck/paper run as LATER steps, so do NOT source images or build anything here. Identify the SUBJECT to research from the Additional workflow context, then gather and verify the FACTUAL evidence ONLY: names, dates, figures, definitions, and authoritative source URLs for that subject. Publish each confirmed fact with its exact source URL via share_finding, and mark anything you cannot confirm from a source as unverified rather than guessing. Write findings in {{language}}.",
+      "allowedAgents": ["researcher"],
+      "params": {
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      }
+    },
+    "deck_images": {
+      "description": "Source, verify, and locally SAVE real free-license images for a slide deck, one per subject, via fetch_image. Images only — no fact research, no building. Internal image step of the deck pipeline.",
+      "task": "This is the IMAGE-SOURCING step of a multi-step pipeline; the facts were gathered earlier and the deck/paper are built LATER, so do NOT research facts or build anything here. Identify the SUBJECT of the deck from the Additional workflow context below (e.g. the building/place/topic the user named); the shared facts from the research step, if present, name more specific sub-subjects worth a picture — but the topic alone is enough to start. Find images for that subject and its main sub-subjects: use web_search to locate free-license image pages (Wikimedia Commons etc.), then for each call fetch_image(url: <a free-license source page or direct image URL you found via web_search>, subject: <the subject>, outputDir: \"{{outputDir}}/images\"); fetch_image downloads the bytes, confirms a real image, checks the subject when a vision model is available, and saves a local copy. It resolves the real image from a page itself, so NEVER guess or construct a direct/hashed URL. Publish each saved image via share_finding with the workspace PATH it returned (e.g. {{outputDir}}/images/<file>), the source page, and the license. If a subject's image cannot be verified, report it unverified and leave it imageless rather than inventing a URL.",
+      "allowedAgents": ["image_sourcer"],
+      "params": {
+        "outputDir": { "description": "Workspace folder whose images/ subfolder receives the saved images", "default": "presentation" }
+      }
+    },
+    "deck_paper": {
+      "expectArtifact": true,
+      "description": "Write the source-cited paper (with the verified images embedded) from ONLY the already-verified shared facts and saved local images. Build step — does not research or source. One of the two final build steps of the deck pipeline.",
+      "task": "This is a FINAL BUILD step: the facts and the saved local images already ran in earlier steps and are in the shared facts, so do NOT research facts or source images here. Read ALL shared facts (the verified research findings AND the saved image paths). Then write ONE deliverable — the paper — and nothing else: you MUST call generate_document (output_file \"{{outputDir}}/paper.md\", format markdown) for a ~1000-word paper that cites the researched sources. Do NOT use write_file for the paper — ONLY generate_document inlines the local images so the paper renders; write_file leaves them broken. Embed the saved images near the relevant sections with the file-relative path `![alt](images/<file>)` using the exact saved filenames from the image findings (never invent or alter an image path). Do NOT build the deck or notes here — those are a separate step; do NOT re-read files you just wrote. Write all content in {{language}}; if the research step verified nothing, say so honestly instead of fabricating.",
+      "allowedAgents": ["content_writer"],
+      "params": {
+        "outputDir": { "description": "Workspace folder to build into (the paper, deck and images all live under generated/<outputDir>/)", "default": "presentation" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      }
+    },
+    "deck_slides": {
+      "expectArtifact": true,
+      "description": "Build the reveal.js HTML deck (and its auto per-slide speaker notes) from ONLY the already-verified shared facts and saved local images. Build step — does not research or source. One of the two final build steps of the deck pipeline.",
+      "task": "This is a FINAL BUILD step: the facts and the saved local images already ran in earlier steps and are in the shared facts, so do NOT research facts or source images here. Read ALL shared facts (the verified research findings AND the saved image paths). Then build ONE deliverable — the slide deck — in a SINGLE generate_presentation call: outputDir \"{{outputDir}}\", and author ALL {{slideCount}} as a full slides array in that one call (do NOT emit a 1-slide deck and stop). Each slide shows just its core point and has a substantive `notes` field. Embed any saved picture in the slide `content` via the slide-relative path `![alt](images/<file>)` from a shared image finding; leave a slide image-free if none exists rather than inventing one. generate_presentation AUTOMATICALLY inlines those local images so they render AND writes the per-slide `notes.md` speaker-notes file for you — so do NOT hand-author a notes file and do NOT call generate_document here (the paper is a separate step). Do NOT re-read files you just wrote. Write all content in {{language}}; never invent an image or fact.",
+      "allowedAgents": ["content_writer"],
+      "params": {
+        "outputDir": { "description": "Workspace folder to build into (deck at generated/<outputDir>/index.html, images at generated/<outputDir>/images)", "default": "presentation" },
+        "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
+        "language": { "description": "Output language", "default": "the language of the user's request" }
+      }
+    },
+    "validate_image": {
+      "description": "Verify that one or more candidate image URLs are reachable AND actually depict the requested subject, before anything embeds them. Returns a per-URL VERIFIED / REJECTED / UNVERIFIED verdict and publishes the verified URLs verbatim. Use it to vet image links (e.g. for a presentation, web page, or document) instead of trusting an unchecked URL. Example queries: 'verify these image URLs show the Zwinger', 'check that these photo links work and are the right building', 'validate the image URLs before we embed them', 'prüfe ob diese Bild-URLs erreichbar sind und das richtige Motiv zeigen'.",
+      "task": "Validate the candidate image URL(s) for the subject \"{{subject}}\" so only real, on-topic images get used downstream. Read shared facts first — the candidates may already be there. Handle each URL ONE at a time and do EXACTLY this; never web_search for or invent alternative URLs:\n1. REACHABLE? Call url_inspect on the URL. It PASSES only on a final HTTP 200 with a content-type that starts image/ (image/jpeg, image/png, …). A 404 or non-image content-type = REJECT. A 429 (rate-limited) is INCONCLUSIVE: wait briefly and re-inspect once; if still 429, mark it UNVERIFIED rather than rejecting.\n2. RIGHT SUBJECT? For each reachable URL, browser_navigate to that exact URL, browser_screenshot it, then analyze_image the screenshot and decide whether it actually depicts \"{{subject}}\". If it shows something unrelated, REJECT it. (If no vision model is available, accept the reachable image but note 'subject not visually confirmed'.)\n3. Never modify, resize, re-host, or guess a URL — validate exactly the strings you were given.\nThen report a compact verdict list — for EVERY input URL: VERIFIED / REJECTED / UNVERIFIED, the EXACT URL, and a one-line reason — and publish each VERIFIED URL (exact string, plus what it depicts) via share_finding so downstream steps embed it verbatim. Do not pass, embed, or recommend any URL that did not reach VERIFIED (or UNVERIFIED with a clear caveat). Candidate URLs:\n{{candidateUrls}}",
+      "allowedAgents": [
+        "image_sourcer"
+      ],
+      "params": {
+        "subject": {
+          "description": "What the images must depict (e.g. 'the Dresden Zwinger')",
+          "default": "the requested subject"
+        },
+        "candidateUrls": {
+          "description": "The image URLs to validate (newline- or comma-separated)",
+          "default": "(use the candidate image URLs already in shared facts or named in the request)"
+        }
+      }
+    },
+    "apply_jobs": {
+      "description": "Run one browser-assisted freelance application from the n8n application table.",
+      "task": "Use browser_agent to execute one iteration of the freelance application workflow. First call get_site_credentials for {{n8nSite}} and use its loginUrl, named URLs, selectors, and notes to log in and open the application table; if the table URL is available as a named URL, use it instead of guessing. Sort the application table by ranking (rating column) from highest to lowest. CRITICAL n8n DATA-TABLE QUIRK: clicking the column NAME text opens an inline rename editor (NOT a sort). To trigger the sort you must click inside the same header cell but BESIDE the column name — the empty area of the column header cell, not the name itself. So target the rating column header CELL (the wrapper, not the inline-edit-preview text element); if the snapshot exposes refs both for the cell and for the name text, pick the cell wrapper. Try this AT MOST ONCE — if the rows still do not visibly reorder, stop trying to sort, read the rows already visible in the snapshot, and pick the highest-rated eligible one directly. Never click the column name text repeatedly; never enter the inline editor; never type empty text and submit on it. Select the first row that is not already checked or applied and whose reason is not exactly or semantically 'low rating'. If the table already exposes the job URL, navigate directly to it instead of clicking the table cell just to inspect it. Open the job link from that row. If no eligible rows remain, stop and tell the user: 'Es gibt momentan keine passenden Projekte - komm spaeter wieder.' For an eligible job, use the exact job URL host for platform credentials when visible; otherwise use {{freelancermapSite}}. Before attempting an external-platform login or application submit, call get_site_credentials for that exact freelance platform host. If those credentials are missing, stop immediately, summarize the selected project and blocker, and tell the user to add the host in StarlingAI Settings -> Site Credentials, not in n8n. Use the application letter from the n8n row's reason column; if it is missing or unsuitable, write a concise tailored application letter based only on the job posting. Apply for the job through the platform flow. After exactly one job application attempt, stop, summarize the project, action taken, and any blocker, then ask the user whether to continue. Do not ask the user for a job lead; the lead source is the {{n8nSite}} application table. Never expose credential values; use site_fill_credentials for browser logins.",
+      "webhookKey": "$SCENE_APPLY_JOBS_KEY",
+      "allowedAgents": [
+        "browser_agent",
+        "summarizer"
+      ],
+      // Only the credential fill needs a human gate; routine clicks/typing run
+      // unattended so the agent can complete the flow without an approval on
+      // every step. The real human-in-the-loop moment is the freelancermap
+      // CAPTCHA, which browser_agent surfaces via request_human_assist (live
+      // browser in the dashboard). Watch progress in the Operator Requests dock.
+      "humanInLoopSteps": [
+        "site_fill_credentials"
+      ],
+      "approvalChannel": "slack-approvals",
+      "params": {
+        "n8nSite": {
+          "description": "Stored site credential key for the internal n8n application table",
+          "default": "n8n.k2o"
+        },
+        "freelancermapSite": {
+          "description": "Stored site credential key for the external freelance platform",
+          "default": "freelancermap.de"
+        }
+      }
+    },
+    "data_pipeline_review": {
+      "description": "Inspect files or databases for schema quality, completeness, anomalies, and actionable data-quality issues.",
+      "task": "Use document_intake first for attached files, data_analyst for tabular files and exported reports, sql_specialist for live database/schema inspection when a database source is provided, and evidence_analyst or summarizer to merge the findings into the requested quality report. Use qa_guard for one verification pass when the output must map cleanly to explicit validation rules.",
+      "allowedAgents": [
+        "document_intake",
+        "data_analyst",
+        "sql_specialist",
+        "evidence_analyst",
+        "summarizer",
+        "qa_guard"
+      ],
+      "params": {
+        "dataSource": {
+          "description": "File path, database, or dataset description",
+          "default": "attached files or configured database"
+        },
+        "validationRules": {
+          "description": "Rules or checks to apply",
+          "default": "null rates, type consistency, referential integrity, value distributions"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown data quality report with issue table"
+        }
+      }
+    }
+  }
+}

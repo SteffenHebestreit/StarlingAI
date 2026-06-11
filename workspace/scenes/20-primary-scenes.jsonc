@@ -1,0 +1,78 @@
+{
+  // Primary scenes — special-infrastructure workflows: security audit, incident response, multi-channel broadcast.
+  "scenes": {
+    "security_audit": {
+      "description": "Produce a current security risk digest from authoritative advisories, CVEs, and supporting evidence.",
+      "task": "Use researcher to gather current advisories, CVEs, and official remediation guidance for the requested target scope. Use evidence_analyst to reconcile overlaps and rank the concrete risks, then summarizer to produce the final markdown risk report with remediation priorities. Use quality_supervisor or qa_guard for one acceptance pass when severity ranking or scope coverage looks uncertain.",
+      "allowedAgents": [
+        "researcher",
+        "evidence_analyst",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "target": {
+          "description": "Software stack, service, or dependency set to review",
+          "default": "configured platform stack"
+        },
+        "auditScope": {
+          "description": "What to inspect within the target",
+          "default": "dependencies"
+        },
+        "severityThreshold": {
+          "description": "Minimum severity to include",
+          "default": "medium"
+        },
+        "outputFormat": {
+          "description": "Preferred report format",
+          "default": "markdown with risk table and remediation plan"
+        }
+      }
+    },
+    "incident_response": {
+      "description": "Triage a live or recent incident, collect root-cause evidence, and produce a structured internal incident summary.",
+      "task": "Use ops_triage for service-health diagnosis and immediate remediation guidance, log_analyst for timeline reconstruction and correlation across logs, then meeting_briefing_agent or summarizer to structure the incident findings for downstream reporting. Keep observed symptoms, root-cause evidence, remediation steps, and open risks separate.",
+      "allowedAgents": [
+        "ops_triage",
+        "log_analyst",
+        "meeting_briefing_agent",
+        "summarizer",
+        "quality_supervisor",
+        "qa_guard"
+      ],
+      "params": {
+        "incident": {
+          "description": "Description of the incident or outage",
+          "default": "investigate the reported service incident"
+        },
+        "severity": {
+          "description": "Incident severity hint",
+          "default": "high"
+        },
+        "affectedService": {
+          "description": "Impacted service or component",
+          "default": "discover from logs"
+        }
+      }
+    },
+    "multi_channel_broadcast": {
+      "description": "Deliver a prepared summary, report link, or status update to one or more configured communication channels.",
+      "task": "Use notification_agent to send the prepared summary or artifact reference to the requested channels. Read shared findings first so the notification reuses the confirmed message, artifact path, or report summary instead of inventing new wording.",
+      "allowedAgents": [
+        "notification_agent",
+        "summarizer"
+      ],
+      "params": {
+        "channels": {
+          "description": "Comma-separated delivery channels",
+          "default": "slack"
+        },
+        "tone": {
+          "description": "Delivery tone or urgency",
+          "default": "informational"
+        }
+      }
+    }
+  }
+}

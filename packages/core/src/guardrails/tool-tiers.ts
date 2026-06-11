@@ -1151,6 +1151,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  serve_app: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Launch/stop a live web app as a dedicated container exposed via the gateway proxy",
+    requiresPerCallApproval: true,
+    requiresSandbox: false, // manages docker itself on the host network — cannot run inside a sandbox
+  },
   ssh_upload: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Upload workspace files or directories to a remote system over SCP",

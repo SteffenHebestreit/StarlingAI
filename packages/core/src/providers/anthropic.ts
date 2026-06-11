@@ -1,0 +1,790 @@
+/**
+ * Anthropic provider — native Messages API (`/v1/messages`) via the official
+ * @anthropic-ai/sdk, implementing the same ChatProvider surface as the
+ * OpenAI-compatible providers so it slots into the failover chain, the
+ * provider activity monitor, and the runtime status dashboards unchanged.
+ *
+ * Auth supports both Anthropic credential modes:
+ *  - API key (`sk-ant-api...`)   → `x-api-key` header (console.anthropic.com, pay-per-use)
+ *  - OAuth token (`sk-ant-oat...`) → `Authorization: Bearer` + the
+ *    `anthropic-beta: oauth-2025-04-20` header. This is the credential Claude
+ *    Code mints with `claude setup-token`, billed against a Claude Pro/Max
+ *    subscription rather than API usage.
+ * The mode is sniffed from the credential prefix so a single string can flow
+ * through the existing endpoint/failover/container plumbing (which only
+ * carries `apiKey`).
+ *
+ * Intentional omissions:
+ *  - `temperature`/`top_p`/`top_k` are never sent — they are removed on the
+ *    newest Opus-tier models (400) and Claude's defaults are correct.
+ *  - Extended thinking is never requested: the internal LLMMessage history
+ *    cannot round-trip thinking blocks, which the API requires ahead of
+ *    tool_use continuations. `enableThinking` is therefore ignored here.
+ *  - `embed()` throws — Anthropic has no embeddings endpoint; embeddings stay
+ *    on the local/OpenAI-compatible provider (see resolveEmbeddingEndpoint).
+ */
+
+import Anthropic from "@anthropic-ai/sdk";
+import { childLogger } from "../logger.js";
+import type { ModelConfig } from "../config/schema.js";
+import {
+  computeOpenAICompatibleRequestTimeoutMs,
+  ProviderHardTimeoutError,
+  type ChatProvider,
+  type LLMMessage,
+  type LLMResponse,
+  type LLMToolDef,
+  type OpenAICompatibleProviderRuntimeSnapshot,
+  type StreamChunk,
+} from "./lmstudio.js";
+import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
+import { logAudit } from "../audit/logger.js";
+
+const log = childLogger("provider:anthropic");
+
+export const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
+
+/**
+ * Curated current-model choices for the dashboard picker. Static on purpose:
+ * subscription OAuth tokens are inference-scoped and may not be allowed to
+ * call /v1/models, so a live listing can't be relied on. The dashboard also
+ * accepts a free-text model id for anything not listed here.
+ */
+export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<{ id: string; label: string; hint: string }> = [
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Best speed/intelligence balance (default)" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Most capable Opus — long-horizon agentic work" },
+  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Most powerful tier — highest cost" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest and most cost-effective" },
+];
+const OAUTH_BETA_HEADER = "oauth-2025-04-20";
+/**
+ * Subscription OAuth tokens are scoped to Claude Code, and the Messages API
+ * rejects them unless the request presents as Claude Code — the first system
+ * block must be this identity. We inject it as the FIRST block and append the
+ * agent's real system prompt after it, so behaviour is driven by the real
+ * prompt while the gate is satisfied. Only used in OAuth mode.
+ */
+const CLAUDE_CODE_SYSTEM_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** Claude Code / `ant auth` OAuth tokens are prefixed `sk-ant-oat...`; API keys `sk-ant-api...`. */
+export function isAnthropicOAuthCredential(credential: string): boolean {
+  return credential.startsWith("sk-ant-oat");
+}
+
+interface AnthropicProviderOptions {
+  timeoutMs?: number;
+  maxRetries?: number;
+  /**
+   * Managed-OAuth mode: returns a fresh (auto-refreshed) access token. When
+   * set, the token is injected as a per-request `Authorization` header so a
+   * long-lived provider instance always authenticates with a current token,
+   * even after the constructor's snapshot has expired.
+   */
+  tokenProvider?: () => Promise<string | null>;
+}
+
+function parseModelId(providerModel: string): string {
+  // "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6"
+  const parts = providerModel.split("/");
+  return parts.length > 1 ? parts.slice(1).join("/") : providerModel;
+}
+
+function parseToolArguments(raw: string): Record<string, unknown> {
+  if (!raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function mapStopReason(stopReason: string | null | undefined): string {
+  switch (stopReason) {
+    case "end_turn": return "stop";
+    case "tool_use": return "tool_calls";
+    case "max_tokens": return "length";
+    case null:
+    case undefined: return "stop";
+    default: return stopReason;
+  }
+}
+
+/**
+ * Translate the internal OpenAI-shaped LLMMessage history into the Anthropic
+ * Messages API shape: leading system messages become the `system` parameter,
+ * assistant tool_calls become tool_use blocks, tool results become
+ * tool_result blocks grouped into user turns. Exported for tests.
+ */
+export function toAnthropicMessages(messages: readonly LLMMessage[]): {
+  system?: string;
+  messages: Anthropic.Messages.MessageParam[];
+} {
+  const systemParts: string[] = [];
+  let index = 0;
+  while (index < messages.length && messages[index]!.role === "system") {
+    const content = messages[index]!.content;
+    if (typeof content === "string" && content.trim()) systemParts.push(content);
+    index += 1;
+  }
+
+  const out: Anthropic.Messages.MessageParam[] = [];
+  const pushToolResult = (block: Anthropic.Messages.ToolResultBlockParam) => {
+    const last = out[out.length - 1];
+    if (last && last.role === "user" && Array.isArray(last.content)) {
+      (last.content as Anthropic.Messages.ContentBlockParam[]).push(block);
+      return;
+    }
+    out.push({ role: "user", content: [block] });
+  };
+
+  for (const message of messages.slice(index)) {
+    switch (message.role) {
+      case "system": {
+        // Mid-conversation system text: deliver as user-turn context — the
+        // top-level system parameter only covers the conversation head.
+        const text = typeof message.content === "string" ? message.content : "";
+        if (text.trim()) out.push({ role: "user", content: text });
+        break;
+      }
+      case "user": {
+        const text = typeof message.content === "string" && message.content.length > 0 ? message.content : " ";
+        out.push({ role: "user", content: text });
+        break;
+      }
+      case "assistant": {
+        const blocks: Anthropic.Messages.ContentBlockParam[] = [];
+        if (typeof message.content === "string" && message.content.trim()) {
+          blocks.push({ type: "text", text: message.content });
+        }
+        for (const toolCall of message.tool_calls ?? []) {
+          blocks.push({
+            type: "tool_use",
+            id: toolCall.id,
+            name: toolCall.function.name,
+            input: parseToolArguments(toolCall.function.arguments),
+          });
+        }
+        if (blocks.length > 0) out.push({ role: "assistant", content: blocks });
+        break;
+      }
+      case "tool": {
+        pushToolResult({
+          type: "tool_result",
+          tool_use_id: message.tool_call_id ?? "",
+          content: typeof message.content === "string" ? message.content : "",
+        });
+        break;
+      }
+    }
+  }
+
+  // The API requires the first message to be a user turn.
+  if (out.length === 0 || out[0]!.role !== "user") {
+    out.unshift({ role: "user", content: "(continuing session)" });
+  }
+
+  const pairing = enforceToolResultPairing(out);
+  if (pairing.synthesizedResultIds.length > 0 || pairing.orphanedResultIds.length > 0) {
+    log.warn(
+      {
+        synthesizedResultIds: pairing.synthesizedResultIds,
+        orphanedResultIds: pairing.orphanedResultIds,
+        messageCount: out.length,
+      },
+      "Repaired tool_use/tool_result pairing before Anthropic request — upstream history dropped or misplaced tool results",
+    );
+    logAudit("tool_call_recovered", {
+      type: "anthropic_history_repaired",
+      synthesizedResultIds: pairing.synthesizedResultIds,
+      orphanedResultIds: pairing.orphanedResultIds,
+      messageCount: out.length,
+    }, { severity: "warn" });
+  }
+
+  return {
+    ...(systemParts.length > 0 ? { system: systemParts.join("\n\n") } : {}),
+    messages: pairing.messages,
+  };
+}
+
+function toolUseIdsOf(message: Anthropic.Messages.MessageParam): string[] {
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return [];
+  return message.content
+    .filter((block): block is Anthropic.Messages.ToolUseBlockParam => block.type === "tool_use")
+    .map((block) => block.id);
+}
+
+/**
+ * The Messages API hard-rejects (400 invalid_request_error) any request where
+ * an assistant `tool_use` block is not answered by a matching `tool_result`
+ * block in the IMMEDIATELY following user message, or where a `tool_result`
+ * references an id with no preceding `tool_use`. The internal history is
+ * assembled by many mutators (evidence filters, mid-batch aborts, compaction)
+ * and the lenient OpenAI-style providers never enforced this invariant, so a
+ * latent producer bug surfaces here as a fatal rejection that kills the whole
+ * sub-agent run (audit f0143008: one dropped read_shared_facts result 400'd
+ * two research delegations). Repair instead of failing: re-home recorded
+ * results to the message right after their tool_use, synthesize an error
+ * result for ids with no recorded result, and downgrade orphaned results to
+ * plain text. Exported for tests.
+ */
+export function enforceToolResultPairing(messages: Anthropic.Messages.MessageParam[]): {
+  messages: Anthropic.Messages.MessageParam[];
+  synthesizedResultIds: string[];
+  orphanedResultIds: string[];
+} {
+  // Fast path: leave well-formed histories (the overwhelming majority) untouched.
+  let valid = true;
+  for (let i = 0; i < messages.length && valid; i += 1) {
+    const message = messages[i]!;
+    const useIds = toolUseIdsOf(message);
+    if (useIds.length > 0) {
+      const next = messages[i + 1];
+      const nextResultIds = new Set(
+        next && next.role === "user" && Array.isArray(next.content)
+          ? next.content.filter((b) => b.type === "tool_result").map((b) => b.tool_use_id)
+          : [],
+      );
+      if (!useIds.every((id) => nextResultIds.has(id))) valid = false;
+    }
+    if (message.role === "user" && Array.isArray(message.content)) {
+      const prevUseIds = new Set(i > 0 ? toolUseIdsOf(messages[i - 1]!) : []);
+      for (const block of message.content) {
+        if (block.type === "tool_result" && !prevUseIds.has(block.tool_use_id)) valid = false;
+      }
+    }
+  }
+  if (valid) return { messages, synthesizedResultIds: [], orphanedResultIds: [] };
+
+  // Collect every recorded result (first occurrence wins) so it can be
+  // re-homed next to the assistant message that owns its tool_use id.
+  const resultById = new Map<string, Anthropic.Messages.ToolResultBlockParam>();
+  for (const message of messages) {
+    if (message.role !== "user" || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (block.type === "tool_result" && !resultById.has(block.tool_use_id)) {
+        resultById.set(block.tool_use_id, block);
+      }
+    }
+  }
+
+  const repaired: Anthropic.Messages.MessageParam[] = [];
+  const synthesizedResultIds: string[] = [];
+  const orphanedResultIds: string[] = [];
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      repaired.push(message);
+      const useIds = toolUseIdsOf(message);
+      if (useIds.length > 0) {
+        const blocks = useIds.map((id): Anthropic.Messages.ToolResultBlockParam => {
+          const recorded = resultById.get(id);
+          if (recorded) {
+            resultById.delete(id);
+            return recorded;
+          }
+          synthesizedResultIds.push(id);
+          return {
+            type: "tool_result",
+            tool_use_id: id,
+            content: "[tool result was not recorded for this call]",
+            is_error: true,
+          };
+        });
+        repaired.push({ role: "user", content: blocks });
+      }
+      continue;
+    }
+    if (!Array.isArray(message.content)) {
+      repaired.push(message);
+      continue;
+    }
+    // User message: claimed tool_results were re-homed above — drop them here.
+    // Unclaimed ones reference no tool_use (orphans); keep their content as
+    // plain text so the information survives without violating the protocol.
+    const rest: Anthropic.Messages.ContentBlockParam[] = [];
+    for (const block of message.content) {
+      if (block.type !== "tool_result") {
+        rest.push(block);
+        continue;
+      }
+      if (resultById.get(block.tool_use_id) === block) {
+        resultById.delete(block.tool_use_id);
+        orphanedResultIds.push(block.tool_use_id);
+        const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content ?? "");
+        if (text.trim()) rest.push({ type: "text", text: `[tool result]\n${text}` });
+      }
+    }
+    if (rest.length > 0) repaired.push({ role: "user", content: rest });
+  }
+
+  return { messages: repaired, synthesizedResultIds, orphanedResultIds };
+}
+
+function toAnthropicTools(tools: LLMToolDef[]): Anthropic.Messages.Tool[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.parameters as Anthropic.Messages.Tool.InputSchema,
+  }));
+}
+
+function toAnthropicToolChoice(
+  toolChoice: "auto" | "required" | "none" | undefined,
+): Anthropic.Messages.ToolChoice {
+  switch (toolChoice) {
+    case "required": return { type: "any" };
+    case "none": return { type: "none" };
+    default: return { type: "auto" };
+  }
+}
+
+export class AnthropicProvider implements ChatProvider {
+  private client: Anthropic;
+  private modelConfig: ModelConfig;
+  private baseUrl: string;
+  private oauthMode: boolean;
+  private tokenProvider?: () => Promise<string | null>;
+  private healthy = false;
+  private lastHealthCheck = 0;
+  private configuredMaxRetries: number;
+  private requestTimeoutMs: number;
+  private loadedModel?: string;
+  private lastError?: string;
+  private requestCount = 0;
+  private successCount = 0;
+  private failureCount = 0;
+  private latencyTotalMs = 0;
+  private latencySamples = 0;
+  private lastLatencyMs?: number;
+  private lastUsedAt?: string;
+  private lastSuccessAt?: string;
+  private lastFailureAt?: string;
+  private lastHealthCheckLatencyMs?: number;
+
+  constructor(baseUrl: string, credential: string, modelConfig: ModelConfig, options: AnthropicProviderOptions = {}) {
+    this.baseUrl = baseUrl || ANTHROPIC_DEFAULT_BASE_URL;
+    this.modelConfig = modelConfig;
+    this.tokenProvider = options.tokenProvider;
+    // OAuth mode if the credential is an oat token OR a refresher is attached
+    // (managed mode, where the snapshot may briefly be empty before first fetch).
+    this.oauthMode = isAnthropicOAuthCredential(credential) || Boolean(options.tokenProvider);
+    this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
+    this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs ?? 120_000);
+    // Pass the unused credential slot as null so the SDK does not pick up a
+    // conflicting ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the
+    // environment (sending both headers is rejected by the API).
+    this.client = new Anthropic({
+      baseURL: this.baseUrl,
+      apiKey: this.oauthMode ? null : credential,
+      authToken: this.oauthMode ? credential : null,
+      timeout: this.requestTimeoutMs,
+      maxRetries: 0, // retries handled manually, mirroring LMStudioProvider
+      ...(this.oauthMode ? { defaultHeaders: { "anthropic-beta": OAUTH_BETA_HEADER } } : {}),
+    });
+  }
+
+  /** True when authenticating with a Claude subscription OAuth token rather than an API key. */
+  isOAuthMode(): boolean {
+    return this.oauthMode;
+  }
+
+  async checkHealth(): Promise<{ healthy: boolean; loadedModel?: string; error?: string }> {
+    const startedAt = Date.now();
+    const modelId = parseModelId(this.modelConfig.primary);
+    try {
+      if (this.tokenProvider) {
+        // Subscription OAuth tokens are inference-scoped and may not permit
+        // models.list — treat "a fresh token is obtainable" as healthy and
+        // defer real failures (auth/scope) to the first inference call.
+        const token = await this.tokenProvider();
+        if (!token) throw new Error("No Anthropic OAuth token available — reconnect the Claude subscription");
+      } else {
+        await Promise.race([
+          this.client.models.list({ limit: 1 }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Health check timeout")), 5000)),
+        ]);
+      }
+      this.healthy = true;
+      this.lastHealthCheck = Date.now();
+      this.lastHealthCheckLatencyMs = this.lastHealthCheck - startedAt;
+      this.loadedModel = modelId;
+      this.lastError = undefined;
+      return { healthy: true, loadedModel: modelId };
+    } catch (err) {
+      this.healthy = false;
+      this.lastHealthCheck = Date.now();
+      this.lastHealthCheckLatencyMs = this.lastHealthCheck - startedAt;
+      this.lastError = String(err);
+      return { healthy: false, error: String(err) };
+    }
+  }
+
+  getRuntimeSnapshot(): OpenAICompatibleProviderRuntimeSnapshot {
+    return {
+      baseUrl: this.baseUrl,
+      healthy: this.healthy,
+      loadedModel: this.loadedModel,
+      lastError: this.lastError,
+      requestTimeoutMs: this.requestTimeoutMs,
+      configuredMaxRetries: this.configuredMaxRetries,
+      requestCount: this.requestCount,
+      successCount: this.successCount,
+      failureCount: this.failureCount,
+      lastLatencyMs: this.lastLatencyMs,
+      averageLatencyMs: this.latencySamples > 0 ? Math.round(this.latencyTotalMs / this.latencySamples) : undefined,
+      lastUsedAt: this.lastUsedAt,
+      lastSuccessAt: this.lastSuccessAt,
+      lastFailureAt: this.lastFailureAt,
+      lastHealthCheckAt: this.lastHealthCheck > 0 ? new Date(this.lastHealthCheck).toISOString() : undefined,
+      lastHealthCheckLatencyMs: this.lastHealthCheckLatencyMs,
+    };
+  }
+
+  private recordRequestSuccess(startedAt: number): void {
+    const finishedAt = Date.now();
+    const latencyMs = finishedAt - startedAt;
+    this.requestCount += 1;
+    this.successCount += 1;
+    this.lastLatencyMs = latencyMs;
+    this.latencyTotalMs += latencyMs;
+    this.latencySamples += 1;
+    this.lastUsedAt = new Date(finishedAt).toISOString();
+    this.lastSuccessAt = this.lastUsedAt;
+    this.lastError = undefined;
+    this.healthy = true;
+    this.lastHealthCheck = finishedAt;
+  }
+
+  private recordRequestFailure(startedAt: number, error: unknown): void {
+    const finishedAt = Date.now();
+    this.requestCount += 1;
+    this.failureCount += 1;
+    this.lastLatencyMs = finishedAt - startedAt;
+    this.lastUsedAt = new Date(finishedAt).toISOString();
+    this.lastFailureAt = this.lastUsedAt;
+    this.lastError = error instanceof Error ? error.message : String(error);
+  }
+
+  // Same wall-clock guard as LMStudioProvider: the SDK timeout has been seen
+  // not to fire when a connection is held open without data, so every attempt
+  // gets a setTimeout-based abort we control. Hard timeouts are terminal.
+  private async withHardTimeout<T>(
+    parentSignal: AbortSignal | undefined,
+    timeoutMs: number,
+    fn: (combinedSignal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const ac = new AbortController();
+    let parentListener: (() => void) | undefined;
+    let timedOut = false;
+
+    if (parentSignal?.aborted) {
+      ac.abort(parentSignal.reason);
+    } else if (parentSignal) {
+      parentListener = () => ac.abort(parentSignal.reason);
+      parentSignal.addEventListener("abort", parentListener, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    try {
+      return await fn(ac.signal);
+    } catch (err) {
+      if (timedOut && !parentSignal?.aborted) throw new ProviderHardTimeoutError(timeoutMs);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
+    }
+  }
+
+  async verifyToolCallSupport(_modelId: string): Promise<boolean> {
+    // Every current Claude model supports tool use natively — skip the paid probe call.
+    return true;
+  }
+
+  private buildRequestBase(messages: LLMMessage[], tools: LLMToolDef[], toolChoice?: "auto" | "required" | "none") {
+    const modelId = parseModelId(this.modelConfig.primary);
+    const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
+    const anthropicTools = toAnthropicTools(tools);
+
+    // In OAuth (subscription) mode the Messages API requires the request to
+    // present as Claude Code: first system block is the identity, the agent's
+    // real system prompt follows. In API-key mode the plain string is sent.
+    let systemParam: string | Anthropic.Messages.TextBlockParam[] | undefined;
+    if (this.oauthMode) {
+      systemParam = [
+        { type: "text", text: CLAUDE_CODE_SYSTEM_IDENTITY },
+        ...(system ? [{ type: "text", text: system } as Anthropic.Messages.TextBlockParam] : []),
+      ];
+    } else if (system) {
+      systemParam = system;
+    }
+
+    return {
+      modelId,
+      params: {
+        model: modelId,
+        max_tokens: this.modelConfig.maxTokens ?? 4096,
+        ...(systemParam ? { system: systemParam } : {}),
+        messages: anthropicMessages,
+        ...(anthropicTools.length > 0
+          ? { tools: anthropicTools, tool_choice: toAnthropicToolChoice(toolChoice) }
+          : {}),
+      },
+    };
+  }
+
+  /**
+   * Per-request options. In managed-OAuth mode this fetches a fresh
+   * (auto-refreshed) access token and overrides the Authorization header so the
+   * long-lived client never authenticates with an expired snapshot.
+   */
+  private async requestOptions(signal: AbortSignal): Promise<{ signal: AbortSignal; headers?: Record<string, string> }> {
+    if (!this.tokenProvider) return { signal };
+    const token = await this.tokenProvider();
+    if (!token) return { signal };
+    return { signal, headers: { Authorization: `Bearer ${token}` } };
+  }
+
+  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+    const { modelId, params } = this.buildRequestBase(messages, tools);
+
+    let attempt = 0;
+    const maxAttempts = this.configuredMaxRetries + 1;
+    const retryDelay = 2000;
+
+    while (attempt < maxAttempts) {
+      const startedAt = Date.now();
+      const callId = beginProviderCall({ model: modelId, mode: "complete" });
+      try {
+        const response = await this.withHardTimeout(signal, this.requestTimeoutMs + 5000, async (s) =>
+          this.client.messages.create(params, await this.requestOptions(s)),
+        );
+        endProviderCall(callId);
+
+        let content = "";
+        const toolCalls: LLMResponse["tool_calls"] = [];
+        for (const block of response.content) {
+          if (block.type === "text") content += block.text;
+          else if (block.type === "tool_use") {
+            toolCalls.push({
+              id: block.id,
+              name: block.name,
+              arguments: (block.input ?? {}) as Record<string, unknown>,
+            });
+          }
+        }
+
+        this.recordRequestSuccess(startedAt);
+
+        const usage = response.usage;
+        const promptTokens = (usage.input_tokens ?? 0)
+          + (usage.cache_read_input_tokens ?? 0)
+          + (usage.cache_creation_input_tokens ?? 0);
+        return {
+          content: content.trim().length > 0 ? content : null,
+          tool_calls: toolCalls,
+          usage: {
+            promptTokens,
+            completionTokens: usage.output_tokens ?? 0,
+            totalTokens: promptTokens + (usage.output_tokens ?? 0),
+          },
+          finishReason: mapStopReason(response.stop_reason),
+        };
+      } catch (err: unknown) {
+        endProviderCall(callId);
+        this.recordRequestFailure(startedAt, err);
+        if (err instanceof ProviderHardTimeoutError) {
+          log.error({ attempt, timeoutMs: err.timeoutMs, model: modelId }, "Anthropic completion hit hard timeout — not retrying");
+          throw err;
+        }
+        // Non-retryable API errors: auth, invalid request, permissions.
+        if (err instanceof Anthropic.APIError && err.status !== undefined && err.status < 500 && err.status !== 429) {
+          log.error({ status: err.status, model: modelId, error: err.message }, "Anthropic request rejected");
+          throw new Error(`Anthropic request failed (model: ${modelId}, status: ${err.status}): ${err.message}`);
+        }
+        attempt++;
+        if (signal?.aborted || attempt >= maxAttempts) {
+          log.error({ err, attempt, model: modelId }, "Anthropic completion failed");
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Anthropic request failed (model: ${modelId}): ${msg}`);
+        }
+        log.warn({ err, attempt, retryDelay }, "Anthropic request failed — retrying");
+        await new Promise((r) => setTimeout(r, retryDelay));
+      }
+    }
+
+    throw new Error("Anthropic completion failed after max retries");
+  }
+
+  /** Same contract as LMStudioProvider.completeViaStream — a complete()-shaped
+   *  result accumulated from the streaming endpoint, giving the activity
+   *  monitor live token progress and the per-chunk inactivity abort. */
+  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+    let content = "";
+    const reasoningParts: string[] = [];
+    const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
+    const toolOrder: string[] = [];
+    let finishReason = "stop";
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+    for await (const chunk of this.stream(messages, tools, signal)) {
+      switch (chunk.type) {
+        case "text_delta":
+          content += chunk.content ?? "";
+          break;
+        case "reasoning_delta":
+          if (chunk.content) reasoningParts.push(chunk.content);
+          break;
+        case "tool_call_start": {
+          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+          if (!toolBuffers.has(id)) {
+            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+            toolOrder.push(id);
+          }
+          break;
+        }
+        case "tool_call_delta": {
+          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+          if (buf) buf.args += chunk.argumentsDelta ?? "";
+          break;
+        }
+        case "done":
+          finishReason = chunk.finishReason ?? finishReason;
+          if (chunk.usage) usage = chunk.usage;
+          break;
+      }
+    }
+
+    const tool_calls = toolOrder.map((id) => {
+      const buf = toolBuffers.get(id)!;
+      return { id: buf.id, name: buf.name, arguments: parseToolArguments(buf.args) };
+    });
+
+    const reasoning = reasoningParts.join("").trim();
+    return {
+      content: content.length > 0 ? content : null,
+      ...(reasoning ? { reasoning } : {}),
+      tool_calls,
+      usage,
+      finishReason,
+    };
+  }
+
+  async *stream(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    signal?: AbortSignal,
+    options?: { toolChoice?: "auto" | "required" | "none" },
+  ): AsyncGenerator<StreamChunk> {
+    const { modelId, params } = this.buildRequestBase(messages, tools, options?.toolChoice);
+
+    const streamAc = new AbortController();
+    let streamParentListener: (() => void) | undefined;
+    if (signal?.aborted) {
+      streamAc.abort(signal.reason);
+    } else if (signal) {
+      streamParentListener = () => streamAc.abort(signal.reason);
+      signal.addEventListener("abort", streamParentListener, { once: true });
+    }
+
+    const stream = await this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, async (s) =>
+      this.client.messages.create({ ...params, stream: true }, await this.requestOptions(s)),
+    );
+
+    // index → tool id mapping: Anthropic streams tool args per content-block index.
+    const toolBlockIds = new Map<number, string>();
+    let promptTokens = 0;
+    let outputTokens = 0;
+    let collectedStopReason: string | undefined;
+    const startedAt = Date.now();
+    const callId = beginProviderCall({ model: modelId, mode: "stream" });
+
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const armInactivity = () => {
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        streamAc.abort(new Error(`LLM stream stalled (no chunk in ${this.requestTimeoutMs}ms)`));
+      }, this.requestTimeoutMs);
+    };
+    armInactivity();
+
+    try {
+      for await (const event of stream) {
+        armInactivity();
+        switch (event.type) {
+          case "message_start": {
+            const usage = event.message.usage;
+            promptTokens = (usage.input_tokens ?? 0)
+              + (usage.cache_read_input_tokens ?? 0)
+              + (usage.cache_creation_input_tokens ?? 0);
+            break;
+          }
+          case "content_block_start": {
+            if (event.content_block.type === "tool_use") {
+              recordProviderToken(callId);
+              toolBlockIds.set(event.index, event.content_block.id);
+              yield { type: "tool_call_start", toolCallId: event.content_block.id, toolName: event.content_block.name };
+            }
+            break;
+          }
+          case "content_block_delta": {
+            recordProviderToken(callId);
+            if (event.delta.type === "text_delta") {
+              yield { type: "text_delta", content: event.delta.text };
+            } else if (event.delta.type === "thinking_delta") {
+              yield { type: "reasoning_delta", content: event.delta.thinking };
+            } else if (event.delta.type === "input_json_delta") {
+              const toolCallId = toolBlockIds.get(event.index);
+              if (toolCallId) {
+                yield { type: "tool_call_delta", toolCallId, argumentsDelta: event.delta.partial_json };
+              }
+            }
+            break;
+          }
+          case "message_delta": {
+            collectedStopReason = event.delta.stop_reason ?? collectedStopReason;
+            outputTokens = event.usage.output_tokens ?? outputTokens;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    } catch (err) {
+      this.recordRequestFailure(startedAt, err);
+      log.error({ err, model: modelId }, "Anthropic streaming failed");
+      throw new Error(`Anthropic stream failed (model: ${modelId}): ${String(err)}`);
+    } finally {
+      endProviderCall(callId);
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
+      if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
+    }
+
+    this.recordRequestSuccess(startedAt);
+    yield {
+      type: "done",
+      finishReason: mapStopReason(collectedStopReason),
+      usage: {
+        promptTokens,
+        completionTokens: outputTokens,
+        totalTokens: promptTokens + outputTokens,
+      },
+    };
+  }
+
+  async embed(_texts: string[], _model: string): Promise<Float32Array[]> {
+    throw new Error(
+      "The Anthropic provider does not support embeddings — configure agents.defaults.model.embeddingModel on a local/OpenAI-compatible provider",
+    );
+  }
+
+  isHealthy(): boolean {
+    const staleness = Date.now() - this.lastHealthCheck;
+    return this.healthy && staleness < 120000; // 2 min, same policy as LMStudioProvider
+  }
+}

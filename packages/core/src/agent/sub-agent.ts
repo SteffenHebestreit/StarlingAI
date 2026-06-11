@@ -11,6 +11,7 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
+import fs from "node:fs";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
@@ -24,7 +25,7 @@ import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLi
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
-import { createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
 import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
 import {
@@ -40,6 +41,7 @@ import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
+import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
@@ -81,6 +83,21 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "browser_type",
   "browser_select_option",
   "site_fill_credentials",
+]);
+
+// Discovery/meta tools whose output is routing metadata about the SWARM, never
+// evidence about the user's subject. Excluded from the useful-evidence snippet
+// buffer and the auto-share pipeline (audit 1ac79471: a search_agents catalog
+// dump was auto-shared as a "finding" and polluted sibling builders' context).
+const ROUTING_METADATA_TOOL_NAMES = new Set([
+  "search_agents",
+  "list_agents",
+  "search_workflows",
+  "search_skills",
+  "list_skills",
+  "get_swarm_state",
+  "recall_context",
+  "read_shared_facts",
 ]);
 
 // Fetch tools whose results are checked for productivity (cost-center 3): a 404,
@@ -839,6 +856,51 @@ const ARTIFACT_PERSIST_TOOLS = new Set<string>([
   "generate_presentation",
   "export_workspace_artifact",
 ]);
+
+export interface SalvagedTruncatedWrite {
+  path: string;
+  mode?: "overwrite" | "append" | "create";
+  content: string;
+}
+
+function safeJsonUnescape(escaped: string): string | null {
+  try {
+    return JSON.parse(`"${escaped}"`) as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Salvage a write_file call whose JSON arguments were CUT OFF by the model's output
+ * limit. The slow local model repeatedly tries to emit an ENTIRE large file as one
+ * tool-call argument, hits finishReason:"length" mid-string, and the unparseable
+ * args execute as {} → "path is required" → zero bytes written and ~2 minutes of
+ * generation wasted (audits 5fec8427, c2f76a00, 77944865 — prompt-level "write in
+ * chunks" instructions failed twice, so this is the MECHANICAL fix). Extract the
+ * complete "path" (and "mode" when present) plus the partial "content" string,
+ * strip any trailing half-finished escape sequence, and return executable args so
+ * the truncation becomes a PARTIAL WRITE the model can continue with mode:"append".
+ * Returns null when no complete path or no meaningful content can be recovered.
+ */
+export function salvageTruncatedWriteFileArgs(rawArgs: string): SalvagedTruncatedWrite | null {
+  const raw = String(rawArgs ?? "");
+  if (raw.length < 64) return null;
+  const pathMatch = raw.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const path = pathMatch?.[1] !== undefined ? safeJsonUnescape(pathMatch[1]) : null;
+  if (!path || !path.trim()) return null;
+  const modeMatch = raw.match(/"mode"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const rawMode = modeMatch?.[1]?.toLowerCase();
+  const mode = rawMode === "overwrite" || rawMode === "append" || rawMode === "create" ? rawMode : undefined;
+  const contentMatch = raw.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  let body = contentMatch?.[1] ?? "";
+  // Drop a trailing escape sequence the cut-off left incomplete ("\", "\u12").
+  body = body.replace(/\\u[0-9a-fA-F]{0,3}$/, "").replace(/(?<!\\)\\$/, "");
+  const content = safeJsonUnescape(body);
+  // Below ~200 chars the salvage is not worth a partial file — let the model re-issue.
+  if (!content || content.length < 200) return null;
+  return { path: path.trim(), ...(mode ? { mode } : {}), content };
+}
 const ARTIFACT_PERSIST_DISTINCT_TOOLS_TRIP = 2;
 const ARTIFACT_PERSIST_TOTAL_FAILURES_TRIP = 3;
 
@@ -895,6 +957,13 @@ const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
   "mail_",
   "calendar_",
   "contacts_",
+  // MCP tools reach their MCP servers through the gateway's host-side MCP
+  // registry. The agent-worker container runs with `--network none` and no
+  // gateway config, so any mcp__* call (e.g. mcp__code_sandbox__run_js used by
+  // `coder`) fails opaquely as "container error: unknown" with zero model
+  // progress. Force MCP-using agents in-process. The sandboxing those tools
+  // need is provided by the MCP service itself, not the agent-worker container.
+  "mcp__",
 ];
 
 const WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES = new Set<string>([
@@ -927,6 +996,54 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "web_fetch",
   "workspace_search",
 ]);
+
+/**
+ * Structural completeness check for a written text artifact, used by the
+ * deterministic artifact completion ("done is done"). A run that gets cut by
+ * its turn timeout mid-build leaves a half-written file behind; branding that
+ * "Deliverable completed" ships a broken app to the user (audit e5b5850b:
+ * web_coder wrote the 21KB HTML/CSS skeleton of a quiz platform, the 240s
+ * timeout killed it while generating the data/JS chunk, and the run reported
+ * the file as a finished deliverable — it ended mid-<script> with no
+ * questions, no logic, and no closing tag).
+ *
+ * Checks are FORMAT-VALIDITY checks, not content heuristics: an .html file
+ * must contain a closing </html> tag; a .json file must parse. Returns a short
+ * human-readable reason when the file looks truncated, null when it looks
+ * complete or cannot be assessed (missing path, unreadable, other formats).
+ */
+export function artifactFileLooksTruncated(artifact: Record<string, unknown>): string | null {
+  try {
+    const absPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
+    if (!absPath || !fs.existsSync(absPath)) return null;
+    const stat = fs.statSync(absPath);
+    if (!stat.isFile() || stat.size === 0 || stat.size > 5_000_000) return null;
+    const name = (typeof artifact["filename"] === "string" && artifact["filename"]
+      ? artifact["filename"]
+      : absPath).toLowerCase();
+    if (name.endsWith(".html") || name.endsWith(".htm")) {
+      const text = fs.readFileSync(absPath, "utf8");
+      // Only judge full documents — an HTML fragment/partial template without
+      // an <html> open tag has no required terminator.
+      if (/<html[\s>]/i.test(text.slice(0, 2000)) && !/<\/html>/i.test(text.slice(-4000))) {
+        return "missing closing </html> tag — the file ends mid-document";
+      }
+      return null;
+    }
+    if (name.endsWith(".json")) {
+      const text = fs.readFileSync(absPath, "utf8");
+      try {
+        JSON.parse(text);
+      } catch {
+        return "not valid JSON (parse failed) — the file appears cut off";
+      }
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Tools that observe or mutate LIVE, changing state — a browser page or a remote
@@ -1145,6 +1262,24 @@ function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
   return guidance.join("\n");
 }
 
+/**
+ * Compact an agent description for the inline delegation catalog. Configured
+ * descriptions are written for EMBEDDING search and carry long "Example queries:"
+ * bags plus multi-sentence detail — inlining 24 of them put ~12KB of padding into
+ * every orchestration-capable sub-agent prompt (mission_coordinator ran at 27KB
+ * while researcher ran at 4.8KB; on the prefill-bound local model that is seconds
+ * of pure overhead per iteration). The catalog only needs the at-a-glance lead:
+ * first sentence, examples stripped, hard cap. Semantic discovery (search_agents)
+ * still sees the FULL description — this trims only the inline prompt copy.
+ */
+export function compactAgentCatalogDescription(description: string | undefined): string {
+  const d = (description ?? "").trim();
+  if (!d) return "No description available.";
+  const withoutExamples = d.replace(/\s*(?:Example queries|Beispielanfragen)\s*:[\s\S]*$/i, "").trim() || d;
+  const firstSentence = withoutExamples.match(/^[\s\S]{20,}?[.!?](?=\s|$)/)?.[0]?.trim() ?? withoutExamples;
+  return firstSentence.length > 180 ? `${firstSentence.slice(0, 177)}…` : firstSentence;
+}
+
 function buildSubAgentAgentDiscoveryGuidance(agentName: string, allowedAgents: string[] | undefined): string {
   const config = getConfig();
   const catalogNames = Object.keys(config.subAgents)
@@ -1166,8 +1301,7 @@ function buildSubAgentAgentDiscoveryGuidance(agentName: string, allowedAgents: s
   }
 
   const catalogLines = catalogNames.slice(0, 24).map((name) => {
-    const description = config.subAgents[name]?.description?.trim() ?? "No description available.";
-    return `- ${name}: ${description}`;
+    return `- ${name}: ${compactAgentCatalogDescription(config.subAgents[name]?.description)}`;
   });
 
   if (catalogNames.length > 24) {
@@ -2199,8 +2333,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       { sessionId: subSessionId, userId: undefined, channel: `sub-agent:${opts.agentName}` }
     );
 
-    // Merge defaults with per-agent overrides
-    const modelConfig = { ...config.agents.defaults.model, ...(agentCfg.model ?? {}) };
+    // Merge defaults with per-agent overrides, then overlay the active model
+    // preset (dashboard Local ⇄ Claude switch) — a preset overrides the model
+    // identity for EVERY agent, including ones with their own model override,
+    // so capability tests run the whole swarm on the preset model.
+    const modelConfig = applyActiveModelPreset({ ...config.agents.defaults.model, ...(agentCfg.model ?? {}) }, config);
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
@@ -2222,7 +2359,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // config and service discovery. Inside the generic agent-worker container
     // they do not inherit the gateway's runtime config and usually run with
     // `--network none`, which turns simple inbox checks into opaque container
-    // failures before the deterministic mail fast path can run.
+    // failures before the deterministic mail fast path can run. The same
+    // `--network none` isolation breaks mcp__* tools (they reach their MCP
+    // servers via the gateway's host-side registry), so MCP-using agents are
+    // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
     const requiresHostRegistry = (agentCfg.tools ?? []).some((t: string) =>
       ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t),
     );
@@ -2391,6 +2531,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const toolContext: ToolContext = {
       sessionId: subSessionId,
       workspacePath: opts.workspacePath,
+      // Workspace zoning: working agents see only generated/ + uploads/ (paths
+      // outside re-root into generated/, mirroring the write rooting) so they
+      // physically cannot wander into the platform's config zones or burn time
+      // reading its docs (audit 0ac7d3fc). Core/self-maintenance agents opt in
+      // to the whole workspace via workspaceAccess:"full" in their agent config.
+      workspaceScope: agentCfg.workspaceAccess === "full" ? "full" : "generated",
       userId: opts.userId,
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
@@ -2553,6 +2699,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
     let sufficiencyToolsStripped = false;
+    // Evidence-gathering iterations the model has run AFTER the sufficiency
+    // nudge told it to answer — past the threshold, the soft nudge escalates
+    // to the hard tool strip (see strip condition below).
+    let evidenceIterationsSinceNudge = 0;
+    const NUDGE_IGNORED_STRIP_ITERATIONS = 3;
     let consecutiveBlockedToolIterations = 0;
     const BLOCKED_TOOL_ITERATION_THRESHOLD = 2;
     // A delegation that "executes" but only reports that the target agent/tool is
@@ -2905,10 +3056,109 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ? synthProvider.completeViaStream(msgs, [], sig)
         : synthProvider.complete(msgs, [], sig);
 
+    // "Done is done" (audit 2445da2e): when a BUILD-shaped run has already
+    // persisted its deliverable(s), a final-synthesis LLM call adds no
+    // information — on a stalled provider it burned the remaining budget and
+    // re-branded a finished build as timeout/partial (content_writer wrote the
+    // paper + shared the finding at 171s, then died at 270s waiting for the
+    // final message). Return a deterministic completion instead. Scoped to
+    // artifact-creation tasks: research runs still need the LLM synthesis
+    // because their deliverable IS the prose.
+    const tryDeterministicArtifactCompletion = (trigger: string): SubAgentRunResult | null => {
+      if (artifacts.length === 0) return null;
+      if (!looksLikeArtifactCreationRequest(opts.task)) return null;
+      const lines = artifacts.map((artifact) => {
+        const path = typeof artifact["outputPath"] === "string" && artifact["outputPath"]
+          ? String(artifact["outputPath"])
+          : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : "artifact");
+        const rawBytes = typeof artifact["bytes"] === "number"
+          ? artifact["bytes"]
+          : (typeof artifact["size"] === "number" ? artifact["size"] : undefined);
+        return `- ${path}${typeof rawBytes === "number" ? ` (${Math.max(1, Math.round(rawBytes / 1024))} KB)` : ""}`;
+      });
+      // "Done" requires the files to actually be done. A timeout that cut the
+      // build mid-chunk leaves a structurally truncated file — report that as
+      // PARTIAL with the broken paths named, never as a completed deliverable
+      // (audit e5b5850b: half-written quiz app shipped as "Deliverable
+      // completed" and the user opened an app with no questions and no JS).
+      const truncated = artifacts
+        .map((artifact) => ({
+          path: typeof artifact["outputPath"] === "string" && artifact["outputPath"]
+            ? String(artifact["outputPath"])
+            : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : "artifact"),
+          reason: artifactFileLooksTruncated(artifact),
+        }))
+        .filter((entry): entry is { path: string; reason: string } => Boolean(entry.reason));
+      if (truncated.length > 0) {
+        const output = [
+          "Build INTERRUPTED before completion — file(s) were written but at least one is structurally incomplete:",
+          ...lines,
+          ...truncated.map((entry) => `INCOMPLETE: ${entry.path} — ${entry.reason}.`),
+          "Do NOT present these as finished deliverables. The build must be completed (e.g. append the missing content to the incomplete file) or re-run.",
+        ].join("\n");
+        const stats = buildStats(trigger === "timeout_synthesis" ? "timeout" : "completed", "partial");
+        recordOutcome({
+          ts: new Date().toISOString(),
+          agent: opts.agentName,
+          task: opts.task.slice(0, 200),
+          outcome: "partial",
+          iterations,
+          totalTokens: usage.totalTokens,
+          durationMs: Date.now() - runStartedAt,
+          timeoutMs: turnTimeoutMs,
+        });
+        logSubAgentCompletionAudit(stats, output, {
+          deterministicArtifactCompletion: true,
+          artifactTruncated: truncated.map((entry) => entry.path),
+          trigger,
+          artifactCount: artifacts.length,
+          timeoutMs: turnTimeoutMs,
+        }, "warn");
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "completed",
+          iteration: iterations,
+          summary: `Interrupted ${opts.agentName} — ${truncated.length} written file(s) look structurally incomplete.`,
+        });
+        return withArtifacts({ output, stats });
+      }
+      const output =
+        "Deliverable completed. The following file(s) were written this run and are attached as artifacts:\n"
+        + lines.join("\n");
+      const stats = buildStats("completed", "success");
+      recordOutcome({
+        ts: new Date().toISOString(),
+        agent: opts.agentName,
+        task: opts.task.slice(0, 200),
+        outcome: "success",
+        iterations,
+        totalTokens: usage.totalTokens,
+        durationMs: Date.now() - runStartedAt,
+        timeoutMs: turnTimeoutMs,
+      });
+      logSubAgentCompletionAudit(stats, output, {
+        deterministicArtifactCompletion: true,
+        trigger,
+        artifactCount: artifacts.length,
+        timeoutMs: turnTimeoutMs,
+      }, "info");
+      opts.onProgress?.({
+        agentName: opts.agentName,
+        kind: "completed",
+        iteration: iterations,
+        summary: `Completed ${opts.agentName} — deliverables already written; skipped final synthesis.`,
+      });
+      return withArtifacts({ output, stats });
+    };
+
     const attemptTimeoutSynthesis = async (): Promise<SubAgentRunResult | null> => {
       if (!turnTimeoutMs || toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
         return null;
       }
+
+      // Built deliverables make the synthesis pass redundant — return them.
+      const deterministicAtTimeout = tryDeterministicArtifactCompletion("timeout_synthesis");
+      if (deterministicAtTimeout) return deterministicAtTimeout;
 
       // Single-delegation passthrough first. If the only substantive work was
       // one substantial delegation, the synthesis pass is wasted effort — the
@@ -3048,6 +3298,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (toolCount === 0 || !history.some((message) => message.role === "tool") || opts.signal?.aborted) {
         return null;
       }
+
+      // Built deliverables make the reserved synthesis window redundant —
+      // return them immediately instead of spending the window on an LLM call.
+      const deterministicAtSoftDeadline = tryDeterministicArtifactCompletion("soft_deadline");
+      if (deterministicAtSoftDeadline) return deterministicAtSoftDeadline;
 
       // Single-delegation passthrough — the soft-deadline synthesis would just
       // re-wrap one already-final delegation result. Skip the LLM call when
@@ -3406,6 +3661,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // sets) winds this run down on the next iteration, and `isUnbounded`
       // suppresses further surfacing. The hard `turnTimeoutMs` and the
       // soft-deadline synthesis above remain the real safety bounds.
+      // Operator granted "unbounded": the dock promises "let it finish
+      // naturally", so the hard turn deadline is suspended for this run
+      // (audit 2445da2e: the grant only silenced the dock while the run
+      // still died at turnTimeoutMs mid-synthesis). maxIterations and
+      // provider failures remain the safety bounds; an operator "stop"
+      // still wins.
+      if (!lrgOperatorStop && turnTimeoutReached && longRunningGenerationManager.isUnbounded(subSessionId)) {
+        turnTimeoutReached = false;
+      }
       if (!lrgOperatorStop && !longRunningGenerationManager.isUnbounded(subSessionId)) {
         if (longRunningGenerationManager.isStopRequested(subSessionId)) {
           // Operator stopped this run (or the whole turn). Mark the run for
@@ -3456,6 +3720,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !softDeadlineSynthesisAttempted
         && toolCount > 0
         && history.some((message) => message.role === "tool")
+        // Unbounded grant suspends the soft deadline too — the operator asked
+        // for the run to finish naturally.
+        && !longRunningGenerationManager.isUnbounded(subSessionId)
       ) {
         const elapsed = Date.now() - runStartedAt;
         // I11.1: Bumped reservation to 33% (min 30s, max 75s). The previous
@@ -3737,6 +4004,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             stats,
           });
         }
+        // A stalled/timed-out FINAL call after the deliverable already exists is
+        // not a failed run — return the finished build instead of branding it
+        // timeout/partial (audit 2445da2e).
+        if (looksLikeTimeoutLikeError(err)) {
+          const deterministicAfterStall = tryDeterministicArtifactCompletion("final_call_timeout");
+          if (deterministicAfterStall) return deterministicAfterStall;
+        }
         const interruptedOutcome = classifyInterruptedOutcome({
           successfulToolCount,
           artifacts,
@@ -4014,6 +4288,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
+      // Tool calls whose truncated write_file args were salvaged this iteration —
+      // their success result gets the continue-with-append coaching appended.
+      const salvagedTruncatedWriteTails = new Map<string, string>();
 
       // Delegation depth ceiling: a sub-agent at/over the configured nesting
       // depth must not delegate further — it gathers evidence with its own
@@ -4038,21 +4315,49 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (tc.arguments && "_parse_error" in tc.arguments) {
           const rawArgs = String((tc.arguments as Record<string, unknown>)["_raw"] ?? "");
-          emitSubAgentToolAudit({
-            agentName: opts.agentName,
-            tool: tc.name,
-            phase: "done",
-            args: { _raw: rawArgs.slice(0, 200) },
-            toolCallId: tc.id,
-            errorText: `Malformed JSON arguments produced for tool '${tc.name}'. Do not retry this call with a large inline payload; answer from existing evidence or use a smaller artifact-producing tool call.`,
-            skippedReason: "invalid_arguments",
-          });
-          toolResults.push({
-            role: "tool",
-            content: `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Do not retry this exact tool call; synthesize from existing evidence or use a smaller valid tool call.`,
-            tool_call_id: tc.id,
-          });
-          continue;
+          // Truncated-giant-write salvage (audit 77944865): the model emitted a whole
+          // large file as ONE write_file argument and the output limit cut it off.
+          // Prompt-level chunking instructions failed twice on the slow local model,
+          // so recover mechanically: write the salvaged first part and coach the model
+          // to continue with mode:"append" — the truncation becomes forward progress
+          // instead of "path is required" + zero bytes.
+          const looksTruncatedByOutputLimit = response.finishReason === "length" || rawArgs.length > 4_000;
+          const salvaged = tc.name === "write_file" && looksTruncatedByOutputLimit
+            ? salvageTruncatedWriteFileArgs(rawArgs)
+            : null;
+          if (salvaged) {
+            tc.arguments = { path: salvaged.path, ...(salvaged.mode ? { mode: salvaged.mode } : {}), content: salvaged.content };
+            salvagedTruncatedWriteTails.set(tc.id, salvaged.content.slice(-120));
+            logAudit("sub_agent_tool_call", {
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "recovered",
+              reason: "truncated_write_args_salvaged",
+              toolCallId: tc.id,
+              salvagedChars: salvaged.content.length,
+              path: salvaged.path,
+            }, { sessionId: subSessionId, severity: "warn" });
+            // Fall through to normal execution with the salvaged arguments.
+          } else {
+            const truncatedWriteCoaching = tc.name === "write_file" && looksTruncatedByOutputLimit
+              ? " Your write_file arguments were CUT OFF by the output limit — the call was too large to finish, and nothing was written. Do NOT retry the whole file in one call. Re-issue write_file with a SMALL first chunk — {\"path\": \"...\", \"mode\": \"create\", \"content\": <first small part>} with \"path\" as the FIRST property — then continue with {\"mode\": \"append\"} chunks until the file is complete."
+              : " Do not retry this call with a large inline payload; answer from existing evidence or use a smaller valid tool call.";
+            emitSubAgentToolAudit({
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "done",
+              args: { _raw: rawArgs.slice(0, 200) },
+              toolCallId: tc.id,
+              errorText: `Malformed JSON arguments produced for tool '${tc.name}'.${truncatedWriteCoaching}`,
+              skippedReason: "invalid_arguments",
+            });
+            toolResults.push({
+              role: "tool",
+              content: `Error: Could not parse arguments for tool '${tc.name}'.${truncatedWriteCoaching}`,
+              tool_call_id: tc.id,
+            });
+            continue;
+          }
         }
 
         const priorApprovalFailure = approvalBlockedTools.get(tc.name);
@@ -4387,6 +4692,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               ? `Error: ${result.error}`
               : (result.output.trim() || "Error: unknown"));
 
+        const salvagedWriteTail = salvagedTruncatedWriteTails.get(tc.id);
+        if (salvagedWriteTail !== undefined && result.success) {
+          resultContent += "\n\n[PARTIAL WRITE — OUTPUT LIMIT] Your write_file arguments were cut off by the output limit; only the salvaged first part was written. "
+            + "CONTINUE the file NOW: call write_file again with the SAME path and mode:\"append\", adding the next chunk — keep every chunk SMALL (well under your output limit) and repeat until the file is complete. "
+            + `The file currently ends with: «${salvagedWriteTail}»`;
+        }
+
         if (!result.success && isApprovalGateFailure(result.error ?? resultContent)) {
           const approvalFailure = result.error?.trim() || resultContent.replace(/^Error:\s*/i, "").trim();
           approvalBlockedTools.set(tc.name, approvalFailure);
@@ -4522,15 +4834,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const recoveredInterruptedEvidence = extractUsefulInterruptedToolEvidence(resultContent)
             ?? extractUsefulInterruptedToolEvidence(usefulPortion);
           const usefulTrimmed = (recoveredInterruptedEvidence ?? usefulPortion).trim();
-          if (
-            !usefulTrimmed
-            || looksLikeInterruptedEvidenceBoilerplate(usefulTrimmed)
-            || looksLikeProviderErrorEcho(usefulTrimmed)
-          ) {
-            continue;
-          }
+          // "Not useful as evidence" must NOT skip the rest of the loop body:
+          // the toolResults.push at the bottom is mandatory for EVERY executed
+          // call. A `continue` here silently dropped the tool result from
+          // history — lenient OpenAI-style templating never noticed, but the
+          // Anthropic Messages API rejects the whole next request with a fatal
+          // 400 ("tool_use ids were found without tool_result blocks") when any
+          // id goes unanswered. Audit f0143008: read_shared_facts returning
+          // "No shared facts available yet" (classified boilerplate below)
+          // killed two research delegations this way on the claude preset.
+          const isUsefulEvidence =
+            Boolean(usefulTrimmed)
+            && !looksLikeInterruptedEvidenceBoilerplate(usefulTrimmed)
+            && !looksLikeProviderErrorEcho(usefulTrimmed);
+          // Discovery/meta tool output is ROUTING metadata, not evidence. Auto-sharing
+          // it pollutes shared session facts with catalog dumps and "NEXT ACTION:
+          // delegate to X" coaching that sibling agents then read as findings
+          // (audit 1ac79471: content_writer's context led with a search_agents dump
+          // recommending browser_agent for a build). Guard ONLY the snippet+share
+          // section — the rest of the per-tool loop body must still run.
           const snippetThreshold = recoveredInterruptedEvidence ? 80 : 180;
-          if (usefulTrimmed.length >= snippetThreshold) {
+          if (isUsefulEvidence && !ROUTING_METADATA_TOOL_NAMES.has(tc.name) && usefulTrimmed.length >= snippetThreshold) {
             const snippet = truncateToolAuditText(usefulTrimmed, 900);
             if (snippet) {
               recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
@@ -4766,6 +5090,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
       }
 
+      // Track how often the model keeps gathering evidence AFTER the
+      // sufficiency nudge told it to answer — feeds the soft→hard escalation
+      // in the strip condition below.
+      if (sufficiencySynthesisNudged && !sufficiencyToolsStripped && toolNames.some((name) => EVIDENCE_GATHERING_TOOL_NAMES.has(name))) {
+        evidenceIterationsSinceNudge += 1;
+      }
+
       // I13: In-loop sufficiency / cascade-failure guard. Runs after tool
       // results have been collected for this iteration but before they are
       // pushed into history and the next LLM call is made. This is the
@@ -4844,7 +5175,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       } else if (
         !sufficiencyToolsStripped
         && !cascadeSynthesisForced
-        && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES
+        && (
+          cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES
+          // Nudge-ignored escalation (audit a438ef4a): the researcher got the
+          // soft "answer now" nudge at iteration 5 and kept gathering for 8
+          // more iterations (5.5 min) without ever reaching the 12K emergency
+          // brake. A nudge ignored this many times IS the convergence failure
+          // the brake exists for — escalate soft → hard.
+          || (sufficiencySynthesisNudged && evidenceIterationsSinceNudge >= NUDGE_IGNORED_STRIP_ITERATIONS)
+        )
         && toolResults.length > 0
         && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
       ) {
@@ -4894,6 +5233,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             strippedToolNames,
             shareFindinCallCount,
             iterations,
+            nudgeIgnoredEscalation: cumulativeUsefulEvidenceBytes < SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES,
+            evidenceIterationsSinceNudge,
           },
           { sessionId: subSessionId, severity: "info" },
         );

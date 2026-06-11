@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
@@ -52,7 +53,17 @@ import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "
 import { getDeadLetterCount, readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
-import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
+import { getActiveModelPreset, listModelPresets, resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
+import {
+  generatePkce,
+  generateOAuthState,
+  buildAuthorizeUrl,
+  exchangeAuthorizationCode,
+  storeTokenSet,
+  clearStoredTokenSet,
+  loadStoredTokenSet,
+} from "../providers/anthropic-oauth.js";
+import { ANTHROPIC_MODEL_CHOICES } from "../providers/anthropic.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { logAudit } from "../audit/logger.js";
 import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/concurrency.js";
@@ -1300,8 +1311,13 @@ export function createGateway() {
   app.get("/api/observability/recovery-nets", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    const { getRecoveryMetricsSnapshot } = await import("../observability/recovery-metrics.js");
-    return c.json(getRecoveryMetricsSnapshot());
+    const { getRecoveryMetricsSnapshot, getStaleNetsReport } = await import("../observability/recovery-metrics.js");
+    // ?staleDays=N tunes the retirement window (default 30): nets whose LAST firing is
+    // older than the window are retirement candidates (counters persist across restarts,
+    // so the clock is real — windowCovered says whether counting spans the window yet).
+    const staleDaysRaw = Number(c.req.query("staleDays"));
+    const staleDays = Number.isFinite(staleDaysRaw) && staleDaysRaw > 0 ? staleDaysRaw : 30;
+    return c.json({ ...getRecoveryMetricsSnapshot(), stale: getStaleNetsReport(staleDays) });
   });
 
   // ── Role-based access control (Wave B) ───────────────────────────────────
@@ -1930,6 +1946,193 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     return c.json(await syncChatProviderRuntimeStatus());
+  });
+
+  // ── Model presets: the dashboard "Local ⇄ Claude" switch ───────────────────
+  // GET returns the configured default model, the switchable presets (incl.
+  // the implicit "claude" preset when providers.anthropic is credentialed),
+  // and which one is active. POST activates a preset (or null → back to the
+  // configured default) and persists the choice in the runtime overlay.
+  app.get("/api/models/preset", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const config = getConfig();
+    const active = getActiveModelPreset(config);
+    return c.json({
+      active: active?.name ?? null,
+      activePrimary: active?.preset.primary ?? null,
+      defaultPrimary: config.agents.defaults.model.primary,
+      presets: listModelPresets(config),
+    });
+  });
+
+  app.post("/api/models/preset", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const requested = (body as { preset?: unknown }).preset;
+    if (requested !== null && typeof requested !== "string") {
+      return c.json({ error: "Body must be { preset: string | null }" }, 400);
+    }
+
+    const config = getConfig();
+    const previous = config.agents.defaults.activeModelPreset ?? null;
+    if (typeof requested === "string" && !listModelPresets(config).some((p) => p.name === requested)) {
+      return c.json({ error: `Unknown model preset '${requested}'` }, 400);
+    }
+
+    const updated = updateConfig((raw) => {
+      const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
+      const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+      // "" (falsy → no active preset) instead of delete: the runtime overlay is
+      // a diff against the base config, so a deletion could not switch the
+      // preset off if the base config ever sets one.
+      raw["agents"] = { ...agents, defaults: { ...defaults, activeModelPreset: requested ?? "" } };
+    });
+
+    const active = getActiveModelPreset(updated);
+    logAudit("model_preset_switched", {
+      from: previous,
+      to: active?.name ?? null,
+      primary: active?.preset.primary ?? updated.agents.defaults.model.primary,
+    });
+
+    return c.json({
+      active: active?.name ?? null,
+      activePrimary: active?.preset.primary ?? null,
+      defaultPrimary: updated.agents.defaults.model.primary,
+      presets: listModelPresets(updated),
+    });
+  });
+
+  // ── Claude subscription OAuth (browser verification) ───────────────────────
+  // Same PKCE login Claude Code uses. `start` returns the authorize URL + the
+  // PKCE verifier/state held by the dashboard (the OAuth client); `complete`
+  // exchanges the pasted code for a token set, encrypted at rest in the
+  // credential store. The token is Anthropic's own credential — never put in a
+  // prompt, only sent to Anthropic as the auth header.
+  app.get("/api/models/anthropic/oauth/status", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const stored = loadStoredTokenSet();
+    return c.json({
+      connected: stored !== null,
+      expiresAt: stored ? new Date(stored.expiresAt).toISOString() : null,
+    });
+  });
+
+  app.post("/api/models/anthropic/oauth/start", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const { verifier, challenge } = generatePkce();
+    const state = generateOAuthState();
+    return c.json({
+      authorizeUrl: buildAuthorizeUrl(challenge, state),
+      verifier,
+      state,
+    });
+  });
+
+  app.post("/api/models/anthropic/oauth/complete", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: { code?: unknown; verifier?: unknown; state?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.code !== "string" || typeof body.verifier !== "string" || typeof body.state !== "string") {
+      return c.json({ error: "Body must be { code, verifier, state }" }, 400);
+    }
+    if (!body.code.trim()) return c.json({ error: "Authorization code is required" }, 400);
+
+    try {
+      const tokenSet = await exchangeAuthorizationCode(body.code, body.state, body.verifier);
+      storeTokenSet(tokenSet);
+      logAudit("anthropic_oauth_connected", { expiresAt: new Date(tokenSet.expiresAt).toISOString() });
+      return c.json({ connected: true, expiresAt: new Date(tokenSet.expiresAt).toISOString() });
+    } catch (err) {
+      log.error({ err }, "Anthropic OAuth code exchange failed");
+      return c.json({ error: err instanceof Error ? err.message : "Token exchange failed" }, 400);
+    }
+  });
+
+  // ── Claude model selection for the implicit "claude" preset ───────────────
+  // The dashboard picker writes providers.anthropic.defaultModel (runtime
+  // overlay). A curated list is served because subscription tokens may not be
+  // scoped for /v1/models; free-text ids are accepted for anything newer.
+  app.get("/api/models/anthropic/model", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const config = getConfig();
+    return c.json({
+      model: config.providers.anthropic?.defaultModel ?? "claude-sonnet-4-6",
+      choices: ANTHROPIC_MODEL_CHOICES,
+    });
+  });
+
+  app.post("/api/models/anthropic/model", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: { model?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const model = typeof body.model === "string" ? body.model.trim() : "";
+    if (!model || model.length > 100 || !/^[a-z0-9][a-z0-9.:_-]*$/i.test(model)) {
+      return c.json({ error: "Body must be { model: \"claude-...\" } (bare Anthropic model id)" }, 400);
+    }
+
+    const previous = getConfig().providers.anthropic?.defaultModel ?? "claude-sonnet-4-6";
+    const updated = updateConfig((raw) => {
+      const providers = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
+      const anthropic = (providers["anthropic"] as Record<string, unknown> | undefined) ?? {};
+      raw["providers"] = { ...providers, anthropic: { ...anthropic, defaultModel: model } };
+    });
+
+    logAudit("model_preset_switched", { claudeModelFrom: previous, claudeModelTo: model });
+
+    const active = getActiveModelPreset(updated);
+    return c.json({
+      model,
+      choices: ANTHROPIC_MODEL_CHOICES,
+      // Refresh payload for the preset pill (tooltip/active primary may change).
+      active: active?.name ?? null,
+      activePrimary: active?.preset.primary ?? null,
+      defaultPrimary: updated.agents.defaults.model.primary,
+      presets: listModelPresets(updated),
+    });
+  });
+
+  app.post("/api/models/anthropic/oauth/disconnect", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    // If the active preset is the implicit Claude one, fall back to local so the
+    // swarm doesn't strand on an unauthenticated cloud model.
+    const wasActive = getActiveModelPreset(getConfig());
+    clearStoredTokenSet();
+    if (wasActive?.name === "claude") {
+      updateConfig((raw) => {
+        const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
+        const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+        raw["agents"] = { ...agents, defaults: { ...defaults, activeModelPreset: "" } };
+      });
+    }
+    logAudit("anthropic_oauth_disconnected", {});
+    return c.json({ connected: false });
   });
 
   app.get("/api/model-endpoints/config", async (c) => {
@@ -3249,6 +3452,66 @@ export function createGateway() {
       // for additional assets via /api/workspace/preview, but nothing else.
       "Cross-Origin-Resource-Policy": "same-origin",
     });
+  });
+
+  // ── Live app reverse proxy ────────────────────────────────────────────────
+  // /api/app/:id/*  — forwards authenticated requests to a serve_app container
+  // (running by name on the gateway's docker network). The first navigation
+  // carries ?token=<jwt>, which we mirror into a path-scoped cookie so the app's
+  // relative sub-resource requests authenticate too; HTML responses get a <base>
+  // so those relative URLs resolve under the /api/app/<id>/ subpath.
+  const APP_PROXY_HOP_BY_HOP = new Set(["host", "connection", "cookie", "content-length", "transfer-encoding", "keep-alive", "upgrade"]);
+  app.all("/api/app/:id", (c) => {
+    const id = c.req.param("id");
+    const tok = c.req.query("token");
+    return c.redirect(`/api/app/${id}/${tok ? `?token=${encodeURIComponent(tok)}` : ""}`);
+  });
+  app.all("/api/app/:id/*", async (c) => {
+    const id = c.req.param("id");
+    const queryToken = c.req.query("token")?.trim();
+    const cookieToken = /(?:^|;\s*)sai_app_token=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
+    const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.text("Unauthorized", 401);
+
+    const served = getServedApp(id);
+    if (!served) return c.text(`No running app '${id}'.`, 404);
+    if (served.status !== "running") return c.text(`App '${id}' is ${served.status}.`, 503);
+
+    const prefix = `/api/app/${id}/`;
+    const rest = c.req.path.startsWith(prefix) ? c.req.path.slice(prefix.length) : "";
+    const url = new URL(c.req.url);
+    url.searchParams.delete("token");
+    const qs = url.searchParams.toString();
+    const target = `http://${served.containerName}:${served.internalPort}/${rest}${qs ? `?${qs}` : ""}`;
+
+    const fwdHeaders = new Headers();
+    for (const [k, v] of Object.entries(c.req.header())) {
+      if (!APP_PROXY_HOP_BY_HOP.has(k.toLowerCase())) fwdHeaders.set(k, v);
+    }
+    const method = c.req.method;
+    const body = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
+
+    let upstream: Response;
+    try {
+      upstream = await fetch(target, { method, headers: fwdHeaders, body, redirect: "manual" });
+    } catch (err) {
+      return c.text(`App '${id}' is not reachable: ${err instanceof Error ? err.message : String(err)}`, 502);
+    }
+
+    const respHeaders = new Headers(upstream.headers);
+    respHeaders.delete("content-encoding"); // fetch already decoded the body
+    respHeaders.delete("content-length");
+    respHeaders.delete("content-security-policy");
+    if (queryToken) {
+      respHeaders.append("Set-Cookie", `sai_app_token=${encodeURIComponent(queryToken)}; Path=${prefix}; HttpOnly; SameSite=Lax`);
+    }
+
+    const contentType = upstream.headers.get("content-type") ?? "";
+    if (/text\/html/i.test(contentType)) {
+      const html = injectBaseHref(await upstream.text(), prefix);
+      return new Response(html, { status: upstream.status, headers: respHeaders });
+    }
+    return new Response(await upstream.arrayBuffer(), { status: upstream.status, headers: respHeaders });
   });
 
   // ── Memory inspector endpoints ────────────────────────────────────────────  // Read-only views into the durable memory store and the MemGraph knowledge

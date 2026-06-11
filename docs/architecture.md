@@ -275,8 +275,11 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
          │
 ┌────────▼───────────────────────────────────────────────────────────┐
 │  Providers  (packages/core/src/providers/)                          │
-│  LM Studio (OpenAI-compatible, port 1234) — primary                │
-│  Anthropic cloud — optional fallback                                │
+│  LM Studio / any OpenAI-compatible endpoint — primary (local)      │
+│  Anthropic (anthropic.ts) — native Messages API; API key or Claude │
+│    subscription OAuth (anthropic-oauth.ts: browser PKCE login,     │
+│    encrypted+auto-refreshed token); "Local ⇄ Claude" preset switch │
+│    swaps the whole swarm, local primary stays as fallback          │
 │  provider.stream() — true token-by-token streaming                 │
 │  embeddings.ts — semantic agent search index + query cache         │
 └────────────────────────────────────────────────────────────────────┘
@@ -377,6 +380,19 @@ A soft policy layer shapes *how* the loop runs without scripting it (all tunable
 
 ---
 
+## Live Web Apps (build + serve)
+
+Beyond static deliverables, the swarm can build and **run** a dynamic web app:
+
+- **`web_coder`** writes the front-end (multi-file HTML/CSS/JS/SPA, or a reveal.js deck) with relative asset paths so it works under both the static preview and the app proxy.
+- **`backend_coder`** writes a Node/Express `server.js` + `package.json` (binding `0.0.0.0:$PORT`) and calls the **`serve_app`** tool (Tier 3, per-call approval).
+- **`serve_app`** runs the app as a dedicated container (`sai-app-<id>`) on the gateway's docker network, health-checks it, and registers it; lifecycle actions are `start` / `stop` / `list` / `logs`. The docker exec and health probe are injected so the lifecycle is unit-tested without a daemon.
+- The **gateway reverse-proxy** (`/api/app/:id/*`) forwards authenticated requests to the container by name and injects a `<base>` so relative URLs resolve under the subpath (see `docs/api.md`).
+
+Separation of concerns holds: a *static* page or slide deck never needs this path — it is served by `/api/workspace/preview`. The live-app path is only for apps that need a running server.
+
+---
+
 ## Hybrid Agent Routing
 
 The `search_agents` tool scores every registered agent against the query using four signals:
@@ -445,8 +461,12 @@ packages/
                             redis-client.ts — shared Redis connection
       mcp/                  client.ts — MCP protocol client
                             registry.ts — MCP tool-bridge registry
-      providers/            index.ts — LM Studio + Anthropic adapters, provider.stream()
+      providers/            index.ts — endpoint resolution, failover chain, model presets
                             lmstudio.ts — OpenAI-compatible local model adapter
+                            anthropic.ts — native Anthropic Messages API adapter
+                                           (API key or Claude-subscription OAuth token)
+                            anthropic-oauth.ts — browser PKCE login + encrypted
+                                           auto-refreshing subscription token store
                             embeddings.ts — semantic agent search index + query cache
       swarm/                bus.ts — Redis Pub/Sub bus + EventEmitter fallback
                             locks.ts — distributed task locks

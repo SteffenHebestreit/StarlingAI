@@ -177,6 +177,54 @@ describe("filesystem tools", () => {
     expect(existsSync(join(tempDir, "generated", "reports", "plan.md"))).toBe(false);
   });
 
+  // Missing-path repair (audit 0ac7d3fc): the slow model spent ~2 minutes generating a
+  // complete app, then emitted parsed args with content but NO path; failing on "path is
+  // required" threw away the expensive part to protect the cheap part. The path is now
+  // defaulted structurally from the content itself.
+  it("defaults a missing path from substantial content instead of discarding it (audit 0ac7d3fc)", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const { existsSync } = await import("node:fs");
+    const tool = getTool("write_file")!;
+    const ctx = { sessionId: "session-defaulted-path", workspacePath: tempDir };
+
+    const appHtml = "<!DOCTYPE html>\n<html>\n<head><style>.quiz{padding:4px}</style></head>\n<body>"
+      + "<div class=\"quiz\">Frage 1</div>".repeat(20)
+      + "<script>let i=0;</script></body></html>";
+    const result = await tool.execute({ path: "", content: appHtml }, ctx);
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("defaulted to \"index.html\"");
+    expect(result.metadata).toMatchObject({ outputPath: "generated/index.html" });
+    expect(existsSync(join(tempDir, "generated", "index.html"))).toBe(true);
+  });
+
+  it("does NOT default a path for mode:'append' or for small content", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("write_file")!;
+    const ctx = { sessionId: "session-no-default", workspacePath: tempDir };
+
+    // Append without a path: there is no way to know which file the chunk belongs to.
+    const appendNoPath = await tool.execute({ path: "", content: "x".repeat(500), mode: "append" }, ctx);
+    expect(appendNoPath.success).toBe(false);
+    expect(appendNoPath.error).toMatch(/path is required/i);
+
+    // Small content is not worth a guessed artifact.
+    const tiny = await tool.execute({ path: "", content: "short note" }, ctx);
+    expect(tiny.success).toBe(false);
+    expect(tiny.error).toMatch(/path is required/i);
+  });
+
+  it("sniffs the default path from content structure (defaultWritePathForContent)", async () => {
+    const { defaultWritePathForContent } = await import("../tools/filesystem.js");
+    expect(defaultWritePathForContent("<!DOCTYPE html><html><body>app</body></html>")).toBe("index.html");
+    expect(defaultWritePathForContent("<html lang=\"de\"><body>app</body></html>")).toBe("index.html");
+    expect(defaultWritePathForContent("<svg viewBox=\"0 0 10 10\"></svg>")).toBe("image.svg");
+    expect(defaultWritePathForContent("<?xml version=\"1.0\"?><root/>")).toBe("document.xml");
+    expect(defaultWritePathForContent(JSON.stringify({ questions: [1, 2, 3] }))).toBe("data.json");
+    expect(defaultWritePathForContent("# Lernplan\n\nKapitel 1 …")).toBe("document.md");
+    expect(defaultWritePathForContent("{ not valid json")).toBe("output.txt");
+    expect(defaultWritePathForContent("plain prose paragraph")).toBe("output.txt");
+  });
+
   it("mode:'append' creates the file when it does not exist yet", async () => {
     const { getTool } = await import("../tools/registry.js");
     const { readFileSync } = await import("node:fs");

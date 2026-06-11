@@ -314,9 +314,9 @@ describe("generate_presentation", () => {
     expect(result.success).toBe(true);
     expect(result.metadata?.["artifactKind"]).toBe("website");
     expect(result.metadata?.["slideCount"]).toBe(2);
-    expect(result.metadata?.["indexPath"]).toBe("deck/index.html");
+    expect(result.metadata?.["indexPath"]).toBe("generated/deck/index.html");
 
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect(html).toContain("<title>Dresden Architecture</title>");
     expect(html).toContain('class="reveal"');
     expect((html.match(/<section>/g) ?? []).length).toBe(2);
@@ -337,7 +337,7 @@ describe("generate_presentation", () => {
       revealVersion: "5.0.4",
       slides: [{ title: "One", content: "Body" }],
     }, { sessionId: "s1", workspacePath: ws });
-    let html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    let html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect(html).toContain("reveal.js@5.0.4/");
     expect(html).toContain("theme/night.css");
 
@@ -348,18 +348,27 @@ describe("generate_presentation", () => {
       revealVersion: "../../etc/passwd",
       slides: [{ title: "One", content: "Body" }],
     }, { sessionId: "s1", workspacePath: ws2 });
-    html = readFileSync(join(ws2, "deck", "index.html"), "utf8");
+    html = readFileSync(join(ws2, "generated", "deck", "index.html"), "utf8");
     expect(html).toContain("reveal.js@4.6.1/");
     expect(html).not.toContain("passwd");
   });
 
-  it("rejects a bad theme and an empty/invalid slide list", async () => {
+  it("falls back on a bad theme (never fails the build) but still rejects an empty slide list", async () => {
     const ws = tempWorkspace();
+    // A guessed theme like "neon"/"dark" must NOT fail the whole deck (audit 3c46a4d4 burned
+    // a build attempt on theme:"dark"); it falls back to a valid reveal theme and renders.
     const badTheme = await (await tool()).execute({
-      outputDir: "deck", title: "T", theme: "neon", slides: [{ title: "x" }],
+      outputDir: "deck", title: "T", theme: "neon", slides: [{ title: "x", content: "body" }],
     }, { sessionId: "s1", workspacePath: ws });
-    expect(badTheme.success).toBe(false);
-    expect(badTheme.error).toContain("theme");
+    expect(badTheme.success).toBe(true);
+    expect(readFileSync(join(ws, "generated", "deck", "index.html"), "utf8")).toContain("theme/black.css");
+
+    const ws2 = tempWorkspace();
+    const darkTheme = await (await tool()).execute({
+      outputDir: "deck", title: "T", theme: "dark", slides: [{ title: "x", content: "body" }],
+    }, { sessionId: "s1", workspacePath: ws2 });
+    expect(darkTheme.success).toBe(true);
+    expect(readFileSync(join(ws2, "generated", "deck", "index.html"), "utf8")).toContain("theme/black.css");
 
     const emptySlides = await (await tool()).execute({
       outputDir: "deck", title: "T", slides: [],
@@ -399,7 +408,7 @@ describe("generate_presentation", () => {
 
     expect(result.success).toBe(true);
     expect(result.metadata?.["slideCount"]).toBe(2);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect((html.match(/<section>/g) ?? []).length).toBe(2);
     expect(html).toContain("<h2>Der Zwinger</h2>");
     expect(html).toContain("<strong>barockes</strong>");
@@ -423,12 +432,35 @@ describe("generate_presentation", () => {
 
     expect(result.success).toBe(true);
     expect(result.metadata?.["slideCount"]).toBe(2);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect((html.match(/<section>/g) ?? []).length).toBe(2);
     expect(html).toContain("<h2>Architektur von Dresden</h2>");
     expect(html).toContain("<li>Kronentor</li>");
     // The repaired inner-quote text is preserved as content (rendered, escaped).
     expect(html).toContain("Elbflorenz");
+  });
+
+  // Audit 3c46a4d4: the model serialized slides as a JSON string whose content/notes values
+  // contained a German quotation immediately before a colon — `**Begriff „Zwinger":**`. The
+  // earlier repair treated that stray `"` as a key terminator (next char ':'), so JSON.parse
+  // still failed and EVERY deck retry bounced on "slides must be an array" → the presentation
+  // and speaker notes never built. A value-internal `"` before ':' must be escaped, not closed.
+  it("repairs a value-internal quote that precedes a colon (German „Wort\": pattern)", async () => {
+    const ws = tempWorkspace();
+    const slides =
+      '[{"title": "Der Zwinger", "content": "Auftraggeber: Kurfürst („August der Starke")",'
+      + ' "notes": "**Begriff „Zwinger":** Bezeichnete den Bereich zwischen den Stadtmauern."}]';
+    const result = await (await tool()).execute({
+      outputDir: "deck", title: "Zwinger", slides,
+    }, { sessionId: "s1", workspacePath: ws });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.["slideCount"]).toBe(1);
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
+    expect((html.match(/<section>/g) ?? []).length).toBe(1);
+    expect(html).toContain("<h2>Der Zwinger</h2>");
+    expect(html).toContain('<aside class="notes">');
+    expect(html).toContain("Zwinger");
   });
 
   it("coerces a JSON-string bullets field on a slide", async () => {
@@ -440,7 +472,7 @@ describe("generate_presentation", () => {
     }, { sessionId: "s1", workspacePath: ws });
 
     expect(result.success).toBe(true);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect(html).toContain("<li>Kronentor</li>");
     expect(html).toContain("<li>Glockenspielpavillon</li>");
   });
@@ -455,7 +487,7 @@ describe("generate_presentation", () => {
 
     expect(result.success).toBe(true);
     expect(result.metadata?.["slideCount"]).toBe(1);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect((html.match(/<section>/g) ?? []).length).toBe(1);
     expect(html).toContain("<h2>Only One</h2>");
   });
@@ -474,7 +506,7 @@ describe("generate_presentation", () => {
     }, { sessionId: "s1", workspacePath: ws });
 
     expect(result.success).toBe(true);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect(html).toContain(`<img src="${url}" alt="Zwinger">`);
   });
 
@@ -487,7 +519,7 @@ describe("generate_presentation", () => {
       slides: [{ title: "Safe", image: "https://example.com/x.jpg" }],
     }, { sessionId: "s1", workspacePath: ws });
     expect(result.success).toBe(true);
-    const html = readFileSync(join(ws, "deck", "index.html"), "utf8");
+    const html = readFileSync(join(ws, "generated", "deck", "index.html"), "utf8");
     expect(html).not.toContain("<img");
     expect(html).toContain("<h2>Safe</h2>");
 

@@ -15,8 +15,21 @@
     //     "apiKey": "local-vllm"
     //   }
     // }
+    // Claude models via the native Anthropic API. Configuring either credential
+    // unlocks the dashboard "Local ⇄ Claude" header switch (an implicit "claude"
+    // preset using defaultModel). authToken (sk-ant-oat..., from Claude Code's
+    // `claude setup-token`) bills the Claude Pro/Max subscription and wins over
+    // apiKey (sk-ant-api..., pay-per-use). Both support $ENV refs and are also
+    // auto-filled from ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN in .env.
+    //
+    // EASIEST PATH — no token needed here: click "Connect Claude" in the
+    // dashboard header to run the browser login (the same PKCE flow Claude
+    // Code uses). The subscription token is stored encrypted on the gateway
+    // (needs SAI_MASTER_KEY set) and auto-refreshed; this block stays optional.
     // "anthropic": {
-    //   "apiKey": "$ANTHROPIC_API_KEY"
+    //   "apiKey": "$ANTHROPIC_API_KEY",
+    //   "authToken": "$CLAUDE_CODE_OAUTH_TOKEN",
+    //   "defaultModel": "claude-sonnet-4-6"
     // }
   },
 
@@ -36,6 +49,14 @@
         "maxTokens": 4096,
         "embeddingModel": "lmstudio/text-embedding-nomic-embed-text-v1.5"
       }
+      //,
+      // Optional named alternates for the dashboard model switch (the implicit
+      // "claude" preset already appears when providers.anthropic is configured).
+      // The active preset swaps the model for the WHOLE swarm; the local
+      // primary automatically becomes the fallback.
+      // "modelPresets": {
+      //   "claude-opus": { "label": "Claude Opus", "primary": "anthropic/claude-opus-4-8" }
+      // }
     },
     "ephemeralGeneration": {
       "enabled": true,

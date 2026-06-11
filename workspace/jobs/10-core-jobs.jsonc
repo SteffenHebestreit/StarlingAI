@@ -1,5 +1,5 @@
 {
-  // Research & intel digests — scheduled/triggered research and briefing packets.
+  // Core jobs — everyday scheduled research & briefing packets.
   "jobs": {
     "deep_research_packet": {
       "description": "Run a deep-research dossier workflow with optional Mermaid visuals. Example triggers: '/deep-research electric grid storage', 'Tiefenrecherche zum Thema Quantencomputer', 'deep-dive dossier on the supply chain', 'Dossier mit Visualisierungen erstellen'.",
@@ -65,33 +65,6 @@
             "outputStyle": "{{outputStyle}}",
             "freshnessRequirement": "use the freshest reliable evidence relevant to {{topic}} and preserve publication dates"
           }
-        }
-      ]
-    },
-    "research_visual_digest": {
-      "description": "Produce a fast visual research brief for a topic that benefits from one high-signal Mermaid diagram. Example triggers: 'give me a visual brief on our stack', 'visuelle Kurzrecherche mit Diagramm', 'one-diagram summary of the architecture', 'Kompakt-Briefing mit Mermaid-Diagramm'.",
-      "params": {
-        "topic": {
-          "description": "Topic or system to summarize visually",
-          "default": "current architecture and key dependencies"
-        }
-      },
-      "steps": [
-        {
-          "scene": "deep_research",
-          "label": "Research and diagram",
-          "params": {
-            "deliverable": "concise visual brief",
-            "includeVisuals": "yes",
-            "audience": "technical stakeholder",
-            "visualFocus": "create the single most useful Mermaid diagram for {{topic}}"
-          }
-        }
-      ],
-      "triggers": [
-        {
-          "type": "api",
-          "webhookKey": "$JOB_RESEARCH_VISUAL_DIGEST_KEY"
         }
       ]
     },
@@ -193,61 +166,6 @@
           "replyText": "Queued {{jobName}} as {{jobId}}.",
           "params": {
             "channels": "telegram"
-          }
-        }
-      ]
-    },
-    "weekly_security_digest": {
-      "description": "Research the latest CVEs, security advisories, and threat intelligence for the configured stack, produce a prioritized risk report, and broadcast it to the configured channels. Example triggers: '/security-digest Node.js', 'wöchentliches Sicherheits-Update verteilen', 'send the weekly CVE digest', 'Sicherheits-Digest mit Risiken broadcasten'.",
-      "params": {
-        "scope": {
-          "description": "Software stack, services, or dependency set to cover",
-          "default": "Node.js, Docker, nginx, PostgreSQL, and configured npm dependencies"
-        },
-        "channels": {
-          "description": "Comma-separated delivery channels",
-          "default": "slack"
-        },
-        "severityThreshold": {
-          "description": "Minimum severity to include",
-          "default": "medium"
-        }
-      },
-      "steps": [
-        {
-          "scene": "security_audit",
-          "label": "Collect CVEs and audit findings",
-          "params": {
-            "target": "{{scope}}",
-            "auditScope": "dependencies",
-            "severityThreshold": "{{severityThreshold}}",
-            "outputFormat": "markdown with risk table and remediation plan"
-          }
-        },
-        {
-          "scene": "multi_channel_broadcast",
-          "label": "Broadcast security digest",
-          "params": {
-            "channels": "{{channels}}",
-            "tone": "urgent"
-          }
-        }
-      ],
-      "triggers": [
-        {
-          "type": "api",
-          "webhookKey": "$JOB_WEEKLY_SECURITY_DIGEST_KEY"
-        },
-        {
-          "type": "channel",
-          "channels": ["slack"],
-          "pattern": "/security-digest",
-          "mode": "prefix",
-          "captureRemainderAs": "scope",
-          "parseParams": false,
-          "replyText": "Queued {{jobName}} for {{scope|configured stack}} as {{jobId}}.",
-          "params": {
-            "channels": "slack"
           }
         }
       ]

@@ -4,6 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
+import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
 
 type ConfigSourceType = "file" | "directory";
@@ -195,11 +196,16 @@ function readRawConfigDirectory(directoryPath: string, mutablePath: string): Rec
 
 function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string): string[] {
   const shardPaths: string[] = [];
-  const visit = (currentPath: string) => {
+  const visit = (currentPath: string, depth: number) => {
     for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
       const nextPath = resolve(currentPath, entry.name);
       if (entry.isDirectory()) {
-        visit(nextPath);
+        // Working zones (generated/, uploads/, tools/) hold agent output, user
+        // uploads, and dynamic-tool bundles — NOT config. Sweeping them would
+        // let an agent-written data.json (or a malicious upload with a top-level
+        // "agents" key) merge straight into the live config on reload.
+        if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        visit(nextPath, depth + 1);
         continue;
       }
       if (!entry.isFile() || !isSupportedConfigFile(entry.name)) continue;
@@ -208,7 +214,7 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
     }
   };
 
-  visit(directoryPath);
+  visit(directoryPath, 0);
   return shardPaths.sort((left, right) => relative(directoryPath, left).localeCompare(relative(directoryPath, right)));
 }
 
@@ -349,6 +355,16 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
     const ant = (p["anthropic"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), anthropic: { ...ant, apiKey: env["ANTHROPIC_API_KEY"] } };
+  }
+  if (env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDE_CODE_OAUTH_TOKEN"]) {
+    // OAuth bearer token (sk-ant-oat...) — e.g. from Claude Code's `claude setup-token`.
+    // Bills the Claude subscription instead of API pay-per-use; wins over apiKey.
+    const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
+    const ant = (p["anthropic"] as Record<string, unknown> | undefined) ?? {};
+    raw["providers"] = {
+      ...(p as object),
+      anthropic: { ...ant, authToken: env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDE_CODE_OAUTH_TOKEN"] },
+    };
   }
   if (env["SAI_DEFAULT_MODEL"]) {
     // Lets the guided setup wizard pin the default agent model from .env alone

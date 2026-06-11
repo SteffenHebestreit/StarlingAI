@@ -5,15 +5,16 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, getAllTools, searchToolsByEmbedding, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
-import { computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { buildAgentTokenIdf, computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
+import { appendOutcome, readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { readPromotedAgents, promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -29,6 +30,7 @@ import { longRunningGenerationManager } from "../agent/long-running-generation.j
 
 const log = childLogger("tool:sub-agent");
 import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
+import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
 /**
@@ -761,9 +763,14 @@ export async function resolveAgentRouting(
 
   const positiveNavigationIntent = isNavigationRoutingRequest(raw);
 
+  // Lexical-fallback discrimination: IDF over the agent corpus so rare query tokens
+  // dominate when embeddings are degraded (without it, common tokens flatten the
+  // ranking and routing collapses to ~equal scores — audit 9b5196ad). Semantic mode
+  // never reads keyword scores, so this only shapes the degraded path.
+  const lexicalIdf = usedSemanticSearch ? undefined : buildAgentTokenIdf(entries);
   let ranked = entries
     .map(([name, cfg]) => {
-      const keywordMatch = usedSemanticSearch ? { score: 0, matchedTerms: [] } : scoreAgentKeywordMatch(raw, name, cfg);
+      const keywordMatch = usedSemanticSearch ? { score: 0, matchedTerms: [] } : scoreAgentKeywordMatch(raw, name, cfg, lexicalIdf);
       const semanticScore = semanticScores.get(name) ?? 0;
       const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
@@ -1233,6 +1240,21 @@ function agentIsResearchCapable(agentName: string): boolean {
 /** Phrases that explicitly ask the swarm to go online and validate/look up. */
 const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check|im internet (such|recherchier)|recherchier[a-z]* online)\b/i;
 
+// A web-research task in the GENERAL (incl. German) shape the patterns above miss:
+// a search/research VERB together with an unambiguously EXTERNAL web noun (URL,
+// price, platform, provider, course, …). Audit 3ef67aef: a German "Recherchiere
+// die besten Lernquellen … Suche nach … URL, Preis, Quellen" task matched none of
+// the English patterns and the turn was not classified source-sensitive, so the
+// research-capability redirect never fired — swarm_delegate bidding then handed it
+// to web-INCAPABLE agents (quality_supervisor → … → productivity_agent) that
+// FABRICATED a sourced-looking resource list with zero web_search calls. Stays
+// high-precision: BOTH a verb AND an external noun must be present, and a workspace/
+// code marker (function, file, symbol, codebase) vetoes it so internal "find/search"
+// tasks (code_analyst's territory) are never misrouted to the web researcher.
+const WEB_RESEARCH_VERB_RE = /\b(?:research|recherch\w+|investigat\w+|ermittl\w+|such\w*|searche?s?|find|finde|look\s*up|gather|sammel\w+|zusammenstell\w+)\b/i;
+const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|webseite\w*|online|plattform\w*|platforms?|anbieter|providers?|vendors?|preis|preise|prices?|pricing|kurs|kurse|courses?|datasheets?|reviews?|bewertung\w*|lernquelle\w*|lernmaterial\w*)\b/i;
+const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|quellcode|funktion\w*|functions?|methods?|datei\w*|files?|symbols?|klasse\w*|class(?:es)?|modul\w*|modules?)\b/i;
+
 /**
  * Whether a delegation task requires fresh external evidence. The authoritative
  * signal is the runtime-injected "SOURCE-SENSITIVE DELEGATION" wrapper (the
@@ -1245,7 +1267,11 @@ export function taskRequiresExternalResearch(task: string): boolean {
   const t = task ?? "";
   if (t.includes("SOURCE-SENSITIVE DELEGATION")) return true;
   if (SEARCH_ONLINE_TASK_RE.test(t)) return true;
-  return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(t));
+  if (EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(t))) return true;
+  // General (incl. German) web-research shape: a research/search verb + an external
+  // web noun, with no workspace/code marker that would make it an internal lookup.
+  if (!WORKSPACE_CODE_MARKER_RE.test(t) && WEB_RESEARCH_VERB_RE.test(t) && EXTERNAL_WEB_NOUN_RE.test(t)) return true;
+  return false;
 }
 
 /** First configured, research-capable, not-yet-attempted coordinator/specialist
@@ -2105,6 +2131,14 @@ function looksLikeArtifactDeliverableMiss(
   // stats as "called nothing" would false-positive on every legacy test
   // path that mocks runSubAgent without runSubAgentWithStats.
   if (!stats) return false;
+  // A runtime-authored research slice embeds the user's ORIGINAL request
+  // (which may say "bauen"/"build a device"), but the slice's own deliverable
+  // is prose evidence by construction. Judging the researcher against the
+  // embedded build verb branded a successful 8.8KB sourced report a failure
+  // because it never called write_file (audit b5107ae4) — which then cascaded
+  // into an architect-built ephemeral that re-researched ONE component and
+  // shipped that as the whole answer.
+  if (isCanonicalResearchSliceTask(task)) return false;
   // NOTE: do NOT skip on `toolCount === 0 && toolNames.length === 0`. The
   // earlier "treat empty stats as a mock signal" shortcut let real
   // production failures through: session 25f55376 (2026-05-28) had
@@ -2453,6 +2487,36 @@ export function classifyDelegationResult(
     return "partial";
   }
   return "success";
+}
+
+/**
+ * Decide whether a FAILED delegation should be reported to the orchestrator as
+ * "narrative-only" (the agent narrated intent but never called a work tool).
+ *
+ * A container/host-level crash — the agent-worker could not reach the model
+ * endpoint or a gateway-bound MCP, failed to spawn, exited non-zero, or timed
+ * out — is NOT a narrative-only miss even though it produced zero tool calls
+ * (it never got to run). Labeling it "never called write_file — restate the
+ * task as a single direct instruction, or pick a different specialist" is
+ * misleading on two counts: the agent wasn't lazy, and re-wording the task to
+ * the SAME broken containerized agent cannot succeed. Surface the raw container
+ * error instead so the orchestrator can see it and route elsewhere.
+ *
+ * (audit: `coder` ran containerized for the CPSA-F learning-platform build, hit
+ * "container error: unknown" with 0 tokens / 0 tools, and was reported as
+ * "narrative-only — restate the task", which sent the orchestrator in circles
+ * and cascaded the dependent nodes to blocked.)
+ */
+export function isNarrativeOnlyDeliverableFailure(
+  classification: DelegationClassification,
+  output: string,
+  task: string,
+  stats: { toolCount: number; toolNames: string[] } | undefined,
+  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+): boolean {
+  if (classification !== "failure") return false;
+  if (looksLikeContainerLevelFailure(output)) return false;
+  return looksLikePlanningOnlyResult(output) || looksLikeArtifactDeliverableMiss(task, stats, agentCfg);
 }
 
 function formatArtifactReferencesForSharedContext(artifacts: Record<string, unknown>[]): string {
@@ -2839,6 +2903,14 @@ async function runArchitectFallback(task: string, ctx: ToolContext): Promise<Too
   const description = String(spec.description ?? agentName);
   const rawTools = Array.isArray(spec.tools) ? spec.tools.map(String) : [];
   const tools = rawTools.filter(t => GRANTABLE_TOOLS.has(t));
+  // Always let an architect-fallback ephemeral publish to (and read from) the shared-facts
+  // store so its findings reach the parent and sibling agents. The architect routinely omits
+  // share_finding from its tool pick, so the ephemeral's explicit shares were hard-blocked as
+  // not_in_agent_tools and its evidence never propagated to the parent's build/synthesis gate
+  // (audit 9b5196ad: ephemeral researcher → starved build, no app).
+  for (const sharingTool of ["share_finding", "read_shared_facts"]) {
+    if (GRANTABLE_TOOLS.has(sharingTool) && !tools.includes(sharingTool)) tools.push(sharingTool);
+  }
   const usesComputerTools = tools.some(t => EXECUTION_TOOL_FAMILIES.computer.has(t));
   const iterCap = usesComputerTools ? 20 : 8;
   const iterFloor = usesComputerTools ? 8 : 1;
@@ -3368,8 +3440,38 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
           bestAutoMatchConfidence = topCandidate.confidence;
+          // Diagnostic: a weak top score that coincides with a DEGRADED embedding endpoint is
+          // the signature of "configured embedding model not serving" (audit 9b5196ad: the
+          // configured model wasn't loaded → /v1/embeddings errored → every catalog agent
+          // scored ~0.25 → architect ephemeral). Surface it in the audit the operator reads so
+          // the cause (embeddings) is obvious from the symptom (low score / ephemeral fallback),
+          // instead of silently degrading to keyword scoring.
+          if (bestAutoMatchScore < skillMatchThreshold) {
+            const embStatus = getEmbeddingSearchStatus();
+            if (embStatus.configured && (!embStatus.available || embStatus.lastError)) {
+              logAudit("delegation_routing_embedding_degraded", {
+                taskTitle: title,
+                topScore: Number(bestAutoMatchScore.toFixed(3)),
+                embeddingModel: embStatus.model,
+                embeddingAvailable: embStatus.available,
+                indexedAgentCount: embStatus.indexedAgentCount,
+                lastError: embStatus.lastError ?? null,
+              }, { sessionId: ctx.sessionId, severity: "warn" });
+            }
+          }
+          // A research task whose candidates were already filtered to research-capable agents
+          // (above) must route to the REAL researcher even when the match score is weak — e.g.
+          // a domain-specific routing query ("iSAQB CPSA-F curriculum exam format topics") or a
+          // DOWN/unloaded embedding model scores every catalog agent ~0.25, which would
+          // otherwise fall through to an architect-designed ephemeral that lacks share_finding
+          // and loses its facts to the parent (audit 9b5196ad: embeddings unavailable →
+          // bestAutoMatchScore 0.25 → ephemeral → starved build). A real research agent is
+          // strictly better here than a fabricated one.
+          const researchTaskHasCapableCandidate =
+            taskRequiresExternalResearch(request.task) && agentIsResearchCapable(topCandidate.name);
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
+            || researchTaskHasCapableCandidate
             || shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold);
           if (shouldQueueRoutedCandidate) {
             routingCandidateMap.set(topCandidate.name, {
@@ -3709,6 +3811,36 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         output = parsedOutcome.data || output;
       }
 
+      // Delegation-boundary inline-app harvest (audit 1ac79471): a build delegation
+      // "succeeds" with ZERO artifacts but pastes the complete app document into its
+      // RESULT text (browser_agent dumped a 14KB <!DOCTYPE html> app inline because
+      // its completion cap cut the write_file call). The expensive content exists —
+      // write it NOW so the deliverable survives, instead of classifying around the
+      // loss. Mirrors the runtime's corrective-build harvest one level down, covering
+      // EVERY delegated builder.
+      if (artifacts.length === 0 && WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())) {
+        const inlineDoc = extractInlineHtmlDocument(output);
+        if (inlineDoc) {
+          try {
+            const harvestWrite = await executeTool("write_file", { path: "app/index.html", content: inlineDoc }, ctx);
+            if (harvestWrite.success && harvestWrite.metadata) {
+              const harvestComplete = looksLikeCompleteHtmlDocument(inlineDoc);
+              artifacts.push({ sourceAgent: candidate, sourceTool: "write_file", ...harvestWrite.metadata });
+              const writtenPath = typeof harvestWrite.metadata["outputPath"] === "string" ? harvestWrite.metadata["outputPath"] : "app/index.html";
+              output = `${output.trim()}\n\n[INLINE DOCUMENT HARVESTED] The HTML document above was written to ${writtenPath} and attached as a real artifact${harvestComplete ? "" : " — NOTE: the document was cut off before its end, so the file is INCOMPLETE"}. Do not paste its code again; reference the file.`;
+              logAudit("guardrail_flagged", {
+                type: "delegation_inline_artifact_harvested",
+                agentName: candidate,
+                chars: inlineDoc.length,
+                complete: harvestComplete,
+              }, { sessionId: ctx.sessionId, severity: "warn" });
+            }
+          } catch (err) {
+            log.warn({ err, agentName: candidate }, "Delegation-boundary inline-document harvest failed");
+          }
+        }
+      }
+
       // D14: Consolidated classification — replaces the scattered acceptPartial /
       // coordinatorMicroCompletion / weak variables that used to live here.
       const classification = classifyDelegationResult(
@@ -3731,12 +3863,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // orchestrator into retrying with the same wording. Replace it with a
         // structured reason that names what was missing so the orchestrator
         // can adjust its next move.
-        const narrativeOnly =
-          classification === "failure"
-          && (
-            looksLikePlanningOnlyResult(output)
-            || looksLikeArtifactDeliverableMiss(request.task, stats, agentCfg)
-          );
+        const narrativeOnly = isNarrativeOnlyDeliverableFailure(
+          classification, output, request.task, stats, agentCfg,
+        );
         if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
             /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
@@ -3860,6 +3989,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attemptedAgents,
           delegationSucceeded: true,
           delegationOutcome: delegationOutcome ?? "success",
+          // Mark runtime-authored research slices: their output is synthesis
+          // INPUT (evidence), never a verbatim-relayable final deliverable.
+          ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
           ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
@@ -3895,7 +4027,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // architect to design a purpose-built ephemeral agent for this task.
   // Skip architect if the failure was infrastructure-level (host unreachable, etc.) —
   // an ephemeral agent would face the exact same connectivity problem.
-  if (!explicitAgentRequested && !lastFailureWasInfrastructure && !longRunningGenerationManager.isStopRequested(ctx.sessionId) && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))) {
+  if (
+    !explicitAgentRequested
+    && !lastFailureWasInfrastructure
+    && !longRunningGenerationManager.isStopRequested(ctx.sessionId)
+    // Honor the substantive-partial-evidence keystone above: once an attempt
+    // left real usable evidence, do NOT escalate to an architect-built
+    // ephemeral either. The ephemeral starts cold, scopes itself from whatever
+    // shared facts are most recent (audit b5107ae4: it re-researched ONLY the
+    // TP4056 charger out of a whole device design), and its result then
+    // REPLACES the broader partial evidence at the return below. Surface the
+    // partial via the tail return instead — the orchestrator synthesizes from it.
+    && !(bestPartialResult && partialResultHasSubstantiveEvidence(bestPartialResult.output))
+    && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))
+  ) {
     const architectResult = await runArchitectFallback(request.task, ctx);
     if (architectResult) {
       clearTaskBids(taskId);
@@ -3935,6 +4080,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         delegationSucceeded: true,
         delegationOutcome: "partial",
         partialFallback: true,
+        ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
         ...(bestPartialResult.artifacts?.length ? { artifacts: bestPartialResult.artifacts } : {}),
         ...(bestPartialResult.terminalState ? { terminalState: bestPartialResult.terminalState } : {}),
         ...(bestPartialResult.routingInfo
@@ -4259,6 +4405,11 @@ registerTool({
     const completed = new Set<string>();
     const failed = new Set<string>();
     const blocked = new Set<string>();
+    // Accumulate artifacts each node's sub-agent produced so the graph surfaces
+    // them as downloads on the parent turn (same propagation gap as
+    // parallel_delegate — see that handler). Without this a graph whose final
+    // node BUILT a file ships no download and the honesty guards see 0 produced.
+    const graphArtifacts: Record<string, unknown>[] = [];
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
 
     for (const node of rawNodes) {
@@ -4363,6 +4514,14 @@ registerTool({
 
       if (result.success) {
         completed.add(node.id);
+        const arts = result.metadata?.["artifacts"];
+        if (Array.isArray(arts)) {
+          for (const artifact of arts) {
+            if (artifact && typeof artifact === "object") {
+              graphArtifacts.push(artifact as Record<string, unknown>);
+            }
+          }
+        }
       } else {
         failed.add(node.id);
       }
@@ -4391,7 +4550,13 @@ registerTool({
     return {
       success: failed.size === 0,
       output: `Swarm task graph complete.\n${summary}\n\n${formatSwarmState(swarmState)}`,
-      metadata: { completed: [...completed], failed: [...failed], blocked: [...blocked], swarmState },
+      metadata: {
+        completed: [...completed],
+        failed: [...failed],
+        blocked: [...blocked],
+        swarmState,
+        ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
+      },
     };
   },
 });
@@ -4488,8 +4653,24 @@ registerTool({
         .filter((toolName, index, list) => list.indexOf(toolName) === index)
         .slice(0, 8);
     }
-    const tools = requestedTools.filter(t => GRANTABLE_TOOLS.has(t));
+    let tools = requestedTools.filter(t => GRANTABLE_TOOLS.has(t));
     const rejected = requestedTools.filter(t => !GRANTABLE_TOOLS.has(t));
+
+    // Auto-recover the bare "tools omitted entirely" case instead of dead-ending the
+    // turn: the model called create_ephemeral_agent with no tools array (audit 9a6a8c7f
+    // turn 3 — the website builder was rejected, the turn then collapsed). We already
+    // computed the routing layer's best-fit grantable tools; grant the top few so the
+    // build can proceed. Only when NOTHING was requested — an explicit list that all got
+    // rejected is a real mistake and still surfaces the unknown-tool error below.
+    if (requestedTools.length === 0 && tools.length === 0 && semanticToolMatches.length > 0) {
+      tools = semanticToolMatches.slice(0, 4);
+      logAudit("ephemeral_tools_autofilled", {
+        agentName,
+        grantedTools: tools,
+        reason: "tools_array_omitted_routing_matches_applied",
+      }, { sessionId: ctx.sessionId, severity: "info", channel: "agent-factory" });
+    }
+
     if (rejected.length > 0) {
       logAudit("ephemeral_agent_rejected", {
         agentName,
@@ -5457,6 +5638,26 @@ registerTool({
         { requested: runnableTasks.length, dispatched: dispatchTasks.length, removed: duplicatesRemoved },
         { sessionId: ctx.sessionId, severity: "warn" },
       );
+      // Smallest-sufficient-swarm feedback: a coordinator whose ENTIRE fan-out collapsed
+      // to one task added no decomposition value this run — the request was a single
+      // specialist's job reached through an expensive extra coordinator hop (audit
+      // ce8e2128: mission_coordinator's only contribution was two IDENTICAL researcher
+      // slices, 708s of overhead). Record a "partial" outcome for the coordinator so
+      // outcome-weighted routing (computeOutcomeRoutingMultiplier, ±20% over ≥25 samples)
+      // gradually prefers the direct specialist for this task class. Learning signal
+      // only — no hard rule, and a partial dedup (3→2) still counts as real partitioning.
+      if (dispatchTasks.length === 1 && runnableTasks.length > 1 && ctx.currentAgentName) {
+        appendOutcome(ctx.workspacePath, {
+          ts: new Date().toISOString(),
+          agent: ctx.currentAgentName,
+          task: (dispatchTasks[0]?.task ?? "").slice(0, 300),
+          outcome: "partial",
+          iterations: 0,
+          totalTokens: 0,
+          lesson: "parallel_delegate fan-out collapsed to ONE task (identical slices) — no decomposition value added; this request shape fits a single specialist directly",
+          taskKeywords: extractTaskKeywords(dispatchTasks[0]?.task ?? ""),
+        });
+      }
     }
 
     logAudit(
@@ -5491,6 +5692,28 @@ registerTool({
 
     const succeeded = results.filter(result => result.success).length;
 
+    // Propagate each sub-task's produced artifacts to the parent turn. Single
+    // delegate_to_agent and run_workflow already surface their delegate's
+    // artifacts via metadata.artifacts (collectTurnArtifactAttachments recurses
+    // into it); parallel_delegate previously dropped them. The cost: a fan-out
+    // that actually BUILT a deliverable (e.g. backend_coder writing a full
+    // multi-file WebApp) surfaced ZERO downloads on the final message AND every
+    // artifact-aware honesty guard (auto-build "already built?", false-completion
+    // banner) saw "0 produced" — so the turn shipped a research-only stub with no
+    // sign of the built app (audit 411ed14f: iSAQB learn-platform built by
+    // backend_coder, never surfaced). Aggregate them here.
+    const aggregatedArtifacts: Record<string, unknown>[] = [];
+    for (const result of results) {
+      const arts = result.metadata?.["artifacts"];
+      if (Array.isArray(arts)) {
+        for (const artifact of arts) {
+          if (artifact && typeof artifact === "object") {
+            aggregatedArtifacts.push(artifact as Record<string, unknown>);
+          }
+        }
+      }
+    }
+
     return {
       success: succeeded > 0,
       output: formatted.join("\n\n---\n\n"),
@@ -5498,6 +5721,7 @@ registerTool({
         taskCount: dispatchTasks.length,
         succeeded,
         failed: results.length - succeeded,
+        ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
       },
     };

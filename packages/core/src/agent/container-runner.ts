@@ -310,7 +310,17 @@ export async function runSubAgentInContainer(
         cleanup();
         gracefulKill(proc.pid, proc);
         const partial = recoverPartialOutput(stdout);
-        settle(`Sub-agent '${opts.agentName}' timed out after ${timeoutMs}ms.${partial ? ` Partial: ${partial}` : ""}`);
+        // Include the stderr tail: a container that burns its whole budget with
+        // no output usually died inside (provider unreachable, auth, crash) and
+        // the bare "timed out" line hides the actual cause from the audit trail
+        // (audit f0143008: api_integrator's container ran 60s and reported
+        // nothing actionable).
+        const errTail = stderr.trim().slice(-300);
+        settle(
+          `Sub-agent '${opts.agentName}' timed out after ${timeoutMs}ms.` +
+          (partial ? ` Partial: ${partial}` : "") +
+          (errTail ? ` Container stderr (tail): ${errTail}` : ""),
+        );
       }, delayMs);
       timeoutHandle.unref?.();
     };
@@ -338,9 +348,11 @@ export async function runSubAgentInContainer(
             data: { reason: "heartbeat_lost", staleMs },
           });
           const partial = recoverPartialOutput(stdout);
+          const errTail = stderr.trim().slice(-300);
           settle(
             `Sub-agent '${opts.agentName}' stopped responding (no heartbeat for ${Math.round(staleMs / 1000)}s).` +
-            (partial ? ` Partial: ${partial}` : ""),
+            (partial ? ` Partial: ${partial}` : "") +
+            (errTail ? ` Container stderr (tail): ${errTail}` : ""),
           );
         }
       }, 10_000);

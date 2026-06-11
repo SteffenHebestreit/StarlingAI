@@ -540,6 +540,24 @@ function isCoordinatorBootstrapAgent(agentName: string): boolean {
   return tools.some((toolName) => COORDINATOR_BOOTSTRAP_TOOL_NAMES.has(toolName));
 }
 
+/**
+ * A scene/job step scoped to exactly ONE non-coordinator (leaf) agent has no
+ * orchestration decision to make — the only legal action is "run that agent". On a
+ * slow local model the per-step ORCHESTRATOR (runTurn) sometimes answers tool-free and
+ * never delegates, burning the step's whole budget without producing the deliverable
+ * (audit: a single-`content_writer` build step shipped a 389-char stub and never built
+ * the deck). Running the leaf agent directly removes that escape entirely. Coordinators
+ * are excluded — orchestrating IS their job, so they keep the runTurn/coordinator path.
+ * Topic-neutral: applies to any single-leaf-agent step, not a specific workflow.
+ */
+export function resolveSingleStepLeafAgent(allowedAgents: string[] | undefined): string | null {
+  if (!allowedAgents || allowedAgents.length !== 1) return null;
+  const agentName = allowedAgents[0]!.trim();
+  if (!agentName || !getConfig().subAgents[agentName]) return null;
+  if (isCoordinatorBootstrapAgent(agentName)) return null;
+  return agentName;
+}
+
 function resolveSceneBootstrapAgent(
   scene: SceneSummary,
   allowedAgents: string[] | undefined,
@@ -548,14 +566,14 @@ function resolveSceneBootstrapAgent(
   if (coordinatorBootstrap) return coordinatorBootstrap;
 
   const match = scene.task.match(/^\s*use\s+([a-z0-9_:-]+)\s+(?:first\b|to\b)/i);
-  if (!match?.[1]) return null;
-
-  const agentName = match[1].trim();
-  if (allowedAgents?.length && !allowedAgents.includes(agentName)) {
-    return null;
+  if (match?.[1]) {
+    const agentName = match[1].trim();
+    const allowed = !(allowedAgents?.length && !allowedAgents.includes(agentName));
+    if (allowed && getConfig().subAgents[agentName]) return agentName;
   }
 
-  return getConfig().subAgents[agentName] ? agentName : null;
+  // No explicit "use X" lead — but a single-leaf-agent scene still runs that agent directly.
+  return resolveSingleStepLeafAgent(allowedAgents);
 }
 
 function stripCoordinatorBootstrapInstruction(task: string, agentName: string): string {
@@ -927,6 +945,10 @@ async function runSceneInline(
         blocked: bootstrapBlocked,
         toolCallsExecuted: 1,
         bootstrapAgent,
+        // The bootstrap agent ran in its OWN sub-session, so the scene session's
+        // collector finds nothing — thread the agent's own collected artifacts (e.g.
+        // the built deck/paper, saved images) so the parent surfaces downloads.
+        artifacts: bootstrapRun.artifacts,
       };
     }
 
@@ -1001,6 +1023,7 @@ async function runJobInline(
 
   try {
     const sections: string[] = [];
+    const directStepArtifacts: Array<Record<string, unknown>> = [];
     let blocked = false;
     let toolCallsExecuted = 0;
     let executedSteps = 0;
@@ -1017,29 +1040,89 @@ async function runJobInline(
       // research step's raw shared facts to guess subjects (fragile). Each step's own task
       // hard-clamps its scope, so the shared context is read as background/topic only.
       const stepTask = appendWorkflowContext(step.task, enrichedWorkflowContext);
-      const result = await runTurn({
-        session,
-        userMessage: stepTask,
-        approvalCallback: ctx.approvalCallback,
-        signal: ctx.signal,
-        allowedAgents,
-        humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
-        autoApprove: ctx.autoApprove,
-        maxIterationsOverride: ctx.maxIterationsOverride,
-        turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
-        _workflowExecutionStack: workflowExecutionStack,
-        onSubAgentProgress: ctx.onSubAgentProgress,
-        onComputerAction: ctx.onComputerAction,
-        onComputerScreenshot: ctx.onComputerScreenshot,
-        onComputerSessionState: ctx.onComputerSessionState,
-        onSwarmState: ctx.onSwarmState,
-      });
 
-      sections.push(`## ${step.label}\n\n${result.response.trim()}`.trim());
-      toolCallsExecuted += result.toolCallsExecuted;
+      // A step scoped to exactly ONE leaf agent has no orchestration decision — run that
+      // agent DIRECTLY (same shared session scope, so shared facts still flow between
+      // steps) instead of a full orchestrator turn whose slow-model tool-free answer can
+      // skip the work entirely (audit: deck_build never delegated to content_writer ->
+      // no deck). Multi-agent / coordinator steps keep the runTurn orchestrator path.
+      const directAgent = resolveSingleStepLeafAgent(allowedAgents);
+      let stepResponse: string;
+      let stepBlocked: boolean;
+      if (directAgent) {
+        const directIntro = `You are the "${directAgent}" specialist running ONE scoped step of a pipeline. Carry out this step's work YOURSELF with your own tools — you have no sub-agents and must not try to delegate.\n\n`;
+        const directOpts = {
+          agentName: directAgent,
+          parentSessionId: session.id,
+          workspacePath: ctx.workspacePath,
+          allowedAgents,
+          signal: ctx.signal,
+          approvalCallback: ctx.approvalCallback,
+          onProgress: ctx.onSubAgentProgress,
+          humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
+          onComputerAction: ctx.onComputerAction,
+          onComputerScreenshot: ctx.onComputerScreenshot,
+          onComputerSessionState: ctx.onComputerSessionState,
+          maxIterationsOverride: ctx.maxIterationsOverride,
+          turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
+          swarmState: ctx.swarmState,
+          onSwarmState: ctx.onSwarmState,
+          _workflowExecutionStack: workflowExecutionStack,
+        };
+        const producedArtifact = (r: { artifacts?: unknown[] }): boolean => Array.isArray(r.artifacts) && r.artifacts.length > 0;
+
+        let run = await runSubAgentWithStats({ ...directOpts, task: `${directIntro}${stepTask}` });
+        toolCallsExecuted += run.stats.toolCount;
+
+        // QA deliverable check: a step that MUST persist an output file but produced none
+        // gets ONE corrective re-attempt with the failure folded in. A clean retry that
+        // reminds the agent of valid tool-arg shapes beats giving a deterministic arg
+        // rejection more wall-clock time (audit 3c46a4d4: deck_slides reported success with a
+        // text answer after THREE rejected generate_presentation calls, so the deck + speaker
+        // notes were never written yet the job claimed all 4 steps were done).
+        if (step.expectArtifact && !producedArtifact(run)) {
+          const correctiveTask = `${directIntro}${stepTask}\n\n[QA RE-ATTEMPT] Your previous attempt did NOT persist the required output file — no artifact was saved. Produce it now and make sure the artifact tool call SUCCEEDS before you stop: pass every array argument as a real JSON array (e.g. slides=[{…}], bullets=[…]) — never a quoted string; use only allowed enum values (an invalid theme is ignored, not rejected); embed any images as Markdown ![alt](images/<file>). Do not paste the file contents into your reply.`;
+          const retry = await runSubAgentWithStats({ ...directOpts, task: correctiveTask });
+          toolCallsExecuted += retry.stats.toolCount;
+          if (producedArtifact(retry)) run = retry; // adopt the attempt that produced the file
+        }
+
+        stepResponse = run.output.trim() || `Step '${step.label}' produced no output.`;
+        stepBlocked = run.stats.outcome === "failure" || workflowOutputIsBlocked(stepResponse);
+        if (run.artifacts?.length) directStepArtifacts.push(...run.artifacts);
+        // An artifact-required step that STILL produced no file is not a success — mark it
+        // incomplete so the job reports honestly instead of implying the deliverable exists.
+        if (step.expectArtifact && !producedArtifact(run)) {
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n_(This step was required to produce an output file but none was saved.)_`.trim();
+        }
+      } else {
+        const result = await runTurn({
+          session,
+          userMessage: stepTask,
+          approvalCallback: ctx.approvalCallback,
+          signal: ctx.signal,
+          allowedAgents,
+          humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
+          autoApprove: ctx.autoApprove,
+          maxIterationsOverride: ctx.maxIterationsOverride,
+          turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
+          _workflowExecutionStack: workflowExecutionStack,
+          onSubAgentProgress: ctx.onSubAgentProgress,
+          onComputerAction: ctx.onComputerAction,
+          onComputerScreenshot: ctx.onComputerScreenshot,
+          onComputerSessionState: ctx.onComputerSessionState,
+          onSwarmState: ctx.onSwarmState,
+        });
+        stepResponse = result.response.trim();
+        stepBlocked = result.blocked || workflowOutputIsBlocked(result.response);
+        toolCallsExecuted += result.toolCallsExecuted;
+      }
+
+      sections.push(`## ${step.label}\n\n${stepResponse}`.trim());
       executedSteps += 1;
 
-      if (result.blocked || workflowOutputIsBlocked(result.response)) {
+      if (stepBlocked) {
         blocked = true;
         break;
       }
@@ -1053,16 +1136,26 @@ async function runJobInline(
       response || `Workflow ${job.name} ${blocked ? "blocked" : "completed"}.`,
     );
 
-    // All steps ran on the SAME session, so the collector (which walks back to the
-    // last user message) returns the final build step's artifacts — the deck + its
-    // notes + paper. Surface them so the parent turn shows downloads and the
-    // source-sensitive auto-build doesn't re-fire (same rationale as runSceneInline).
+    // Surface the built artifacts (deck + notes + paper, saved images). Orchestrator
+    // (runTurn) steps leave their delegate artifacts in this shared session, so the
+    // collector finds them; directly-run leaf steps ran in their own sub-sessions, so
+    // their artifacts are threaded explicitly. De-dup by outputPath across both.
+    const collected = collectTurnArtifactAttachments(session);
+    const seenPaths = new Set<string>();
+    const artifacts: Array<Record<string, unknown>> = [];
+    for (const artifact of [...directStepArtifacts, ...collected]) {
+      const key = typeof artifact["outputPath"] === "string" ? (artifact["outputPath"] as string) : JSON.stringify(artifact);
+      if (seenPaths.has(key)) continue;
+      seenPaths.add(key);
+      artifacts.push(artifact);
+    }
+
     return {
       response,
       blocked,
       toolCallsExecuted,
       executedSteps,
-      artifacts: collectTurnArtifactAttachments(session),
+      artifacts,
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];

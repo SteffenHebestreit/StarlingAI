@@ -99,6 +99,13 @@ export interface ToolContext {
    * nodes) via guardResourceAccess — undefined means "no multi-user scoping".
    */
   userId?: string;
+  /**
+   * Workspace visibility zone for this execution. "generated" (sub-agent default)
+   * confines file tools to the working zones (generated/ + uploads/) via the
+   * request context consulted in workspace-path.ts; "full" / undefined exposes
+   * the whole workspace (runtime internals, core agents).
+   */
+  workspaceScope?: "full" | "generated";
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   onSubAgentProgress?: (event: {
@@ -560,10 +567,13 @@ export async function executeTool(
       let result: ToolResult;
       const runHandler = async (): Promise<ToolResult> => {
         try {
-          // Make the owning user available to downstream clients (e.g. the
-          // mail-service HTTP client) for per-user resource access control,
-          // without threading userId through every call.
-          return await runWithRequestContext({ userId: context.userId }, () => handler.execute(args, context));
+          // Make the owning user + workspace zone available downstream (mail-service
+          // identity forwarding, workspace-path zone enforcement) without threading
+          // them through every call signature.
+          return await runWithRequestContext(
+            { userId: context.userId, workspaceScope: context.workspaceScope },
+            () => handler.execute(args, context),
+          );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           return {

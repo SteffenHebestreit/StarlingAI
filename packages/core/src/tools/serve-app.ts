@@ -1,0 +1,298 @@
+/**
+ * serve_app — run a user-built web app as a dedicated, long-lived container and
+ * expose it through the gateway reverse proxy (/api/app/<id>/).
+ *
+ * Unlike the one-shot sub-agent sandbox (container-runner.ts), this runs a
+ * persistent server container on the gateway's docker network (default
+ * `starlingai-public`), so the gateway process can reach it by container NAME —
+ * no host-port juggling. The gateway proxy route (gateway/index.ts) forwards
+ * authenticated requests to `http://sai-app-<id>:<port>/` and injects a <base>
+ * tag into HTML so relative asset URLs resolve under the /api/app/<id>/ subpath.
+ *
+ * Scope (v1): Node/Express (and any node-startable app). Static sites do NOT
+ * need this — they are already served by /api/workspace/preview. Tier 3
+ * privileged + per-call approval (it launches a long-lived networked container).
+ *
+ * Docker exec and the health probe are injectable so the lifecycle logic is
+ * unit-testable without a docker daemon.
+ */
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { logAudit } from "../audit/logger.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("tools:serve-app");
+
+export type ServedAppRuntime = "node-express";
+export type ServedAppStatus = "starting" | "running" | "failed" | "stopped";
+
+export interface ServedApp {
+  id: string;
+  name: string;
+  containerName: string;
+  runtime: ServedAppRuntime;
+  internalPort: number;
+  network: string;
+  image: string;
+  root: string;
+  command: string;
+  status: ServedAppStatus;
+  startedAt: number;
+  sessionId: string;
+  lastError?: string;
+}
+
+/** In-process registry shared with the gateway proxy route. Apps do not survive
+ * a gateway restart (the containers are auto-removed) — documented limitation. */
+const apps = new Map<string, ServedApp>();
+export function getServedApp(id: string): ServedApp | undefined { return apps.get(id); }
+export function listServedApps(): ServedApp[] { return [...apps.values()]; }
+export function __resetServedAppsForTests(): void { apps.clear(); }
+
+// ── Injectable docker exec ────────────────────────────────────────────────
+export type DockerExec = (args: string[], opts?: { timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+function defaultDockerExec(args: string[], opts?: { timeoutMs?: number }): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolveExec) => {
+    const proc = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = opts?.timeoutMs
+      ? setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already gone */ } }, opts.timeoutMs)
+      : null;
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("error", (err) => { if (timer) clearTimeout(timer); resolveExec({ code: -1, stdout, stderr: stderr || String(err) }); });
+    proc.on("close", (code) => { if (timer) clearTimeout(timer); resolveExec({ code: code ?? -1, stdout, stderr }); });
+  });
+}
+
+let dockerExec: DockerExec = defaultDockerExec;
+export function __setDockerExecForTests(fn: DockerExec | null): void { dockerExec = fn ?? defaultDockerExec; }
+
+// ── Injectable health probe ───────────────────────────────────────────────
+export type HealthProbe = (url: string) => Promise<boolean>;
+async function defaultHealthProbe(url: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(url, { signal: ctrl.signal, redirect: "manual" });
+    clearTimeout(t);
+    // Any HTTP response (even 404) means the server is listening.
+    return res.status > 0;
+  } catch {
+    return false;
+  }
+}
+let healthProbe: HealthProbe = defaultHealthProbe;
+export function __setHealthProbeForTests(fn: HealthProbe | null): void { healthProbe = fn ?? defaultHealthProbe; }
+
+// ── Config (env-driven, no schema churn) ──────────────────────────────────
+function serveAppNetwork(): string { return process.env["SAI_APP_NETWORK"]?.trim() || "starlingai-public"; }
+function serveAppImage(): string { return process.env["SAI_APP_NODE_IMAGE"]?.trim() || "node:22-alpine"; }
+function serveAppDefaultPort(): number { return Number(process.env["SAI_APP_PORT"]) || 3000; }
+function serveAppHealthTimeoutMs(): number { return Number(process.env["SAI_APP_HEALTH_TIMEOUT_MS"]) || 180_000; }
+function serveAppMaxApps(): number { return Number(process.env["SAI_APP_MAX"]) || 5; }
+
+/** Reject absolute paths and any traversal so a served root stays in the workspace. */
+export function sanitizeAppRoot(root: string): string | null {
+  const raw = (root || "").trim();
+  if (!raw) return null;
+  // Reject absolute and drive-letter paths BEFORE any normalization.
+  if (raw.startsWith("/") || raw.startsWith("\\") || /^[a-zA-Z]:/.test(raw)) return null;
+  const cleaned = raw.replace(/[/\\]+$/, "").replace(/\\/g, "/");
+  if (!cleaned) return null;
+  if (/(^|\/)\.\.(\/|$)/.test(cleaned)) return null; // traversal
+  return cleaned;
+}
+
+/** Insert a <base href> so an app proxied under /api/app/<id>/ resolves its
+ * relative asset URLs correctly. No-op when the document already declares a base. */
+export function injectBaseHref(html: string, base: string): string {
+  if (/<base\s/i.test(html)) return html;
+  const tag = `<base href="${base}">`;
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => `${m}${tag}`);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${tag}</head>`);
+  return `${tag}${html}`;
+}
+
+/** Pure, testable docker-run arg builder. */
+export function buildServeRunArgs(app: ServedApp, hostAppDir: string): string[] {
+  return [
+    "run", "-d", "--rm", "--init",
+    "--name", app.containerName,
+    "--label", `starlingai.app=${app.id}`,
+    "--label", `starlingai.session=${app.sessionId}`,
+    "--network", app.network,
+    "--memory", "512m",
+    "--cpus", "1",
+    "--pids-limit", "256",
+    "--security-opt", "no-new-privileges",
+    "-w", "/app",
+    "-e", `PORT=${app.internalPort}`,
+    "-e", "HOST=0.0.0.0",
+    "-e", "NODE_ENV=production",
+    "-v", `${hostAppDir}:/app`,
+    app.image,
+    "sh", "-lc", app.command,
+  ];
+}
+
+function defaultStartCommand(entry: string, internalPort: number): string {
+  // Install deps when a manifest is present, then start. The app MUST bind
+  // 0.0.0.0:$PORT (we pass PORT) so the gateway can reach it by container name.
+  const safeEntry = entry.replace(/[^\w./-]/g, "");
+  return `if [ -f package.json ]; then npm install --no-audit --no-fund --loglevel=error || exit 1; fi; `
+    + `if [ -f package.json ] && grep -q '"start"' package.json; then exec npm start; else exec node ${safeEntry || "server.js"}; fi`;
+}
+
+function appSummary(app: ServedApp): Record<string, unknown> {
+  return {
+    id: app.id,
+    name: app.name,
+    status: app.status,
+    runtime: app.runtime,
+    previewPath: `/api/app/${app.id}/`,
+    container: app.containerName,
+    internalPort: app.internalPort,
+    root: app.root,
+    startedAt: new Date(app.startedAt).toISOString(),
+    ...(app.lastError ? { lastError: app.lastError } : {}),
+  };
+}
+
+async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const root = sanitizeAppRoot(String(args["root"] ?? ""));
+  if (!root) {
+    return { success: false, output: "", error: "A workspace-relative 'root' directory (containing the app, e.g. 'generated/my-app') is required and must stay inside the workspace." };
+  }
+  const running = listServedApps().filter((a) => a.status === "running" || a.status === "starting");
+  if (running.length >= serveAppMaxApps()) {
+    return { success: false, output: "", error: `Too many running apps (${running.length}/${serveAppMaxApps()}). Stop one with serve_app(action:"stop", id:...) first.` };
+  }
+
+  const id = randomUUID().slice(0, 8);
+  const internalPort = Number(args["port"]) > 0 ? Number(args["port"]) : serveAppDefaultPort();
+  const entry = String(args["entry"] ?? "server.js");
+  const command = (typeof args["command"] === "string" && args["command"].trim())
+    ? String(args["command"]).trim()
+    : defaultStartCommand(entry, internalPort);
+
+  const app: ServedApp = {
+    id,
+    name: String(args["name"] ?? root),
+    containerName: `sai-app-${id}`,
+    runtime: "node-express",
+    internalPort,
+    network: serveAppNetwork(),
+    image: serveAppImage(),
+    root,
+    command,
+    status: "starting",
+    startedAt: Date.now(),
+    sessionId: ctx.sessionId,
+  };
+  apps.set(id, app);
+
+  const hostAppDir = `${resolveDockerWorkspaceMountSource(ctx.workspacePath).replace(/[/\\]+$/, "")}/${root}`;
+  logAudit("serve_app_started", { id, container: app.containerName, root, network: app.network, image: app.image }, { sessionId: ctx.sessionId, severity: "warn" });
+
+  const run = await dockerExec(buildServeRunArgs(app, hostAppDir), { timeoutMs: 60_000 });
+  if (run.code !== 0) {
+    app.status = "failed";
+    app.lastError = (run.stderr || run.stdout || "docker run failed").trim().slice(0, 600);
+    if (/cannot connect to the docker daemon|is the docker daemon running/i.test(app.lastError)) {
+      app.lastError = "Docker daemon is not reachable from the gateway — serve_app requires the dockerized gateway with docker access.";
+    }
+    return { success: false, output: "", error: `Failed to launch app container: ${app.lastError}`, metadata: appSummary(app) };
+  }
+
+  // Health-poll the app by container name on the shared network until it listens.
+  const probeUrl = `http://${app.containerName}:${app.internalPort}/`;
+  const deadline = Date.now() + serveAppHealthTimeoutMs();
+  let healthy = false;
+  for (;;) {
+    if (ctx.signal?.aborted) break;
+    if (await healthProbe(probeUrl)) { healthy = true; break; }
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  if (!healthy) {
+    const logs = await dockerExec(["logs", "--tail", "40", app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
+    app.status = "failed";
+    app.lastError = `App did not start listening on port ${app.internalPort} within ${Math.round(serveAppHealthTimeoutMs() / 1000)}s. Make sure the server binds 0.0.0.0:$PORT.`;
+    return {
+      success: false,
+      output: `App '${app.name}' launched but never became reachable.\nLast container logs:\n${(logs.stdout || logs.stderr || "(none)").slice(-1500)}`,
+      error: app.lastError,
+      metadata: appSummary(app),
+    };
+  }
+
+  app.status = "running";
+  logAudit("serve_app_running", { id, container: app.containerName, previewPath: `/api/app/${id}/` }, { sessionId: ctx.sessionId });
+  return {
+    success: true,
+    output: `App '${app.name}' is running. Open it at /api/app/${id}/ (served through the gateway, requires the dashboard token). Stop it with serve_app(action:"stop", id:"${id}").`,
+    metadata: appSummary(app),
+  };
+}
+
+async function stopApp(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const id = String(args["id"] ?? "").trim();
+  if (!id) return { success: false, output: "", error: "'id' is required to stop an app (use action:\"list\" to see running apps)." };
+  const app = apps.get(id);
+  if (!app) return { success: false, output: "", error: `No app with id '${id}'.` };
+  await dockerExec(["rm", "-f", app.containerName], { timeoutMs: 15_000 }).catch(() => undefined);
+  app.status = "stopped";
+  apps.delete(id);
+  logAudit("serve_app_stopped", { id, container: app.containerName }, { sessionId: ctx.sessionId });
+  return { success: true, output: `Stopped app '${app.name}' (${id}).`, metadata: { id, status: "stopped" } };
+}
+
+async function appLogs(args: Record<string, unknown>): Promise<ToolResult> {
+  const id = String(args["id"] ?? "").trim();
+  const app = id ? apps.get(id) : undefined;
+  if (!app) return { success: false, output: "", error: `No app with id '${id}'.` };
+  const tail = Math.min(Math.max(Number(args["tail"]) || 80, 1), 500);
+  const logs = await dockerExec(["logs", "--tail", String(tail), app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
+  return { success: true, output: (logs.stdout || logs.stderr || "(no logs)").slice(-4000), metadata: appSummary(app) };
+}
+
+registerTool({
+  name: "serve_app",
+  description: "Run a built web app as a live, dedicated container and expose it through the gateway at /api/app/<id>/. Use for DYNAMIC apps that need a running server (Node/Express). A static site or reveal.js deck does NOT need this — it is already served by the workspace preview. Actions: start (default; needs 'root' = the workspace folder containing the app, e.g. 'generated/my-app', with the server binding 0.0.0.0:$PORT), stop (needs 'id'), list, logs (needs 'id').",
+  parameters: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["start", "stop", "list", "logs"], description: "Lifecycle action (default start)" },
+      root: { type: "string", description: "For start: workspace-relative directory containing the app (package.json/server.js), e.g. 'generated/my-app'." },
+      runtime: { type: "string", enum: ["node-express"], description: "App runtime (default node-express)." },
+      entry: { type: "string", description: "Entry file for the default start command when there is no npm 'start' script (default server.js)." },
+      command: { type: "string", description: "Optional shell command to start the server (overrides the default install+start). Must keep the server in the foreground and bind 0.0.0.0:$PORT." },
+      port: { type: "number", description: "Internal port the server listens on (default 3000). Passed to the container as $PORT." },
+      name: { type: "string", description: "Optional human label for the app." },
+      id: { type: "string", description: "App id for stop/logs." },
+      tail: { type: "number", description: "For logs: number of trailing lines (default 80)." },
+    },
+    required: [],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const action = String(args["action"] ?? "start").trim() || "start";
+    try {
+      switch (action) {
+        case "start": return await startApp(args, ctx);
+        case "stop": return await stopApp(args, ctx);
+        case "logs": return await appLogs(args);
+        case "list": return { success: true, output: listServedApps().length === 0 ? "No apps running." : listServedApps().map((a) => `- ${a.id} '${a.name}' [${a.status}] → /api/app/${a.id}/`).join("\n"), metadata: { apps: listServedApps().map(appSummary) } };
+        default: return { success: false, output: "", error: `Unknown action '${action}'. Use start | stop | list | logs.` };
+      }
+    } catch (err) {
+      log.error({ err, action }, "serve_app failed");
+      return { success: false, output: "", error: `serve_app ${action} failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});

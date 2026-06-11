@@ -55,7 +55,7 @@ describe("runtime turn guidance", () => {
     expect(guidance?.freshnessSensitive).toBe(true);
     expect(guidance?.sourceSensitive).toBe(true);
     expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
-    expect(guidance?.prompt).toContain("Use delegate_to_agent for atomic specialist routing");
+    expect(guidance?.prompt).toContain("First DECIDE whether fulfilling this request takes more than one step");
     expect(guidance?.prompt).toContain("prefer mission_coordinator");
     expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
     expect(guidance?.prompt).toContain("route it through a browser specialist");
@@ -614,6 +614,91 @@ describe("runtime turn guidance", () => {
     expect(disposition).toBe("failure");
   });
 
+  it("classifies a fully executed workflow as synthesize even though the preamble says 'incomplete' (audit 802d4791)", () => {
+    // The completed-workflow instruction preamble contains "marks as incomplete",
+    // which the failure-keyword sniff used to read as failure evidence — branding
+    // a 100% successful sourced_presentation run "[DELEGATION FAILED]" and
+    // triggering a full duplicate re-run of the 10-minute job.
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_workflow_ok",
+        content: [
+          "Workflow sourced_presentation [job] completed. Executed steps: 4/4.",
+          "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.",
+          "Artifact files (already attached):",
+          "- generated/presentation/paper.md",
+          "- generated/presentation/notes.md",
+          "Observed evidence:",
+          "Workflow sourced_presentation [job] completed.",
+          "Forschungsergebnisse: Dresdner Architektur und der Zwinger — verifizierte Fakten und Quellen.",
+        ].join("\n"),
+        metadata: {
+          workflowName: "sourced_presentation",
+          workflowType: "job",
+          blocked: false,
+          stepCount: 4,
+          executedSteps: 4,
+          artifacts: [
+            { outputPath: "generated/presentation/paper.md" },
+            { outputPath: "generated/presentation/notes.md" },
+          ],
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("synthesize");
+  });
+
+  it("classifies a blocked workflow as failure", () => {
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_workflow_blocked",
+        content: [
+          "Workflow sourced_presentation [job] blocked. Executed steps: 1/4.",
+          "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research.",
+          "Observed evidence:",
+          "Step 2 was blocked by a guardrail.",
+        ].join("\n"),
+        metadata: {
+          workflowName: "sourced_presentation",
+          workflowType: "job",
+          blocked: true,
+          stepCount: 4,
+          executedSteps: 1,
+          artifacts: [],
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("failure");
+  });
+
+  it("still classifies a partially executed workflow with failing evidence as failure", () => {
+    const disposition = classifyPostOrchestrationDisposition([
+      {
+        role: "tool",
+        tool_call_id: "call_workflow_partial",
+        content: [
+          "Workflow sourced_presentation [job] completed. Executed steps: 2/4.",
+          "Observed evidence:",
+          "Sub-agent 'researcher' timed out after 240000ms",
+        ].join("\n"),
+        metadata: {
+          workflowName: "sourced_presentation",
+          workflowType: "job",
+          blocked: false,
+          stepCount: 4,
+          executedSteps: 2,
+          artifacts: [],
+        },
+      },
+    ]);
+
+    expect(disposition).toBe("failure");
+  });
+
   it("reroutes partial delegated results that only echo a provider HTTP error to the failure branch", () => {
     const result = buildModelVisibleToolResult(
       "delegate_to_agent",
@@ -840,6 +925,42 @@ describe("runtime turn guidance", () => {
     expect(result).toContain("## 1. Einleitung");
     expect(result).toContain("## 5. Fazit");
     // Not truncated at 1600 chars — should be much longer
+    const evidenceStart = result.indexOf("Observed evidence:\n");
+    const evidenceContent = result.slice(evidenceStart + "Observed evidence:\n".length);
+    expect(evidenceContent.length).toBeGreaterThan(2500);
+  });
+
+  // Regression (audit b5107ae4): a runtime-authored research slice returns
+  // EVIDENCE, never the user-facing deliverable. The VERBATIM instruction made
+  // the orchestrator paste a TP4056 component spec dump as the entire answer
+  // to a device DESIGN request — and the single-deliverable relay shortcut
+  // (which keys on the VERBATIM string) skipped synthesis completely.
+  it("instructs synthesis instead of verbatim relay for research-slice results", () => {
+    const longResearchReport = [
+      "## TP4056 Li-Ion Battery Charger IC — Complete Confirmed Specifications",
+      "- Float voltage: 4.2 V ±1.5% (Source: https://example.com/tp4056)",
+      "- Input range: 4.5–5.5 V (Source: https://example.com/tp4056)",
+      "Details und Quellenlage. ".repeat(150),
+    ].join("\n");
+
+    const result = buildModelVisibleToolResult(
+      "delegate_to_agent",
+      longResearchReport,
+      {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: true,
+        delegationOutcome: "success",
+        terminalState: "completed",
+        researchSlice: true,
+      },
+    );
+
+    expect(result).toContain("Delegated result from researcher — TASK COMPLETED.");
+    expect(result).not.toContain("VERBATIM");
+    expect(result).toContain("research EVIDENCE, not the final deliverable");
+    expect(result).toContain("user's ORIGINAL request");
+    // Full evidence still passed through for synthesis (not 1600-char truncated)
     const evidenceStart = result.indexOf("Observed evidence:\n");
     const evidenceContent = result.slice(evidenceStart + "Observed evidence:\n".length);
     expect(evidenceContent.length).toBeGreaterThan(2500);

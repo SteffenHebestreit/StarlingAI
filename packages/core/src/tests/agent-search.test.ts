@@ -1499,3 +1499,71 @@ describe("shortenOverspecifiedRoutingQuery", () => {
     expect(shortenOverspecifiedRoutingQuery("the and or of for with to a an is")).toBeNull();
   });
 });
+/**
+ * Lexical IDF fallback (Wave 3): when embeddings are degraded, routing falls back to
+ * keyword scoring — without IDF, common corpus tokens ("web", "research") match nearly
+ * every agent and the ranking flattens toward equal scores (the 0.25-everywhere collapse,
+ * audit 9b5196ad). BM25-style IDF makes rare tokens dominate so the true specialist
+ * separates from generalists. Backward compatible: no idf argument = unchanged scoring.
+ */
+describe("buildAgentTokenIdf + IDF-weighted keyword fallback", () => {
+  const k8sAgent = {
+    description: "Kubernetes cluster operations: deploy web services, inspect pods, manage helm releases.",
+    capabilities: ["kubernetes", "web operations"],
+    tags: ["kubernetes", "web"],
+    tools: [],
+    systemPrompt: "",
+  } as never;
+  const genericWebAgent = {
+    description: "General web research and web content summaries for any web task.",
+    capabilities: ["web research"],
+    tags: ["web"],
+    tools: [],
+    systemPrompt: "",
+  } as never;
+  const otherWebAgent = {
+    description: "Web page screenshots and web form automation for web sites.",
+    capabilities: ["web automation"],
+    tags: ["web"],
+    tools: [],
+    systemPrompt: "",
+  } as never;
+
+  const corpus: Array<[string, never]> = [
+    ["k8s_operator", k8sAgent],
+    ["web_researcher", genericWebAgent],
+    ["web_automator", otherWebAgent],
+  ];
+
+  it("gives rare tokens high idf and ubiquitous tokens low idf", async () => {
+    const { buildAgentTokenIdf } = await import("../providers/embeddings.js");
+    const idf = buildAgentTokenIdf(corpus);
+    expect(idf.get("kubernetes")!).toBeGreaterThan(idf.get("web")!);
+  });
+
+  it("IDF widens the gap between the true specialist and generic-token matches", async () => {
+    const { buildAgentTokenIdf, scoreAgentKeywordMatch } = await import("../providers/embeddings.js");
+    const idf = buildAgentTokenIdf(corpus);
+    const query = "kubernetes web deployment";
+
+    const plainSpecialist = scoreAgentKeywordMatch(query, "k8s_operator", k8sAgent).score;
+    const plainGeneric = scoreAgentKeywordMatch(query, "web_researcher", genericWebAgent).score;
+    const idfSpecialist = scoreAgentKeywordMatch(query, "k8s_operator", k8sAgent, idf).score;
+    const idfGeneric = scoreAgentKeywordMatch(query, "web_researcher", genericWebAgent, idf).score;
+
+    // The specialist still wins in both modes …
+    expect(plainSpecialist).toBeGreaterThan(plainGeneric);
+    expect(idfSpecialist).toBeGreaterThan(idfGeneric);
+    // … but IDF increases the RELATIVE separation (generic "web"-only matches shrink).
+    const plainGap = plainSpecialist - plainGeneric;
+    const idfGap = idfSpecialist - idfGeneric;
+    expect(idfGap).toBeGreaterThan(plainGap);
+  });
+
+  it("omitting the idf argument leaves scoring exactly as before", async () => {
+    const { scoreAgentKeywordMatch } = await import("../providers/embeddings.js");
+    const a = scoreAgentKeywordMatch("kubernetes web deployment", "k8s_operator", k8sAgent);
+    const b = scoreAgentKeywordMatch("kubernetes web deployment", "k8s_operator", k8sAgent, undefined);
+    expect(a).toEqual(b);
+  });
+});

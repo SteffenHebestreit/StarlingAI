@@ -590,7 +590,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
         : "Use direct web tools before answering if they are available.",
       "A tool-free answer is invalid unless prior tool results already contain the necessary evidence for this exact request.",
       delegateMode
-        ? "Use delegate_to_agent for atomic specialist routing. For multi-step specialist collaboration or requests that mix research, analysis, visualization, and synthesis, delegate to a coordinator-style or planning agent first."
+        ? "First DECIDE whether fulfilling this request takes more than one step — e.g. gather sourced facts AND THEN build or produce a separate deliverable from them (a website, web app, document, slide deck, chart), or research plus analysis plus synthesis. If it is genuinely multi-step, delegate to mission_coordinator (it sequences research → build → one quality pass and hands the build to the right builder); do NOT send a multi-step build request to a lone researcher, which can only gather facts and will leave the deliverable unbuilt. Use delegate_to_agent to a single specialist only for a genuinely single-step request."
         : "Start with web_search. Use web_fetch only if the search snippets are insufficient.",
       delegateMode
         ? "For broad current-source deliverables like comprehensive guides, comparisons, audits, hardware/product recommendations, verified component lists, or step-by-step reports, prefer mission_coordinator. Reserve web_task_coordinator for live single-shot lookups such as news, weather, scores, lottery numbers, stock quotes, or browser-heavy workflows."

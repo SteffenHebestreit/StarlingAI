@@ -40,22 +40,30 @@ const command = process.argv[2];
 const subCommand = process.argv[3];
 const restArgs = process.argv.slice(3);
 
-switch (command) {
-  case "setup":   await cmdSetup(); break;
-  case "start":   await cmdStart(); break;
-  case "stop":    await cmdStop(); break;
-  case "wipe":    await cmdWipe(); break;
-  case "config":  await cmdConfig(); break;
-  case "memory":  await cmdMemory(); break;
-  case "env-check": await cmdEnvCheck(); break;
-  case "token":   await cmdToken(); break;
-  case "health":  await cmdHealth(); break;
-  case "dev":     await cmdDev(); break;
-  case "help": case "--help": case "-h": case undefined:
-    printHelp(); break;
-  default:
-    fail(`Unknown command: ${command}`);
-    printHelp();
+// Dispatch is invoked at the BOTTOM of this file (see `await main()`), not here.
+// A top-level `await cmd…()` would run while module evaluation is still suspended,
+// before the module-scope `const`s further down (e.g. MEMORY_FLATFILE_ZONES) have
+// been initialized — those consts would be in their TDZ and any command that touches
+// them throws "Cannot access 'X' before initialization". Running main() last
+// guarantees every declaration in this module is initialized first.
+async function main() {
+  switch (command) {
+    case "setup":   await cmdSetup(); break;
+    case "start":   await cmdStart(); break;
+    case "stop":    await cmdStop(); break;
+    case "wipe":    await cmdWipe(); break;
+    case "config":  await cmdConfig(); break;
+    case "memory":  await cmdMemory(); break;
+    case "env-check": await cmdEnvCheck(); break;
+    case "token":   await cmdToken(); break;
+    case "health":  await cmdHealth(); break;
+    case "dev":     await cmdDev(); break;
+    case "help": case "--help": case "-h": case undefined:
+      printHelp(); break;
+    default:
+      fail(`Unknown command: ${command}`);
+      printHelp();
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,7 +100,8 @@ async function cmdStart() {
   // Prerequisites
   ensureCommand("docker", "Docker not found. Install Docker Desktop first.");
   ensureCommand("docker compose version", "Docker Compose plugin not found.");
-  ok("Docker available");
+  ensureDockerDaemon();
+  ok("Docker available (daemon reachable)");
 
   // First-run .env
   if (!existsSync(".env")) {
@@ -255,6 +264,7 @@ async function cmdStop() {
   const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop"];
 
   hdr("Stopping StarlingAI...");
+  ensureDockerDaemon();
   const downArgs = values.volumes ? ["down", "-v"] : ["down"];
   await run(["docker", "compose", ...composeFiles, ...allProfiles, ...downArgs]);
 
@@ -287,6 +297,7 @@ async function cmdWipe() {
     warn("For a full clean slate (volumes + flat-file memory/skills) use:  pnpm sai stop --volumes");
     return;
   }
+  ensureDockerDaemon();
 
   const dcExec = (label, service, shellCmd) => {
     try {
@@ -440,6 +451,19 @@ function ensureCommand(cmd, errMsg) {
   catch { fail(errMsg); process.exit(1); }
 }
 
+// `ensureCommand("docker", …)` only proves the CLI binary exists — it never contacts
+// the daemon, so with Docker Desktop stopped the preflight prints "✓ Docker available"
+// and the run dies minutes later inside `docker compose` with a raw npipe stack trace.
+// `docker info` actually round-trips to the engine, so a stopped daemon fails HERE,
+// immediately, with an actionable message.
+function ensureDockerDaemon() {
+  try { execSync("docker info --format {{.ServerVersion}}", { stdio: "ignore" }); }
+  catch {
+    fail("Docker daemon is not reachable — start Docker Desktop, wait until the engine shows 'running', then retry.");
+    process.exit(1);
+  }
+}
+
 function loadDotEnv() {
   if (!existsSync(".env")) return;
   const lines = readFileSync(".env", "utf-8").split(/\r?\n/);
@@ -533,3 +557,12 @@ function run(cmdOrParts, args) {
     child.on("error", reject);
   });
 }
+
+// Run the dispatcher only after every module-scope declaration above is initialized.
+// Catch instead of letting the rejection escape: the child's own stderr already showed
+// the real error (stdio: inherit), so the Node-internal stack trace is pure noise — and
+// an explicit exit code makes `sai stop && sai start` chains short-circuit reliably.
+await main().catch((err) => {
+  fail(err?.message ?? String(err));
+  process.exit(typeof process.exitCode === "number" && process.exitCode !== 0 ? process.exitCode : 1);
+});

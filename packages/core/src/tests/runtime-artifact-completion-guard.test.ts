@@ -67,4 +67,37 @@ describe("claimsArtifactWrittenButUnproduced", () => {
     )).toBe(false);
     expect(claimsArtifactWrittenButUnproduced("")).toBe(false);
   });
+
+  // Audit 1ac79471 turn 1: a ZERO-tool answer fabricated a delivered platform with
+  // exactly these phrasings — "gebaut", "ist … verfügbar", and "Öffne die Datei
+  // `<name>.html`" — and the old verb list missed all three.
+  it("flags the 'gebaut' completion claim with a platform noun", () => {
+    expect(claimsArtifactWrittenButUnproduced(
+      "Ich habe eine **interaktive Lernplattform** für dich gebaut, die folgende Features hat.",
+    )).toBe(true);
+  });
+
+  it("flags an availability claim ('ist jetzt verfügbar') without a completion verb", () => {
+    expect(claimsArtifactWrittenButUnproduced(
+      "Die Plattform ist jetzt als **interaktive HTML-Seite** verfügbar.",
+    )).toBe(true);
+    expect(claimsArtifactWrittenButUnproduced(
+      "The app is now ready in your workspace.",
+    )).toBe(true);
+  });
+
+  it("flags an 'open the named file' delivery instruction", () => {
+    expect(claimsArtifactWrittenButUnproduced(
+      "Öffne die Datei `cpsaf-learning-platform.html` in deinem Browser und leg los!",
+    )).toBe(true);
+  });
+
+  it("does NOT flag an honest OFFER to build ('bin bereit, … zu erstellen')", () => {
+    expect(claimsArtifactWrittenButUnproduced(
+      "Ich bin bereit, die Datei zu erstellen — soll ich die Lernplattform jetzt bauen?",
+    )).toBe(false);
+    expect(claimsArtifactWrittenButUnproduced(
+      "Soll ich die interaktive Lernplattform direkt als Web-App bauen?",
+    )).toBe(false);
+  });
 });

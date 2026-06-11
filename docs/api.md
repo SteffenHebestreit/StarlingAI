@@ -51,6 +51,15 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 
 ## REST Endpoints
 
+### Live App Proxy
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `ANY` | `/api/app/:id/*` | reverse-proxy to a running `serve_app` container (auth: `?token=` once → cookie, or `Authorization: Bearer`) |
+| `ANY` | `/api/app/:id` | redirects to `/api/app/:id/` (preserves `?token=`) |
+
+The `backend_coder` agent builds a Node/Express app under `generated/<dir>` and launches it with the `serve_app` tool, which runs it as a dedicated container (`sai-app-<id>`) on the gateway's docker network (`SAI_APP_NETWORK`, default `starlingai-public`). The gateway forwards authenticated requests to the container by name and injects a `<base href="/api/app/<id>/">` into HTML so relative asset and `/api/...` URLs resolve under the subpath. The first navigation carries `?token=<jwt>`, mirrored into a path-scoped `HttpOnly` cookie so sub-resource requests authenticate. Static sites/decks do **not** use this — they are served by `/api/workspace/preview`. `serve_app` is Tier 3 (per-call approval); apps are in-process state and do not survive a gateway restart. Env: `SAI_APP_NODE_IMAGE` (default `node:22-alpine`), `SAI_APP_PORT` (3000), `SAI_APP_HEALTH_TIMEOUT_MS` (180000), `SAI_APP_MAX` (5).
+
 ### Sites
 
 | Method | Path | Notes |
@@ -68,6 +77,53 @@ Config-file sites are read-only from the dashboard API.
 | `GET` | `/api/guardrails` | current guardrail state |
 | `PUT` | `/api/guardrails` | partial update |
 | `POST` | `/api/guardrails/reset` | reset to config defaults |
+
+### Model Presets
+
+The dashboard "Local ⇄ Claude" switch. A preset is a named alternate for the
+default chat model (`agents.defaults.modelPresets`); an implicit `claude`
+preset (model `providers.anthropic.defaultModel`, default
+`anthropic/claude-sonnet-4-6`) appears whenever Claude is usable — a config
+`apiKey` (`sk-ant-api...`, pay-per-use) or `authToken` (`sk-ant-oat...`), **or**
+a browser-connected subscription token (see Anthropic Subscription OAuth below).
+While a preset is active the whole swarm — orchestrator and every sub-agent,
+including agents with their own model override — runs on the preset model, the
+previous primary becomes the failover fallback, the routing/synthesis tier
+ladder is bypassed, and embeddings stay on the local provider. The choice
+persists in the runtime overlay and is audit-logged as `model_preset_switched`.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/models/preset` | active preset, default model, and the switchable preset list |
+| `POST` | `/api/models/preset` | body `{ "preset": "claude" }` to activate, `{ "preset": null }` to return to the local default |
+
+### Anthropic Subscription OAuth
+
+The "Connect Claude" browser-verification flow — the same PKCE login Claude
+Code uses, producing a Claude Pro/Max **subscription** access+refresh token so
+the swarm runs on Claude billed to the subscription instead of API pay-per-use.
+The dashboard is the PKCE client: `start` returns the authorize URL plus the
+verifier/state it holds; the operator authorizes on `claude.ai`, copies the
+`code#state` the callback page shows, and `complete` exchanges it. The token
+set is **encrypted at rest** in the gateway credential store
+(`credentials/store.ts`), auto-refreshed, and sent only to Anthropic as the
+`Authorization` header — never placed in a model prompt or sent to another
+provider. Subscription tokens are Claude-Code-scoped, so the provider injects
+the required Claude Code system identity as the first system block on each call.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/models/anthropic/oauth/status` | `{ connected, expiresAt }` |
+| `POST` | `/api/models/anthropic/oauth/start` | returns `{ authorizeUrl, verifier, state }` (PKCE; dashboard holds verifier/state) |
+| `POST` | `/api/models/anthropic/oauth/complete` | body `{ code, verifier, state }` → exchanges + stores the token set |
+| `POST` | `/api/models/anthropic/oauth/disconnect` | clears the stored token; reverts an active `claude` preset to local |
+| `GET` | `/api/models/anthropic/model` | current Claude model for the implicit preset + curated choices |
+| `POST` | `/api/models/anthropic/model` | body `{ "model": "claude-opus-4-8" }` → sets `providers.anthropic.defaultModel` (free-text ids accepted); applies immediately |
+
+> Using a subscription token from a third-party app is the operator's call —
+> Anthropic intends these tokens for Claude Code. The API-key path
+> (`providers.anthropic.apiKey`) is the officially-sanctioned alternative.
+> Requires `SAI_MASTER_KEY` (the credential store's encryption key) to be set.
 
 ### Agents
 

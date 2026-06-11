@@ -4,6 +4,7 @@ import { PDFDocument, StandardFonts, type PDFFont, rgb } from "pdf-lib";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolveWorkspaceWritePath } from "./workspace-path.js";
+import { inlineLocalImagesInHtml, inlineLocalImagesInMarkdown } from "./inline-images.js";
 
 const log = childLogger("tool:document-output");
 
@@ -92,10 +93,19 @@ registerTool({
     }
 
     const rendered = renderDocument({ title, content, format });
+    // Inline co-located local images as data URIs so an illustrated paper/report
+    // renders self-contained (the workspace preview can't resolve relative
+    // `images/x` refs); resolve them against the document's own folder.
+    const docDir = dirname(resolvedOutput.resolved);
+    const finalContent = format === "markdown"
+      ? await inlineLocalImagesInMarkdown(rendered, docDir)
+      : format === "html"
+        ? await inlineLocalImagesInHtml(rendered, docDir)
+        : rendered;
 
     try {
-      await mkdir(dirname(resolvedOutput.resolved), { recursive: true });
-      await writeFile(resolvedOutput.resolved, rendered, "utf8");
+      await mkdir(docDir, { recursive: true });
+      await writeFile(resolvedOutput.resolved, finalContent, "utf8");
     } catch (err) {
       log.error({ err, outputFile: resolvedOutput.relativePath, format }, "generate_document failed");
       return fail(`Failed to write document: ${String(err)}`);
@@ -110,7 +120,7 @@ registerTool({
         filename: basenameFromRelativePath(resolvedOutput.relativePath),
         format,
         title: title || undefined,
-        size: rendered.length,
+        size: finalContent.length,
         contentType: contentTypeForDocumentFormat(format),
         previewMode: previewModeForFormat(format),
       },

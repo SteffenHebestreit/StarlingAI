@@ -187,7 +187,8 @@ onMounted(() => { void loadSkills(); });
 .skills-page {
   display: flex;
   flex-direction: column;
-  background: rgba(8, 10, 18, 0.92);
+  /* Near-transparent scrim — the themed app canvas glows through. */
+  background: rgba(8, 10, 18, 0.30);
   color: rgb(229 231 235);
   overflow: hidden;
 }

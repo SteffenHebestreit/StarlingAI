@@ -28,6 +28,8 @@ export interface ResolvedJobStep {
   allowedAgents?: string[];
   humanInLoopSteps?: string[];
   approvalChannel?: string;
+  /** Scene declared it must persist an output file — the job runner verifies + retries it. */
+  expectArtifact?: boolean;
 }
 
 export function listAllJobs(): JobSummary[] {
@@ -169,6 +171,7 @@ function resolveStep(step: JobStepConfig, index: number, jobParams: Record<strin
     allowedAgents: scene.allowedAgents,
     humanInLoopSteps: scene.humanInLoopSteps,
     approvalChannel: scene.approvalChannel,
+    expectArtifact: scene.expectArtifact,
   };
 }
 

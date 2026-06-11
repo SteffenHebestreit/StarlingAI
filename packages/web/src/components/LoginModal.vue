@@ -2,7 +2,7 @@
   <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
        role="dialog" aria-modal="true" aria-labelledby="login-heading"
        @click.self="onBackdrop">
-    <div class="glass-card relative w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
+    <div class="glass-card modal-pop relative w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
 
       <!-- Close (only when the modal was opened manually while connected) -->
       <button

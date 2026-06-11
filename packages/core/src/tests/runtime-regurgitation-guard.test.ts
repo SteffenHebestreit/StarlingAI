@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeRegurgitatedPriorAnswer } from "../agent/runtime.js";
+import {
+  looksLikeRegurgitatedPriorAnswer,
+  looksLikeArtifactMutationRequest,
+  claimsArtifactWrittenButUnproduced,
+  looksLikeFabricatedToolDeliveryLink,
+} from "../agent/runtime.js";
 import type { SessionHistoryMessage } from "../agent/session.js";
 
 /**
@@ -77,5 +82,65 @@ describe("blocked-turn honesty guard — looksLikeRegurgitatedPriorAnswer", () =
       "Ich habe in diesem Schritt nur die Bild-URLs als JSON gesammelt; die Folien selbst wurden noch nicht "
       + "aktualisiert. Wenn du möchtest, baue ich die Präsentation jetzt mit den Bildern neu auf — sag kurz Bescheid.";
     expect(looksLikeRegurgitatedPriorAnswer(distinct, history)).toBe(false);
+  });
+});
+
+/**
+ * Failed-build turn must not replay a stale prior answer (audit 9a6a8c7f turn 3).
+ * The website build timed out (no artifact), and synthesis shipped the turn-1
+ * IM73A135V01 guide verbatim — wrong mic, not a website. The normal regurgitation
+ * guard was skipped (the turn DID orchestrate), and the false-completion guard
+ * needs a written-claim the stale guide didn't make. The fix OR's the regurgitation
+ * branch into the false-completion guard for an artifact request that produced nothing.
+ */
+describe("stale-prior-answer replay on a failed build (audit 9a6a8c7f turn 3)", () => {
+  const PRIOR_GUIDE =
+    "Hier ist der vollständige technische Leitfaden für dein tragbares Audio-Aufnahmegerät. "
+    + "1. Mikrofon-Auswahl: IM73A135V01, analoges XENSIV MEMS, SNR 73 dB(A), IP57. "
+    + "2. Audio-ADC: TI PCM1808, 6-Kanal, 24-Bit, I2S. 3. Lade-IC: TI BQ25895. Kostenplan ca. 28,70 Euro pro Einheit.";
+  const history: SessionHistoryMessage[] = [
+    msg("user", "Baue ein portables Aufnahmegerät mit IM73A135V01."),
+    msg("assistant", PRIOR_GUIDE),
+    msg("user", "Wir nehmen IM69D120V01XTSA1 als mic. Überarbeite den Plan."),
+  ];
+
+  it("classifies the website request as an artifact request (guard precondition)", () => {
+    expect(looksLikeArtifactMutationRequest("Kannst du mir jetzt ein Tutorial als Website erstellen?")).toBe(true);
+  });
+
+  it("catches the stale replay via the regurgitation branch even with no false write-claim", () => {
+    // The guard fires on (claim OR replay); the stale guide is a replay, not a claim.
+    expect(looksLikeRegurgitatedPriorAnswer(PRIOR_GUIDE, history)).toBe(true);
+  });
+
+  it("releases an honest 'not built this turn' reply (neither a claim nor a replay)", () => {
+    const honest =
+      "Ich habe die Website in diesem Schritt nicht erstellt — der Build lief in die Zeitüberschreitung. "
+      + "Bestätige kurz, dann lasse ich den Inhalts-Spezialisten die Seite jetzt mit generate_website bauen.";
+    expect(claimsArtifactWrittenButUnproduced(honest)).toBe(false);
+    expect(looksLikeRegurgitatedPriorAnswer(honest, history)).toBe(false);
+  });
+
+  // audit 52c23af8 turn 2: the inlined-tutorial answer led with this exact claim while
+  // no file was produced. Locks the trigger for the last-line-of-defense honest banner.
+  it("flags the inlined-website completion claim that shipped in the re-test", () => {
+    expect(claimsArtifactWrittenButUnproduced(
+      "## Tutorial-Website für dein Mikrofon-Array-Aufnahmegerät\n\nIch habe die Website erstellt. Hier ist der vollständige Inhalt:\n\n# Bauanleitung",
+    )).toBe(true);
+  });
+
+  // audit 45d5bae9: a ZERO-tool turn fabricated a whole learn-platform and handed over
+  // a fake serve URL. The decisive signal is the tool-only link; the German "gebaut" +
+  // "Lernplattform/Plattform/App" claim is the secondary one (both were lexicon gaps).
+  describe("zero-work fabricated-delivery signals (audit 45d5bae9)", () => {
+    it("flags a fabricated served-app / workspace link", () => {
+      expect(looksLikeFabricatedToolDeliveryLink("Die Plattform: [öffnen](/api/app/3807)")).toBe(true);
+      expect(looksLikeFabricatedToolDeliveryLink("download: /api/workspace/file?path=x.html")).toBe(true);
+      expect(looksLikeFabricatedToolDeliveryLink("see [the deck](generated/presentation/index.html)")).toBe(true);
+    });
+    it("does not flag ordinary prose without a tool-minted link", () => {
+      expect(looksLikeFabricatedToolDeliveryLink("Eine Lernplattform könnte Quizfragen und Fortschritt zeigen.")).toBe(false);
+      expect(looksLikeFabricatedToolDeliveryLink("Read more at https://www.isaqb.org/news/")).toBe(false);
+    });
   });
 });
