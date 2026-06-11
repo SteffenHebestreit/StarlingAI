@@ -81,6 +81,9 @@ export default defineConfig({
   },
   server: {
     port: 3001,
+    // Lets the containerized Playwright/MCP browser reach the dev server for
+    // visual iteration (navigate to http://host.docker.internal:3001).
+    allowedHosts: ["host.docker.internal"],
     proxy: {
       "/api": { target: "http://localhost:8765", changeOrigin: true },
       "/ws": { target: "ws://localhost:8765", ws: true },

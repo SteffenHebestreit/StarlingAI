@@ -78,6 +78,7 @@ import "./tools/navigation.js";
 import "./tools/multimodal.js";
 import "./tools/document-output.js";
 import "./tools/website.js";
+import "./tools/serve-app.js";
 import "./tools/extractors.js";
 import "./tools/artifact-emitters.js";
 import "./tools/office-output.js";
@@ -248,8 +249,11 @@ export async function main() {
   // processing the prompt, or stalled? (The provider runs on a separate machine.)
   startProviderActivityMonitor();
   // Count which orchestration recovery nets actually fire (audit-stream subscriber)
-  // so dead scaffolding can be retired with evidence.
-  startRecoveryMetrics();
+  // so dead scaffolding can be retired with evidence. Persisted across restarts —
+  // "this net hasn't fired in N weeks" is only meaningful when redeploys don't
+  // reset the clock. (The scene worker stays in-memory: it can share this cwd, and
+  // two writers would clobber each other's stats file.)
+  startRecoveryMetrics({ persist: true });
 
   // Start gateway (WS + REST)
   const gateway = createGateway();

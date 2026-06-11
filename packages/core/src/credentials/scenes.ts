@@ -37,6 +37,8 @@ export interface SceneSummary {
   approvalChannel?: string;
   /** Per-scene override for the approval channel timeout (ms). Falls back to channel config when absent. */
   approvalTimeoutMs?: number;
+  /** When true, a job step running this scene must persist an output file; the job runner verifies + retries. */
+  expectArtifact?: boolean;
   /** Catalog-routing triggers used by the workflow guardrail (config-file scenes only). */
   triggers?: WorkflowCatalogTriggers;
 }
@@ -60,6 +62,7 @@ export function listAllScenes(): SceneSummary[] {
       humanInLoopSteps: scene.humanInLoopSteps,
       approvalChannel: scene.approvalChannel,
       approvalTimeoutMs: scene.approvalTimeoutMs,
+      expectArtifact: scene.expectArtifact,
       triggers: scene.triggers,
     });
   }
@@ -100,6 +103,7 @@ export function getScene(name: string): SceneSummary | null {
       humanInLoopSteps: configScene.humanInLoopSteps,
       approvalChannel: configScene.approvalChannel,
       approvalTimeoutMs: configScene.approvalTimeoutMs,
+      expectArtifact: configScene.expectArtifact,
       triggers: configScene.triggers,
     };
   }

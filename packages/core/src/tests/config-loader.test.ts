@@ -416,7 +416,9 @@ describe("config loader mutable overlay", () => {
   });
 
   it("ships anti-hallucination prompt rules for evidence-bearing delegations", () => {
-    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
+    // The main-assistant `agents` block lives in 00-platform.jsonc after the agent-tier
+    // reorg; 10-core-agents.jsonc now holds only the core-tier subAgents.
+    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/00-platform.jsonc");
 
     const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
       agents?: { mainAssistant?: { customInstructions?: string } };
@@ -436,7 +438,9 @@ describe("config loader mutable overlay", () => {
   });
 
   it("keeps main and desktop prompts access-method driven rather than app-script specific", () => {
-    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/10-core-agents.jsonc");
+    // The main-assistant `agents` block lives in 00-platform.jsonc after the agent-tier
+    // reorg; 10-core-agents.jsonc now holds only the core-tier subAgents.
+    const coreAgentsPath = resolve(process.cwd(), "../../workspace/agents/00-platform.jsonc");
 
     const coreRaw = JSON5.parse(readFileSync(coreAgentsPath, "utf8")) as {
       agents?: { mainAssistant?: { customInstructions?: string } };
@@ -534,6 +538,58 @@ describe("config loader mutable overlay", () => {
       await wait(400);
 
       expect(configLoader.getConfig()).toBe(stableConfig);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // Workspace zoning: the shard sweep must skip the working zones. Before this
+  // guard, ANY .json an agent wrote into generated/ (or a user uploaded, or a
+  // dynamic-tool bundle in tools/) was merged into the live config on reload —
+  // a generated data.json with a top-level "subAgents" or "gateway" key would
+  // silently reconfigure the swarm.
+  it("does not sweep working zones (generated/, uploads/, tools/) into the config merge", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-zones-"));
+    const configDir = join(tempDir, "config");
+    const workspaceDir = join(tempDir, "workspace");
+
+    mkdirSync(join(configDir, "gateway"), { recursive: true });
+    writeFileSync(join(configDir, "gateway", "10-gateway.json"), JSON.stringify({
+      gateway: { port: 8765 },
+    }), "utf8");
+
+    mkdirSync(join(workspaceDir, "agents"), { recursive: true });
+    writeFileSync(join(workspaceDir, "agents", "10-test.jsonc"), JSON.stringify({
+      subAgents: { zone_probe: { description: "legitimate config-zone agent" } },
+    }), "utf8");
+
+    // Poison files in each working zone — none may reach the merge.
+    mkdirSync(join(workspaceDir, "generated", "reports"), { recursive: true });
+    writeFileSync(join(workspaceDir, "generated", "reports", "data.json"), JSON.stringify({
+      gateway: { port: 9999 },
+      subAgents: { evil_generated: { description: "agent-planted" } },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "uploads"), { recursive: true });
+    writeFileSync(join(workspaceDir, "uploads", "attachment.json"), JSON.stringify({
+      subAgents: { evil_upload: { description: "user-uploaded" } },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "tools"), { recursive: true });
+    writeFileSync(join(workspaceDir, "tools", "csv_to_json.json"), JSON.stringify({
+      name: "csv_to_json", description: "dynamic tool bundle", code: "return {};", version: 1,
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    process.env["SAI_WORKSPACE_CONFIG_PATH"] = workspaceDir;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.gateway.port).toBe(8765);
+      expect(config.subAgents["zone_probe"]).toBeDefined();
+      expect(config.subAgents["evil_generated"]).toBeUndefined();
+      expect(config.subAgents["evil_upload"]).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

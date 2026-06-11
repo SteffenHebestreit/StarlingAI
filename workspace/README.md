@@ -9,12 +9,28 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 | `agents/` | Main assistant settings + sub-agent definitions, **sharded by role** (`21-orchestration`, `22-research-analysis`, `23-authoring-content`, …) |
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
+| `tools/` | Swarm-invented dynamic tool bundles (JSON) — written only by the tool-development pipeline (sandbox-tested + approved), hot-loaded into the registry as `selfdev__*` tools |
 | `runtime/` | `runtime.overrides.json` — live overrides written by the config-assistant |
 | `vault/` | *(generated, gitignore it)* Obsidian-style Markdown mirror of durable memory/skills/sessions — `sai memory export` / `import` or the `memory_export` / `memory_import` tools. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §6 |
 
 > See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full role taxonomy, the agent→file map, the
 > tool organization, and the **separation-of-concerns contract** (coordinators orchestrate; only
 > authoring agents persist deliverables).
+
+## Workspace zones & agent visibility
+
+The workspace is split into **config zones** (`agents/`, `jobs/`, `scenes/`, `tools/`, `runtime/` — the
+swarm's self-authored definition layer) and **working zones** (`generated/` for agent output, `uploads/`
+for user attachments). Two structural rules keep them apart:
+
+- **Agents are scope-confined by default**: a sub-agent's file tools see only `generated/` + `uploads/`;
+  any other path transparently re-roots into `generated/` (mirroring the write rooting), so a working
+  agent physically cannot read the platform's configs/docs or plant files outside its zone. Core
+  platform agents (e.g. `swarm_maintainer`, `prompt_optimizer`) opt in to the whole workspace with
+  `workspaceAccess: "full"` in their agent definition — full scope also lifts the `generated/` write
+  rooting so they can edit config shards directly.
+- **The config-shard sweep skips working zones**: `.json`/`.jsonc` files under `generated/`, `uploads/`,
+  and `tools/` are never merged into the live config.
 
 ## How it works
 

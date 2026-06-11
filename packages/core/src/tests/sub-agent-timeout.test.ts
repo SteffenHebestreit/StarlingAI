@@ -1350,6 +1350,109 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
+  // "Done is done" (audit 2445da2e): a BUILD run that already persisted its
+  // deliverable must complete deterministically when the timeout hits — no
+  // final-synthesis LLM call, no timeout/partial branding of finished work
+  // (content_writer wrote the paper at 171s, then died at 270s waiting for a
+  // stalled final message).
+  it("completes deterministically at timeout when the build artifact already exists", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-artifact-done-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        builder_agent: {
+          description: "Deterministic completion test agent",
+          systemPrompt: "Build the requested file.",
+          tools: ["get_swarm_state"],
+          maxIterations: 3,
+          turnTimeoutMs: 1000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.useFakeTimers();
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "get_swarm_state",
+      description: "Write the deliverable file",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          success: true,
+          output: "File written: generated/app/index.html (9000 chars)",
+          metadata: {
+            artifactKind: "workspace_file",
+            outputPath: "generated/app/index.html",
+            filename: "index.html",
+            contentType: "text/html; charset=utf-8",
+            size: 9000,
+          },
+        };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "build-1",
+            name: "get_swarm_state",
+            arguments: {},
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      // The next call drags past the turn timeout and comes back wanting MORE
+      // tool work — the timeout latch must route to completion instead.
+      .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        setTimeout(() => resolve({
+          content: "",
+          tool_calls: [
+            {
+              id: "extra-build",
+              name: "get_swarm_state",
+              arguments: {},
+            },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          finishReason: "tool_calls",
+        }), 1100);
+      }));
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const resultPromise = runSubAgentWithStats({
+        agentName: "builder_agent",
+        task: "Erstelle die Lernplattform als einzelne Datei index.html mit Quiz.",
+        parentSessionId: "parent-artifact-done",
+        workspacePath: tempDir,
+      });
+      await vi.advanceTimersByTimeAsync(1200);
+      const result = await resultPromise;
+
+      // The finished build is returned as a SUCCESS with the artifact listed —
+      // not branded timeout/partial, and without another LLM synthesis call.
+      expect(result.output).toContain("Deliverable completed");
+      expect(result.output).toContain("generated/app/index.html");
+      expect(result.stats.outcome).toBe("success");
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.artifacts?.some((a) => a["outputPath"] === "generated/app/index.html")).toBe(true);
+      // No third LLM call: the deterministic completion replaced the synthesis pass.
+      expect(completeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      unregisterTool("get_swarm_state");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
+
   it("rescues final output that becomes empty after hallucinated tool markup is stripped", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-sanitize-rescue-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -3251,4 +3354,73 @@ describe("sub-agent turn timeouts", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("keeps boilerplate tool results in history so every tool_use id stays answered (audit f0143008)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-boilerplate-result-"));
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      subAgents: {
+        facts_agent: {
+          description: "Boilerplate tool-result regression agent",
+          systemPrompt: "Check shared facts, then answer.",
+          tools: ["read_shared_facts"],
+          maxIterations: 3,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "read_shared_facts",
+      description: "Returns the no-facts boilerplate that used to be dropped from history",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: true, output: "No shared facts available yet for this session." };
+      },
+    });
+
+    completeMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{ id: "facts-1", name: "read_shared_facts", arguments: {} }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      })
+      .mockResolvedValueOnce({
+        content: "Final answer after checking facts.",
+        tool_calls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "stop",
+      });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "facts_agent",
+        task: "Answer using shared facts.",
+        parentSessionId: "parent-boilerplate-result",
+        workspacePath: tempDir,
+      });
+
+      expect(result.output).toContain("Final answer after checking facts.");
+      expect(completeMock).toHaveBeenCalledTimes(2);
+      // The second LLM call's history MUST contain a tool message answering
+      // facts-1. Before the fix, the boilerplate classifier `continue`d past
+      // the toolResults.push, the result vanished from history, and the
+      // strict Anthropic API rejected the whole next request with a 400.
+      const secondCallMessages = completeMock.mock.calls[1]![0] as Array<{
+        role: string; content: unknown; tool_call_id?: string;
+      }>;
+      const toolMessage = secondCallMessages.find((m) => m.role === "tool" && m.tool_call_id === "facts-1");
+      expect(toolMessage).toBeDefined();
+      expect(String(toolMessage!.content)).toContain("No shared facts available yet");
+    } finally {
+      unregisterTool("read_shared_facts");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 10000);
 });

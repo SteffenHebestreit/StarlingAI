@@ -26,8 +26,20 @@ export const OllamaProviderSchema = z.object({
 });
 
 export const AnthropicProviderSchema = z.object({
-  apiKey: z.string().min(1),
-  timeoutMs: z.number().int().min(5000).max(120000).default(60000),
+  /** Anthropic API key (`sk-ant-api...`, console.anthropic.com — pay-per-use).
+   *  Supports `$ENV_VAR` refs. Auto-filled from ANTHROPIC_API_KEY. */
+  apiKey: z.string().optional(),
+  /** OAuth bearer token (`sk-ant-oat...`), e.g. minted by Claude Code's
+   *  `claude setup-token` — bills the Claude Pro/Max subscription instead of
+   *  API usage. Takes precedence over apiKey. Supports `$ENV_VAR` refs.
+   *  Auto-filled from ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN. */
+  authToken: z.string().optional(),
+  baseUrl: z.string().url().default("https://api.anthropic.com"),
+  /** Model used by the implicit "claude" dashboard preset when no explicit
+   *  modelPresets entry overrides it. Bare Anthropic model id (no provider prefix). */
+  defaultModel: z.string().default("claude-sonnet-4-6"),
+  timeoutMs: z.number().int().min(5000).max(300000).default(120000),
+  maxRetries: z.number().int().min(0).max(5).default(2),
 });
 
 export const ProvidersSchema = z.object({
@@ -102,6 +114,24 @@ export const ModelConfigSchema = z.object({
     synthesis: z.string().max(200).optional(),
   }).optional(),
 });
+
+/** A named, runtime-switchable alternate for the default chat model (the
+ *  dashboard "Local ⇄ Claude" switch). When active it overrides the model
+ *  identity (primary/fallback) everywhere — orchestrator AND sub-agents —
+ *  while behavioral fields (maxIterations, tool sets, prompts) stay untouched.
+ *  The previously configured primary automatically becomes the fallback so a
+ *  broken cloud preset degrades back to the local model. */
+export const ModelPresetSchema = z.object({
+  /** Display label for the dashboard switch (defaults to the preset key). */
+  label: z.string().max(60).optional(),
+  /** Provider-prefixed model, e.g. "anthropic/claude-sonnet-4-6". */
+  primary: z.string().max(200),
+  /** Explicit fallback; defaults to the regular configured primary. */
+  fallback: z.string().max(200).optional(),
+  maxTokens: z.number().int().min(256).max(16384).optional(),
+  contextWindow: z.number().int().min(2048).max(131072).optional(),
+});
+export type ModelPreset = z.infer<typeof ModelPresetSchema>;
 
 export const RateLimitSchema = z.object({
   requestsPerMinute: z.number().int().min(1).max(600).default(60),
@@ -711,6 +741,15 @@ export const SubAgentConfigSchema = z.object({
   container: SubAgentContainerSchema.optional(),    // run in ephemeral Docker container
   /** GPU/compute resource requirements — used for GPU-aware routing. */
   compute: AgentComputeProfileSchema,
+  /**
+   * Workspace visibility zone. "generated" (default) confines the agent's file
+   * tools to the working zones (generated/ + uploads/) — paths outside are
+   * transparently re-rooted into generated/, mirroring the write rooting. "full"
+   * exposes the whole workspace (config zones agents/, scenes/, jobs/, tools/,
+   * runtime/) and is reserved for core/self-improvement agents that maintain
+   * the swarm itself.
+   */
+  workspaceAccess: z.enum(["full", "generated"]).optional(),
 });
 
 export const SubAgentsSchema = z.record(SubAgentConfigSchema);
@@ -1045,6 +1084,10 @@ export const SceneConfigSchema = z.object({
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
   humanInLoopSteps: z.array(z.string()).optional(), // tool names that require user approval in this scene
+  // When true and this scene runs as a single-agent job step, the job runner verifies the
+  // step actually persisted an output file; if not, it does ONE corrective re-attempt and,
+  // failing that, reports the step incomplete instead of claiming the deliverable exists.
+  expectArtifact: z.boolean().optional(),
   /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
   triggers: WorkflowCatalogTriggersSchema,
   /** Name of an entry in `approvalChannels` — used when this scene is triggered via webhook */
@@ -1288,6 +1331,12 @@ export const OrchestrationSchema = z.object({
    *  entirely. Source-sensitive turns reuse the existing evidence backstop.
    *  Default: true. */
   riskGatedQA: z.boolean().default(true),
+  /** Final-response completion QA gate. When true, before shipping the final answer the
+   *  runtime verifies that an interactive/served app the user asked to BUILD was actually
+   *  produced as a file; if not, it runs ONE bounded corrective build (the right builder)
+   *  and ships the built artifact instead of a concept/description. Bounded to a single
+   *  corrective iteration per turn. Default: true. */
+  finalResponseQaGate: z.boolean().default(true),
   /** When true, a source-sensitive turn that delegated SUCCESSFULLY (so the
    *  failure-path evidence backstop never fired) has its final answer cross-checked
    *  against the curated shared findings: if the answer references none of the
@@ -1382,6 +1431,14 @@ export const ConfigSchema = z.object({
   agents: z.object({
     defaults: z.object({
       model: ModelConfigSchema.default({}),
+      /** Named alternates for the default chat model, switchable at runtime
+       *  from the dashboard header. An implicit "claude" preset exists
+       *  whenever providers.anthropic is configured (model from
+       *  providers.anthropic.defaultModel). */
+      modelPresets: z.record(ModelPresetSchema).default({}),
+      /** Currently active preset name; unset = the configured local default.
+       *  Persisted by the dashboard switch into the runtime overlay. */
+      activeModelPreset: z.string().optional(),
     }).default({}),
     mainAssistant: MainAssistantConfigSchema.default({}),
     ephemeralGeneration: EphemeralGenerationSchema.default({}),

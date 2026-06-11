@@ -783,11 +783,28 @@ watch(
   { immediate: true },
 );
 
-const imageAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) =>
+// De-duplicate before rendering: the same artifact can arrive both as a streamed
+// tool-result and in the final message payload, so a raw list shows each file
+// twice in the bubble (the side panel already dedups by filename). Key on the
+// stable identity (relativePath / externalUrl / dataUrl / filename).
+const dedupedAttachments = computed(() => {
+  const list = props.message.attachments ?? [];
+  const seen = new Set<string>();
+  const out: typeof list = [];
+  for (const attachment of list) {
+    const key = attachment.relativePath || attachment.externalUrl || attachment.dataUrl || attachment.filename || "";
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(attachment);
+  }
+  return out;
+});
+
+const imageAttachments = computed(() => dedupedAttachments.value.filter((attachment) =>
   Boolean(attachment.dataUrl?.startsWith("data:image/") || attachment.dataUrl?.startsWith("blob:"))
 ));
 
-const artifactAttachments = computed(() => (props.message.attachments ?? []).filter((attachment) => !imageAttachments.value.includes(attachment)));
+const artifactAttachments = computed(() => dedupedAttachments.value.filter((attachment) => !imageAttachments.value.includes(attachment)));
 
 const mermaidAttachments = computed(() => artifactAttachments.value.filter((attachment) => attachment.previewMode === "mermaid"));
 
@@ -2130,13 +2147,23 @@ onBeforeUnmount(() => {
 .prose-content :deep(strong)      { color: #f3e8ff; font-weight: 600; }
 .prose-content :deep(em)          { color: #d8b4fe; font-style: italic; }
 .prose-content :deep(blockquote)  { border-left: 2px solid rgba(168,85,247,0.4); padding-left: 0.75rem; color: #9ca3af; font-style: italic; margin: 0.5rem 0; }
+/* Heading scale — must stay strictly monotonic (h1 > h2 > … > body) with steps
+   big enough to survive a serif display face's smaller apparent size, and the
+   display font on EVERY level so adjacent headings never mix serif/sans. */
 .prose-content :deep(h1), .prose-content :deep(h2), .prose-content :deep(h3),
 .prose-content :deep(h4), .prose-content :deep(h5), .prose-content :deep(h6) {
-  color: #f3e8ff; font-weight: 600; margin: 0.75rem 0 0.35rem; line-height: 1.3;
+  font-family: var(--font-display);
+  letter-spacing: var(--display-tracking);
+  color: #f3e8ff; font-weight: 600; margin: 1.1rem 0 0.4rem; line-height: 1.25;
 }
-.prose-content :deep(h1) { font-size: 1.15em; }
-.prose-content :deep(h2) { font-size: 1.05em; border-bottom: 1px solid rgba(168,85,247,0.15); padding-bottom: 0.2rem; }
-.prose-content :deep(h3) { font-size: 0.97em; color: #e9d5ff; }
+.prose-content :deep(h1) { font-size: 1.6em;  font-weight: 700; }
+.prose-content :deep(h2) { font-size: 1.34em; font-weight: 700; border-bottom: 1px solid rgba(168,85,247,0.15); padding-bottom: 0.22rem; }
+.prose-content :deep(h3) { font-size: 1.17em; color: #ede9fe; }
+.prose-content :deep(h4) { font-size: 1.06em; color: #e9d5ff; }
+.prose-content :deep(h5) { font-size: 0.96em; color: #d8b4fe; text-transform: uppercase; letter-spacing: 0.05em; }
+.prose-content :deep(h6) { font-size: 0.88em; color: #c4b5fd; text-transform: uppercase; letter-spacing: 0.06em; }
+/* The first block in a message shouldn't push down from the top edge. */
+.prose-content :deep(> :first-child) { margin-top: 0; }
 .prose-content :deep(hr) { border: none; border-top: 1px solid rgba(168,85,247,0.2); margin: 0.75rem 0; }
 .prose-content :deep(table)       { width: 100%; border-collapse: collapse; font-size: 0.82em; margin: 0.5rem 0; }
 .prose-content :deep(th)          { background: rgba(168,85,247,0.12); color: #d8b4fe; font-weight: 600; text-align: left; padding: 0.35rem 0.6rem; border: 1px solid rgba(168,85,247,0.2); }

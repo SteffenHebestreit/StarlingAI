@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyDelegationResult } from "../tools/sub-agent.js";
+import { classifyDelegationResult, isNarrativeOnlyDeliverableFailure } from "../tools/sub-agent.js";
 import type { DelegationClassification } from "../tools/sub-agent.js";
 
 const baseStats = {
@@ -400,6 +400,63 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("failure");
   });
 
+  // Regression (audit b5107ae4): the runtime's source-sensitive rewrite wraps
+  // the ORIGINAL user request ("ich möchte ein Aufnahmegerät bauen ... layout")
+  // in the canonical WEB RESEARCH TASK template. The researcher (which has
+  // write_file for notes) returned a successful 8.8KB sourced report without
+  // writing files — and the embedded build verb made artifact-deliverable-miss
+  // brand it a failure, discarding the evidence and cascading into a
+  // narrowly-scoped ephemeral re-research. A research slice's deliverable is
+  // prose evidence by construction.
+  it("does NOT flag a research slice against the embedded original request's build verbs", () => {
+    const researchSliceTask = [
+      "WEB RESEARCH TASK — gather fresh sourced evidence from official primary sources.",
+      "Research the request below: use web_search and web_fetch to open the most authoritative primary or official sources.",
+      "SOURCE-SENSITIVE DELEGATION:",
+      "Original user request:",
+      "ich möchte ein sehr portables, batterie powered aufnahmegerät bauen — can you give me product suggestions as well as a layout how to connect everything together",
+    ].join("\n");
+    const r = classifyDelegationResult(
+      "## IM73A135V01 — Confirmed Specifications\n\n- Interface: analog differential (Source: https://www.infineon.com/...)\n- SNR: 73 dB(A) (Source: https://datasheet4u.com/...)\n\n## ESP32-S3 Audio\n\n- I2S: 2 controllers (Source: https://www.espressif.com/...)\n\nSome PDF datasheets could not be text-extracted; those values are marked unverified.",
+      "success",
+      {
+        toolCount: 20,
+        toolNames: ["read_shared_facts", "web_search", "web_fetch"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      {
+        tags: ["research"],
+        tools: ["web_search", "web_fetch", "read_shared_facts", "share_finding", "write_file", "read_file"],
+      } as never,
+      "researcher",
+      researchSliceTask,
+    );
+    expect(r).toBe<DelegationClassification>("success");
+  });
+
+  // Control for the research-slice exemption: the SAME bare build request
+  // without the runtime's research-slice header must still be flagged.
+  it("still flags an artifact-capable agent that researched instead of building (no slice header)", () => {
+    const r = classifyDelegationResult(
+      "Here is everything you need to know about the components for the device.",
+      "success",
+      {
+        toolCount: 5,
+        toolNames: ["read_shared_facts", "web_search", "web_fetch"],
+        terminalState: "completed",
+        outcome: "success" as const,
+      },
+      {
+        tags: ["research"],
+        tools: ["web_search", "web_fetch", "read_shared_facts", "write_file"],
+      } as never,
+      "researcher",
+      "Erstelle eine vollständige Bauanleitung als Markdown-Datei und speichere sie im Workspace.",
+    );
+    expect(r).toBe<DelegationClassification>("failure");
+  });
+
   // The same agent shape, but it DID delegate (e.g. to content_writer):
   // don't flag it. The work might legitimately be happening downstream.
   it("does NOT flag a coordinator that delegated but didn't write directly", () => {
@@ -539,5 +596,65 @@ describe("classifyDelegationResult — D14", () => {
       "configure the server",
     );
     expect(r).toBe<DelegationClassification>("failure");
+  });
+});
+
+// Regression: audit fa1b88b3 (2026-06-08). `coder` ran containerized for the
+// CPSA-F learning-platform build, could not reach the host model / gateway-bound
+// code_sandbox MCP, and died with "container error: unknown" (0 tokens, 0 tools).
+// classifyDelegationResult correctly returns "failure" (so the node is retryable
+// on another agent), but the run_task_graph node error was then labeled
+// "narrative-only — restate the task as a single direct instruction", which sent
+// the orchestrator in circles against the same broken container instead of
+// surfacing the real error. A container/host-level crash must NOT be reported as
+// narrative-only.
+describe("isNarrativeOnlyDeliverableFailure — container crashes are not 'narrative-only'", () => {
+  const coderCfg = {
+    tools: ["mcp__code_sandbox__run_js", "write_file", "list_files", "read_shared_facts", "share_finding"],
+  } as never;
+
+  it("does NOT flag a container crash as narrative-only even though 0 work tools ran", () => {
+    const flagged = isNarrativeOnlyDeliverableFailure(
+      "failure",
+      "Sub-agent 'coder' container error: unknown",
+      "Erstelle die Projektstruktur für die CPSA-F Lernplattform und schreibe package.json.",
+      { toolCount: 0, toolNames: [] },
+      coderCfg,
+    );
+    expect(flagged).toBe(false);
+  });
+
+  it("does NOT flag a sub-agent timeout crash as narrative-only", () => {
+    const flagged = isNarrativeOnlyDeliverableFailure(
+      "failure",
+      "Sub-agent 'coder' timed out after 240000ms",
+      "Erstelle das Frontend public/index.html für die Lernplattform.",
+      { toolCount: 0, toolNames: [] },
+      coderCfg,
+    );
+    expect(flagged).toBe(false);
+  });
+
+  it("STILL flags a genuine narrative-only miss (artifact tools, narrated, never wrote)", () => {
+    const flagged = isNarrativeOnlyDeliverableFailure(
+      "failure",
+      "This is a substantial deliverable. Let me build the complete single-file HTML application now.",
+      "Erstelle eine vollständige Single-Page Lernwebsite als HTML-Datei.",
+      { toolCount: 2, toolNames: ["read_shared_facts", "memory_search"] },
+      coderCfg,
+    );
+    expect(flagged).toBe(true);
+  });
+
+  it("returns false when the classification is not a failure", () => {
+    expect(
+      isNarrativeOnlyDeliverableFailure(
+        "success",
+        "Sub-agent 'coder' container error: unknown",
+        "Erstelle package.json.",
+        { toolCount: 0, toolNames: [] },
+        coderCfg,
+      ),
+    ).toBe(false);
   });
 });

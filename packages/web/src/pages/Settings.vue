@@ -13,6 +13,13 @@
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
       <div class="space-y-5">
 
+        <!-- ── Appearance ─────────────────────────────────────────────────── -->
+        <div v-if="isSettingsPage" class="glass-card p-5">
+          <h3 class="section-title mb-1">Appearance</h3>
+          <div class="text-xs text-gray-500 mb-4">Palette, typeface, and curated presets. Saved in this browser.</div>
+          <AppearanceSettings />
+        </div>
+
         <!-- ── Gateway Connection ─────────────────────────────────────────── -->
         <div v-if="isSettingsPage" class="glass-card p-5">
           <h3 class="section-title">Gateway Connection</h3>
@@ -2026,6 +2033,7 @@ import { useMultimodalStore, type MultimodalConfig } from "@/stores/multimodal";
 import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type ConfigAssistantMode, type FlowMemoryOutcome, type FlowMemoryScope } from "@/stores/configAssistant";
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
+import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import { appVersion } from "@/appVersion";
 
 const route = useRoute();
@@ -3483,7 +3491,8 @@ watch(() => multimodalStore.config, (config) => {
 
 .section-title {
   @apply font-semibold text-gray-100 mb-4 text-sm uppercase tracking-wide;
-  background: linear-gradient(to right, #a855f7, #ec4899);
+  font-family: var(--font-label);
+  background: linear-gradient(to right, rgb(var(--accent-purple)), rgb(var(--accent-pink)));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

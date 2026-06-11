@@ -6,7 +6,7 @@ import { resolve as dnsResolve } from "node:dns/promises";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolveWorkspaceWritePath } from "./workspace-path.js";
 import { getMcpConnections } from "../mcp/registry.js";
 
 const log = childLogger("tool:web");
@@ -644,10 +644,13 @@ registerTool({
 
       const ext = imageExtFromContentType(contentType);
       const baseName = slugifyImageName(requestedName || imageBaseNameFromUrl(resolvedImageUrl));
-      const relPath = posix.join(outputDir.replace(/\\/g, "/"), `${baseName}${ext}`);
+      const normalizedOutputDir = outputDir.replace(/\\/g, "/");
+      const relPath = posix.join(normalizedOutputDir, `${baseName}${ext}`);
       let resolved: { resolved: string; relativePath: string };
       try {
-        resolved = resolvePathWithinWorkspace(relPath, ctx.workspacePath);
+        // Root saved images under generated/ (idempotent) so a deck/paper and its
+        // images live in ONE generated/<dir> tree, not a stray workspace/<dir>.
+        resolved = resolveWorkspaceWritePath(relPath, ctx.workspacePath);
       } catch {
         return { success: false, output: "", error: "outputDir must resolve inside the workspace" };
       }
@@ -659,9 +662,16 @@ registerTool({
         : subjectMatch === "unverified" || subjectMatch === "unverified_no_vision_model"
           ? " (Subject not visually confirmed.)"
           : "";
+      // The deck/paper that embeds this image sits one level above the images dir,
+      // so suggest the deck-relative form (images/<file>) rather than the full
+      // generated/... path — the model otherwise copies the absolute-ish path and
+      // the relative embed breaks.
+      const embedHint = posix.basename(normalizedOutputDir) === "images"
+        ? `images/${baseName}${ext}`
+        : resolved.relativePath;
       return {
         success: true,
-        output: `Saved verified image (${contentType}, ${bytes.length} bytes) to ${resolved.relativePath}.${subjectNote} Embed it as ![alt](${resolved.relativePath}) — copy the path exactly.`,
+        output: `Saved verified image (${contentType}, ${bytes.length} bytes) to ${resolved.relativePath}.${subjectNote} Embed it relative to your deck/paper as ![alt](${embedHint}).`,
         metadata: {
           saved: true,
           outputPath: resolved.relativePath,

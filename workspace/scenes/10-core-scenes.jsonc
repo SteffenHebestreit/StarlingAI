@@ -1,5 +1,5 @@
 {
-  // Research & evidence pipelines — gather, verify, and synthesize sourced findings.
+  // Core scenes — everyday research, content and code-review workflows.
   "scenes": {
     "source_backed_paper": {
       "description": "Produce a paper or report grounded in official sources and verified citations.",
@@ -107,32 +107,56 @@
         }
       }
     },
-    "security_audit": {
-      "description": "Produce a current security risk digest from authoritative advisories, CVEs, and supporting evidence.",
-      "task": "Use researcher to gather current advisories, CVEs, and official remediation guidance for the requested target scope. Use evidence_analyst to reconcile overlaps and rank the concrete risks, then summarizer to produce the final markdown risk report with remediation priorities. Use quality_supervisor or qa_guard for one acceptance pass when severity ranking or scope coverage looks uncertain.",
+    "content_creation": {
+      "description": "Research and draft audience-ready content such as blog posts, newsletters, product copy, or documentation.",
+      "task": "When research is required, use researcher to gather current source material first, then content_writer to produce the requested content in the right tone and format. Use quality_supervisor for one acceptance pass so the draft stays aligned with the audience, tone, and evidence base.",
       "allowedAgents": [
         "researcher",
-        "evidence_analyst",
-        "summarizer",
+        "content_writer",
         "quality_supervisor",
+        "summarizer",
         "qa_guard"
       ],
       "params": {
-        "target": {
-          "description": "Software stack, service, or dependency set to review",
-          "default": "configured platform stack"
+        "contentType": {
+          "description": "Requested content type",
+          "default": "blog-post"
         },
-        "auditScope": {
-          "description": "What to inspect within the target",
-          "default": "dependencies"
+        "topic": {
+          "description": "Topic or key message",
+          "default": ""
         },
-        "severityThreshold": {
-          "description": "Minimum severity to include",
-          "default": "medium"
+        "audience": {
+          "description": "Intended audience",
+          "default": "general technical audience"
         },
-        "outputFormat": {
-          "description": "Preferred report format",
-          "default": "markdown with risk table and remediation plan"
+        "tone": {
+          "description": "Tone or voice guidance",
+          "default": "professional and engaging"
+        },
+        "requiresResearch": {
+          "description": "Whether research should happen before drafting",
+          "default": "yes"
+        }
+      }
+    },
+    "code_review": {
+      "description": "Perform a structured review of recent code changes and produce a merge-readiness report.",
+      "task": "Use diff_reviewer to inspect the requested change set, code_analyst when a suspicious hunk needs deeper code-at-rest context, and qa_guard for one verification-oriented pass on missing tests or risky follow-ups. Produce a concise review report with concrete risks, missing tests, and a merge-readiness verdict.",
+      "allowedAgents": [
+        "diff_reviewer",
+        "code_analyst",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "targetRef": {
+          "description": "Git ref range to review",
+          "default": "HEAD~10..HEAD"
+        },
+        "focusAreas": {
+          "description": "Review focus areas",
+          "default": "all"
         }
       }
     }

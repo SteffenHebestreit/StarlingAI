@@ -24,6 +24,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
+import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 
 export interface WorkspaceValidationResult {
   ok: boolean;
@@ -100,11 +101,14 @@ export function resolveShardDirs(workspacePath: string): { repoRoot: string; dir
 /** Sorted .json/.jsonc shard paths under a directory (recursive), like config-layout. */
 function collectShardPaths(directory: string): string[] {
   const paths: string[] = [];
-  const visit = (current: string) => {
+  const visit = (current: string, depth: number) => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const next = resolve(current, entry.name);
       if (entry.isDirectory()) {
-        visit(next);
+        // Mirror the loader: working zones (generated/, uploads/, tools/) hold
+        // agent output and dynamic-tool bundles, never config shards.
+        if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        visit(next, depth + 1);
         continue;
       }
       const ext = extname(entry.name).toLowerCase();
@@ -112,7 +116,7 @@ function collectShardPaths(directory: string): string[] {
       paths.push(next);
     }
   };
-  visit(directory);
+  visit(directory, 0);
   return paths.sort((a, b) => relative(directory, a).localeCompare(relative(directory, b)));
 }
 

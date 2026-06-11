@@ -46,9 +46,38 @@ import {
   toSoftRoutingHint,
   looksMultiDomainResearch,
 } from "./intent-classifier.js";
-import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
+import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject, buildSourceSensitiveCoordinatorTask } from "./source-sensitive-delegation.js";
 import { looksEvidenceAnchored, sharesEvidenceVocabulary } from "./evidence-anchoring.js";
-import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
+import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
+import {
+  classifyDeliverableIntent,
+  claimsArtifactWrittenButUnproduced,
+  looksLikeFabricatedToolDeliveryLink,
+  looksLikeInlinedArtifactFabrication,
+  looksLikeInlinedAppDocument,
+  extractInlineHtmlDocument,
+  looksLikeCompleteHtmlDocument,
+  stripLargeCodeFences,
+} from "./deliverable-intent.js";
+
+// Re-export the deliverable-intent module so existing imports from runtime.js
+// (tests, tools) keep working after the god-file extraction.
+export {
+  looksLikeArtifactCreationRequest,
+  selectAutoBuildBuilderAgent,
+  shouldSuppressRelayForUnbuiltApp,
+  looksLikeComposedGuideRequest,
+  looksLikeArtifactMutationRequest,
+  claimsArtifactWrittenButUnproduced,
+  looksLikeFabricatedToolDeliveryLink,
+  looksLikeInlinedArtifactFabrication,
+  looksLikeInlinedAppDocument,
+  extractInlineHtmlDocument,
+  looksLikeCompleteHtmlDocument,
+  stripLargeCodeFences,
+  classifyDeliverableIntent,
+  type DeliverableIntent,
+} from "./deliverable-intent.js";
 
 const log = childLogger("agent:runtime");
 
@@ -473,87 +502,34 @@ export function looksLikeRawToolEvidenceDump(value: string): boolean {
 }
 
 /**
+ * Strip a leading delegate label echo ("[researcher]:", often doubled as
+ * "[researcher]:\n[researcher]:") that parallel_delegate / the relay prepends to a sub-agent's
+ * answer. The label is relay scaffolding, not content — but it makes the otherwise-clean
+ * synthesis underneath trip {@link looksLikeRawToolEvidenceDump} (audit 49372c7a), so the good
+ * delegate guide gets discarded and the backstop ships raw shared facts instead (audit
+ * da8fc547: the IM73A135V01-vs-INMP441 build guide was dropped for raw datasheet reflow temps).
+ * Removes up to a few leading "[agent]:" labels so the real synthesis can serve as a backstop.
+ */
+export function stripLeadingDelegateLabelEcho(text: string): string {
+  let t = (text ?? "").trimStart();
+  for (let i = 0; i < 4; i++) {
+    const m = /^\[[a-z][a-z0-9_]{2,}\]\*{0,2}:[ \t]*\n?/i.exec(t);
+    if (!m) break;
+    t = t.slice(m[0].length).trimStart();
+  }
+  return t;
+}
+
+/**
  * Honest user-facing message for the "research succeeded but the artifact step failed"
  * end-state. Surfaces the curated, sourced findings (so the gathered work isn't lost)
  * under a bilingual could-not-finish preamble — never the raw dump. Used by the
  * last-resort terminal guard.
  */
-/**
- * Heuristic: the user's request asks to CREATE a concrete artifact/deliverable (a file,
- * website, presentation/deck, document, report, chart, app) — not merely to research or
- * answer a question. Mutation verb + artifact noun, EN + DE. Used to decide whether a
- * source-sensitive turn that only gathered evidence should auto-build the artifact in the
- * same turn. Topic-agnostic — verb+noun shape only.
- */
-export function looksLikeArtifactCreationRequest(userMessage: string): boolean {
-  const t = (userMessage ?? "").toLowerCase();
-  const hasVerb = /\b(create|build|generate|make|write|produce|draft|compose|erstelle|erstellen|erstell|baue|bau|schreibe|schreib|generiere|generier|verfasse|verfass|erzeuge|erzeug|mach)\b/.test(t);
-  if (!hasVerb) return false;
-  return /\b(presentation|pr[äa]sentation|slides?|slide deck|deck|folien|foliensatz|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|site|document|dokument|report|bericht|paper|file|datei|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx)\b/.test(t);
-}
+// Deliverable-intent classifiers + answer-side honesty detectors moved to
+// ./deliverable-intent.ts (god-file seam). Re-exported below so existing imports
+// from runtime.js (tests, tools) keep working unchanged.
 
-const ARTIFACT_NOUN_RE =
-  /\b(presentation|pr[äa]sentation|slides?|slide deck|folien|foliensatz|deck|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|document|dokument|report|bericht|paper|file|datei|index\.html|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx|artifact|artefakt)\b/i;
-
-/**
- * Broader than {@link looksLikeArtifactCreationRequest}: the turn asks to CREATE *or* CHANGE
- * a concrete artifact (update / edit / insert into / add to / embed in / replace). Used to
- * scope the false-completion guard so a "füge die Bilder in die Präsentation ein" (modify)
- * request is covered, not just "erstelle eine Präsentation" (create). Topic-agnostic.
- */
-export function looksLikeArtifactMutationRequest(userMessage: string): boolean {
-  if (looksLikeArtifactCreationRequest(userMessage)) return true;
-  const t = (userMessage ?? "").toLowerCase();
-  const hasMutateVerb =
-    /\b(update|updated|edit|modify|change|revise|adjust|insert|add|append|embed|replace|fix|aktualisiere?|aktualisier|ändere?|änder|bearbeite?|bearbeit|überarbeite?|überarbeit|ergänze?|ergänz|einf[üu]gen|einf[üu]ge|f[üu]ge|hinzuf[üu]gen|hinzuf[üu]ge|einbette?|einbinden|einbinde|ersetze?|ersetz)\b/.test(t);
-  if (!hasMutateVerb) return false;
-  return ARTIFACT_NOUN_RE.test(t);
-}
-
-/**
- * The answer ASSERTS, as a completed fact, that it created/updated/saved/inserted the
- * artifact — yet the caller only invokes this when NO artifact was produced this turn, so a
- * match means a FALSE "I updated the presentation" claim (audit 14661623 turn 2: the run
- * gathered image URLs, never rebuilt the deck, but said "Die Bilder wurden eingefügt …
- * URLs überprüft"). Clause-scoped so a negated, honest "I did NOT update the deck" is not
- * flagged. Structural + bilingual; needs a completion verb AND an artifact noun in the SAME
- * clause, with no negation in that clause.
- */
-export function claimsArtifactWrittenButUnproduced(value: string): boolean {
-  const text = value ?? "";
-  if (!text.trim()) return false;
-  const claimVerb =
-    /(eingef[üu]gt|eingebettet|aktualisiert|erstellt|gespeichert|hinzugef[üu]gt|geändert|überarbeitet|ergänzt|integriert|eingebunden|ersetzt|inserted|embedded|updated|created|saved|added|modified|written|generated|built|produced)/i;
-  const negation =
-    /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
-  // Split into clauses so a negated clause ("… wurde NICHT geändert") can't trip the claim.
-  for (const clause of text.split(/[.!?\n;:]+/)) {
-    if (claimVerb.test(clause) && ARTIFACT_NOUN_RE.test(clause) && !negation.test(clause)) return true;
-  }
-  return false;
-}
-
-/**
- * Heuristic: the answer INLINES a full artifact (a complete HTML document, or a large
- * fenced code block carrying the whole deliverable) instead of it being a real workspace
- * file. On a source-sensitive artifact-creation turn that produced NO artifact, this is the
- * model hand-writing the deliverable from training data and passing it off as the result
- * (audit 453a263e: after the build was stopped, synthesis pasted a multi-KB reveal.js deck
- * — fabricated, falsely "verified"). Structural only: full-document markers or a big code
- * fence; format-agnostic, no topic terms. The caller scopes this to the no-artifact case.
- */
-export function looksLikeInlinedArtifactFabrication(value: string): boolean {
-  const v = value ?? "";
-  if (v.length < 1500) return false;
-  // A complete HTML/XML document inlined into the answer.
-  if (/<!DOCTYPE\s+html/i.test(v) && /<\/html>/i.test(v)) return true;
-  if (/```[a-z]*\s*<!DOCTYPE\s+html/i.test(v)) return true;
-  if (/```[a-z]*\s*<html[\s>]/i.test(v)) return true;
-  // The whole deliverable pasted as one large fenced code block rather than written to a file.
-  const fences = v.match(/```[\s\S]*?```/g);
-  if (fences && fences.some((f) => f.length >= 1500)) return true;
-  return false;
-}
 
 function buildResearchGatheredFallback(curatedEvidence: string | null, isArtifactRequest = true): string {
   // The preamble must match what the user actually asked for. An artifact-creation turn
@@ -931,12 +907,25 @@ export function ephemeralAgentSpecLacksWebTools(args: Record<string, unknown>): 
   return !tools.some((t) => /^web_search$/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t));
 }
 
+/** Builder roles whose delegated task is a BUILD SPEC worth preserving (role-based, no message keywords). */
+const BUILDER_AGENT_ROLE_RE = /^(?:content_writer|web_coder|backend_coder)$/i;
+
 export function enforceSourceSensitiveOriginalRequestOnToolCall(
   toolCall: LLMResponse["tool_calls"][number],
   userMessage: string,
   guidance: DynamicTurnGuidance | null | undefined,
   sessionId: string,
   guardrailEvents: Array<{ type: string; details: string }>,
+  /**
+   * Receives the model's OWN build-task text when the research-first rewrite is about
+   * to discard it (a delegate to content_writer/web_coder/backend_coder on a
+   * source-sensitive turn). The orchestrator often writes an excellent spec — features,
+   * data shape, UI behaviour — and throwing it away leaves the later corrective build
+   * with only generic facts (audit c2f76a00: a detailed 100-question quiz-app spec was
+   * rewritten to research; the eventual build shipped a 4KB welcome page). The caller
+   * stashes it and feeds it back into the corrective build as the blueprint.
+   */
+  onDiscardedBuilderTask?: (spec: string) => void,
 ): void {
   if (!guidance?.sourceSensitive) return;
   // A source-sensitive task may still spawn a downstream WRITER to render the
@@ -948,14 +937,38 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
   }
   const originalArgs = toolCall.arguments ?? {};
   let nextArgs: Record<string, unknown> | null = null;
+  let recoveryReason = "source_sensitive_original_request_enforced";
 
   if (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate" || toolCall.name === "create_ephemeral_agent") {
-    const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
-    const focus = deriveSourceSensitiveDelegationFocus(originalTask, userMessage);
-    nextArgs = withDefaultResearchFallbackAgents(
-      stripUntrustedDelegationContext({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) }),
-      guidance,
-    );
+    // When the orchestrator LLM CHOSE a coordinator (mission_coordinator / *_planner),
+    // it has decided this request needs multiple steps. Honor that decision: give the
+    // coordinator a source-disciplined frame that lets it decompose + build + review,
+    // NOT the research-only "gather and STOP and report" rewrite below (which flattens
+    // the whole thing to research and blocks any build phase — audit 1740fb0c). This is
+    // keyed only on the agent the LLM picked — no message keyword-matching, no forced
+    // routing; the multi-step decision stays the model's.
+    const chosenAgent = typeof originalArgs["agentName"] === "string" ? String(originalArgs["agentName"]) : "";
+    if (
+      (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate")
+      && /(?:coordinator|planner)/i.test(chosenAgent)
+    ) {
+      nextArgs = stripUntrustedDelegationContext({
+        ...originalArgs,
+        task: buildSourceSensitiveCoordinatorTask(userMessage),
+      });
+      recoveryReason = "source_sensitive_coordinator_frame";
+    } else {
+      const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
+      // Preserve the model's build spec before the research-first rewrite discards it.
+      if (BUILDER_AGENT_ROLE_RE.test(chosenAgent) && originalTask.trim().length >= 200) {
+        onDiscardedBuilderTask?.(originalTask.trim());
+      }
+      const focus = deriveSourceSensitiveDelegationFocus(originalTask, userMessage);
+      nextArgs = withDefaultResearchFallbackAgents(
+        stripUntrustedDelegationContext({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) }),
+        guidance,
+      );
+    }
   } else if (toolCall.name === "parallel_delegate") {
     const rawTasks = Array.isArray(originalArgs["tasks"])
       ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
@@ -1001,11 +1014,11 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
 
   if (!nextArgs || stableSerialize(nextArgs) === stableSerialize(originalArgs)) return;
   toolCall.arguments = nextArgs;
-  guardrailEvents.push({ type: "delegation_required", details: `${toolCall.name}:source_sensitive_original_request_enforced` });
+  guardrailEvents.push({ type: "delegation_required", details: `${toolCall.name}:${recoveryReason}` });
   logAudit("tool_call_recovered", {
     originalTool: toolCall.name,
     rewrittenTo: toolCall.name,
-    reason: "source_sensitive_original_request_enforced",
+    reason: recoveryReason,
   }, { sessionId, severity: "info" });
 }
 
@@ -1043,6 +1056,7 @@ function collapseExcessDirectDelegationsInResponse(
   toolCalls: LLMResponse["tool_calls"],
   sessionId: string,
   guardrailEvents: Array<{ type: string; details: string }>,
+  onDiscardedBuilderTask?: (spec: string) => void,
 ): LLMResponse["tool_calls"] {
   let seenDirectDelegation = false;
   const filtered: LLMResponse["tool_calls"] = [];
@@ -1057,6 +1071,17 @@ function collapseExcessDirectDelegationsInResponse(
       seenDirectDelegation = true;
       filtered.push(toolCall);
       continue;
+    }
+
+    // When the dropped surplus delegation is a BUILD task to a builder agent, its task
+    // text is the model's own build spec — preserve it for the corrective build instead
+    // of losing it (audit c2f76a00: the model emitted research + a detailed content_writer
+    // quiz-app spec in one response; the spec was dropped here and the eventual corrective
+    // build, running on generic facts only, shipped a 4KB welcome page).
+    const droppedAgent = typeof toolCall.arguments?.["agentName"] === "string" ? String(toolCall.arguments["agentName"]) : "";
+    const droppedTask = typeof toolCall.arguments?.["task"] === "string" ? String(toolCall.arguments["task"]) : "";
+    if (BUILDER_AGENT_ROLE_RE.test(droppedAgent) && droppedTask.trim().length >= 200) {
+      onDiscardedBuilderTask?.(droppedTask.trim());
     }
 
     logAudit("tool_call_blocked", {
@@ -2452,7 +2477,7 @@ function findRecentDelegateEvidence(
     const rawEvidence = evidenceMatch
       ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
       : content.trim();
-    const evidence = extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence;
+    const evidence = stripLeadingDelegateLabelEcho(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence);
     const delegationOutcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : "";
@@ -2517,7 +2542,7 @@ export function stripLeadingReasoningPreamble(text: string): string {
 // Repetition-collapse helpers live in ./text-dedup.js so the runtime relay/final
 // sanitizer AND the sub-agent passthrough share one guard. Re-exported here to keep
 // the existing public import surface (tests, callers) stable.
-export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections };
+export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines };
 
 /**
  * Decide whether a turn's single delegation already produced a complete, presentable
@@ -2530,6 +2555,18 @@ export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections };
  * tagged a long deliverable ("present … VERBATIM"), and the evidence is a real structured
  * answer (headings/table/bullets) that is not a raw dump / provider error / scaffold.
  */
+/**
+ * True when a deliverable contains an UNTERMINATED fenced code block — an odd number
+ * of ``` fences means one was opened and never closed, i.e. the text was cut off
+ * mid-code (the slow local model hit its token/time budget while emitting a large
+ * code blob). Such a deliverable is broken (truncated HTML/JS/etc.) and must never be
+ * relayed as finished. Purely structural — counts fence lines, no language/lexicon.
+ */
+export function looksLikeTruncatedCodeDeliverable(text: string): boolean {
+  const fences = (text.match(/^[ \t]*```/gm) ?? []).length;
+  return fences % 2 === 1;
+}
+
 export function extractSingleRelayableDeliverable(
   toolResultMessages: readonly { role: string; content?: string | null }[],
   turnDelegationCount: number,
@@ -2553,6 +2590,15 @@ export function extractSingleRelayableDeliverable(
   // behaviour that worked before this relay shortcut existed (audit 9fd16384: the slow
   // model looped "Microphone Selection: …" 17× and the relay shipped it as-is).
   if (looksLikeDegenerateRepetition(evidence)) return null;
+  // A truncated/unterminated code-blob deliverable must NOT be relayed verbatim. A
+  // research agent that improvises a build (audit 61683c52: a single "research THEN
+  // build a WebApp" task sent to researcher, which authored a 14 KB single-file HTML
+  // blob and ran out of budget at the soft deadline) emits an OPENED ``` fence that
+  // never closes — the answer literally ends mid-string. Shipping that as a "finished
+  // deliverable" both gives the user broken code AND suppresses the auto-build net
+  // that would route the build to a real builder. Unbalanced fences = cut off =
+  // not shippable; structural + language-independent (no lexicon).
+  if (looksLikeTruncatedCodeDeliverable(evidence)) return null;
   if (REASONING_PREAMBLE_STARTERS.test(evidence)) return null; // couldn't clean the lead-in
   if (
     looksLikeRawToolEvidenceDump(evidence)
@@ -2962,12 +3008,42 @@ export function classifyPostOrchestrationDisposition(
       return "failure";
     }
 
+    if (/^Ephemeral agent .+ failed\./m.test(text)) {
+      return "failure";
+    }
+
+    // run_workflow results carry the runtime's own structured verdict — trust
+    // it over text heuristics. The completed-workflow instruction preamble
+    // contains phrases like "marks as incomplete" that the failure-keyword
+    // sniff below misreads as failure evidence (audit 802d4791: a fully
+    // successful sourced_presentation run was branded "[DELEGATION FAILED]",
+    // the model re-ran the entire 10-minute job, and the warden then
+    // force-stopped two SUCCESSFUL runs as "consecutive failures").
+    if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
+      if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
+        return "failure";
+      }
+      const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
+      const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
+      const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
+      const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
+      if (fullyExecuted || artifactCount > 0) {
+        if (CONTINUATION_CUE_RE.test(observedEvidence)) {
+          sawContinuationCue = true;
+        }
+        continue;
+      }
+    }
+
     if (
       interruptedPartialWithoutUsableEvidence
       || !delegationSucceeded
       || delegationOutcome === "failure"
       || (!delegationPartial && terminalState && terminalState !== "completed")
-      || (!delegationPartial && looksLikeDelegatedFailureEvidence(text))
+      // Sniff only the delegated EVIDENCE, never the harness-built instruction
+      // preamble above it — preamble wording must not be classifiable as a
+      // failure signal (same defect class as the workflow case above).
+      || (!delegationPartial && looksLikeDelegatedFailureEvidence(observedEvidence))
     ) {
       return "failure";
     }
@@ -3124,9 +3200,18 @@ export function buildModelVisibleToolResult(
     const successEvidence = isLongDeliverable
       ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), getConfig().agents.performance.maxDelegatedResultChars)
       : evidence;
-    const importantNote = isLongDeliverable
-      ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
-      : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names. Do NOT add markers like '(truncated)' or '(abgeschnitten)'.";
+    // A runtime-authored research slice returns gathered EVIDENCE, never the
+    // user-facing deliverable — the orchestrator must synthesize the actual
+    // answer from it. The VERBATIM instruction (and with it the
+    // single-deliverable relay shortcut, which keys on that exact string)
+    // shipped a component-spec research dump as the entire answer to a device
+    // DESIGN request, skipping synthesis completely (audit b5107ae4).
+    const researchSlice = metadata?.["researchSlice"] === true;
+    const importantNote = researchSlice
+      ? "IMPORTANT: This is gathered research EVIDENCE, not the final deliverable. Write the answer to the user's ORIGINAL request yourself, in the user's language, covering EVERY part of what they asked. Ground every concrete spec, name, number, and recommendation in this evidence and keep the source URLs for the claims you use. Do NOT paste this report verbatim and do NOT invent values that are not in the evidence."
+      : isLongDeliverable
+        ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
+        : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names. Do NOT add markers like '(truncated)' or '(abgeschnitten)'.";
     const parts = [
       `Delegated result from ${agentName} — TASK COMPLETED.`,
       attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
@@ -3171,11 +3256,25 @@ export function buildModelVisibleToolResult(
     const stepCount = Number(metadata?.["stepCount"] ?? 1);
     const executedSteps = Number(metadata?.["executedSteps"] ?? stepCount);
     const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
+    // Artifact-bearing completion: the deliverables are FILES attached to the
+    // turn, not chat text. Without this pivot the model relays the document
+    // body verbatim and ships its truncated head as the final answer
+    // (audit 2445da2e: 1600 chars of the paper's TOC ending in "…" while the
+    // real paper/deck/notes sat in the attachments).
+    const workflowArtifactPaths = Array.isArray(metadata?.["artifacts"])
+      ? (metadata["artifacts"] as Array<Record<string, unknown>>)
+        .map((artifact) => typeof artifact["outputPath"] === "string" ? String(artifact["outputPath"]) : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : ""))
+        .filter(Boolean)
+      : [];
+    const completedInstruction = workflowArtifactPaths.length > 0
+      ? "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n"
+        + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
+      : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
     return [
       `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
       blocked
         ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
-        : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.",
+        : completedInstruction,
       `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
     ].join("\n");
   }
@@ -3433,6 +3532,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // research?" (regression: session 3a35cff0).
   const { priorUserRequest, priorAssistantAnswer } = extractPriorTurnContext(session.getHistory(), userMessage);
   const researchSubject = buildEffectiveResearchSubject(userMessage, priorUserRequest, priorAssistantAnswer);
+  // The turn's deliverable intent, classified ONCE. Every finalization gate below
+  // (auto-build, relay suppression, false-completion nets) consumes this single
+  // object — N gates independently re-classifying the same message is exactly how
+  // the two-autopilot conflicts of v0.30/v0.31 happened.
+  const deliverableIntent = classifyDeliverableIntent(userMessage);
+  // The model's OWN build spec, rescued when the research-first rewrite or the
+  // surplus-delegation filter discards a builder delegation. The corrective build
+  // uses it as the blueprint instead of running on generic facts alone (audit
+  // c2f76a00: a detailed quiz-app spec was dropped → 4KB welcome page got built).
+  let stashedBuilderTaskSpec: string | null = null;
+  const stashDiscardedBuilderTask = (spec: string): void => {
+    if (!stashedBuilderTaskSpec) stashedBuilderTaskSpec = spec;
+  };
   const priorEvidenceFollowUpPrompt = reusePriorDelegateEvidenceForFollowUp && priorDelegateEvidenceForFollowUp
     ? buildPriorEvidenceFollowUpPrompt(priorDelegateEvidenceForFollowUp)
     : "";
@@ -3528,6 +3640,158 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
   let _forcedSynthesisFired = false;
+  // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
+  // finalization paths — normal-stop and forced-terminal).
+  let qaCorrectiveBuildUsed = false;
+
+  // One bounded corrective build for the completion QA gate: when the user asked to BUILD an
+  // artifact and none was produced, delegate to the right builder, record the assistant+tool
+  // pair so the artifact surfaces as a download, and synthesize a confirmation. Returns the
+  // confirmation message if a real artifact was produced, else null (caller keeps its draft).
+  const runCorrectiveBuild = async (buildContext: string): Promise<string | null> => {
+    if (qaCorrectiveBuildUsed || signal.aborted) return null;
+    qaCorrectiveBuildUsed = true;
+    const builderAgent = deliverableIntent.builder;
+    logAudit("guardrail_flagged", {
+      type: "final_qa_corrective_build_delegated",
+      builderAgent,
+      contextChars: buildContext.length,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    opts.onStatus?.({ phase: "guardrail", message: "Der QA-Check verlangt das angeforderte Artefakt — ich lasse es jetzt vom passenden Spezialisten erstellen.", iteration: iterationCount });
+    const buildTask = builderAgent === "content_writer"
+      ? ("BUILD TASK — produce the requested deliverable NOW from the verified findings/context. "
+        + "Do NOT re-research. Use ONLY facts present in the context or shared findings; cite source URLs where relevant. "
+        + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
+        + userMessage)
+      // The app task mandates ONE self-contained FILE but INCREMENTAL writes: telling the
+      // slow model to fit the whole app in one write_file call made it emit the entire app
+      // as a single giant tool-call argument, blow the completion cap mid-arguments, and
+      // fail with "path is required" — it then fell back to generate_website and shipped a
+      // 4KB static welcome page instead of the app (audit c2f76a00). generate_website is
+      // explicitly forbidden here: it renders markdown into static pages, never an app.
+      : ("BUILD TASK — build the requested app NOW as ONE REAL FILE in the workspace, not as a prose answer. "
+        + "Use ONLY facts/content present in the context or shared findings; do NOT re-research. "
+        + "Build a SINGLE self-contained index.html: ALL CSS in an inline <style>, ALL JavaScript in an inline <script>, data (questions, items, etc.) embedded INLINE so it runs from the file with no server, and every control functional. Do NOT create or reference separate ./app.js or ./styles.css files — a multi-file build that runs out of time leaves a BROKEN app, whereas one self-contained file always runs. "
+        + "WRITE THE FILE IN BOUNDED CHUNKS: first write_file with mode:\"create\" for the head + styles + the opening of the body, then 2-4 write_file calls with mode:\"append\" (same path) for the markup, the data, and the script — each call SMALL enough to finish well within your output budget. NEVER try to emit the entire app in ONE write_file call (the arguments get cut off mid-generation and the write fails), and do NOT use generate_website — it produces a static markdown page, not an interactive app. "
+        + "START WRITING IMMEDIATELY: your FIRST tool call is the write_file mode:\"create\" for index.html — no exploratory reads first. If the context above has no usable facts or data, generate representative sample content from your own knowledge of the topic and build with that. "
+        + "NEVER paste the app's code into your reply — that is a failure. Your final reply is a SHORT summary plus the entry file path (index.html).\n\nOriginal request:\n"
+        + userMessage);
+    // Blueprint first (the model's own rescued spec — features, data shape, UI), then the
+    // gathered facts. Without the spec the builder only knows the one-line user request.
+    const buildContextWithSpec = [
+      stashedBuilderTaskSpec ? `BUILD SPEC (written by the orchestrator earlier this turn — implement THIS):\n${stashedBuilderTaskSpec.slice(0, 2_500)}` : "",
+      buildContext.trim(),
+    ].filter(Boolean).join("\n\n");
+    let buildResultMetadata: Record<string, unknown> | undefined;
+    let buildResultOutput = "";
+    try {
+      const buildResult = await executeTool("delegate_to_agent", {
+        agentName: builderAgent,
+        task: buildTask,
+        ...(buildContextWithSpec ? { context: buildContextWithSpec.slice(0, 10_000) } : {}),
+        // Operator Stop means "build now from what we gathered," so this one bounded
+        // build delegation runs even when the stop latch is set (audit 453a263e).
+      }, { ...toolContext, allowDelegationAfterOperatorStop: true });
+      _turnDelegationCount += 1;
+      buildResultMetadata = buildResult.metadata;
+      buildResultOutput = buildResult.success ? buildResult.output : "";
+      // executeTool here runs OUTSIDE the main tool loop; record a well-formed assistant+tool
+      // pair so the built artifact surfaces as a clickable attachment (collectTurnArtifactAttachments
+      // only reads tool-role history) and history stays valid (audit 65f46046).
+      const buildCallId = `qabuild_${Date.now().toString(36)}`;
+      session.addMessage({
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: buildCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: builderAgent, task: "BUILD TASK (final-QA corrective build)" }) } }],
+      });
+      session.addMessage({
+        role: "tool",
+        content: (buildResult.success ? buildResult.output : (buildResult.error?.trim() ? `Error: ${buildResult.error}` : buildResult.output)).slice(0, 4_000),
+        tool_call_id: buildCallId,
+        metadata: buildResult.metadata,
+      });
+    } catch (err) {
+      log.warn({ err, sessionId: session.id }, "Final-QA corrective build delegation failed");
+    }
+    const builtArtifacts: Array<Record<string, unknown>> = [];
+    if (buildResultMetadata) extractArtifactsFromMetadata(buildResultMetadata, builtArtifacts, new Set<string>());
+    if (builtArtifacts.length === 0) {
+      for (const a of collectTurnArtifactAttachments(session)) builtArtifacts.push(a);
+    }
+    let harvestedIncomplete = false;
+    if (builtArtifacts.length === 0) {
+      // HARVEST (audit 0ac7d3fc): the builder "succeeded" but wrote no file — its timeout
+      // synthesis pasted the complete app (15KB <!DOCTYPE html>) into its RESULT text
+      // instead. The content exists; writing it to a file is deterministic work the
+      // runtime does itself rather than failing the whole turn over a missed tool call.
+      const inlineDoc = extractInlineHtmlDocument(buildResultOutput);
+      if (inlineDoc) {
+        harvestedIncomplete = !looksLikeCompleteHtmlDocument(inlineDoc);
+        try {
+          const harvestWrite = await executeTool("write_file", { path: "app/index.html", content: inlineDoc }, toolContext);
+          if (harvestWrite.success) {
+            const harvestCallId = `qaharvest_${Date.now().toString(36)}`;
+            session.addMessage({
+              role: "assistant",
+              content: "",
+              tool_calls: [{ id: harvestCallId, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "app/index.html", note: "harvested from builder's inline draft" }) } }],
+            });
+            session.addMessage({
+              role: "tool",
+              content: harvestWrite.output.slice(0, 1_000),
+              tool_call_id: harvestCallId,
+              metadata: harvestWrite.metadata,
+            });
+            if (harvestWrite.metadata) extractArtifactsFromMetadata(harvestWrite.metadata, builtArtifacts, new Set<string>());
+            logAudit("guardrail_flagged", {
+              type: "final_qa_corrective_build_harvested_inline",
+              chars: inlineDoc.length,
+              complete: !harvestedIncomplete,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          }
+        } catch (err) {
+          log.warn({ err, sessionId: session.id }, "Harvest write of builder's inline document failed");
+        }
+      }
+    }
+    if (builtArtifacts.length === 0) return null;
+    const paths = builtArtifacts
+      .map((a) => (typeof a["relativePath"] === "string" && a["relativePath"] ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "")))
+      .filter((p): p is string => Boolean(p));
+    // Ground the confirmation in the ARTIFACT FACTS so it cannot advertise features the
+    // build never produced (audit c2f76a00: the actual artifact was a 4KB single static
+    // page, but the confirmation promised an exam simulator, flashcards, and progress
+    // tracking — a false-completion one level down: the file exists but isn't the app).
+    const artifactFacts = builtArtifacts
+      .map((a) => {
+        const name = (typeof a["relativePath"] === "string" && a["relativePath"]) ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "artifact");
+        const size = typeof a["size"] === "number" ? ` (${Math.max(1, Math.round(Number(a["size"]) / 1024))} KB)` : "";
+        return `${String(name)}${String(size)}`;
+      })
+      .join(", ");
+    const synth = await forceSynthesis(
+      session, provider, signal,
+      "The requested artifact has just been BUILT by the build specialist and is ALREADY attached to this message as a downloadable file. "
+      + `ARTIFACT FACTS (the only ground truth about what was built): ${artifactFacts}. `
+      + (harvestedIncomplete ? "IMPORTANT: the file was recovered from a draft that was CUT OFF before the end — tell the user plainly that the app file is incomplete (it may not run yet) and offer to finish it. " : "")
+      + "Confirm to the user in the SAME language as their request: state that the file was created, give its path(s) and size, and summarize ONLY what the builder's own report explicitly says it implemented — do NOT advertise features (quiz, simulator, flashcards, tracking, …) that the report does not state were built, and if the artifact is small or minimal, say so plainly and offer to extend it. "
+      + "Do NOT dump raw evidence and do NOT paste the file's HTML/CSS/JS code or any fenced code block — the file is attached, so inlining its code is redundant and confusing.",
+    );
+    // Belt-and-suspenders: the slow model sometimes ignores the no-code instruction and
+    // pastes a large (often fabricated, non-matching) code block — see audit ce8e2128 where
+    // the chat dumped a different inline HTML than the built file. The artifact is already a
+    // download, so a big fenced block in the confirmation is always noise; strip it.
+    const synthDeFenced = synth ? stripLargeCodeFences(synth) : null;
+    const candidate = synthDeFenced ? sanitizeUserFacingAssistantResponse(synthDeFenced, iterationCount) : null;
+    logAudit("guardrail_flagged", {
+      type: "final_qa_corrective_build_synthesized",
+      artifacts: paths.length,
+      synthesized: Boolean(candidate && candidate.trim().length >= 80),
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    return candidate && candidate.trim().length >= 80
+      ? candidate
+      : `Die angeforderte Datei wurde erstellt: ${paths.join(", ")}.\n\n(The requested file was built: ${paths.join(", ")}.)`;
+  };
   // G33: Collected share_finding texts for trajectory cache write
   const sharedFindingsThisTurn: string[] = [];
   // Phase 3: skills injected into the planner this turn — outcomes recorded at
@@ -3602,6 +3866,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // is correct: there is nothing useful to synthesize from. Allow ONE such
   // recovery retry per turn (Fix 3).
   let synthesisRequiredRecoveryRetryUsed = false;
+  let synthesisRequiredBuilderBuildUsed = false;
   const isWorkflowExecutionTurn = session.channel === "workflow" || (opts._workflowExecutionStack?.length ?? 0) > 0;
   const workflowCatalogSuppressedForMaintenance = Boolean(
     initialDynamicGuidance?.swarmMaintenanceSensitive || recentWorkflowAuthoringMaintenanceContext,
@@ -3650,6 +3915,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let workflowCatalogAttemptedThisTurn = workflowCatalogAttemptedInPriorTurn;
   let workflowExecutionRetryUsed = false;
   let workflowExecutionForceUsed = false;
+  let workflowRedirectUsed = false;
   let workflowExecutionCorrectionRetryUsed = false;
   let workflowExecutionEnforcementPrompt = "";
   let approvedRunCandidateRetryUsed = false;
@@ -4204,7 +4470,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
     llmResponse.tool_calls = collapseDuplicateToolCallsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
-    llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents, stashDiscardedBuilderTask);
     llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     const sourceSensitiveOriginalRequestEnforcementActive = Boolean(
@@ -4214,7 +4480,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     );
     if (sourceSensitiveOriginalRequestEnforcementActive) {
       for (const tc of llmResponse.tool_calls) {
-        enforceSourceSensitiveOriginalRequestOnToolCall(tc, researchSubject, initialDynamicGuidance, session.id, guardrailEvents);
+        enforceSourceSensitiveOriginalRequestOnToolCall(tc, researchSubject, initialDynamicGuidance, session.id, guardrailEvents, stashDiscardedBuilderTask);
       }
     }
     if (requiredResearchFallbackRoute) {
@@ -4375,6 +4641,47 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // the curated workflow IS the deliverable path, not a re-research loop (audit
     // b8e3b68f: the force fired but was rejected by the synthesis-required guard).
     let forcedWorkflowRunThisIteration = false;
+
+    // WRONG-WORKFLOW REDIRECT: the model can run a DIFFERENT workflow than the one the
+    // user's request high-precision-matches. detectWorkflowCatalogSignal.strongestMatch
+    // is derived from the USER MESSAGE via author-declared catalogTriggers (action-verb
+    // gated) — the authoritative "this request IS this workflow" signal — whereas the
+    // model often biases its OWN search_workflows query and then runs the top-ranked
+    // result (audit e0cf4ca8: a reveal.js-presentation request with verified images and
+    // sources biased the query to "deep research paper" and ran deep_research_packet,
+    // which builds a paper-only dossier with NO deck/slides/notes). When the model runs a
+    // run_workflow whose name differs from the strong catalog match, rewrite it to the
+    // catalog match (once; the existing force-release path covers a later failure).
+    const catalogPinnedMatch = workflowCatalogSignal.reason === "catalog_match"
+      ? workflowCatalogSignal.strongestMatch
+      : undefined;
+    if (catalogPinnedMatch && !workflowRedirectUsed && !workflowRunCompletedThisTurn) {
+      const runWorkflowCall = llmResponse.tool_calls.find((toolCall) => toolCall.name === "run_workflow");
+      const chosenWorkflowName = runWorkflowCall
+        ? String((runWorkflowCall.arguments as Record<string, unknown>)?.["name"] ?? "").trim()
+        : "";
+      if (runWorkflowCall && chosenWorkflowName && chosenWorkflowName !== catalogPinnedMatch.name) {
+        workflowRedirectUsed = true;
+        forcedWorkflowRunThisIteration = true;
+        const redirectArgs = runWorkflowCall.arguments as Record<string, unknown>;
+        redirectArgs["name"] = catalogPinnedMatch.name;
+        redirectArgs["workflowType"] = catalogPinnedMatch.workflowType;
+        if (!redirectArgs["context"]) redirectArgs["context"] = userMessage;
+        // The dropped params targeted the other workflow; the catalog-matched job derives
+        // its topic from the user request carried in `context` (same as the force path).
+        delete redirectArgs["params"];
+        guardrailEvents.push({ type: "workflow_required", details: "workflow_redirected_to_catalog_match" });
+        logAudit("tool_call_recovered", {
+          originalTool: "run_workflow",
+          rewrittenTo: "run_workflow",
+          reason: "workflow_redirected_to_catalog_match",
+          from: chosenWorkflowName,
+          workflowName: catalogPinnedMatch.name,
+          workflowType: catalogPinnedMatch.workflowType,
+        }, { sessionId: session.id, severity: "warn" });
+      }
+    }
+
     const nonWorkflowOrchestrationRequested = llmResponse.tool_calls.some((toolCall) =>
       // Use the broader swarm-state set, not just ORCHESTRATION_LAUNCHER_TOOL_NAMES, so
       // swarm_delegate counts too: otherwise the model bypasses the workflow-run force by
@@ -4418,7 +4725,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // rewrite (which also can't rely on the model's compliance). The original user
       // request rides along as `context` so the scene's agents see the real topic
       // even though the scene template only carries default param placeholders.
-      const forcedWorkflowMatch = workflowSearchMatches[0];
+      // Prefer the high-precision catalog-trigger match (from the user message) over the
+      // model's own search ranking, which it can bias with a slanted query.
+      const forcedWorkflowMatch = catalogPinnedMatch ?? workflowSearchMatches[0];
       if (!workflowExecutionForceUsed && forcedWorkflowMatch) {
         workflowExecutionForceUsed = true;
         forcedWorkflowRunThisIteration = true;
@@ -4515,6 +4824,26 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const junkPriorDelegation = synthesisRequiredRecoveryRetryUsed
         ? null
         : findRecentJunkDelegationResult(collapsedHistory);
+      // Builder-build exception (audit a438ef4a): right after research, the model itself
+      // delegated the BUILD step (content_writer with its own spec) — exactly what the
+      // user asked for — and this gate rejected it, only for the corrective-build net to
+      // re-do the same build minutes later. When the turn wants an artifact and none has
+      // been produced yet, the model's OWN builder delegation is the plan working, not a
+      // tool-call loop: let it through once per turn.
+      const builderRoleRe = /^(?:content_writer|web_coder|backend_coder)$/i;
+      const isBuilderDelegationCall = (toolCall: typeof llmResponse.tool_calls[number]): boolean => {
+        if (builderRoleRe.test(toolCall.name)) return true; // agent-name-as-tool shape, rewritten downstream
+        if (/^(?:delegate_to_agent|swarm_delegate)$/.test(toolCall.name)) {
+          const agentName = typeof toolCall.arguments?.["agentName"] === "string" ? String(toolCall.arguments["agentName"]) : "";
+          return builderRoleRe.test(agentName);
+        }
+        return false;
+      };
+      const builderBuildCall = !synthesisRequiredBuilderBuildUsed
+        && (deliverableIntent.isAppBuild || deliverableIntent.wantsArtifact)
+        && collectTurnArtifactAttachments(session).length === 0
+        ? llmResponse.tool_calls.find(isBuilderDelegationCall)
+        : undefined;
       if (junkPriorDelegation) {
         synthesisRequiredRecoveryRetryUsed = true;
         logAudit("guardrail_flagged", {
@@ -4535,6 +4864,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           "Synthesis-required guardrail granted one recovery retry — prior delegation produced sub-floor evidence",
         );
         // Fall through to normal tool-call processing this iteration.
+      } else if (builderBuildCall) {
+        synthesisRequiredBuilderBuildUsed = true;
+        logAudit("guardrail_flagged", {
+          type: "synthesis_required_builder_build_allowed",
+          toolName: builderBuildCall.name,
+          agentName: typeof builderBuildCall.arguments?.["agentName"] === "string" ? builderBuildCall.arguments["agentName"] : builderBuildCall.name,
+        }, { sessionId: session.id, severity: "info" });
+        guardrailEvents.push({ type: "synthesis_required", details: "builder_build_allowed" });
+        log.info(
+          { sessionId: session.id, toolName: builderBuildCall.name },
+          "Synthesis-required guardrail allowed the model's own builder delegation — artifact wanted and none built yet",
+        );
+        // Fall through to normal tool-call processing this iteration.
       } else {
         logAudit("guardrail_flagged", {
           type: "tool_calls_after_synthesis_required",
@@ -4544,8 +4886,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         guardrailEvents.push({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" });
         _forcedSynthesisFired = true;
         terminalFinishReason = "synthesis_required_tool_call_rejected";
-        terminalSynthesisInstruction =
-          "RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer in the user's language that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverifiziert — Recherche unvollständig] when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.";
+        // When the orchestration ALREADY produced attached artifacts, the work is
+        // DONE — telling the model "research incomplete, write a partial answer"
+        // made it relay the deliverable's truncated head as the final message
+        // (audit 2445da2e: a completed 4/4-step workflow ended as 1600 chars of
+        // the paper's TOC ending in "…"). Pivot to a completion summary.
+        const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
+        terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
+          ? "THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer in the user's language that: (1) states what was completed, (2) lists every attached artifact path with a one-line description ("
+            + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
+            + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
+          : "RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer in the user's language that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverifiziert — Recherche unvollständig] when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.";
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
         break;
@@ -4573,7 +4924,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // tool_calls in the same response.  Only treat the turn as complete when there
     // are literally zero tool calls to process.
     if (llmResponse.tool_calls.length === 0) {
-      const rawResponse = llmResponse.content ?? "";
+      let rawResponse = llmResponse.content ?? "";
       // Trust-the-LLM never-empty guarantee. The routing guardrails below each
       // nudge the model ONCE to use an orchestration/workflow tool. If it still
       // answers tool-free after that nudge, we no longer dead-end the turn into
@@ -4801,6 +5152,37 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }
       }
 
+      // Normal-completion regurgitation guard. The model answered tool-free and
+      // the draft is a near-verbatim copy of an EARLIER assistant answer, while
+      // NOTHING was delegated/built this turn — shipping it re-prints the prior
+      // turn's deliverable as if the user's NEW request had been carried out.
+      // The terminal-path guard below only covers blocked/synthesis/max-iteration
+      // finishes, so a clean `stop` slipped straight through (audit c97a9907 turn 3:
+      // "jetzt erstelle mir die webapp-lernplattform" → 0 tool calls, the entire
+      // prior curriculum re-pasted verbatim). High-bar duplicate detector + the
+      // "no orchestration this turn" gate keep this off legitimate direct answers.
+      if (
+        !autoResearchAnswer
+        && !currentTurnHasExecutableOrchestration
+        && looksLikeRegurgitatedPriorAnswer(rawResponse, session.getHistory())
+      ) {
+        logAudit("guardrail_flagged", {
+          type: "tool_free_regurgitated_prior_answer",
+          finishReason: llmResponse.finishReason,
+          draftLength: rawResponse.length,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        const honest = await forceSynthesis(
+          session, provider, signal,
+          "Your draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out — but this turn neither produced nor delegated anything. Do NOT ship that stale copy. "
+          + "Reply briefly and honestly IN THE USER'S LANGUAGE: state that the requested deliverable was NOT built or changed in this turn, and offer to delegate it now to the right specialist (for an HTML/web learning app, content_writer or web_coder). "
+          + "Do NOT re-paste the earlier answer, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
+        );
+        const honestClean = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
+        rawResponse = (honestClean && honestClean.trim().length > 0 && !looksLikeRegurgitatedPriorAnswer(honestClean, session.getHistory()))
+          ? honestClean
+          : "Ich habe die Lernplattform/das Artefakt in diesem Schritt nicht tatsächlich gebaut und gebe die vorherige Antwort nicht erneut als erledigt aus. Bestätige kurz, dann delegiere ich den Bau an den passenden Spezialisten (content_writer bzw. web_coder).\n\nI did not actually build the platform/artifact this turn and won't re-post the previous answer as if it were done. Confirm and I'll delegate the build to the right specialist (content_writer / web_coder).";
+      }
+
       // Output guardrail scan
       const outputScan = scanOutput(rawResponse);
       const effectiveToolIterations = promisedContinuationWithoutTools && unresolvedDelegatedActionInHistory
@@ -4927,25 +5309,31 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // eingefügt … URLs überprüft"). The three AND-conditions keep real builds (an artifact
       // was produced → skipped) and report-only turns (no claim → skipped) untouched;
       // topic-agnostic. Runs for ALL backends, not only source-sensitive ones.
+      const artifactClaimUnbacked = claimsArtifactWrittenButUnproduced(finalResponse);
+      const staleArtifactReplay = !artifactClaimUnbacked
+        && looksLikeRegurgitatedPriorAnswer(finalResponse, session.getHistory());
       if (
-        looksLikeArtifactMutationRequest(userMessage)
+        deliverableIntent.wantsArtifactMutation
         && collectTurnArtifactAttachments(session).length === 0
-        && claimsArtifactWrittenButUnproduced(finalResponse)
+        && (artifactClaimUnbacked || staleArtifactReplay)
       ) {
         logAudit("guardrail_flagged", {
           type: "artifact_completion_claim_unbacked_suppressed",
+          reason: staleArtifactReplay ? "stale_prior_answer_replayed_on_failed_build" : "false_completion_claim",
           finishReason: terminalFinishReason,
           answerLength: finalResponse.length,
         }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         const honest = await forceSynthesis(
           session, provider, signal,
-          "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed. "
+          "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — OR it re-pastes an earlier turn's answer almost verbatim — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed and do NOT re-post a previous turn's answer as if this turn's request were done. "
           + "Reply briefly and honestly IN THE USER'S LANGUAGE: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.",
         );
         const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
-        finalResponse = (candidate && candidate.trim().length >= 40 && !claimsArtifactWrittenButUnproduced(candidate))
+        finalResponse = (candidate && candidate.trim().length >= 40
+          && !claimsArtifactWrittenButUnproduced(candidate)
+          && !looksLikeRegurgitatedPriorAnswer(candidate, session.getHistory()))
           ? candidate
-          : "Ich habe die Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige bitte, dann lasse ich den Inhalts-Spezialisten die Präsentation jetzt damit erstellen bzw. aktualisieren.\n\nI did **not** create or modify the file in this turn — I only gathered the requested information. Confirm and I'll have the content specialist build or update the presentation now.";
+          : "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.\n\nI did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.";
       }
 
       // Risk-gated auto-verify QA gate: for high-stakes turns that recorded a
@@ -5023,10 +5411,132 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }
       }
 
+      // Completion QA gate (normal-stop path): the user asked to BUILD an interactive/served
+      // app, the model finished a turn (finishReason stop) describing a CONCEPT, but no real
+      // artifact was produced → run ONE corrective build and ship the built app instead of the
+      // description. Scoped to app/served deliverables (web_coder/backend_coder) so plain
+      // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
+      // qaCorrectiveBuildUsed latch. (The forced-terminal path has its own build gate above.)
+      if (
+        (getConfig().orchestration?.finalResponseQaGate ?? true)
+        && !qaCorrectiveBuildUsed
+        && !signal.aborted
+        && deliverableIntent.wantsArtifact
+        && deliverableIntent.isAppBuild
+        && collectTurnArtifactAttachments(session).length === 0
+      ) {
+        const factsCtx = initialDynamicGuidance?.sourceSensitive
+          ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
+          : "";
+        // A source-sensitive build still needs gathered facts (don't build from nothing).
+        if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
+          const built = await runCorrectiveBuild(factsCtx);
+          if (built) {
+            finalResponse = built;
+            guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" });
+          }
+        }
+      }
+
       if (!outputScan.safe && outputScan.redacted) {
         finalResponse = outputScan.redacted;
         guardrailEvents.push({ type: "output_redacted", details: (outputScan.detectedTypes ?? []).join(", ") });
         logAudit("output_redacted", { types: outputScan.detectedTypes }, { sessionId: session.id, severity: "warn" });
+      }
+
+      // Zero-work fabrication guard (audit 45d5bae9): a turn that requested NO tool
+      // calls and produced NO artifact cannot have built or served anything — yet the
+      // slow model sometimes "answers" a build request by FABRICATING a finished
+      // deliverable outright: inventing a serve URL (/api/app/3807), a workspace
+      // download link, or an "Ich habe die Plattform gebaut" claim, with zero work
+      // behind it. This is the worst false-completion (no draft, no file, a link that
+      // 404s). Detect it deterministically (no model call) off the conclusive signals —
+      // a tool-only link in a zero-tool turn, or a completion claim in a zero-tool/
+      // zero-artifact turn — and REPLACE the fabrication (its content is invented, so
+      // nothing is worth preserving) with an honest offer to build it for real. Runs
+      // before the build-timeout banner so the two never double-process.
+      // Third trigger shape (audit 3b7d59a8): the model HAND-WRITES the whole app as an
+      // inline HTML document with zero tools — usually truncated by the completion cap
+      // (11.4KB, finishReason "length", dead mid-CSS). The runaway_inline_artifact flag
+      // is observability-only; THIS is where it gets rerouted into a real build. Scoped
+      // to app/artifact-shaped requests so a full-document answer to a genuine "show me
+      // the HTML inline" ask in hybrid mode isn't converted against the user's wishes.
+      const inlinedAppDocumentInsteadOfBuild =
+        (deliverableIntent.isAppBuild || deliverableIntent.wantsArtifact)
+        && looksLikeInlinedAppDocument(finalResponse);
+      if (
+        toolCallsRequested === 0
+        && collectTurnArtifactAttachments(session).length === 0
+        && (looksLikeFabricatedToolDeliveryLink(finalResponse)
+          || claimsArtifactWrittenButUnproduced(finalResponse)
+          || inlinedAppDocumentInsteadOfBuild)
+      ) {
+        logAudit("guardrail_flagged", {
+          type: "fabricated_zero_work_delivery_suppressed",
+          hadFabricatedLink: looksLikeFabricatedToolDeliveryLink(finalResponse),
+          hadInlinedAppDocument: inlinedAppDocumentInsteadOfBuild,
+          answerLength: finalResponse.length,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_zero_work_delivery_suppressed" });
+        // The model FABRICATED a finished deliverable with zero work — which means it
+        // decided this turn should PRODUCE an artifact (the LLM's own build judgement).
+        // Honor that intent: actually build it now (one bounded corrective build) instead
+        // of only denying. This turns a useless "I built nothing, confirm" first-turn answer
+        // into the real app (audit 13523d73: a fresh "brauche eine Lernplattform … Fragekatalog
+        // … multiple-choice" turn fabricated "…erstellt" with 0 tools — the user wants the app,
+        // not a denial). Keys off the model's own fabrication, so no brittle need-verb routing
+        // keyword is required. Gated behind finalResponseQaGate + the qaCorrectiveBuildUsed latch
+        // (runCorrectiveBuild self-guards re-entry); a source-sensitive turn still needs gathered
+        // facts. Falls back to the honest message only when the build produces nothing.
+        let fabricationCorrectiveBuild: string | null = null;
+        let fabricationBuildAttempted = false;
+        if (
+          (getConfig().orchestration?.finalResponseQaGate ?? true)
+          && !qaCorrectiveBuildUsed
+          && !signal.aborted
+        ) {
+          const factsCtx = initialDynamicGuidance?.sourceSensitive
+            ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
+            : "";
+          if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
+            fabricationBuildAttempted = true;
+            fabricationCorrectiveBuild = await runCorrectiveBuild(factsCtx);
+          }
+        }
+        if (fabricationCorrectiveBuild) {
+          finalResponse = fabricationCorrectiveBuild;
+          guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_zero_work_corrective_build" });
+        } else if (fabricationBuildAttempted || qaCorrectiveBuildUsed) {
+          // A real build WAS attempted and produced no file — saying "no tools ran" here
+          // would be its own false statement (audit 0ac7d3fc: the denial claimed nothing
+          // ran while a 6-minute corrective build had just failed). Be accurate.
+          finalResponse = "Der Bau der angeforderten Datei wurde gestartet, ist aber **fehlgeschlagen** — es wurde keine fertige Datei erstellt, daher existiert ein oben genannter Link/Inhalt nicht. Bestätige kurz, dann starte ich einen neuen Bauversuch.\n\nThe build of the requested file was started but **failed** — no finished file was produced, so any link or deliverable named above does not exist. Confirm and I'll retry the build now.";
+        } else {
+          finalResponse = "Ich habe in diesem Schritt **nichts** gebaut — es wurden keine Tools ausgeführt und keine Datei oder App erstellt, daher existiert ein oben genannter Link/Inhalt nicht. Bestätige kurz, dann lasse ich den passenden Spezialisten die angeforderte Lösung jetzt **wirklich** bauen.\n\nI did **not** build anything in this turn — no tools ran and no file or app was created, so any link or deliverable named above does not exist. Confirm and I'll have the right specialist actually build it now.";
+        }
+      }
+
+      // Last-line-of-defense honesty net (audit 52c23af8 turn 2): the false-completion
+      // guard above tries to rewrite via forceSynthesis, but on the slow local model that
+      // re-synthesis can itself re-emit a claiming draft AND the corrected answer was
+      // observed getting bypassed before send. This final, deterministic check runs AFTER
+      // every synthesis + redaction pass and makes NO model call (the model is already
+      // timing out), so it always lands: if the answer STILL asserts it created/updated an
+      // artifact for an artifact-mutation request that produced NO file this turn, prepend
+      // an honest banner so the user is never told a file was built when none was. Content
+      // is preserved (the inline draft is usually correct) — only the false framing is corrected.
+      if (
+        deliverableIntent.wantsArtifactMutation
+        && collectTurnArtifactAttachments(session).length === 0
+        && claimsArtifactWrittenButUnproduced(finalResponse)
+      ) {
+        finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Build lief in eine Zeitüberschreitung). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build timed out). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
+          + finalResponse;
+        guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_completion_claim_unbacked_bannered" });
+        logAudit("guardrail_flagged", {
+          type: "artifact_completion_claim_unbacked_bannered",
+          answerLength: finalResponse.length,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       }
 
       persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
@@ -5878,7 +6388,26 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // instead of paying for a SECOND full synthesis pass on the slow local model (which
         // also caused coordinator↔assistant divergence). Strictly gated to the clean
         // single-deliverable case; everything else still synthesizes below.
-        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true)
+        // A single-deliverable relay is a shortcut for a COMPLETE deliverable. But when the
+        // user asked to BUILD an interactive app / served app (web_coder/backend_coder class)
+        // and NO real artifact was produced this turn, the relayed text is research + a
+        // *concept*, not the built app — relaying it ships "here's how it could work" and
+        // short-circuits the auto-build backstop entirely (audit 9ad34ef9: a "WebApp" turn
+        // relayed the researcher's fact-sheet + concept and never built anything). Suppress the
+        // relay in that case so the turn falls through to autoBuildAfterResearch, which builds
+        // the actual app file. Scoped to app/served deliverables so plain reports/decks (which
+        // are fine inline) still relay.
+        const turnNeedsUnbuiltAppArtifact =
+          deliverableIntent.wantsArtifact
+          && deliverableIntent.isAppBuild
+          && collectTurnArtifactAttachments(session).length === 0;
+        if (turnNeedsUnbuiltAppArtifact) {
+          logAudit("guardrail_flagged", {
+            type: "single_deliverable_relay_suppressed_unbuilt_app",
+            builderAgent: deliverableIntent.builder,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }
+        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
           ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
           : null;
         if (relayDeliverable) {
@@ -5924,13 +6453,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             performance,
           };
         }
+        // Artifact-aware variant: when the orchestration produced attached files,
+        // the final answer is a completion SUMMARY (paths + what was built), never
+        // a relay of the documents' contents (audit 2445da2e).
+        const synthesisArtifacts = collectTurnArtifactAttachments(session);
         session.addMessage({
           role: "system",
-          content:
-            "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks. " +
-            "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. " +
-            "Do NOT delegate again for the same information — the evidence is already collected. " +
-            "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
+          content: synthesisArtifacts.length > 0
+            ? "[SYNTHESIS REQUIRED] The orchestration is COMPLETE and its deliverables are attached to this message as files ("
+              + synthesisArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
+              + "). Write a SHORT final answer in the user's language: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again."
+            : "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks. " +
+              "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. " +
+              "Do NOT delegate again for the same information — the evidence is already collected. " +
+              "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.",
         });
       } else if (disposition === "continue") {
         _consecutiveDelegationFailures = 0;
@@ -6248,89 +6784,42 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
     ? terminalSharedFactsEvidence.evidence
     : null;
-  if (
-    (getConfig().orchestration?.autoBuildAfterResearch ?? true)
-    && initialDynamicGuidance?.sourceSensitive
-    && curatedForBuild
-    && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 3
-    && looksLikeArtifactCreationRequest(userMessage)
-    && collectTurnArtifactAttachments(session).length === 0
-    && !signal.aborted
-  ) {
-    logAudit("guardrail_flagged", {
-      type: "source_sensitive_auto_build_delegated",
-      curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
-    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-    opts.onStatus?.({ phase: "guardrail", message: "Die Recherche ist abgeschlossen — ich lasse jetzt den Inhalts-Spezialisten das Artefakt aus den belegten Fakten erstellen.", iteration: iterationCount });
-    const buildTask = "BUILD TASK — the research is already done; produce the requested deliverable NOW from the verified findings in the context. "
-      + "Do NOT re-research. Use ONLY facts present in the context; cite the source URLs where relevant. "
-      + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
-      + userMessage;
-    let buildResultMetadata: Record<string, unknown> | undefined;
-    try {
-      const buildResult = await executeTool("delegate_to_agent", {
-        agentName: "content_writer",
-        task: buildTask,
-        context: curatedForBuild.slice(0, 8_000),
-        // Operator Stop means "build now from what we gathered," so this one bounded
-        // build delegation runs even when the stop latch is set (audit 453a263e).
-      }, { ...toolContext, allowDelegationAfterOperatorStop: true });
-      _turnDelegationCount += 1;
-      buildResultMetadata = buildResult.metadata;
-      // executeTool here runs OUTSIDE the main tool loop, which is what normally
-      // appends the result (with artifacts metadata) to history. Record the auto-build
-      // delegation as a well-formed assistant+tool pair so (a) the built artifact
-      // surfaces as a clickable attachment on the final message (persistAssistantTurnState
-      // → collectTurnArtifactAttachments only reads tool-role history) and (b) history
-      // stays valid for synthesis and the next turn (audit 65f46046: the deck WAS built
-      // but the success message never shipped because the stale history walk found no
-      // artifact and the failure backstop won instead).
-      const autoBuildCallId = `autobuild_${Date.now().toString(36)}`;
-      session.addMessage({
-        role: "assistant",
-        content: "",
-        tool_calls: [{
-          id: autoBuildCallId,
-          type: "function",
-          function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: "content_writer", task: "BUILD TASK (auto-build after research)" }) },
-        }],
-      });
-      session.addMessage({
-        role: "tool",
-        content: (buildResult.success ? buildResult.output : (buildResult.error?.trim() ? `Error: ${buildResult.error}` : buildResult.output)).slice(0, 4_000),
-        tool_call_id: autoBuildCallId,
-        metadata: buildResult.metadata,
-      });
-    } catch (err) {
-      log.warn({ err, sessionId: session.id }, "Auto-build-after-research delegation failed");
-    }
-    // Detect the built artifact from the delegation RETURN metadata first (authoritative;
-    // see above), falling back to the history walk.
-    const builtArtifacts: Array<Record<string, unknown>> = [];
-    if (buildResultMetadata) extractArtifactsFromMetadata(buildResultMetadata, builtArtifacts, new Set<string>());
-    if (builtArtifacts.length === 0) {
-      for (const a of collectTurnArtifactAttachments(session)) builtArtifacts.push(a);
-    }
-    if (builtArtifacts.length > 0) {
-      const paths = builtArtifacts
-        .map((a) => (typeof a["relativePath"] === "string" && a["relativePath"] ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "")))
-        .filter((p): p is string => Boolean(p));
-      const synth = await forceSynthesis(
-        session,
-        provider,
-        signal,
-        "The requested artifact has just been BUILT by the content specialist from the verified findings. "
-        + "Confirm to the user in the SAME language as their request: state that the file was created, give its path(s), and a 2–3 sentence summary of what it contains and the sources used. Do NOT dump raw evidence.",
-      );
-      const candidate = synth ? sanitizeUserFacingAssistantResponse(synth, iterationCount) : null;
-      autoBuildFinalMsg = candidate && candidate.trim().length >= 80
-        ? candidate
-        : `Die angeforderte Datei wurde aus den belegten Fakten erstellt: ${paths.join(", ")}.\n\n(The requested file was built from the verified findings: ${paths.join(", ")}.)`;
-      logAudit("guardrail_flagged", {
-        type: "source_sensitive_auto_build_synthesized",
-        artifacts: paths.length,
-        synthesized: Boolean(candidate && candidate.trim().length >= 80),
-      }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+  // Completion QA gate (terminal path): the user asked to CREATE an artifact and NONE was
+  // produced this turn → run ONE corrective build before shipping (via the shared
+  // runCorrectiveBuild helper, which picks web_coder / backend_coder / content_writer by
+  // deliverable type). A source-sensitive turn must have gathered ≥3 curated facts first
+  // (never build from nothing and risk fabrication); a non-source-sensitive build request
+  // can build directly. Degrades to the honest research-gathered fallback below if the build
+  // still produces nothing.
+  {
+    const turnWantsArtifact = deliverableIntent.wantsArtifact || deliverableIntent.wantsComposedGuide;
+    const isAppBuild = deliverableIntent.isAppBuild;
+    // Best facts to build from: curated shared facts if present, else the assembled research
+    // answer this turn produced (the delegated researcher's result, full of sourced facts).
+    // This matters because an architect-fallback EPHEMERAL researcher's auto-shared findings
+    // do NOT land in the parent's shared-facts store (audit 9b5196ad: bestAutoMatchScore 0.25
+    // → ephemeral → terminalSharedFactsEvidence empty → the build gate was starved and the app
+    // never got built), yet the facts ARE in the assembled answer. Build from that.
+    const buildContext = curatedForBuild
+      ?? (evidenceBackstopMsg && !looksLikeRawToolEvidenceDump(evidenceBackstopMsg) ? evidenceBackstopMsg : "");
+    const hasResearchBackedFacts = !!curatedForBuild && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 3;
+    // An interactive/served APP MUST end as a real file. Build it whenever we have ANY non-dump
+    // context to build from — do NOT require curated shared facts (gated by finalResponseQaGate).
+    // A non-app source-sensitive deliverable (sourced doc/deck) keeps the conservative
+    // gather-facts-first rule under autoBuildAfterResearch to avoid fabricating a sourced
+    // document. Non-source-sensitive artifact requests build directly.
+    const buildEnabled = initialDynamicGuidance?.sourceSensitive
+      ? (isAppBuild
+          ? ((getConfig().orchestration?.finalResponseQaGate ?? true) && buildContext.trim().length > 0)
+          : ((getConfig().orchestration?.autoBuildAfterResearch ?? true) && hasResearchBackedFacts))
+      : (getConfig().orchestration?.finalResponseQaGate ?? true);
+    if (
+      buildEnabled
+      && turnWantsArtifact
+      && collectTurnArtifactAttachments(session).length === 0
+      && !signal.aborted
+    ) {
+      autoBuildFinalMsg = await runCorrectiveBuild(buildContext);
     }
   }
 
@@ -6352,7 +6841,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       dumpLength: presentableFinalMsg.length,
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-    presentableFinalMsg = buildResearchGatheredFallback(curated, looksLikeArtifactCreationRequest(userMessage));
+    presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
   }
   // Fabricated-inline-artifact guard: on a source-sensitive artifact-creation turn that
   // produced NO real artifact (the build was stopped/blocked/never ran), the model
@@ -6366,7 +6855,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   if (
     !autoBuildFinalMsg
     && initialDynamicGuidance?.sourceSensitive
-    && looksLikeArtifactCreationRequest(userMessage)
+    && deliverableIntent.wantsArtifact
     && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 1
     && collectTurnArtifactAttachments(session).length === 0
     && looksLikeInlinedArtifactFabrication(presentableFinalMsg)

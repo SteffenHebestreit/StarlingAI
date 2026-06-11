@@ -3987,24 +3987,32 @@ onUnmounted(() => {
 .chat-composer__textarea {
   width: 100%;
   resize: none;
-  border-radius: 1.5rem;
-  border: 1px solid rgba(168, 85, 247, 0.2);
-  background: rgba(31, 41, 55, 0.58);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-1), inset 0 1px 0 var(--highlight-top);
   padding: 0.78rem 1rem;
   color: rgb(243 244 246);
   font-size: 0.92rem;
   line-height: 1.42;
-  transition: border-color 0.2s ease, background 0.2s ease, padding 0.2s ease, min-height 0.2s ease;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.25s ease, padding 0.2s ease, min-height 0.2s ease;
 }
 
 .chat-composer__textarea:hover {
-  border-color: rgba(168, 85, 247, 0.38);
+  border-color: var(--hairline-strong);
 }
 
 .chat-composer__textarea:focus {
   outline: none;
-  border-color: rgba(168, 85, 247, 0.62);
-  background: rgba(31, 41, 55, 0.76);
+  border-color: var(--hairline-strong);
+  background: var(--surface-2);
+  /* Soft accent halo — the "console is listening" cue. */
+  box-shadow: var(--shadow-1),
+              inset 0 1px 0 var(--highlight-top),
+              0 0 0 3px rgba(var(--accent-purple), 0.14),
+              0 0 24px rgba(var(--accent-purple), 0.18);
 }
 
 .chat-composer__textarea:disabled {

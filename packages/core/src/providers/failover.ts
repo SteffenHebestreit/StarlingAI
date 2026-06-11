@@ -1,6 +1,6 @@
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { LMStudioProvider, type ChatProvider, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamChunk } from "./lmstudio.js";
+import { type ChatProvider, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamChunk } from "./lmstudio.js";
 
 const log = childLogger("provider:failover");
 
@@ -231,9 +231,11 @@ export class FailoverChatProvider implements ChatProvider {
     return this.bindings.map((binding) => {
       const key = providerKey(binding.endpoint);
       const state = this.state.get(key) ?? { consecutiveFailures: 0, circuitOpenUntil: null };
-      const providerSnapshot: OpenAICompatibleProviderRuntimeSnapshot | undefined = binding.provider instanceof LMStudioProvider
-        ? binding.provider.getRuntimeSnapshot()
-        : undefined;
+      // Duck-typed: LMStudioProvider and AnthropicProvider both expose the
+      // same runtime-snapshot shape; other ChatProviders fall back to isHealthy().
+      const snapshotCapable = binding.provider as { getRuntimeSnapshot?: () => OpenAICompatibleProviderRuntimeSnapshot };
+      const providerSnapshot: OpenAICompatibleProviderRuntimeSnapshot | undefined =
+        typeof snapshotCapable.getRuntimeSnapshot === "function" ? snapshotCapable.getRuntimeSnapshot() : undefined;
       const circuitOpen = Boolean(state.circuitOpenUntil && state.circuitOpenUntil > now);
 
       return {

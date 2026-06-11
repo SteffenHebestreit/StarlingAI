@@ -14,6 +14,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export interface RequestContext {
   /** Authenticated user (JWT subject / username) that owns this tool execution. */
   userId?: string;
+  /**
+   * Workspace visibility zone of the executing agent. "generated" confines file
+   * tools to the working zones (generated/ + uploads/); "full" / undefined means
+   * the whole workspace (runtime internals, core agents, gateway endpoints).
+   */
+  workspaceScope?: "full" | "generated";
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -31,4 +37,9 @@ export function currentRequestContext(): RequestContext | undefined {
 /** Convenience: the user that owns the active tool execution, if any. */
 export function currentUserId(): string | undefined {
   return storage.getStore()?.userId;
+}
+
+/** Convenience: the workspace zone of the active tool execution, if any. */
+export function currentWorkspaceScope(): "full" | "generated" | undefined {
+  return storage.getStore()?.workspaceScope;
 }

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   collapseRepeatedMarkdownSections,
+  collapseRepeatedLines,
   extractSingleRelayableDeliverable,
+  looksLikeTruncatedCodeDeliverable,
   filterForcedOrchestrationTools,
   looksLikeDegenerateRepetition,
+  looksLikeDegenerateLineRepetition,
   stripLeadingReasoningPreamble,
 } from "../agent/runtime.js";
 import { fetchResultIsNonProductive, tryExtractLatestCompleteDeliverable } from "../agent/sub-agent.js";
@@ -114,6 +117,31 @@ describe("cost center 2 — single-deliverable relay", () => {
     expect(relayed!.startsWith("## Recommendation")).toBe(true);
     expect(relayed).not.toContain("Let me synthesize");
   });
+
+  // audit 61683c52: a single "research THEN build a WebApp" task went to researcher,
+  // which improvised the build, ran out of budget at the soft deadline, and emitted a
+  // structured answer that OPENS a ```html fence and is cut off mid-string (the closing
+  // fence never arrives). That truncated blob must NOT be relayed as a finished deliverable.
+  it("does not relay a deliverable with an unterminated code fence (truncated build)", () => {
+    const truncated = [
+      "## CPSA-F Lernplattform",
+      "Hier ist die WebApp basierend auf dem iSAQB Curriculum 2025.1.",
+      "- Themenbasierte Fragen",
+      "- Prüfungsmodus",
+      "## Code der WebApp",
+      "```html",
+      "<!DOCTYPE html><html><head><title>CPSA-F</title></head><body>",
+      "<script>const questionBank = [{ text: \"Was ist das primäre Ziel?\",",
+      "explanation: \"Das Singleton-Muster begrenzt die Instanziierung einer Klasse auf",
+    ].join("\n");
+    expect(extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(truncated) }], 1)).toBeNull();
+  });
+
+  it("looksLikeTruncatedCodeDeliverable: odd fences truncated, even fences complete", () => {
+    expect(looksLikeTruncatedCodeDeliverable("intro\n```js\ncode here\n```\ndone")).toBe(false);
+    expect(looksLikeTruncatedCodeDeliverable("intro\n```html\n<div>cut off mid build")).toBe(true);
+    expect(looksLikeTruncatedCodeDeliverable("no code at all, just prose")).toBe(false);
+  });
 });
 
 describe("degenerate-repetition guard (audit 9fd16384)", () => {
@@ -148,6 +176,57 @@ describe("degenerate-repetition guard (audit 9fd16384)", () => {
 
   it("still relays a clean single deliverable", () => {
     expect(extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(DELIVERABLE) }], 1)).not.toBeNull();
+  });
+});
+
+describe("line-level degenerate-repetition guard (audit 9a6a8c7f turn 2)", () => {
+  // The slow 35B answered "Überarbeite den Plan" directly and looped one bold
+  // paragraph ~15× with NO intervening headings — so the section-level detector saw
+  // one unique block and shipped 11 KB of "… Nein." verbatim.
+  function pdmLoop(repeats: number): string {
+    const head = [
+      "### 1. Mikrofon-Spezifikation (IM69D120V01XTSA1)",
+      "- **Typ:** Digitales MEMS-Mikrofon (PDM).",
+      "- **Schnittstelle:** PDM (1-Bit, 1,54 MHz typisch).",
+      "",
+      "### 2. Kritische Änderung",
+      "Da das Mikrofon ein digitales PDM-Signal ausgibt, brauchst du keinen externen Sigma-Delta-ADC mehr.",
+      "",
+    ];
+    const loop: string[] = [];
+    for (let i = 0; i < repeats; i++) {
+      loop.push("**Korrekte Komponente:** Der **TI PCM1808** ist ein ADC. Für PDM brauchst du einen **PDM-zu-I2S-Converter** wie den **TI PCM1864**? Nein.");
+      loop.push("");
+      loop.push("**Realistische Lösung:** Der **ESP32-S3** hat keine PDM-Eingänge. Du musst externe PDM-Decoder verwenden, z.B. den **TI PCM1808** nicht. Stattdessen: **MAX11300**? Nein.");
+      loop.push("");
+    }
+    return [...head, ...loop].join("\n");
+  }
+
+  it("detects a paragraph-level loop the section detector misses", () => {
+    expect(looksLikeDegenerateLineRepetition(pdmLoop(15))).toBe(true);
+    expect(looksLikeDegenerateRepetition(pdmLoop(15))).toBe(true);
+  });
+
+  it("collapses the loop to one copy of each unique paragraph and is no longer degenerate", () => {
+    const collapsed = collapseRepeatedMarkdownSections(pdmLoop(15));
+    expect((collapsed.match(/Korrekte Komponente/g) ?? []).length).toBe(1);
+    expect((collapsed.match(/Realistische Lösung/g) ?? []).length).toBe(1);
+    expect(collapsed).toContain("Mikrofon-Spezifikation"); // genuine head content survives
+    expect(collapsed.length).toBeLessThan(pdmLoop(15).length / 3);
+    expect(looksLikeDegenerateRepetition(collapsed)).toBe(false);
+  });
+
+  it("leaves a clean, non-repeating answer untouched", () => {
+    const clean = [
+      "## Recommendation",
+      "Switch to the digital PDM microphone and drop the external ADC entirely.",
+      "The ESP32-S3 reads PDM directly on its I2S peripheral, so the BOM loses one chip.",
+      "Power stays on the BQ25895; the waterproofing and enclosure plan are unchanged.",
+      "Next: confirm the PDM clock budget and update the KiCad net for the I2S pins.",
+    ].join("\n");
+    expect(looksLikeDegenerateLineRepetition(clean)).toBe(false);
+    expect(collapseRepeatedLines(clean)).toBe(clean);
   });
 });
 

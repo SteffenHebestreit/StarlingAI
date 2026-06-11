@@ -48,6 +48,12 @@ computer-remote-build.log
 # Agent-mutable runtime overrides (local state)
 workspace/runtime/runtime.overrides.json
 
+# Agent-generated run output (decks, papers, fetched images, …). Tools root all
+# generated artifacts under workspace/generated/; older builds also left a stray
+# workspace/presentation/. None of it is source — keep it out of the repo.
+workspace/generated/
+workspace/presentation/
+
 # Test artifacts
 packages/core/tmp/
 # Some tests write process.cwd()-relative paths; when vitest runs from

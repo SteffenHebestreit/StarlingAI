@@ -13,7 +13,8 @@ import { Buffer } from "node:buffer";
 import { dirname, extname, join, posix } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { inlineLocalImagesInHtml } from "./inline-images.js";
 
 const log = childLogger("tool:website");
 
@@ -283,7 +284,7 @@ interface SlideSpec {
 registerTool({
   name: "generate_presentation",
   description:
-    "Generate a self-contained reveal.js HTML slide deck in the workspace from a STRUCTURED slide list — author each slide's content as compact Markdown (or bullet points), and the tool assembles the full reveal.js HTML, theme, and navigation. Use this for any 'create an HTML presentation / slide deck / reveal.js deck' deliverable instead of emitting a whole HTML document via write_file (which the model cannot reliably produce in one call). Each slide: {title?, content? (markdown), bullets?[], notes?}. Markdown in `content` is fully supported (headings, lists, links, emphasis, tables, and `![alt](url)` images). Produces index.html with a preview-ready artifactKind='website' response.",
+    "Generate a self-contained reveal.js HTML slide deck in the workspace from a STRUCTURED slide list — author each slide's content as compact Markdown (or bullet points), and the tool assembles the full reveal.js HTML, theme, and navigation. Use this for any 'create an HTML presentation / slide deck / reveal.js deck' deliverable instead of emitting a whole HTML document via write_file (which the model cannot reliably produce in one call). Each slide: {title?, content? (markdown), bullets?[], notes?}. Markdown in `content` is fully supported (headings, lists, links, emphasis, tables, and `![alt](url)` images). Co-located LOCAL images (e.g. `![](images/x.jpg)`) are inlined into the HTML as data URIs so the deck is self-contained and its pictures render in the preview and in a downloaded copy. Also writes a per-slide `notes.md` (the on-slide points plus each slide's speaker notes) next to index.html and surfaces it as a second artifact. Produces index.html with a preview-ready artifactKind='website' response.",
   embeddingDescription:
     "generate presentation slide deck reveal.js reveal html slides talk keynote pitch deck Präsentation Foliensatz erstellen HTML-Präsentation create slideshow",
   parameters: {
@@ -342,7 +343,6 @@ registerTool({
     if (!title) return fail("title is required");
 
     const theme = normalizeRevealTheme(args["theme"]);
-    if (!theme) return fail(`theme must be one of: ${REVEAL_THEMES.join(", ")}`);
 
     const slides = normalizeSlides(args["slides"]);
     if (!slides.ok) return fail(slides.error);
@@ -353,7 +353,10 @@ registerTool({
 
     let resolvedDir: { resolved: string; relativePath: string };
     try {
-      resolvedDir = resolvePathWithinWorkspace(outputDir, ctx.workspacePath);
+      // Root the deck under generated/ (same place generate_document puts the
+      // paper) so the deck, its images, the notes, and the paper all co-locate
+      // in ONE folder instead of a stray workspace/<dir> beside generated/.
+      resolvedDir = resolveWorkspaceWritePath(outputDir, ctx.workspacePath);
     } catch {
       return fail("outputDir must resolve inside the workspace");
     }
@@ -374,23 +377,49 @@ registerTool({
       }
     }
 
-    const html = renderRevealDeck({ title, slides: slides.slides, theme, revealVersion, transition });
+    const rawHtml = renderRevealDeck({ title, slides: slides.slides, theme, revealVersion, transition });
+    // Inline co-located local images so the deck is self-contained and renders
+    // under the query-param workspace preview (which can't resolve relative srcs).
+    const html = await inlineLocalImagesInHtml(rawHtml, resolvedDir.resolved);
     try {
       await writeFile(indexPath, html, "utf8");
     } catch (err) {
       return fail(`Failed to write index.html: ${String(err)}`);
     }
 
+    // Emit the per-slide details + speaker notes as a standalone Markdown
+    // deliverable (the "Speaker-Notes" the user expects), surfaced as a nested
+    // artifact so it appears alongside the deck with no extra model call.
+    const extraArtifacts: Array<Record<string, unknown>> = [];
+    const notesMd = buildDeckNotesMarkdown(title, slides.slides);
+    const notesRelative = posix.join(resolvedDir.relativePath.replace(/\\/g, "/"), "notes.md");
+    try {
+      await writeFile(join(resolvedDir.resolved, "notes.md"), notesMd, "utf8");
+      extraArtifacts.push({
+        artifactKind: "document",
+        outputPath: notesRelative,
+        filename: "notes.md",
+        format: "markdown",
+        title: `${title} — Speaker Notes`,
+        size: Buffer.byteLength(notesMd, "utf8"),
+        contentType: "text/markdown; charset=utf-8",
+        previewMode: "markdown",
+        sourceTool: "generate_presentation",
+      });
+    } catch (err) {
+      log.warn({ err }, "generate_presentation could not write notes.md sidecar");
+    }
+
     const indexRelative = posix.join(resolvedDir.relativePath.replace(/\\/g, "/"), "index.html");
     const totalBytes = Buffer.byteLength(html, "utf8");
     log.info(
-      { outputDir: resolvedDir.relativePath, slides: slides.slides.length, theme, revealVersion, bytes: totalBytes },
+      { outputDir: resolvedDir.relativePath, slides: slides.slides.length, theme, revealVersion, bytes: totalBytes, notes: extraArtifacts.length > 0 },
       "generate_presentation produced reveal.js deck",
     );
 
     return {
       success: true,
-      output: `reveal.js deck with ${slides.slides.length} slide(s) written to ${resolvedDir.relativePath}. Open ${indexRelative}.`,
+      output: `reveal.js deck with ${slides.slides.length} slide(s) written to ${resolvedDir.relativePath}. Open ${indexRelative}.${extraArtifacts.length > 0 ? ` Per-slide speaker notes written to ${notesRelative}.` : ""}`,
       metadata: {
         artifactKind: "website",
         outputPath: resolvedDir.relativePath,
@@ -401,14 +430,32 @@ registerTool({
         totalBytes,
         previewMode: "website",
         contentType: "text/html; charset=utf-8",
+        ...(extraArtifacts.length > 0 ? { artifacts: extraArtifacts } : {}),
       },
     };
   },
 });
 
-function normalizeRevealTheme(value: unknown): RevealTheme | null {
+// Map a few common guesses the slow model emits onto real reveal.js themes.
+const REVEAL_THEME_SYNONYMS: Record<string, RevealTheme> = {
+  dark: "black",
+  light: "white",
+  default: "black",
+  bright: "white",
+  modern: "simple",
+  minimal: "simple",
+  professional: "simple",
+  corporate: "simple",
+};
+
+// Never fail the whole deck build over a theme name. The slow model frequently guesses a
+// non-reveal theme ("dark", "modern", …); rejecting it cost a full build attempt + a long
+// provider stall (audit 3c46a4d4: `theme:"dark"` hard-failed before the deck ever rendered).
+// Map known synonyms, otherwise fall back to a sensible default.
+function normalizeRevealTheme(value: unknown): RevealTheme {
   const v = String(value ?? "white").trim().toLowerCase();
-  return (REVEAL_THEMES as readonly string[]).includes(v) ? (v as RevealTheme) : null;
+  if ((REVEAL_THEMES as readonly string[]).includes(v)) return v as RevealTheme;
+  return REVEAL_THEME_SYNONYMS[v] ?? "black";
 }
 
 function normalizeRevealVersion(value: unknown): string {
@@ -427,18 +474,43 @@ function normalizeTransition(value: unknown): string {
 // dominant way the slow local model corrupts a serialized slides/bullets string (audit
 // 39953ed9: a notes value `… „Elbflorenz" rührt …` left the closing typographic quote as a
 // raw " that terminated the string early and broke JSON.parse, so coercion failed and the
-// build fell back to hand-written HTML). Single left-to-right pass tracking string state: a
-// " is a real delimiter only when the next non-space char is structural (:,}]) or EOF —
-// otherwise it is content and gets escaped. Used ONLY as a fallback after a normal
-// JSON.parse fails, so valid JSON is never touched.
+// build fell back to hand-written HTML). Single left-to-right pass that tracks both string
+// state AND structural position (object key vs value), because the delimiter rule differs:
+//   - a KEY string closes only before ':'   (e.g. `"content":`)
+//   - a VALUE string closes only before ',' '}' ']' or EOF — a value is NEVER followed by
+//     a colon, so a `"` inside a value that precedes ':' is a stray inner quote and must be
+//     escaped. The earlier version treated ':' as a delimiter regardless of position, so a
+//     German quotation like `**Begriff „Zwinger":**` inside a notes value was read as a key
+//     terminator → the repaired JSON was still broken → JSON.parse failed again → every deck
+//     retry bounced on "slides must be an array" (audit 3c46a4d4: presentation + speaker
+//     notes never built, the step burned its whole budget on identical rejections).
+// Used ONLY as a fallback after a normal JSON.parse fails, so valid JSON is never touched.
 function repairUnescapedInnerQuotes(s: string): string {
   let out = "";
   let inStr = false;
+  let curStringIsKey = false;
+  const stack: Array<"obj" | "arr"> = [];
+  let expectKey = false; // meaningful when top of stack is "obj": next opened string is a key
   for (let i = 0; i < s.length; i++) {
     const c = s[i]!;
     if (!inStr) {
       out += c;
-      if (c === '"') inStr = true;
+      if (c === '"') {
+        inStr = true;
+        curStringIsKey = stack[stack.length - 1] === "obj" && expectKey;
+      } else if (c === "{") {
+        stack.push("obj");
+        expectKey = true;
+      } else if (c === "[") {
+        stack.push("arr");
+        expectKey = false;
+      } else if (c === "}" || c === "]") {
+        stack.pop();
+      } else if (c === ":") {
+        expectKey = false; // the value of the current key follows
+      } else if (c === ",") {
+        expectKey = stack[stack.length - 1] === "obj"; // next object entry starts with a key
+      }
       continue;
     }
     if (c === "\\") { // copy an escape sequence verbatim (e.g. \" \\ \n)
@@ -450,7 +522,10 @@ function repairUnescapedInnerQuotes(s: string): string {
       let j = i + 1;
       while (j < s.length && (s[j] === " " || s[j] === "\t" || s[j] === "\n" || s[j] === "\r")) j++;
       const next = j < s.length ? s[j]! : "";
-      if (next === "" || next === ":" || next === "," || next === "}" || next === "]") {
+      const isDelimiter = curStringIsKey
+        ? next === ":"
+        : next === "" || next === "," || next === "}" || next === "]";
+      if (isDelimiter) {
         out += '"'; // genuine closing delimiter
         inStr = false;
       } else {
@@ -504,6 +579,24 @@ function normalizeSlides(value: unknown): { ok: true; slides: SlideSpec[] } | { 
     normalized.push({ title, content, bullets, notes, format });
   }
   return { ok: true, slides: normalized };
+}
+
+/** Per-slide details + speaker notes as a standalone Markdown deliverable, built
+ * from the same slide data that renders the deck (so it never drifts and costs
+ * the model no extra time). */
+function buildDeckNotesMarkdown(title: string, slides: SlideSpec[]): string {
+  const lines: string[] = [`# ${title} — Speaker Notes`, ""];
+  slides.forEach((slide, i) => {
+    lines.push(`## Slide ${i + 1}${slide.title ? `: ${slide.title}` : ""}`, "");
+    if (slide.bullets && slide.bullets.length > 0) {
+      for (const b of slide.bullets) lines.push(`- ${b}`);
+      lines.push("");
+    } else if (slide.content) {
+      lines.push(slide.content.trim(), "");
+    }
+    if (slide.notes) lines.push(`**Speaker notes:** ${slide.notes.trim()}`, "");
+  });
+  return lines.join("\n").trimEnd() + "\n";
 }
 
 function renderSlideSection(slide: SlideSpec): string {

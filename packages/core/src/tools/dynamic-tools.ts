@@ -1,9 +1,11 @@
 /**
  * Dynamic Tools — hot-deploy manager for self-developed tools.
  *
- * Approved tools are persisted as JSON bundles in .starlingai/dynamic_tools/.
- * A file watcher detects new/changed/removed tools and registers or
- * unregisters them in the live tool registry at runtime — no rebuild required.
+ * Approved tools are persisted as JSON bundles in the workspace `tools/` zone
+ * (next to the other self-authored zones agents/, jobs/, scenes/; legacy
+ * .starlingai/dynamic_tools bundles are migrated forward once). A file watcher
+ * detects new/changed/removed tools and registers or unregisters them in the
+ * live tool registry at runtime — no rebuild required.
  *
  * All dynamic tools:
  *   - Are prefixed with selfdev__ (e.g. selfdev__csv_to_json)
@@ -15,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlink
 import { join, basename } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, unregisterTool, type ToolHandler, type ToolContext, type ToolResult } from "./registry.js";
+import { SWARM_TOOLS_SUBDIR } from "./workspace-path.js";
 import { executeDynamicTool } from "./dynamic-tool-executor.js";
 import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -75,11 +78,56 @@ const _runtimeStats = new Map<string, _CallStats>(); // keyed by bare tool name
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const DYNAMIC_TOOLS_DIR = join(
+/**
+ * Pre-zoning storage location (… /.starlingai/dynamic_tools). Bundles found here
+ * are migrated once into the workspace tools/ zone so the swarm's self-authored
+ * artifacts (agents/, jobs/, scenes/, tools/) all live in the workspace.
+ */
+const LEGACY_DYNAMIC_TOOLS_DIR = join(
     process.env["SAI_DATA_DIR"] ?? (process.env["HOME"] ?? "/data"),
     ".starlingai",
     "dynamic_tools",
 );
+
+let _migratedLegacyDir = false;
+
+/**
+ * Swarm-invented tool bundles live in the workspace `tools/` zone, next to the
+ * other self-authored config zones. Resolved lazily (config is not loaded at
+ * module init) and kept out of the config-shard sweep via
+ * NON_CONFIG_WORKSPACE_ZONES. Scope-confined agents cannot write here —
+ * write_file roots everything into generated/ — so bundles only arrive through
+ * the tool-development pipeline (sandbox-tested + approved).
+ */
+function dynamicToolsDir(): string {
+    const dir = join(getConfig().workspacePath, SWARM_TOOLS_SUBDIR);
+    if (!_migratedLegacyDir) {
+        _migratedLegacyDir = true;
+        migrateLegacyDynamicTools(dir);
+    }
+    return dir;
+}
+
+function migrateLegacyDynamicTools(targetDir: string): void {
+    try {
+        if (!existsSync(LEGACY_DYNAMIC_TOOLS_DIR)) return;
+        const legacyFiles = readdirSync(LEGACY_DYNAMIC_TOOLS_DIR).filter((f) => f.endsWith(".json"));
+        if (legacyFiles.length === 0) return;
+        mkdirSync(targetDir, { recursive: true });
+        let moved = 0;
+        for (const file of legacyFiles) {
+            const target = join(targetDir, file);
+            if (existsSync(target)) continue; // workspace copy wins
+            writeFileSync(target, readFileSync(join(LEGACY_DYNAMIC_TOOLS_DIR, file), "utf-8"), "utf-8");
+            moved += 1;
+        }
+        if (moved > 0) {
+            log.info({ moved, from: LEGACY_DYNAMIC_TOOLS_DIR, to: targetDir }, "Migrated legacy dynamic-tool bundles into workspace tools/ zone");
+        }
+    } catch (err) {
+        log.warn({ err }, "Legacy dynamic-tools migration failed — continuing with workspace tools/ zone only");
+    }
+}
 
 const TOOL_NAME_PREFIX = "selfdev__";
 
@@ -94,12 +142,12 @@ let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
 export function loadDynamicTools(): void {
     ensureDir();
 
-    const files = readdirSync(DYNAMIC_TOOLS_DIR).filter((file) => file.endsWith(".json"));
+    const files = readdirSync(dynamicToolsDir()).filter((file) => file.endsWith(".json"));
     let loaded = 0;
 
     for (const file of files) {
         try {
-            const filePath = join(DYNAMIC_TOOLS_DIR, file);
+            const filePath = join(dynamicToolsDir(), file);
             const raw = readFileSync(filePath, "utf-8");
             const def = JSON.parse(raw) as DynamicToolDefinition;
 
@@ -114,14 +162,14 @@ export function loadDynamicTools(): void {
         }
     }
 
-    log.info({ loaded, total: files.length, dir: DYNAMIC_TOOLS_DIR }, "Dynamic tools loaded");
+    log.info({ loaded, total: files.length, dir: dynamicToolsDir() }, "Dynamic tools loaded");
 }
 
 export function watchDynamicToolsDirectory(): void {
     ensureDir();
 
     try {
-        _watcher = watch(DYNAMIC_TOOLS_DIR, { persistent: false }, (_eventType, filename) => {
+        _watcher = watch(dynamicToolsDir(), { persistent: false }, (_eventType, filename) => {
             if (!filename || !filename.endsWith(".json")) return;
 
             if (_debounceTimer) clearTimeout(_debounceTimer);
@@ -130,7 +178,7 @@ export function watchDynamicToolsDirectory(): void {
             }, 500);
         });
 
-        log.info({ dir: DYNAMIC_TOOLS_DIR }, "Watching dynamic tools directory");
+        log.info({ dir: dynamicToolsDir() }, "Watching dynamic tools directory");
     } catch (err) {
         log.warn({ err }, "Failed to watch dynamic tools directory — hot-deploy disabled");
     }
@@ -153,7 +201,7 @@ export function deployApprovedTool(def: DynamicToolDefinition): void {
         def.version = existing.version + 1;
     }
 
-    const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+    const filePath = join(dynamicToolsDir(), `${def.name}.json`);
     writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
 
     registerDynamicTool(def);
@@ -178,7 +226,7 @@ export function rollbackDynamicTool(toolName: string): boolean {
     _loadedTools.delete(toolName);
 
     try {
-        unlinkSync(join(DYNAMIC_TOOLS_DIR, `${toolName}.json`));
+        unlinkSync(join(dynamicToolsDir(), `${toolName}.json`));
     } catch {
         // File may already be gone.
     }
@@ -263,14 +311,14 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
 }
 
 function syncDynamicTools(): void {
-    if (!existsSync(DYNAMIC_TOOLS_DIR)) return;
+    if (!existsSync(dynamicToolsDir())) return;
 
-    const files = readdirSync(DYNAMIC_TOOLS_DIR).filter((file) => file.endsWith(".json"));
+    const files = readdirSync(dynamicToolsDir()).filter((file) => file.endsWith(".json"));
     const fileNames = new Set(files.map((file) => basename(file, ".json")));
 
     for (const file of files) {
         try {
-            const filePath = join(DYNAMIC_TOOLS_DIR, file);
+            const filePath = join(dynamicToolsDir(), file);
             const raw = readFileSync(filePath, "utf-8");
             const def = JSON.parse(raw) as DynamicToolDefinition;
 
@@ -320,7 +368,7 @@ function persistStatsNow(bareToolName: string, stats: _CallStats): void {
     def.runtimeCalls = stats.calls;
     def.runtimeSuccesses = stats.successes;
     try {
-        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
         writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist runtime stats — counts will reset on restart");
@@ -351,7 +399,7 @@ function maybeNominateForPromotion(bareToolName: string): void {
 
     // Persist the updated definition
     try {
-        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
         writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion nomination");
@@ -442,7 +490,7 @@ export function approvePromotion(bareToolName: string, reviewedBy: string): bool
 
     // Persist updated status
     try {
-        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
         writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion approval");
@@ -481,7 +529,7 @@ export function rejectPromotion(bareToolName: string, reviewedBy: string): boole
     def.promotionStatus = "rejected";
 
     try {
-        const filePath = join(DYNAMIC_TOOLS_DIR, `${def.name}.json`);
+        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
         writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion rejection");
@@ -542,7 +590,7 @@ function validateDefinition(def: DynamicToolDefinition): boolean {
 }
 
 function ensureDir(): void {
-    if (!existsSync(DYNAMIC_TOOLS_DIR)) {
-        mkdirSync(DYNAMIC_TOOLS_DIR, { recursive: true });
+    if (!existsSync(dynamicToolsDir())) {
+        mkdirSync(dynamicToolsDir(), { recursive: true });
     }
 }

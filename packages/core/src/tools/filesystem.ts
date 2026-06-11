@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkd
 import { basename, resolve, extname, join } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { logAudit } from "../audit/logger.js";
+import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
@@ -172,13 +173,21 @@ registerTool({
       return { success: false, output: "", error: "Path escapes workspace boundary" };
     }
     if (!existsSync(resolved)) {
+      // A scope-confined agent listing its still-empty working zone (generated/
+      // only exists after the first write): report an empty zone, not an error.
+      if (resolved === resolve(ctx.workspacePath, GENERATED_SUBDIR)) {
+        return { success: true, output: "(empty — no files generated yet; create files with write_file)", metadata: { path, count: 0 } };
+      }
       return { success: false, output: "", error: `Path not found: ${path}` };
     }
 
     const entries = listDir(resolved, recursive ? 3 : 0);
+    // An empty-string output reads as "something went wrong" to the model — it
+    // retries the same listing over and over (audit a438ef4a: 5 identical
+    // list_files calls on an empty working zone). Say "empty" explicitly.
     return {
       success: true,
-      output: entries.join("\n"),
+      output: entries.length > 0 ? entries.join("\n") : "(empty directory — no files yet; create files with write_file)",
       metadata: { path, count: entries.length },
     };
   },
@@ -255,6 +264,26 @@ registerTool({
   },
 });
 
+/**
+ * Structural sniff for a sensible default file path when a write_file call carries
+ * substantial content but no "path" (exported for tests). Language-independent —
+ * keyed off the content's own syntax, never off request wording.
+ */
+export function defaultWritePathForContent(content: string): string {
+  const t = content.trimStart();
+  if (/^(?:<!DOCTYPE\s+html|<html[\s>])/i.test(t)) return "index.html";
+  if (/^<svg[\s>]/i.test(t)) return "image.svg";
+  if (/^<\?xml/i.test(t)) return "document.xml";
+  if (/^[{[]/.test(t)) {
+    try {
+      JSON.parse(content);
+      return "data.json";
+    } catch { /* not valid JSON — fall through */ }
+  }
+  if (/^#{1,6}\s/.test(t)) return "document.md";
+  return "output.txt";
+}
+
 registerTool({
   name: "write_file",
   description: "Write content to a file within the workspace. For a normal-sized deliverable, pass the full content in one call (mode defaults to 'overwrite'). For a VERY LARGE single file (e.g. a 30 KB+ HTML page or reveal.js deck, a long report, a multi-thousand-line script) that the model cannot reliably emit in one completion, build it INCREMENTALLY: write the first chunk, then call write_file again with mode:'append' for each subsequent chunk until the file is complete — each chunk is appended verbatim with no overlap. This keeps every call bounded and avoids the single-giant-completion timeout on slow backends. Creates the file and parent directories if needed. mode:'overwrite' (default) replaces an existing file; mode:'append' adds to it (creating it if missing); mode:'create' fails if the file already exists.",
@@ -276,7 +305,7 @@ registerTool({
     required: ["path", "content"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const path = String(args["path"] ?? "");
+    let path = String(args["path"] ?? "");
     const content = String(args["content"] ?? "");
     const createDirs = Boolean(args["createDirs"] ?? true);
     const rawMode = String(args["mode"] ?? "overwrite").toLowerCase();
@@ -289,6 +318,22 @@ registerTool({
     // wrote a 0-byte file named "generated" and surfaced it to the user as a download. An
     // empty write is never a real deliverable; fail with the same clear signal generate_document
     // gives ("content is required") so no 0-byte artifact is created and the model can recover.
+    //
+    // BUT when the call carries substantial content and only the path is missing (audit
+    // 0ac7d3fc: the model spent ~2 minutes generating a complete app, then emitted args with
+    // content but no path), failing throws away the expensive part to protect the cheap part.
+    // Default the path from the content's structure instead and say so in the output. Append
+    // mode is excluded — there is no way to know which existing file the chunk belongs to.
+    let defaultedPathNote = "";
+    if (!path.trim() && mode !== "append" && content.trim().length >= 200) {
+      path = defaultWritePathForContent(content);
+      defaultedPathNote = ` (note: your call omitted "path" — it was defaulted to "${path}" from the content. Use this exact path in any follow-up write_file mode:"append" or edit_file calls.)`;
+      logAudit("guardrail_flagged", {
+        type: "write_file_missing_path_defaulted",
+        defaultedPath: path,
+        contentChars: content.length,
+      }, { sessionId: ctx.sessionId, severity: "warn" });
+    }
     if (!path.trim()) {
       return { success: false, output: "", error: "path is required — provide the relative file path to write (e.g. \"report.md\")." };
     }
@@ -330,9 +375,9 @@ registerTool({
       const verb = appended ? "appended to" : "written";
       return {
         success: true,
-        output: appended
+        output: (appended
           ? `Appended ${content.length} chars to ${relativePath} (now ${fullContent.length} chars total)`
-          : `File ${verb}: ${relativePath} (${content.length} chars)`,
+          : `File ${verb}: ${relativePath} (${content.length} chars)`) + defaultedPathNote,
         metadata: {
           artifactKind: "workspace_file",
           path,

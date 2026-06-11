@@ -1,12 +1,12 @@
 <template>
-  <div class="app-shell overflow-hidden bg-gray-950 text-gray-100 flex flex-col">
+  <div class="app-shell overflow-hidden text-gray-100 flex flex-col">
 
     <!-- Background orbs -->
     <div class="bg-orb bg-orb-1" aria-hidden="true" />
     <div class="bg-orb bg-orb-2" aria-hidden="true" />
 
     <!-- Header -->
-    <header class="relative z-10 shrink-0 border-b border-purple-500/20 bg-gray-900/80 px-3 py-3 backdrop-blur-lg sm:px-5">
+    <header class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
@@ -18,10 +18,10 @@
             class="h-9 w-9 shrink-0 object-contain drop-shadow-[0_8px_18px_rgba(34,211,238,0.22)]"
           />
           <div class="flex flex-col leading-none min-w-0">
-            <span class="font-semibold text-sm bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent tracking-wide">
+            <span class="font-display font-semibold text-base bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent tracking-wide">
               StarlingAI
             </span>
-            <span class="hidden sm:inline text-[10px] uppercase tracking-[0.18em] text-cyan-200/70 mt-1">
+            <span class="hidden sm:inline font-label text-[10px] uppercase tracking-[0.18em] text-cyan-200/70 mt-1">
               Guarded Agent Swarm
             </span>
           </div>
@@ -35,7 +35,7 @@
           <div class="flex items-center gap-2 text-xs shrink-0">
             <div :class="[
               'w-1.5 h-1.5 rounded-full transition-colors',
-              gateway.connected   ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]'
+              gateway.connected   ? 'bg-emerald-400 dot-pulse'
               : gateway.connecting ? 'bg-amber-400 animate-pulse'
               : 'bg-red-500'
             ]" />
@@ -44,6 +44,67 @@
             </span>
           </div>
 
+          <!-- Model switch: Local ⇄ presets (e.g. Claude via the Anthropic
+               provider). Appears once the gateway reports at least one
+               switchable preset; hidden for read-only viewers. The gear opens
+               the Claude subscription connect/manage modal. -->
+          <div
+            v-if="modelPreset.available && !auth.isViewer"
+            class="flex shrink-0 items-center gap-0.5 rounded-full border border-white/10 bg-white/5 p-0.5"
+            role="group"
+            aria-label="Model switch"
+            :title="`Active model: ${modelPreset.activePrimary ?? modelPreset.defaultPrimary}`"
+          >
+            <button
+              type="button"
+              class="rounded-full border px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-60"
+              :class="modelPreset.active === null
+                ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200'
+                : 'border-transparent text-gray-400 hover:text-gray-200'"
+              :disabled="modelPreset.switching"
+              :title="`Local default: ${modelPreset.defaultPrimary}`"
+              @click="switchModelPreset(null)"
+            >
+              Local
+            </button>
+            <button
+              v-for="preset in modelPreset.presets"
+              :key="preset.name"
+              type="button"
+              class="rounded-full border px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-60"
+              :class="modelPreset.active === preset.name
+                ? 'border-orange-400/35 bg-orange-500/15 text-orange-200'
+                : 'border-transparent text-gray-400 hover:text-gray-200'"
+              :disabled="modelPreset.switching"
+              :title="preset.primary"
+              @click="switchModelPreset(preset.name)"
+            >
+              {{ preset.label }}
+            </button>
+            <button
+              type="button"
+              class="ml-0.5 flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition hover:bg-white/5 hover:text-gray-300"
+              title="Claude settings — model & subscription"
+              aria-label="Claude settings"
+              @click="showModelConnect = true"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- No Claude connected yet → entry point to the browser login. -->
+          <button
+            v-if="!modelPreset.oauthConnected && !auth.isViewer && gateway.connected"
+            type="button"
+            class="hidden shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15 sm:inline-flex"
+            @click="showModelConnect = true"
+          >
+            Connect Claude
+          </button>
+
           <button
             v-if="notifications.supported && notifications.permission === 'default'"
             class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
@@ -51,6 +112,7 @@
           >
             Enable Notifications
           </button>
+
           <!-- Nav: keep a single desktop row, but let it wrap below the
                metadata cluster on small screens so every control stays
                reachable without collapsing into a hamburger menu. -->
@@ -65,7 +127,7 @@
                 class="inline-flex shrink-0 items-center rounded-full border px-3 py-2 text-sm font-medium transition-colors"
                 :class="$route.path === entry.to
                   ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
-                  : 'border-transparent text-gray-400 hover:border-white/10 hover:bg-white/5 hover:text-gray-100'"
+                  : 'border-transparent text-gray-300 hover:border-white/10 hover:bg-white/5 hover:text-white'"
                 :aria-current="$route.path === entry.to ? 'page' : undefined"
               >
                 {{ entry.label }}
@@ -207,10 +269,19 @@
       </section>
     </TransitionGroup>
 
-    <!-- Router view -->
+    <!-- Router view. NOTE: no <Transition> here — several pages (Chat) are
+         multi-root with position:fixed panels, which a transition transform
+         would re-anchor mid-animation. Page-level motion lives in the pages. -->
     <main class="relative z-10 flex-1 min-h-0 overflow-hidden">
       <RouterView />
     </main>
+
+    <!-- Claude subscription connect / manage (browser OAuth verification). -->
+    <ModelConnectModal
+      v-if="showModelConnect"
+      @close="showModelConnect = false"
+      @connected="onClaudeConnected"
+    />
 
     <!-- Global operator requests: approvals + live-browser handoff, reachable
          from any page (e.g. for scenes/jobs started from the dropdown). -->
@@ -223,8 +294,10 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
+import ModelConnectModal from "@/components/ModelConnectModal.vue";
 import NavGroup, { type NavGroupItem } from "@/components/NavGroup.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
@@ -232,7 +305,30 @@ import { appVersion } from "@/appVersion";
 const gateway = useGatewayStore();
 const auth = useAuthStore();
 const notifications = useNotificationStore();
+const modelPreset = useModelPresetStore();
 const $route = useRoute();
+
+// Header model switch (Local ⇄ Claude). The gateway persists the choice in the
+// runtime overlay, so it survives restarts and applies to the whole swarm.
+async function switchModelPreset(name: string | null): Promise<void> {
+  if (modelPreset.active === name) return;
+  await modelPreset.activate(name);
+  if (modelPreset.error) {
+    notifications.pushLocalNotification({
+      title: "Model switch failed",
+      message: modelPreset.error,
+      level: "error",
+      category: "models",
+    });
+    return;
+  }
+  notifications.pushLocalNotification({
+    title: name ? `Switched to ${name}` : "Switched to local model",
+    message: `All agents now use ${modelPreset.activePrimary ?? modelPreset.defaultPrimary}`,
+    level: "success",
+    category: "models",
+  });
+}
 
 const currentUser = computed(() => auth.currentUser);
 // A real per-user identity (multi-user auth). The bootstrap admin token and the
@@ -242,6 +338,17 @@ const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+
+// Claude subscription connect/manage modal (browser OAuth verification).
+const showModelConnect = ref(false);
+function onClaudeConnected(): void {
+  notifications.pushLocalNotification({
+    title: "Claude subscription connected",
+    message: "Use the Local ⇄ Claude switch in the header to run the swarm on Claude.",
+    level: "success",
+    category: "models",
+  });
+}
 
 // Far-right account menu (username + sign out, or sign in). The dropdown is
 // teleported to <body> and positioned with fixed coords anchored to the button,
@@ -387,7 +494,11 @@ async function enableBrowserNotifications(): Promise<void> {
 
 onMounted(() => {
   notifications.syncPermission();
-  if (gateway.token) gateway.connect();
+  if (gateway.token) {
+    gateway.connect();
+    void modelPreset.fetch();
+    void modelPreset.fetchOAuthStatus();
+  }
   void auth.refreshCurrentUser();
   // Keep the teleported account menu anchored to its button on resize.
   window.addEventListener("resize", () => {
@@ -401,6 +512,8 @@ watch(() => gateway.connected, (now) => {
   if (now) {
     showLogin.value = false; // a successful (re)connect closes a manually-opened modal
     void auth.refreshCurrentUser();
+    void modelPreset.fetch();
+    void modelPreset.fetchOAuthStatus();
   }
 });
 </script>
@@ -415,6 +528,46 @@ watch(() => gateway.connected, (now) => {
 .app-shell {
   height: 100vh;
   height: 100dvh;
+}
+
+/* Themed header surface: translucent panel tinted toward the active accent,
+   hairline accent border, and a faint top sheen so it reads as a raised bar
+   over the canvas rather than a flat gray strip. Repaints with the palette. */
+.app-header {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)) ,
+    rgba(var(--app-bg), 0.72);
+  border-bottom: 1px solid var(--hairline);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+/* Energy line: a slow accent current flowing along the header's lower edge —
+   the one continuous "alive" cue of the chrome. background-position only. */
+.app-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  /* A narrow traveling glint on a faint base line — reads as a current
+     passing through, not a constant stripe. */
+  background:
+    linear-gradient(90deg,
+      transparent 40%,
+      rgba(var(--accent-purple), 0.5) 46%,
+      rgba(var(--logo-cyan), 0.9) 50%,
+      rgba(var(--accent-pink), 0.5) 54%,
+      transparent 60%) no-repeat,
+    linear-gradient(90deg, transparent, rgba(var(--accent-purple), 0.16) 30%, rgba(var(--accent-purple), 0.16) 70%, transparent);
+  background-size: 300% 100%, 100% 100%;
+  animation: header-current 9s linear infinite;
+  opacity: 0.9;
+}
+@keyframes header-current {
+  from { background-position: -150% 0, 0 0; }
+  to   { background-position: 250% 0, 0 0; }
 }
 
 .toast-enter-active,

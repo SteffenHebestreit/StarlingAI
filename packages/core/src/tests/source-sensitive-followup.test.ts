@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   isContextlessValidationFollowUp,
+  isAffirmativeContinuationFollowUp,
+  isReferentialSubjectFollowUp,
   buildEffectiveResearchSubject,
   buildSourceSensitiveOriginalRequestTask,
+  buildSourceSensitiveCoordinatorTask,
   buildCanonicalSourceSensitiveDelegationTask,
+  deriveSourceSensitiveDelegationFocus,
 } from "../agent/source-sensitive-delegation.js";
 import { taskRequiresExternalResearch } from "../tools/sub-agent.js";
 
@@ -54,6 +58,111 @@ describe("contextless validation follow-up handling", () => {
 });
 
 /**
+ * Regression: session 64ccceb3 (2026-06-09). Turn 1 names the subject ("iSAQB
+ * CPSA-F Zertifizierung"); turn 2 is a NEW imperative that references it without
+ * naming it ("Recherchiere einen Fragekatalog … für DIESE Zertifizierung").
+ * Neither the validation nor the affirmative detector fired, so the bare turn-2
+ * message was delegated and the researcher confabulated CompTIA Security+ — five
+ * minutes of the wrong certification. A referential follow-up must fold the prior
+ * subject in. Detection is generic deixis (demonstratives / pro-forms), not a
+ * topic-keyword bag.
+ */
+/**
+ * audit 1740fb0c: a research-then-build request was flattened by the source-sensitive
+ * enforcement into the research-only "gather and STOP and report" frame and pinned to a
+ * lone researcher, so the build never ran. When the orchestrator LLM instead CHOOSES a
+ * coordinator, the enforcement must give it a frame that lets it decompose+build, not the
+ * gather-and-stop frame. (The decision to use a coordinator is the LLM's; this just stops
+ * the autopilot sabotaging it — no message keyword-matching.)
+ */
+describe("source-sensitive frames: researcher (gather+stop) vs coordinator (decompose+build)", () => {
+  const req = "Recherchiere einen Fragekatalog und erstelle dann eine WebApp dafür.";
+  it("the lone-researcher frame tells it to gather and STOP", () => {
+    const t = buildSourceSensitiveOriginalRequestTask(req);
+    expect(t).toContain("STOP and report");
+    expect(t).toContain("Original user request:");
+  });
+  it("the coordinator frame tells it to decompose and BUILD, not stop after research", () => {
+    const t = buildSourceSensitiveCoordinatorTask(req);
+    expect(t).not.toContain("STOP and report");
+    expect(/build|produce/i.test(t)).toBe(true);
+    expect(t).toContain("Original user request:");
+    expect(t).toContain(req);
+  });
+});
+
+describe("referential-subject follow-up handling", () => {
+  it("detects a new imperative that references an unnamed earlier subject", () => {
+    expect(isReferentialSubjectFollowUp("Recherchiere einen Fragekatalog der mich auf die Prüfung vorbereiten kann\nErstelle dann eine WebApp zum Lernen für diese Zertifizierung")).toBe(true);
+    expect(isReferentialSubjectFollowUp("build a quiz for this certification")).toBe(true);
+    expect(isReferentialSubjectFollowUp("erstelle eine Übungs-App dafür")).toBe(true);
+    expect(isReferentialSubjectFollowUp("research that exam's domains")).toBe(true);
+  });
+
+  it("does not flag a self-contained request that names its own subject", () => {
+    expect(isReferentialSubjectFollowUp("research the CompTIA Security+ SY0-701 exam objectives and cite sources")).toBe(false);
+    expect(isReferentialSubjectFollowUp("erstelle eine Lernplattform für die iSAQB CPSA-F Zertifizierung")).toBe(false);
+  });
+
+  it("folds the prior turn's named subject into a referential follow-up", () => {
+    const subject = buildEffectiveResearchSubject(
+      "Recherchiere einen Fragekatalog der mich auf die Prüfung vorbereiten kann\nErstelle dann eine WebApp zum Lernen für diese Zertifizierung",
+      "Ich möchte die iSAQB - CPSA-F (Certified Professional for Software Architecture - Foundation Level) Zertifizierung abschließen und brauche eine Lernplattform",
+    );
+    expect(subject).toContain("Original topic to research");
+    expect(subject).toContain("iSAQB");
+    expect(subject).toContain("CPSA-F");
+    expect(subject).toContain("do NOT substitute a different");
+  });
+});
+
+/**
+ * Regression: session 0834b791 (2026-06-08). A staged request — turn 1 names the
+ * subject ("iSAQB CPSA-F Lernplattform"), turn 3 is a bare affirmative
+ * continuation ("ja, suche online und dann erstelle die lernplattform"). The
+ * source-sensitive rewrite anchored on the turn-3 message alone, dropping the
+ * subject, so the researcher chased generic "create an online LMS" vendors
+ * (Moodle/Teachable/COACHY) instead of CPSA-F. An affirmative/go-ahead reply
+ * must have the prior turn's subject folded in, exactly like a validation
+ * follow-up.
+ */
+describe("affirmative continuation follow-up handling", () => {
+  it("detects short affirmative / go-ahead continuations", () => {
+    expect(isAffirmativeContinuationFollowUp("ja, suche online und dann erstelle die lernplattform")).toBe(true);
+    expect(isAffirmativeContinuationFollowUp("beides")).toBe(true);
+    expect(isAffirmativeContinuationFollowUp("okay, start now")).toBe(true);
+    expect(isAffirmativeContinuationFollowUp("dann los; ran an die arbeit")).toBe(true);
+    expect(isAffirmativeContinuationFollowUp("yes, do it")).toBe(true);
+    expect(isAffirmativeContinuationFollowUp("mach das")).toBe(true);
+  });
+
+  it("does not flag self-contained requests (incl. ones that merely start with an action verb)", () => {
+    expect(isAffirmativeContinuationFollowUp("research the best LLM for 3D-printing enclosures")).toBe(false);
+    expect(isAffirmativeContinuationFollowUp("find the latest datasheet for the INMP441 microphone")).toBe(false);
+    expect(isAffirmativeContinuationFollowUp("start a postgres docker container on port 5432")).toBe(false);
+    // Long message that merely opens with "ja," carries its own subject — not folded.
+    expect(
+      isAffirmativeContinuationFollowUp(
+        "ja, und recherchiere bitte ausführlich die genaue Stromaufnahme des ESP32-S3 im Deep-Sleep sowie die Latenz beim Aufwachen",
+      ),
+    ).toBe(false);
+  });
+
+  it("folds the prior turn's subject into an affirmative continuation", () => {
+    const subject = buildEffectiveResearchSubject(
+      "ja, suche online und dann erstelle die lernplattform",
+      "Ich möchte die iSAQB CPSA-F Zertifizierung abschließen und brauche eine Lernplattform mit Fragekatalog und Multiple-Choice-Antworten",
+      "Verstanden. Du suchst eine Lernplattform für die iSAQB CPSA-F-Prüfung mit einem vollständigen Fragekatalog.",
+    );
+    expect(subject).toContain("ja, suche online");
+    expect(subject).toContain("Original topic to research");
+    expect(subject).toContain("iSAQB CPSA-F");
+    // Not phrased as a validation of the prior answer.
+    expect(subject).not.toContain("Prior answer to validate");
+  });
+});
+
+/**
  * The source-sensitive delegation preamble is the routing query for undirected
  * source-sensitive delegations. It must (a) lead with web-research/gather framing
  * so embedding routing picks the researcher (primary gatherer), not source_verifier
@@ -90,4 +199,43 @@ describe("source-sensitive delegation preamble — research-framed + detector ma
       expect(task).toContain("SOURCE-SENSITIVE DELEGATION SLICE 2/3:");
     });
   }
+});
+
+/**
+ * Wrapper idempotency (audit ce8e2128): the top-level rewrite wraps the user request in
+ * the full source-discipline rulebook; when a coordinator then fans out, the pre-evidence
+ * slice enforcement wrapped that ALREADY-WRAPPED parent again — each researcher slice
+ * carried the ~1.6KB boilerplate twice, Russian-doll "Parent task:" nesting, and a
+ * duplicated focus block. Pure prefill latency + instruction dilution on the slow local
+ * model. Re-wrapping must emit the SLIM frame: routing lead + marker + parent verbatim.
+ */
+describe("source-sensitive wrapper idempotency — no Russian-doll boilerplate", () => {
+  const userMessage =
+    "Recherchiere einen Fragekatalog der mich auf die Prüfung vorbereiten kann. Erstelle dann eine WebApp zum Lernen für diese Zertifizierung.";
+  const focus = deriveSourceSensitiveDelegationFocus("slice task wording", userMessage)!;
+
+  it("re-wrapping an already-wrapped parent emits the rulebook ONCE, not twice", () => {
+    const parent = buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus);
+    const slice = buildCanonicalSourceSensitiveDelegationTask(parent, "SLICE 1/2", focus);
+    // Detector invariants hold on the slim frame.
+    expect(slice).toContain("SOURCE-SENSITIVE DELEGATION SLICE 1/2:");
+    expect(slice).toContain("WEB RESEARCH TASK");
+    expect(taskRequiresExternalResearch(slice)).toBe(true);
+    // The parent (with the user message) is embedded verbatim.
+    expect(slice).toContain(userMessage);
+    // The discipline boilerplate appears exactly ONCE (from the parent), never re-emitted.
+    expect(slice.split("For every concrete spec").length - 1).toBe(1);
+    expect(slice.split("Stay tightly scoped").length - 1).toBe(1);
+    // The focus block is NOT duplicated.
+    expect(slice.split("Focus for this slice").length - 1).toBe(1);
+    // The slim frame adds only a small constant overhead over the parent.
+    expect(slice.length).toBeLessThan(parent.length + 600);
+  });
+
+  it("a plain (unwrapped) parent still gets the full discipline rulebook", () => {
+    const t = buildCanonicalSourceSensitiveDelegationTask(userMessage, "SLICE 2/2", focus);
+    expect(t).toContain("SOURCE-SENSITIVE DELEGATION SLICE 2/2:");
+    expect(t).toContain("For every concrete spec");
+    expect(t.toLowerCase()).toContain("stay tightly scoped");
+  });
 });
