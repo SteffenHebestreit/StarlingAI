@@ -163,6 +163,12 @@ export interface CoreExtension {
   roles?: ExtensionRoleDef[];
   /** Credential backend consumed by the core /api/auth routes. One per process. */
   authProvider?: ExtensionAuthProvider;
+  /**
+   * Embedding-reranker routing keywords: tools whose names match `pattern`
+   * gain `keywords` in their embedding text, improving semantic routing for
+   * domain vocabulary (e.g. German medical terms → mfa_* tools).
+   */
+  toolKeywords?: Array<{ pattern: RegExp; keywords: string[] }>;
   /** Guardrail pipeline hooks, appended after built-ins. */
   guardrails?: ExtensionGuardrailHooks;
   /**

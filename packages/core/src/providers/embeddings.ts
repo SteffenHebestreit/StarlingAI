@@ -35,6 +35,19 @@ interface CachedEmbeddingQuery {
   results: EmbeddingSearchResult[];
 }
 
+/** Extension-contributed routing keywords (see extension SDK `toolKeywords`). */
+const EXTENSION_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [];
+
+/** @internal extension-loader-only. */
+export function registerExtensionToolKeywords(rules: Array<{ pattern: RegExp; keywords: string[] }>): void {
+  EXTENSION_KEYWORD_RULES.push(...rules);
+}
+
+/** Test hook. */
+export function _resetExtensionToolKeywordsForTests(): void {
+  EXTENSION_KEYWORD_RULES.length = 0;
+}
+
 const TOOL_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [
   // The web_search/web_fetch rule used to inject ["news","updates","latest",
   // "current","release notes"] into every agent that owns a web tool.  That
@@ -1007,7 +1020,7 @@ export function inferAgentSearchKeywords(agentName: string, cfg: SubAgentConfig)
       keywords.add(token);
     }
 
-    for (const rule of TOOL_KEYWORD_RULES) {
+    for (const rule of [...TOOL_KEYWORD_RULES, ...EXTENSION_KEYWORD_RULES]) {
       if (rule.pattern.test(toolName)) {
         for (const keyword of rule.keywords) {
           keywords.add(keyword);
