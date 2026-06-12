@@ -27,6 +27,7 @@ import { registerTool, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
 import { registerRoutePolicies } from "../gateway/route-policies.js";
+import { registerExtensionToolKeywords } from "../providers/embeddings.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
@@ -132,6 +133,10 @@ function registerExtension(ext: CoreExtension, source: string): void {
 
   if (ext.routePolicies?.length) {
     registerRoutePolicies(ext.name, ext.routePolicies);
+  }
+
+  if (ext.toolKeywords?.length) {
+    registerExtensionToolKeywords(ext.toolKeywords);
   }
 
   const toolNames: string[] = [];
