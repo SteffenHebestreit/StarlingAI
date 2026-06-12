@@ -243,6 +243,7 @@ Model wiring is environment-driven (the setup wizard writes these to `.env`): `S
 | [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
 | [docs/security.md](docs/security.md) | Auth, credential storage, sandboxing, and audit behavior |
 | [docs/tool-tiers.md](docs/tool-tiers.md) | Hard-coded tool permission tiers and approval rules |
+| [docs/forking.md](docs/forking.md) | Fork StarlingAI into a specialized swarm and stay rebase-clean with upstream |
 
 For setup guides, channel configuration, agent details, and more, see the **[interactive tutorials](http://localhost:3002)** (available after `pnpm sai start`).
 
