@@ -25,6 +25,7 @@ import { loadPlugins } from "./plugin/loader.js";
 import { warmToolEmbeddings } from "./tools/registry.js";
 import { createStarlingMcpServer } from "./mcp/server.js";
 import { childLogger } from "./logger.js";
+import { PRODUCT } from "./product/index.js";
 
 const log = childLogger("mcp-stdio");
 
@@ -68,7 +69,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  log.info({ instanceId: config.federation?.instanceId ?? "primary" }, "StarlingAI MCP stdio server ready");
+  log.info({ instanceId: config.federation?.instanceId ?? "primary" }, `${PRODUCT.name} MCP stdio server ready`);
 
   const shutdown = async (signal: string) => {
     log.info({ signal }, "MCP stdio server shutting down");

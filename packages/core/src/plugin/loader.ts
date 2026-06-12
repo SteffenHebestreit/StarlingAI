@@ -28,6 +28,8 @@ import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.j
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
 
+import { PRODUCT, productEnv } from "../product/index.js";
+
 const log = childLogger("plugin-loader");
 
 const PLUGIN_NAME_PREFIX = "plugin__";
@@ -148,12 +150,14 @@ async function resyncPlugins(dir: string): Promise<void> {
 
 /**
  * Resolve the configured plugins directory.  Order:
- * 1. `STARLINGAI_PLUGINS_DIR` env var (absolute or relative to cwd)
- * 2. `plugins.dir` from `starlingai.json` (if defined)
- * 3. `~/.starlingai/plugins`
+ * 1. `<ENV_PREFIX>_PLUGINS_DIR` env var (absolute or relative to cwd; legacy
+ *    prefixes from product.json are honored as fallbacks)
+ * 2. `plugins.dir` from the root config file (if defined)
+ * 3. `~/<stateDir>/plugins` — falling back to a legacy state dir that already
+ *    contains plugins, so renamed forks keep loading pre-rename installs
  */
 export function resolvePluginsDir(): string {
-  const fromEnv = process.env["STARLINGAI_PLUGINS_DIR"];
+  const fromEnv = productEnv("PLUGINS_DIR");
   if (fromEnv?.trim()) {
     return isAbsolute(fromEnv) ? fromEnv : resolve(process.cwd(), fromEnv);
   }
@@ -161,7 +165,14 @@ export function resolvePluginsDir(): string {
   if (fromConfig?.trim()) {
     return isAbsolute(fromConfig) ? fromConfig : resolve(process.cwd(), fromConfig);
   }
-  return join(homedir(), ".starlingai", "plugins");
+  const canonical = join(homedir(), PRODUCT.stateDirName, "plugins");
+  if (!existsSync(canonical)) {
+    for (const legacy of PRODUCT.legacyStateDirNames) {
+      const candidate = join(homedir(), legacy, "plugins");
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return canonical;
 }
 
 /**

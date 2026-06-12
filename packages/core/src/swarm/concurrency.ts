@@ -22,8 +22,8 @@
  * the reasoning simple.)
  *
  * Configuration:
- *   per agent in starlingai.json: "maxConcurrent": 3  — simultaneous containers for this agent type
- *   global via env: STARLINGAI_MAX_GLOBAL_CONCURRENCY — total simultaneous containers across all types
+ *   per agent in the root config: "maxConcurrent": 3  — simultaneous containers for this agent type
+ *   global via env: <ENV_PREFIX>_MAX_GLOBAL_CONCURRENCY — total simultaneous containers across all types
  *
  * Default per-agent cap (when maxConcurrent is absent): DEFAULT_CONCURRENCY.
  * Default global cap: DEFAULT_GLOBAL_CONCURRENCY.
@@ -31,6 +31,7 @@
  * Usage: wrap runSubAgent calls with acquireSlot / releaseSlot.
  */
 import { childLogger } from "../logger.js";
+import { productEnv } from "../product/index.js";
 import { emitSwarmEvent } from "./bus.js";
 
 const log = childLogger("swarm:concurrency");
@@ -71,7 +72,7 @@ function makeSemaphore(maxConcurrent: number): Semaphore {
 const _semaphores = new Map<string, Semaphore>();
 
 function resolveGlobalMax(): number {
-  const raw = Number(process.env["STARLINGAI_MAX_GLOBAL_CONCURRENCY"]);
+  const raw = Number(productEnv("MAX_GLOBAL_CONCURRENCY"));
   if (Number.isFinite(raw) && raw >= 1) return Math.floor(raw);
   return DEFAULT_GLOBAL_CONCURRENCY;
 }

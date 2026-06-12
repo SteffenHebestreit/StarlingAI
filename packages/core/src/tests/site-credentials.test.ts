@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PRODUCT } from "../product/index.js";
+
 describe("site credential resolution", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
@@ -111,7 +113,7 @@ describe("site credential resolution", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-store-env-"));
 
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
     process.env["N8N_USERNAME"] = "admin@n8n.local";
     process.env["N8N_KEY"] = "super-secret-from-env";
     vi.resetModules();
@@ -147,7 +149,7 @@ describe("site credential resolution", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-store-tld-"));
 
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
     vi.resetModules();
 
     try {

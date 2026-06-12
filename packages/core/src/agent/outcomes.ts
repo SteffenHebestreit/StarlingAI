@@ -13,6 +13,8 @@ import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { appendJsonLine, readLastRecords } from "../memory/bounded-ndjson-store.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:outcomes");
 
 export interface OutcomeEntry {
@@ -36,7 +38,7 @@ export interface OutcomeEntry {
   sharedFindingsCount?: number;
 }
 
-const OUTCOMES_FILE = ".starlingai/agent_outcomes.ndjson";
+const OUTCOMES_FILE = `${PRODUCT.stateDirName}/agent_outcomes.ndjson`;
 const MAX_OUTCOMES_LINES = 50_000;
 
 export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void {

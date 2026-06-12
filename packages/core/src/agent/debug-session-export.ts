@@ -13,6 +13,8 @@ import {
   type SessionTranscriptMessage,
 } from "./session.js";
 
+import { PRODUCT } from "../product/index.js";
+
 export class SessionExportBusyError extends Error {
   constructor(sessionId: string) {
     super(`Session export is unavailable while the session is still running: ${sessionId}`);
@@ -321,9 +323,9 @@ async function readSessionAuditEventsAsync(sessionId: string, workspacePath?: st
   const candidates = [
     process.env["SAI_AUDIT_LOG"]?.trim(),
     resolveAuditLogPath(),
-    resolve(process.cwd(), ".starlingai", "audit.jsonl"),
-    resolve(homedir(), ".starlingai", "audit.jsonl"),
-    workspacePath ? resolve(workspacePath, ".starlingai", "audit.jsonl") : undefined,
+    resolve(process.cwd(), PRODUCT.stateDirName, "audit.jsonl"),
+    resolve(homedir(), PRODUCT.stateDirName, "audit.jsonl"),
+    workspacePath ? resolve(workspacePath, PRODUCT.stateDirName, "audit.jsonl") : undefined,
   ].filter((value): value is string => Boolean(value));
 
   const seen = new Set<string>();

@@ -10,12 +10,14 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("tool:workspace-search");
 
 const MAX_FILE_BYTES = 200_000;
 const MAX_DEPTH = 8;
 const SKIP_DIRS = new Set([
-  ".git", "node_modules", ".starlingai", "dist", "build",
+  ".git", "node_modules", PRODUCT.stateDirName, "dist", "build",
   ".next", ".nuxt", "coverage", ".cache", ".turbo",
 ]);
 const TEXT_EXTS = new Set([

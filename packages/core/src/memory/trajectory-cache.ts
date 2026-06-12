@@ -16,10 +16,12 @@ import { dirname, resolve } from "node:path";
 import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { appendJsonLine, readLastRecords } from "./bounded-ndjson-store.js";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const CACHE_FILE = ".starlingai/trajectory_cache.ndjson";
-const INVALIDATION_FILE = ".starlingai/trajectory_cache_invalidations.json";
+const CACHE_FILE = `${PRODUCT.stateDirName}/trajectory_cache.ndjson`;
+const INVALIDATION_FILE = `${PRODUCT.stateDirName}/trajectory_cache_invalidations.json`;
 const INVALIDATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_CACHE_LINES = 5_000;
 const SIMILARITY_THRESHOLD = 0.82;

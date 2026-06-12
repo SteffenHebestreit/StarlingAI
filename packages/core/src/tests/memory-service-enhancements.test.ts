@@ -11,6 +11,8 @@ import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PRODUCT } from "../product/index.js";
+
 const upsertMemoryToGraphMock = vi.fn(async () => undefined);
 
 vi.mock("../memory/graph-service.js", async () => {
@@ -92,7 +94,7 @@ describe("memory service — LRU + decay + embedding", () => {
     });
     await flushEmbeddingWrite();
 
-    const files = readdirSync(join(ws, ".starlingai/memory"));
+    const files = readdirSync(join(ws, `${PRODUCT.stateDirName}/memory`));
     expect(files).toContain("latency_goal.json");
   });
 
@@ -140,7 +142,7 @@ describe("memory service — LRU + decay + embedding", () => {
 
     // Backdate both files to simulate 30 days old.  Then clear the cache so
     // the next read picks up the mtime change.
-    const memDir = join(ws, ".starlingai/memory");
+    const memDir = join(ws, `${PRODUCT.stateDirName}/memory`);
     for (const f of readdirSync(memDir)) {
       const fp = join(memDir, f);
       const raw = require("node:fs").readFileSync(fp, "utf-8");
@@ -203,7 +205,7 @@ describe("memory service — LRU + decay + embedding", () => {
     // Warm the cache via a search
     await searchMemoryRecords(ws, "alpha");
 
-    const memDir = join(ws, ".starlingai/memory");
+    const memDir = join(ws, `${PRODUCT.stateDirName}/memory`);
     const mtimeBefore = statSync(memDir).mtimeMs;
 
     // Second read should not change mtime (no filesystem write).

@@ -107,6 +107,8 @@ import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
 import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("gateway");
 
 function applyTemplate(template: string, params: Record<string, string>): string {
@@ -1279,6 +1281,18 @@ export function createGateway() {
 
   // ── Health endpoints ─────────────────────────────────────────────────────
   app.get("/healthz", (c) => c.json({ status: "ok" }));
+
+  // Product identity for the web shell (name, tagline, theme). Public and
+  // unauthenticated by design: the login screen renders branding before any
+  // token exists. Forks override via product.json (docs/fork-boilerplate-plan.md).
+  app.get("/api/product", (c) =>
+    c.json({
+      name: PRODUCT.name,
+      slug: PRODUCT.slug,
+      tagline: PRODUCT.tagline,
+      theme: PRODUCT.theme,
+    })
+  );
   app.get("/readyz", (c) => {
     const sessions = getAllSessions().length;
     // Latest event-loop lag sample (cheap, no probes) so operators can poll
@@ -3943,7 +3957,7 @@ export function createGateway() {
     const { readFileSync, existsSync } = await import("node:fs");
     const { resolve } = await import("node:path");
     const workspacePath = getConfig().workspacePath;
-    const outcomesFile = resolve(workspacePath, ".starlingai/agent_outcomes.ndjson");
+    const outcomesFile = resolve(workspacePath, `${PRODUCT.stateDirName}/agent_outcomes.ndjson`);
 
     if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
 

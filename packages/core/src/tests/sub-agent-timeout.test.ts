@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OutcomeEntry } from "../agent/outcomes.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const completeMock = vi.fn();
 
 vi.mock("../providers/lmstudio.js", () => ({
@@ -1721,7 +1723,7 @@ describe("sub-agent turn timeouts", () => {
     }), "utf8");
 
     // Seed short outcome history so adaptive would normally pick a LOW timeout
-    const stateDir = join(tempDir, ".starlingai");
+    const stateDir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
     const makeOutcome = (durationMs: number): OutcomeEntry => ({
@@ -1803,7 +1805,7 @@ describe("sub-agent turn timeouts", () => {
       },
     }), "utf8");
 
-    const stateDir = join(tempDir, ".starlingai");
+    const stateDir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
     // Clean (non-timed-out) but slow finishes under a generous budget: history

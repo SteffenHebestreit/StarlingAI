@@ -27,6 +27,8 @@ import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "./bus.js";
 import { getConfig } from "../config/loader.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("swarm:checkpoints");
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -68,7 +70,7 @@ const AGENT_STATE_MAX_SIZE = 16_000; // max serialized agentState size in bytes
 const _store = new Map<string, TaskCheckpoint>();
 
 function checkpointDir(workspacePath: string): string {
-  return join(workspacePath, ".starlingai", "checkpoints");
+  return join(workspacePath, PRODUCT.stateDirName, "checkpoints");
 }
 
 function checkpointPath(workspacePath: string, taskId: string): string {

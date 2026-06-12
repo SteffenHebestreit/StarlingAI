@@ -12,6 +12,8 @@ import {
 } from "../agent/promoted-agents.js";
 import type { SubAgentConfig } from "../config/schema.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const makeConfig = (overrides: Partial<SubAgentConfig> = {}): SubAgentConfig => ({
   description: "Test agent",
   capabilities: ["testing"],
@@ -72,7 +74,7 @@ describe("promoted-agents store", () => {
   });
 
   it("returns empty object if the file contains invalid JSON", () => {
-    const dir = join(tempDir, ".starlingai");
+    const dir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "promoted_agents.json"), "not json", "utf-8");
     expect(readPromotedAgents(tempDir)).toEqual({});

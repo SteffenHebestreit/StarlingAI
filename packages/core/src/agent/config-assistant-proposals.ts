@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:config-assistant-proposals");
 
-const PROPOSALS_FILE = ".starlingai/config_assistant_proposals.json";
+const PROPOSALS_FILE = `${PRODUCT.stateDirName}/config_assistant_proposals.json`;
 
 export type ConversationProposalStatus = "pending" | "applied" | "rejected";
 export type ConversationFeedbackOutcome = "success" | "failure" | "partial" | "rejected";
@@ -204,7 +206,7 @@ function readAllConversationConfigProposals(workspacePath: string): Conversation
 
 function writeAllConversationConfigProposals(workspacePath: string, proposals: ConversationConfigProposal[]): void {
   try {
-    const dir = resolve(workspacePath, ".starlingai");
+    const dir = resolve(workspacePath, PRODUCT.stateDirName);
     mkdirSync(dir, { recursive: true });
     writeFileSync(resolve(workspacePath, PROPOSALS_FILE), `${JSON.stringify(proposals, null, 2)}\n`, "utf-8");
   } catch (err) {

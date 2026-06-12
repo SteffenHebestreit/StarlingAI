@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { computeAdaptiveSubAgentTimeoutMs, type OutcomeEntry } from "../agent/outcomes.js";
 
+import { PRODUCT } from "../product/index.js";
+
 describe("adaptive sub-agent timeout recommendation", () => {
   it("returns null when there is not enough duration history", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-adaptive-timeout-"));
@@ -16,7 +18,7 @@ describe("adaptive sub-agent timeout recommendation", () => {
 
   it("uses recent successful durations with safety headroom", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-adaptive-timeout-"));
-    const stateDir = join(tempDir, ".starlingai");
+    const stateDir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
 
@@ -49,7 +51,7 @@ describe("adaptive sub-agent timeout recommendation", () => {
 
   it("excludes runs that hit their own timeout so the budget can't ratchet upward", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-adaptive-timeout-"));
-    const stateDir = join(tempDir, ".starlingai");
+    const stateDir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
 
@@ -81,7 +83,7 @@ describe("adaptive sub-agent timeout recommendation", () => {
 
   it("clamps the adaptive budget to the 6-minute ceiling", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-adaptive-timeout-"));
-    const stateDir = join(tempDir, ".starlingai");
+    const stateDir = join(tempDir, PRODUCT.stateDirName);
     mkdirSync(stateDir, { recursive: true });
     const outcomesFile = join(stateDir, "agent_outcomes.ndjson");
 

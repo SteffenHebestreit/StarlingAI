@@ -11,9 +11,11 @@ import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("memory:service");
 
-const MEMORY_SUBDIR = ".starlingai/memory";
+const MEMORY_SUBDIR = `${PRODUCT.stateDirName}/memory`;
 const CONTENT_MERGE_MAX_CHARS = 560;
 
 const TOKEN_STOPWORDS = new Set([
@@ -925,7 +927,7 @@ function memoryDir(workspacePath: string): string {
 function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): string {
   if (scope === "user") {
     const override = process.env["SAI_USER_MEMORY_PATH"]?.trim();
-    return override ? resolve(override) : resolve(homedir(), ".starlingai", "user-memory");
+    return override ? resolve(override) : resolve(homedir(), PRODUCT.stateDirName, "user-memory");
   }
   return resolve(workspacePath, MEMORY_SUBDIR);
 }

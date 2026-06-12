@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("personality");
 
 const MAIN_ASSISTANT_PERSONALITY_FILENAME = "main-assistant-personality.json";
@@ -135,7 +137,7 @@ const DEFAULT_MAIN_ASSISTANT_PERSONALITY: MainAssistantPersonalityEditable = Obj
 function resolvePersonalityStorePath(): string {
   const baseDir = process.env["SAI_USER_MEMORY_PATH"]?.trim()
     ? resolve(process.env["SAI_USER_MEMORY_PATH"])
-    : resolve(homedir(), ".starlingai", "state");
+    : resolve(homedir(), PRODUCT.stateDirName, "state");
   return resolve(baseDir, MAIN_ASSISTANT_PERSONALITY_FILENAME);
 }
 

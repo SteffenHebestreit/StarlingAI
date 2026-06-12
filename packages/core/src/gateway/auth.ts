@@ -8,6 +8,8 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("gateway:auth");
 const BCRYPT_ROUNDS = 12;
 
@@ -200,8 +202,8 @@ function resolveJwtSecretPath(): string {
   const explicit = process.env["SAI_JWT_SECRET_PATH"];
   if (explicit?.trim()) return resolve(explicit.trim());
 
-  const workspaceSecret = resolve(process.cwd(), ".starlingai", ".jwt_secret");
-  const homeSecret = resolve(homedir(), ".starlingai", ".jwt_secret");
+  const workspaceSecret = resolve(process.cwd(), PRODUCT.stateDirName, ".jwt_secret");
+  const homeSecret = resolve(homedir(), PRODUCT.stateDirName, ".jwt_secret");
 
   if (existsSync(workspaceSecret)) return workspaceSecret;
   if (existsSync(homeSecret)) return homeSecret;

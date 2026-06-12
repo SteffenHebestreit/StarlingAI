@@ -21,6 +21,7 @@ import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { verifyToken, extractBearerToken } from "../gateway/auth.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { PRODUCT } from "../product/index.js";
 import {
   A2A_ERROR,
   A2A_PROTOCOL_VERSION,
@@ -289,15 +290,15 @@ function buildAgentCard(req: IncomingMessage): A2AAgentCard {
     return {
       id: name,
       name,
-      description: cfg?.description ?? `StarlingAI sub-agent ${name}`,
+      description: cfg?.description ?? `${PRODUCT.name} sub-agent ${name}`,
       tags: cfg?.tags ?? [],
     };
   });
 
   return {
-    name: `StarlingAI (${config.federation?.instanceId ?? "primary"})`,
+    name: `${PRODUCT.name} (${config.federation?.instanceId ?? "primary"})`,
     description:
-      "StarlingAI multi-agent swarm exposed via the public A2A protocol.  " +
+      `${PRODUCT.name} multi-agent swarm exposed via the public A2A protocol.  ` +
       "Each skill maps to a configured sub-agent; tier policies and " +
       "human-in-the-loop gates are enforced server-side.",
     url: `${baseUrl}/a2a/v1`,

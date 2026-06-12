@@ -37,9 +37,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("skills:store");
 
-const SKILLS_SUBDIR = ".starlingai/skills";
+const SKILLS_SUBDIR = `${PRODUCT.stateDirName}/skills`;
 const SUPPORT_FILE_DIRS = new Set(["references", "templates", "scripts", "assets"]);
 const HISTORY_FILE = "skill.history.json";
 const MAX_HISTORY_ENTRIES = 50;

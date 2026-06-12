@@ -9,14 +9,16 @@ import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { SignJWT } from "jose";
 
+import { PRODUCT } from "../product/index.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../../../..");
 const gatewayBaseUrl = process.env["SAI_GATEWAY_URL"]?.trim() || "http://127.0.0.1:8765";
 const speechText = process.env["SAI_QWEN_SMOKE_TEXT"]?.trim() || "Hello from the Qwen speech smoke test.";
 const sampleAudioPath = process.env["SAI_QWEN_SMOKE_SAMPLE_PATH"]?.trim();
-const smokeLogPath = resolve(repoRoot, ".starlingai/qwen-speech-smoke.last.log");
-const smokeStatusPath = resolve(repoRoot, ".starlingai/qwen-speech-smoke.last.status");
+const smokeLogPath = resolve(repoRoot, `${PRODUCT.stateDirName}/qwen-speech-smoke.last.log`);
+const smokeStatusPath = resolve(repoRoot, `${PRODUCT.stateDirName}/qwen-speech-smoke.last.status`);
 
 type TranscriptionResponse = {
   text?: string;
@@ -81,7 +83,7 @@ async function main(): Promise<void> {
 }
 
 function resetSmokeLog(): void {
-  mkdirSync(resolve(repoRoot, ".starlingai"), { recursive: true });
+  mkdirSync(resolve(repoRoot, PRODUCT.stateDirName), { recursive: true });
   writeFileSync(smokeLogPath, "", "utf8");
   writeFileSync(smokeStatusPath, "running\n", "utf8");
 }
@@ -125,7 +127,7 @@ function resolveGatewaySecret(): string {
   const configSecret = readConfigJwtSecret();
   if (configSecret && configSecret.length >= 32) return configSecret;
 
-  const secretPath = join(homedir(), ".starlingai", ".jwt_secret");
+  const secretPath = join(homedir(), PRODUCT.stateDirName, ".jwt_secret");
   try {
     const stored = readFileSync(secretPath, "utf8").trim();
     if (stored.length >= 32) return stored;

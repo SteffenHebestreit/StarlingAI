@@ -8,6 +8,8 @@ import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("credentials");
 const STORE_PATH = resolveStorePath();
 const ALGO = "aes-256-gcm";
@@ -127,8 +129,8 @@ function resolveStorePath(): string {
   const explicit = process.env["SAI_CRED_STORE"];
   if (explicit?.trim()) return resolve(explicit);
 
-  const workspaceStore = resolve(process.cwd(), ".starlingai", "credentials.enc");
-  const homeStore = resolve(homedir(), ".starlingai", "credentials.enc");
+  const workspaceStore = resolve(process.cwd(), PRODUCT.stateDirName, "credentials.enc");
+  const homeStore = resolve(homedir(), PRODUCT.stateDirName, "credentials.enc");
 
   if (existsSync(workspaceStore)) return workspaceStore;
   if (existsSync(homeStore)) return homeStore;

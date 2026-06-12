@@ -1,3 +1,5 @@
+import { PRODUCT } from "../product/index.js";
+
 export type InterventionActionKind = "stop_turn" | "new_session" | "request_approval";
 
 export interface InterventionAction {
@@ -351,7 +353,7 @@ export function buildWardenIntervention(
       reasonCode,
       severity: "error",
       summary: "Docker daemon unreachable — containerized delegations failing",
-      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} Check that Docker Desktop / dockerd is running, or temporarily set agents.defaultContainerized to false (or STARLINGAI_DEFAULT_CONTAINERIZED=false) and restart the gateway.`,
+      detail: `${detail}${subject ? ` Subject: ${subject}.` : ""} Check that Docker Desktop / dockerd is running, or temporarily set agents.defaultContainerized to false (or ${PRODUCT.envPrefix}_DEFAULT_CONTAINERIZED=false) and restart the gateway.`,
       actions: DEFAULT_ACTIONS,
     };
   }

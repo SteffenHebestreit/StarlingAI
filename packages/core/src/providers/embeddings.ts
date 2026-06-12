@@ -14,6 +14,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("embeddings");
 
 interface EmbeddingEntry {
@@ -1159,8 +1161,8 @@ interface PersistedEmbeddingCache {
 function resolveEmbeddingCachePath(): string {
   const explicit = process.env["SAI_EMBEDDING_CACHE"]?.trim();
   if (explicit) return resolve(explicit);
-  const workspacePath = resolve(process.cwd(), ".starlingai", "embedding-cache.json");
-  const homePath = resolve(homedir(), ".starlingai", "embedding-cache.json");
+  const workspacePath = resolve(process.cwd(), PRODUCT.stateDirName, "embedding-cache.json");
+  const homePath = resolve(homedir(), PRODUCT.stateDirName, "embedding-cache.json");
   if (existsSync(workspacePath)) return workspacePath;
   return workspacePath; // default to workspace even if it doesn't exist yet
 }

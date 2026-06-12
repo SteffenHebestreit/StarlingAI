@@ -18,6 +18,8 @@ import { join } from "node:path";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 import type { SwarmState } from "../tools/registry.js";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Shared mocks ──────────────────────────────────────────────────────────
 
 const streamMock = vi.hoisted(() => vi.fn());
@@ -132,7 +134,7 @@ afterEach(async () => {
 describe("H1.1: swarm state seeding on retry turns", () => {
   it("loadPreviousTurnSwarmTasks carries completed tasks into new turn swarmState", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-h1-swarm-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     writeFileSync(join(ws, "starlingai.json"), JSON.stringify({
@@ -276,7 +278,7 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 
   it("does not persist carried swarm state on a direct-answer follow-up turn", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-h1-direct-answer-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     writeFileSync(join(ws, "starlingai.json"), JSON.stringify({
@@ -338,7 +340,7 @@ describe("H1.1: swarm state seeding on retry turns", () => {
 describe("H1.2: architect-spawned ephemeral agents always run in-process", () => {
   it("runArchitectFallback passes container: { disabled: true } in inlineConfig", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-h1-ephemeral-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     writeFileSync(join(ws, "starlingai.json"), JSON.stringify({
@@ -410,7 +412,7 @@ describe("H1.2: architect-spawned ephemeral agents always run in-process", () =>
 
   it("create_ephemeral_agent passes container: { disabled: true } in inlineConfig", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-h1-create-ephemeral-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     writeFileSync(join(ws, "starlingai.json"), JSON.stringify({

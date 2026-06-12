@@ -41,6 +41,7 @@ const PptxGenJS = require("pptxgenjs") as new () => {
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("tool:office-output");
 
@@ -180,7 +181,7 @@ registerTool({
     let buffer: Buffer;
     try {
       const doc = new DocxDocument({
-        creator: author || "StarlingAI",
+        creator: author || PRODUCT.name,
         title: title || undefined,
         sections: [{ properties: {}, children: paragraphs }],
       });

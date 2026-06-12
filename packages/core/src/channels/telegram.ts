@@ -8,6 +8,7 @@ import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
 import { setChannelHealthCheck } from "./registry.js";
+import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("channel:telegram");
 
@@ -58,7 +59,7 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
       userId: userId?.toString(),
     });
     chatSessions.set(ctx.chat.id, session.id);
-    await ctx.reply("StarlingAI connected. How can I help?");
+    await ctx.reply(`${PRODUCT.name} connected. How can I help?`);
     log.info({ chatId: ctx.chat.id, sessionId: session.id }, "Telegram session started");
   });
 

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_TTS_CHUNK_MAX_CHARS } from "../multimodal/tts-chunking.js";
 
+import { PRODUCT } from "../product/index.js";
+
 function createPcmWav(sampleCount: number, seed = 0): Uint8Array {
   const dataSize = sampleCount * 2;
   const wav = Buffer.alloc(44 + dataSize);
@@ -554,7 +556,7 @@ describe("multimodal and browser direct tools", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain(".starlingai/generated/tts-");
+    expect(result.output).toContain(`${PRODUCT.stateDirName}/generated/tts-`);
     expect(result.output).toContain(".wav");
   });
 

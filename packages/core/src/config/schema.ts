@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { productEnv } from "../product/index.js";
 
 const OptionalEndpointUrlSchema = z.preprocess(
   (value) => typeof value === "string" ? value.trim() : value,
@@ -1450,10 +1451,10 @@ export const ConfigSchema = z.object({
      *  silently falling back to in-process execution. Set explicitly to false to keep
      *  the legacy in-process default.
      *
-     *  Environment override: STARLINGAI_DEFAULT_CONTAINERIZED=false flips the default
+     *  Environment override: <ENV_PREFIX>_DEFAULT_CONTAINERIZED=false flips the default
      *  back to false (used by the test harness to keep mock-LLM tests in-process). */
     defaultContainerized: z.boolean().default(
-      process.env["STARLINGAI_DEFAULT_CONTAINERIZED"] === "false" ? false : true,
+      productEnv("DEFAULT_CONTAINERIZED") === "false" ? false : true,
     ),
     rateLimit: RateLimitSchema.default({}),
     /** Maximum tool-call iterations for the orchestrator per turn */

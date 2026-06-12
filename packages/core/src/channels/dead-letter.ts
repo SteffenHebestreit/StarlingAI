@@ -9,6 +9,8 @@ import { resolve, dirname } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("channels:dead-letter");
 
 export interface DeadLetterEntry {
@@ -22,7 +24,7 @@ export interface DeadLetterEntry {
 function getDeadLetterPath(): string {
   const config = getConfig();
   const workspacePath = config.workspacePath ?? "/workspace";
-  return resolve(workspacePath, ".starlingai", "dead-letters.ndjson");
+  return resolve(workspacePath, PRODUCT.stateDirName, "dead-letters.ndjson");
 }
 
 export function appendDeadLetter(entry: DeadLetterEntry): void {
