@@ -139,9 +139,10 @@ describe("extension tool tiers", () => {
 describe("extension loader (reference extension)", () => {
   it("skips underscore-prefixed directories during normal discovery", async () => {
     process.env["SAI_EXTENSIONS_DIR"] = EXTENSIONS_DIR;
-    const result = await loadCoreExtensions();
-    expect(result.loaded).toBe(0);
-    expect(listLoadedExtensions()).toHaveLength(0);
+    await loadCoreExtensions();
+    // Fork-agnostic assertion: a fork's real extensions may load here; the
+    // invariant under test is only that the dormant _example never does.
+    expect(listLoadedExtensions().map((e) => e.name)).not.toContain("example");
   });
 
   it("loads the example extension end to end", async () => {
