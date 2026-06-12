@@ -174,10 +174,10 @@ in-process code:
 | 2 | WS1 product module + core literal sweep incl. tests + `GET /api/product` | ✅ e73f8fe |
 | 3 | WS1 web-shell branding from /api/product | pending (waits for in-flight App.vue work to land) |
 | 4 | WS2 tool groups + config | ✅ b565554 |
-| 5 | WS3 extension SDK + discovery + example + guardrail hooks | ✅ (this commit) |
-| 6 | WS4 web extension points | pending |
-| 7 | WS5+WS6 docs (forking.md), drift script, compose overlays | pending |
-| 8 | WS7 MFA-AI migration | pending |
+| 5 | WS3 extension SDK + discovery + example + guardrail hooks | ✅ 68e2b45 |
+| 6 | WS4 web extension points (registry + router; shell nav wiring waits on in-flight App.vue work) | ✅ 46abac5 |
+| 7 | WS5+WS6 docs/forking.md + generalized drift script | ✅ a80392a |
+| 8 | WS7 MFA-AI migration (sync to refactored upstream, then move MFA layer onto fork-owned surfaces) | pending |
 | 9 | End-to-end verification: build, tests, rebase dry-run in MFA-AI | pending |
 
 ## Non-goals
