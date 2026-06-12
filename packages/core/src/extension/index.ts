@@ -30,6 +30,9 @@ import { ToolTier } from "../guardrails/tool-tiers.js";
 import type { GuardrailResult } from "../guardrails/input.js";
 import type { Logger } from "pino";
 import type { RoutePolicy as RoutePolicyDef } from "../gateway/route-policies.js";
+import type { LlmBoundaryTransformer } from "../providers/llm-boundary.js";
+
+export type { LlmBoundaryTransformer };
 
 export type { RoutePolicyDef };
 
@@ -169,6 +172,12 @@ export interface CoreExtension {
    * domain vocabulary (e.g. German medical terms → mfa_* tools).
    */
   toolKeywords?: Array<{ pattern: RegExp; keywords: string[] }>;
+  /**
+   * LLM-boundary transformer: rewrite the provider-bound message view
+   * (beforeRequest, fails closed) and non-streaming model text
+   * (afterResponse, fails open). See providers/llm-boundary.ts.
+   */
+  llmBoundary?: LlmBoundaryTransformer;
   /** Guardrail pipeline hooks, appended after built-ins. */
   guardrails?: ExtensionGuardrailHooks;
   /**
