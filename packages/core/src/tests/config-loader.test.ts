@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PRODUCT } from "../product/index.js";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -193,7 +194,7 @@ describe("config loader mutable overlay", () => {
 
     try {
       const config = configLoader.loadConfig();
-      const compiledPath = join(tempDir, "starlingai.json");
+      const compiledPath = join(tempDir, PRODUCT.configFileName);
 
       expect(config.agents.defaults.model.primary).toBe("lmstudio/qwen/qwen3.6-35b-a3b");
       expect(config.agents.mainAssistant.toolMode).toBe("delegate_only");
