@@ -1,0 +1,70 @@
+<!doctype html>
+<!-- Dev-only playground: pnpm dev, then open /orb-test.html to preview the
+     orb in every aiState without logging in. Not part of the app build. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Orb playground</title>
+  <style>
+    /* Mirrors the app's Jarvis backdrop (style.css body rules + HUD chrome)
+       so contrast judgments made here hold in the real Chat page. */
+    body {
+      margin: 0; height: 100vh; display: flex; flex-direction: column;
+      background-color: rgb(2, 10, 14);
+      background-image:
+        radial-gradient(1100px 620px at 12% -8%, rgba(34, 211, 238, 0.16), transparent 62%),
+        radial-gradient(960px 540px at 104% 4%, rgba(45, 212, 191, 0.12), transparent 58%),
+        radial-gradient(1400px 800px at 50% 118%, rgba(103, 232, 249, 0.08), transparent 62%);
+      background-attachment: fixed;
+    }
+    body::before {
+      content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1.4px);
+      background-size: 26px 26px;
+      mask-image: radial-gradient(ellipse 100% 90% at 50% 0%, black 25%, transparent 78%);
+      -webkit-mask-image: radial-gradient(ellipse 100% 90% at 50% 0%, black 25%, transparent 78%);
+    }
+    body::after {
+      content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background: repeating-linear-gradient(0deg,
+        rgba(103, 232, 249, 0.024) 0px, rgba(103, 232, 249, 0.024) 1px,
+        transparent 1px, transparent 3px);
+    }
+    #bar { display: flex; gap: 8px; padding: 10px; justify-content: center; }
+    #bar button {
+      background: #1d1530; color: #cbb6ff; border: 1px solid #4a3a77;
+      border-radius: 6px; padding: 6px 14px; cursor: pointer; font: 13px monospace;
+    }
+    #bar button.active { background: #4a3a77; color: #fff; }
+    #stage { flex: 1; min-height: 0; }
+  </style>
+</head>
+<body>
+  <div id="bar"></div>
+  <div id="stage"></div>
+  <script type="module">
+    import { createApp, ref, h } from "vue";
+    import OrbCanvas from "/src/components/OrbCanvas.vue";
+
+    const state = ref("default");
+    const states = ["default", "activity", "output", "waiting", "error", "criticalError"];
+
+    createApp({
+      setup: () => () => h(OrbCanvas, { aiState: state.value, style: "width:100%;height:100%" }),
+    }).mount("#stage");
+
+    const bar = document.getElementById("bar");
+    for (const s of states) {
+      const b = document.createElement("button");
+      b.textContent = s;
+      b.id = "btn-" + s;
+      b.onclick = () => {
+        state.value = s;
+        bar.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+      };
+      bar.appendChild(b);
+    }
+    window.__setOrbState = (s) => { state.value = s; };
+  </script>
+</body>
+</html>

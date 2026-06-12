@@ -1,11 +1,12 @@
+// Neural core sphere. Shimmer/pulse motion uses CPU-accumulated phase
+// uniforms so abrupt speed changes (e.g. entering criticalError) slow the
+// motion smoothly instead of snapping every particle to a new phase.
 export const vertexShader = `
   attribute float shimmerData;
 
-  uniform float uTime;
-  uniform float uDeltaTime;
-  uniform float uNeuralSpherePulseSpeed;
+  uniform float uShimmerPhase;
+  uniform float uPulsePhase;
   uniform float uNeuralSpherePulseAmount;
-  uniform float uNeuralSphereShimmerSpeed;
   uniform vec3 uNeuralSphereColor;
   uniform float uNeuralSphereOpacity;
 
@@ -18,8 +19,7 @@ export const vertexShader = `
   varying vec4 vColor;
 
   void main() {
-    float shimmerPhase = shimmerData;
-    float shimmerValue = (sin(uTime * uNeuralSphereShimmerSpeed + shimmerPhase) + 1.0) / 2.0;
+    float shimmerValue = (sin(uShimmerPhase + shimmerData) + 1.0) / 2.0;
 
     vec3 particleColor = uNeuralSphereColor;
     float particleOpacity = uNeuralSphereOpacity;
@@ -41,7 +41,7 @@ export const vertexShader = `
       particleOpacity = min(1.0, uNeuralSphereOpacity + popIntensity * NEURAL_SPHERE_POP_OPACITY_BOOST);
     }
 
-    float pulseEffect = sin(uTime * uNeuralSpherePulseSpeed) * 0.5 + 0.5;
+    float pulseEffect = sin(uPulsePhase) * 0.5 + 0.5;
     shimmerAdjustedColor = mix(shimmerAdjustedColor, shimmerAdjustedColor * 1.5, pulseEffect * uNeuralSpherePulseAmount);
 
     vColor = vec4(shimmerAdjustedColor, particleOpacity);

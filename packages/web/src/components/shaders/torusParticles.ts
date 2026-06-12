@@ -1,3 +1,8 @@
+// Portal torus particles. All speed-dependent motion is driven by phase
+// uniforms accumulated CPU-side (phase += delta * speed) rather than
+// uTime * speed: with the latter, lerping a speed during a state transition
+// multiplies the *total elapsed time* by the speed delta, which makes the
+// waves whip around violently in long-lived sessions.
 export const vertexShader = `
   attribute float particleAngle;
   attribute float particleRadius;
@@ -7,12 +12,10 @@ export const vertexShader = `
   attribute float particleIsNode;
 
   uniform float uTime;
-  uniform float uDeltaTime;
-  uniform float uPortalSpeedFactor;
-  uniform float uBreatheSpeed;
-  uniform float uRadialWaveSpeed;
-  uniform float uZWaveSpeed;
-  uniform float uDriftSpeed;
+  uniform float uBreathePhase;
+  uniform float uRadialWavePhase;
+  uniform float uZWavePhase;
+  uniform float uDriftOffset;
   uniform float uParticleOpacity;
   uniform vec3  uPulseColor;
   uniform vec3  uPortalColorNear;
@@ -42,12 +45,9 @@ export const vertexShader = `
   varying float vOpacity;
 
   void main() {
-    float breatheFactor = 0.0;
-    if (uBreatheSpeed > 0.0)
-      breatheFactor = sin(uTime * uBreatheSpeed + particlePhase);
+    float breatheFactor = sin(uBreathePhase + particlePhase);
 
-    float radialWaveOffset   = uTime * uRadialWaveSpeed;
-    float angleWaveComponent = sin(particleAngle * RADIAL_WAVE_FREQUENCY + radialWaveOffset);
+    float angleWaveComponent = sin(particleAngle * RADIAL_WAVE_FREQUENCY + uRadialWavePhase);
     float dynamicRadius      = particleRadius + angleWaveComponent * RADIAL_WAVE_AMPLITUDE;
     float pulsedRadius       = dynamicRadius + breatheFactor * RADIAL_PULSE_AMPLITUDE;
 
@@ -56,13 +56,12 @@ export const vertexShader = `
     float finalX = x_base * SNAKE_EYE_SCALE_X;
     float finalY = y_base * SNAKE_EYE_SCALE_Y;
 
-    float driftZ = particleDriftZ - uTime * uDriftSpeed * uPortalSpeedFactor;
+    float driftZ = particleDriftZ - uDriftOffset;
     driftZ = mod(driftZ + PORTAL_DEPTH * 0.5, PORTAL_DEPTH);
     if (driftZ < 0.0) driftZ += PORTAL_DEPTH;
     driftZ -= PORTAL_DEPTH * 0.5;
 
-    float zWaveOffset         = uTime * uZWaveSpeed;
-    float zAngleWaveComponent = sin(particleAngle * Z_WAVE_FREQUENCY + zWaveOffset + particlePhase * 0.5);
+    float zAngleWaveComponent = sin(particleAngle * Z_WAVE_FREQUENCY + uZWavePhase + particlePhase * 0.5);
     float waveZ               = zAngleWaveComponent * Z_WAVE_AMPLITUDE;
     float finalZ              = driftZ + particleZOffset + breatheFactor * AXIAL_PULSE_AMPLITUDE + waveZ;
 

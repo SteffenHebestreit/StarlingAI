@@ -6,8 +6,9 @@
     @drop="onChatDrop"
   >
 
-    <!-- Orb background canvas -->
-    <div class="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
+    <!-- Orb background canvas: fixed to the viewport so layout changes
+         (input bay, panels) can never move or resize the entity. -->
+    <div class="fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
       <OrbCanvas :ai-state="orbAiState" class="w-full h-full" />
     </div>
 
@@ -24,63 +25,101 @@
       </div>
     </div>
 
-    <!-- Session bar — wraps onto two rows on phones so the export buttons
-         stay reachable without horizontal scrolling. -->
-    <div class="relative z-10 bg-gray-900/60 backdrop-blur-md border-b border-purple-500/10 px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-2">
-      <div class="flex items-center gap-2 sm:gap-3 text-xs text-gray-500 min-w-0">
-        <span v-if="gateway.currentSessionId" class="shrink-0">
-          Session
-          <button
-            type="button"
-            @click="copySessionId"
-            :title="sessionIdCopied ? 'Copied!' : `Copy session id: ${gateway.currentSessionId}`"
-            class="font-mono text-gray-400 ml-1 inline-flex items-center gap-1 rounded px-1 -mx-1 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer"
-          >
-            <code class="font-mono">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
-            <span class="text-[10px]" aria-hidden="true">{{ sessionIdCopied ? '✓' : '⧉' }}</span>
-          </button>
-        </span>
-        <span v-else class="italic shrink-0">No active session</span>
-        <select
-          v-if="activeSessions.length > 0"
-          :value="gateway.currentSessionId ?? ''"
-          aria-label="Active session"
-          class="rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300 max-w-[10rem] sm:max-w-none truncate"
-          @change="handleSessionSwitch"
+    <!-- Floating HUD pods: draggable toggles whose menus open around
+         wherever they currently sit. Teleported to <body> so no overlay or
+         stacking context can swallow their clicks. -->
+    <Teleport to="body">
+    <div v-if="(actionsOpen || sessionOpen) && gateway.connected" class="fixed inset-0 z-[210]" @click="actionsOpen = false; sessionOpen = false" />
+
+    <!-- Session-actions pod: tools fan out on a full circle around it.
+         The pods are chat controls — they only exist while connected, so
+         they can never float above the login modal. -->
+    <div v-if="gateway.connected" class="hud-orb" :style="actionsOrbStyle">
+      <div class="radial-menu" :class="actionsOpen ? 'radial-menu--open' : ''">
+        <button
+          v-for="(action, i) in sessionActions"
+          :key="action.key"
+          type="button"
+          class="radial-menu__item"
+          :class="action.danger ? 'radial-menu__item--danger' : ''"
+          :style="radialItemStyle(i, sessionActions.length)"
+          :disabled="action.disabled"
+          :title="action.title"
+          :tabindex="actionsOpen ? 0 : -1"
+          @click="action.run(); actionsOpen = false;"
+        >{{ action.glyph }}</button>
+        <button
+          type="button"
+          class="radial-menu__toggle"
+          :aria-expanded="actionsOpen"
+          aria-label="Session actions"
+          title="Session actions (drag to move)"
+          @pointerdown="actionsOrbDown"
+          @pointermove="actionsOrbMove"
+          @pointerup="actionsOrbUp"
+          @click="onActionsToggleClick"
         >
-          <option value="">Select active session</option>
-          <option v-for="session in activeSessions" :key="session.id" :value="session.id">
-            {{ session.id.substring(0, 8) }}… · {{ session.turns }} turns
-          </option>
-        </select>
-      </div>
-      <div class="flex flex-wrap gap-2 justify-end">
-        <button @click="gateway.createSession()"
-          class="btn-grad px-3 py-1 rounded-lg text-xs">New Session</button>
-        <template v-if="gateway.currentSessionId">
-          <button @click="exportMarkdown"
-            :disabled="gateway.messages.length === 0 || exportingTranscript"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
-            title="Download conversation as Markdown">⬇ MD</button>
-          <button @click="exportDebugMarkdown"
-            :disabled="!gateway.currentSessionId || exportingTranscript"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
-            title="Download combined debug markdown with transcript, raw session history, and audit logs">⬇ Debug</button>
-          <button @click="exportAuditMarkdown"
-            :disabled="!gateway.currentSessionId || exportingTranscript"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
-            title="Download the session audit log as Markdown">⬇ Audit</button>
-          <button @click="exportPDF"
-            :disabled="gateway.messages.length === 0 || exportingTranscript"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs disabled:opacity-40"
-            title="Export conversation as PDF">⬇ PDF</button>
-          <button @click="archiveCurrentSession"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs">Archive</button>
-          <button @click="resetSession"
-            class="btn-ghost px-3 py-1 rounded-lg text-xs">Reset</button>
-        </template>
+          <span v-if="actionsOpen" aria-hidden="true">✕</span>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="h-[17px] w-[17px]" aria-hidden="true">
+            <path d="M4 7h10" /><circle cx="17" cy="7" r="2.2" />
+            <path d="M20 12h-10" /><circle cx="7" cy="12" r="2.2" />
+            <path d="M4 17h8" /><circle cx="15" cy="17" r="2.2" />
+          </svg>
+        </button>
       </div>
     </div>
+
+    <!-- Session pod: indicator + picker behind its own toggle. -->
+    <div v-if="gateway.connected" class="hud-orb" :style="sessionOrbStyle">
+      <button
+        type="button"
+        class="radial-menu__toggle"
+        :class="gateway.currentSessionId ? '' : 'hud-orb__btn--idle'"
+        :aria-expanded="sessionOpen"
+        aria-label="Session"
+        title="Session (drag to move)"
+        @pointerdown="sessionOrbDown"
+        @pointermove="sessionOrbMove"
+        @pointerup="sessionOrbUp"
+        @click="onSessionToggleClick"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="h-[17px] w-[17px]" aria-hidden="true">
+          <path d="M12 3l9 5-9 5-9-5 9-5z" />
+          <path d="M3 13l9 5 9-5" />
+        </svg>
+      </button>
+      <Transition name="hud-pop">
+        <div v-if="sessionOpen" class="session-pod" :class="sessionPodLeft ? 'session-pod--left' : 'session-pod--right'">
+          <div class="session-pod__row">
+            <span class="session-pod__label">Session</span>
+            <button
+              v-if="gateway.currentSessionId"
+              type="button"
+              @click="copySessionId"
+              :title="sessionIdCopied ? 'Copied!' : `Copy session id: ${gateway.currentSessionId}`"
+              class="font-mono text-gray-300 inline-flex items-center gap-1 rounded px-1 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer text-xs"
+            >
+              <code class="font-mono">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
+              <span class="text-[10px]" aria-hidden="true">{{ sessionIdCopied ? '✓' : '⧉' }}</span>
+            </button>
+            <span v-else class="italic text-gray-500 text-xs">No active session</span>
+          </div>
+          <select
+            v-if="activeSessions.length > 0"
+            :value="gateway.currentSessionId ?? ''"
+            aria-label="Active session"
+            class="w-full rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300 truncate"
+            @change="handleSessionSwitch"
+          >
+            <option value="">Select active session</option>
+            <option v-for="session in activeSessions" :key="session.id" :value="session.id">
+              {{ session.id.substring(0, 8) }}… · {{ session.turns }} turns
+            </option>
+          </select>
+        </div>
+      </Transition>
+    </div>
+    </Teleport>
 
     <!-- Workspace -->
     <div class="relative z-10 flex-1 min-h-0 px-4 pb-4 pt-4 sm:px-5">
@@ -101,7 +140,7 @@
               <span>{{ gateway.isLoading ? "New activity" : "New messages" }}</span>
             </button>
           </Transition>
-          <div ref="messagesEl" class="chat-message-scroll">
+          <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''">
             <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
               <button
                 @click="loadOlderMessages"
@@ -356,8 +395,15 @@
       </div>
     </Transition>
 
-    <!-- Input area -->
-    <div class="relative z-10 bg-gray-900/70 backdrop-blur-lg border-t border-purple-500/15 px-5 py-4">
+    <!-- Input bay: a floating bottom panel (no layout impact at all);
+         recedes into depth while idle, summoned by the launcher. -->
+    <div class="chat-input-bay-wrap" :class="composerOpen ? 'chat-input-bay-wrap--open' : ''">
+    <div
+      class="chat-input-bay relative bg-gray-900/85 backdrop-blur-xl border border-purple-500/25 rounded-2xl px-5 py-4 shadow-2xl shadow-black/50"
+      :class="composerOpen ? '' : 'chat-input-bay--hidden'"
+      @focusin="composerFocused = true"
+      @focusout="onComposerFocusOut"
+    >
 
       <!-- Pending image attachment chips -->
       <div v-if="pendingImageContexts.length > 0" class="flex flex-wrap gap-2 mb-2">
@@ -875,10 +921,36 @@
         Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code>
       </div>
     </div>
+    </div>
+
+    <!-- Composer launcher: the single round control left behind when the
+         input bay has flown out. Click (or press "/") to summon it. -->
+    <Teleport to="body">
+    <Transition name="composer-launcher">
+      <button
+        v-if="!composerOpen && gateway.connected"
+        type="button"
+        class="chat-composer-launcher"
+        :style="launcherOrbStyle"
+        title="Message StarlingAI (press / · drag to move)"
+        aria-label="Open message input"
+        @pointerdown="launcherOrbDown"
+        @pointermove="launcherOrbMove"
+        @pointerup="launcherOrbUp"
+        @click="onLauncherClick"
+      >
+        <svg class="chat-composer-launcher__core" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 11.5a8.38 8.38 0 0 1-9 8.35 8.5 8.5 0 0 1-3.4-.7L3 21l1.85-5.6A8.38 8.38 0 0 1 12.5 3a8.5 8.5 0 0 1 8.5 8.5z" />
+          <path d="M8 10h8" /><path d="M8 13.5h5" />
+        </svg>
+      </button>
+    </Transition>
+    </Teleport>
   </div>
 
   <!-- Image preview modal -->
   <Teleport to="body">
+    <Transition name="hud-pop">
     <div
       v-if="previewModalUrl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm"
@@ -898,6 +970,7 @@
         >✕</button>
       </div>
     </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -1172,7 +1245,206 @@ function flagChipClass(color: "purple" | "sky" | "amber"): string {
 /** True while image analysis is in-flight before the backend call starts. */
 const analysing = ref(false);
 
+// ── Floating draggable HUD pods ─────────────────────────────────────────
+// Round toggles that can be dragged anywhere; a short pointer movement
+// still counts as a click on the inner toggle. Positions are stored as
+// viewport FRACTIONS so the pods realign on window resize.
+const hudWin = ref({ w: 1920, h: 1080 });
+function syncHudWin() { hudWin.value = { w: window.innerWidth, h: window.innerHeight }; }
+onMounted(() => { syncHudWin(); window.addEventListener("resize", syncHudWin); });
+onUnmounted(() => window.removeEventListener("resize", syncHudWin));
+
+function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: number }) {
+  const frac = ref({ ...defaultFrac });
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null") as { fx: number; fy: number } | null;
+    if (saved && typeof saved.fx === "number" && typeof saved.fy === "number") frac.value = saved;
+  } catch { /* ignore broken storage */ }
+
+  let pointerActive = false;
+  let moved = false;
+  let startX = 0, startY = 0, origX = 0, origY = 0;
+  let captureEl: HTMLElement | null = null;
+  let capturePointer = 0;
+
+  const x = computed(() => Math.min(Math.max(frac.value.fx * hudWin.value.w, 8), hudWin.value.w - 52));
+  const y = computed(() => Math.min(Math.max(frac.value.fy * hudWin.value.h, 68), hudWin.value.h - 52));
+  const style = computed(() => ({ left: `${x.value}px`, top: `${y.value}px` }));
+
+  function down(event: PointerEvent) {
+    pointerActive = true;
+    moved = false;
+    startX = event.clientX; startY = event.clientY;
+    origX = x.value; origY = y.value;
+    // Capture immediately for reliable fast drags. The handlers live on the
+    // toggle button itself, so the retargeted click still lands on the
+    // element that owns @click — capturing on a wrapper would kill it.
+    captureEl = event.currentTarget as HTMLElement;
+    capturePointer = event.pointerId;
+    try { captureEl.setPointerCapture(capturePointer); } catch { /* synthetic events */ }
+  }
+  function move(event: PointerEvent) {
+    if (!pointerActive) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    if (!moved && Math.abs(dx) + Math.abs(dy) > 6) moved = true;
+    if (moved) {
+      frac.value = {
+        fx: (origX + dx) / hudWin.value.w,
+        fy: (origY + dy) / hudWin.value.h,
+      };
+    }
+  }
+  function up() {
+    pointerActive = false;
+    if (moved) {
+      try { localStorage.setItem(storageKey, JSON.stringify(frac.value)); } catch { /* full/blocked */ }
+    }
+  }
+  const wasDragged = () => moved;
+  return { x, y, style, down, move, up, wasDragged };
+}
+
+const {
+  x: actionsOrbX, style: actionsOrbStyle,
+  down: actionsOrbDown, move: actionsOrbMove, up: actionsOrbUp,
+  wasDragged: actionsOrbDragged,
+} = useDraggableOrb("starlingai.hud.actionsOrb", { fx: 0.955, fy: 0.09 });
+
+const {
+  x: sessionOrbX, style: sessionOrbStyle,
+  down: sessionOrbDown, move: sessionOrbMove, up: sessionOrbUp,
+  wasDragged: sessionOrbDragged,
+} = useDraggableOrb("starlingai.hud.sessionOrb", { fx: 0.955, fy: 0.17 });
+
+const {
+  style: launcherOrbStyle,
+  down: launcherOrbDown, move: launcherOrbMove, up: launcherOrbUp,
+  wasDragged: launcherOrbDragged,
+} = useDraggableOrb("starlingai.hud.launcherOrb", { fx: 0.95, fy: 0.92 });
+
+const sessionOpen = ref(false);
+const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
+
+// Disconnecting unmounts the pods; make sure their menus don't reopen in a
+// stale-open state when the connection returns.
+watch(() => gateway.connected, (connected) => {
+  if (!connected) {
+    actionsOpen.value = false;
+    sessionOpen.value = false;
+  }
+});
+
+function onActionsToggleClick() {
+  if (!actionsOrbDragged()) actionsOpen.value = !actionsOpen.value;
+}
+function onSessionToggleClick() {
+  if (!sessionOrbDragged()) sessionOpen.value = !sessionOpen.value;
+}
+function onLauncherClick() {
+  if (!launcherOrbDragged()) openComposer();
+}
+
+// Radial session-action menu: tools sit behind the toggle and fan out on a
+// circle around it when opened.
+const actionsOpen = ref(false);
+
+interface SessionAction {
+  key: string; glyph: string; title: string;
+  disabled?: boolean; danger?: boolean; run: () => void;
+}
+
+const sessionActions = computed((): SessionAction[] => {
+  const actions: SessionAction[] = [
+    { key: "new", glyph: "＋", title: "New Session", run: () => { void gateway.createSession(); } },
+  ];
+  if (gateway.currentSessionId) {
+    const noMessages = gateway.messages.length === 0 || exportingTranscript.value;
+    const noSession = !gateway.currentSessionId || exportingTranscript.value;
+    actions.push(
+      { key: "md",    glyph: "MD",  title: "Download conversation as Markdown",          disabled: noMessages, run: () => { void exportMarkdown(); } },
+      { key: "debug", glyph: "DBG", title: "Download debug markdown (transcript + audit)", disabled: noSession,  run: () => { void exportDebugMarkdown(); } },
+      { key: "audit", glyph: "AUD", title: "Download the session audit log",              disabled: noSession,  run: () => { void exportAuditMarkdown(); } },
+      { key: "pdf",   glyph: "PDF", title: "Export conversation as PDF",                  disabled: noMessages, run: () => { void exportPDF(); } },
+      { key: "arch",  glyph: "ARC", title: "Archive this session",                        run: () => { void archiveCurrentSession(); } },
+      { key: "reset", glyph: "RST", title: "Reset this session", danger: true,            run: () => { void resetSession(); } },
+    );
+  }
+  return actions;
+});
+
+// Fan the items around the full circle (starting at 12 o'clock) so every
+// tool gets breathing room regardless of where the pod has been dragged.
+function radialItemStyle(index: number, total: number): Record<string, string> {
+  const angle = -90 + (index * 360) / total;
+  const rad = (angle * Math.PI) / 180;
+  const radius = 4.6;
+  return {
+    "--tx": `${(Math.cos(rad) * radius).toFixed(3)}rem`,
+    "--ty": `${(Math.sin(rad) * radius).toFixed(3)}rem`,
+    "--delay": `${index * 28}ms`,
+  };
+}
+
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
+
+// HUD input bay: the whole input area flies out of view while idle and is
+// summoned back via the corner launcher (or "/"). A drafted message, focus,
+// attachments, or a running turn keep it open.
+const composerOpen = ref(false);
+const composerFocused = ref(false);
+
+function openComposer(prefill?: string) {
+  composerOpen.value = true;
+  if (prefill !== undefined) inputText.value = prefill;
+  void nextTick(() => {
+    const textarea = composerTextareaEl.value;
+    if (textarea) {
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    }
+    adjustComposerHeight();
+  });
+}
+
+function maybeCloseComposer() {
+  if (
+    inputText.value.trim() === ""
+    && !gateway.isLoading
+    && !analysing.value
+    && pendingImageContexts.value.length === 0
+  ) {
+    composerOpen.value = false;
+  }
+}
+
+function onComposerFocusOut(event: FocusEvent) {
+  const root = event.currentTarget as HTMLElement | null;
+  if (!root?.contains(event.relatedTarget as Node | null)) {
+    composerFocused.value = false;
+    maybeCloseComposer();
+  }
+}
+
+// While a turn runs the bay stays open (steering); when it ends and the user
+// isn't mid-interaction, it folds away again.
+watch(() => gateway.isLoading, (loading) => {
+  if (loading) composerOpen.value = true;
+  else if (!composerFocused.value) maybeCloseComposer();
+});
+
+// "/" anywhere outside a form control summons the bay ready for a command.
+function onGlobalComposerKey(event: KeyboardEvent) {
+  if (composerOpen.value || event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+  event.preventDefault();
+  openComposer("/");
+}
+onMounted(() => window.addEventListener("keydown", onGlobalComposerKey));
+onUnmounted(() => window.removeEventListener("keydown", onGlobalComposerKey));
+
 const composerMinHeight = computed(() => compactComposer.value ? 64 : 92);
 const composerMaxHeight = computed(() => compactComposer.value ? 160 : 248);
 const composerTextareaStyle = computed(() => ({
@@ -1183,8 +1455,16 @@ const composerTextareaStyle = computed(() => ({
 function adjustComposerHeight() {
   const textarea = composerTextareaEl.value;
   if (!textarea) return;
+  // Measure with the CSS height transition suppressed, then restore the old
+  // height before applying the new one so dock/undock (and growth while
+  // typing) animate from the real starting point instead of from 0.
+  const previous = textarea.style.height;
+  textarea.style.transition = "none";
   textarea.style.height = "0px";
   const nextHeight = Math.min(Math.max(textarea.scrollHeight, composerMinHeight.value), composerMaxHeight.value);
+  textarea.style.height = previous;
+  void textarea.offsetHeight;
+  textarea.style.transition = "";
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > composerMaxHeight.value ? "auto" : "hidden";
 }
@@ -1204,26 +1484,20 @@ const hasRunningSwarmTasks = computed(() => {
 });
 
 const orbAiState = computed(() => {
-  if (!gateway.connected) return "default";
-  if (gateway.isError)     return "error";
-  if (gateway.turnLikelyStalled) return "error";
-  if (gateway.isLoading || analysing.value) {
-    if (
-      analysing.value ||
-      hasRunningToolCalls.value ||
-      hasRunningSwarmTasks.value ||
-      Boolean(gateway.pendingApproval) ||
-      Boolean(gateway.pendingInputRequest) ||
-      Boolean(gateway.pendingIntervention)
-    ) {
-      return "activity";
-    }
-    if (gateway.isStreaming) {
-      return "output";
-    }
+  // Connection lost is the only truly frozen state; during the initial
+  // handshake stay calm instead of flashing red.
+  if (!gateway.connected) return gateway.connecting ? "default" : "criticalError";
+  if (gateway.isError || gateway.turnLikelyStalled) return "error";
+  // Approval/input/intervention means the AI is idle waiting on the human —
+  // show "waiting" (attention), not "activity" (working).
+  if (gateway.pendingApproval || gateway.pendingInputRequest || gateway.pendingIntervention) {
+    return "waiting";
+  }
+  // Tokens visibly arriving outranks still-unresolved tool calls.
+  if (gateway.isStreaming) return "output";
+  if (gateway.isLoading || analysing.value || hasRunningToolCalls.value || hasRunningSwarmTasks.value) {
     return "activity";
   }
-  if (gateway.isStreaming)  return "output";
   return "default";
 });
 
@@ -3742,10 +4016,274 @@ onUnmounted(() => {
 .chat-message-scroll {
   height: 100%;
   overflow-y: auto;
-  padding: 0.15rem 0.1rem 0.35rem 0;
+  /* generous inline inset so bubbles never touch the viewport edges */
+  padding: 0.5rem 1.25rem 0.75rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+/* ── Orbit corridor ─────────────────────────────────────────────────────
+   On wide screens the entity owns the center of the viewport. Both flanks
+   hug the protected central corridor — assistant bubbles right-align
+   against its left boundary, user bubbles left-align against its right —
+   so the conversation clusters around the entity like panels around a HUD
+   core. The whole band is width-capped and centered so nothing drifts to
+   the far corners of ultrawide windows. */
+/* ── 3D depth on scroll ─────────────────────────────────────────────────
+   Messages arrive from deep space at the bottom of the scroller, hold full
+   presence through the middle band, and recede back into space as they
+   leave past the orb at the top. Scroll-driven (compositor-only), with
+   graceful fallback where view() timelines aren't supported. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .chat-message-scroll :deep(.message-row) {
+      animation: msg-depth linear both;
+      animation-timeline: view();
+    }
+  }
+}
+@keyframes msg-depth {
+  0%   { opacity: 0; transform: perspective(900px) translateZ(-180px) translateY(30px) rotateX(8deg); }
+  12%  { opacity: 1; transform: perspective(900px) translateZ(0) translateY(0) rotateX(0deg); }
+  80%  { opacity: 1; transform: perspective(900px) translateZ(0) translateY(0) rotateX(0deg); }
+  100% { opacity: 0; transform: perspective(900px) translateZ(-220px) translateY(-44px) rotateX(-10deg); }
+}
+
+@media (min-width: 1100px) {
+  /* Half the corridor width; flanks end at 50% ± this, so the protected
+     zone stays centered on the orb whatever the column width is. */
+  .chat-message-scroll { --orbit-gap: clamp(7rem, 11vw, 14rem); }
+  .chat-message-scroll :deep(.message-row--ai),
+  .chat-message-scroll :deep(.message-row--user) {
+    width: 100%;
+    max-width: 110rem;
+    margin-inline: auto;
+  }
+  .chat-message-scroll :deep(.message-row--ai) {
+    justify-content: flex-end;
+    padding-right: calc(50% + var(--orbit-gap));
+  }
+  .chat-message-scroll :deep(.message-row--user) {
+    justify-content: flex-start;
+    padding-left: calc(50% + var(--orbit-gap));
+  }
+  .chat-message-scroll :deep(.message-bubble--ai),
+  .chat-message-scroll :deep(.message-bubble--user) { max-width: min(100%, 34rem); }
+}
+
+/* ── Fly-out input bay ──────────────────────────────────────────────────
+   While idle the whole input area folds away below the viewport with a 3D
+   tilt and its layout space collapses; the round launcher remains. */
+/* Floating bottom panel: fixed and centered, so showing/hiding can never
+   shift the page layout. The bay itself only does depth + fade. */
+.chat-input-bay-wrap {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  /* above content/side panel, below the open nav panel (230) */
+  z-index: 215;
+  width: min(46rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+.chat-input-bay {
+  pointer-events: auto;
+  transform: perspective(1200px) translateZ(0) translateY(0);
+  transform-origin: bottom center;
+  transition: transform 460ms var(--ease-out), opacity 320ms var(--ease-out);
+}
+.chat-input-bay--hidden {
+  opacity: 0;
+  pointer-events: none;
+  /* recede into depth and fade — the bay drifts away from the viewer */
+  transform: perspective(1200px) translateZ(-260px) translateY(14%);
+}
+
+/* Keep the newest messages readable above the open floating bay. */
+.chat-message-scroll {
+  transition: padding-bottom 460ms var(--ease-out);
+}
+.chat-message-scroll--bay-open {
+  padding-bottom: clamp(12rem, 26vh, 18rem);
+}
+
+.chat-composer-launcher {
+  position: fixed;
+  z-index: 220;
+  touch-action: none;
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: rgb(var(--logo-cyan));
+  background-color: rgb(4, 12, 18);
+  background-image:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 32%),
+    radial-gradient(circle at 50% 42%, rgba(var(--logo-cyan), 0.4), rgba(var(--accent-purple), 0.24) 58%, rgba(2, 8, 14, 0.96) 100%);
+  border: 1px solid rgba(var(--logo-cyan), 0.4);
+  box-shadow:
+    inset -6px -9px 14px rgba(0, 0, 0, 0.6),
+    inset 4px 5px 10px rgba(255, 255, 255, 0.14),
+    0 8px 20px rgba(0, 0, 0, 0.5),
+    0 0 20px rgba(var(--accent-purple), 0.35);
+  cursor: grab;
+  transition: transform 220ms var(--ease-out), box-shadow 220ms var(--ease-out);
+}
+.chat-composer-launcher:active { cursor: grabbing; }
+.chat-composer-launcher:hover {
+  transform: scale(1.08);
+  box-shadow:
+    inset -6px -9px 14px rgba(0, 0, 0, 0.55),
+    inset 4px 5px 10px rgba(255, 255, 255, 0.18),
+    0 10px 24px rgba(0, 0, 0, 0.55),
+    0 0 30px rgba(var(--accent-purple), 0.55);
+}
+.chat-composer-launcher__core {
+  width: 1.25rem;
+  height: 1.25rem;
+  animation: launcher-breathe 3.2s ease-in-out infinite;
+}
+@keyframes launcher-breathe {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.12); }
+}
+.composer-launcher-enter-active,
+.composer-launcher-leave-active { transition: transform 360ms var(--ease-out), opacity 280ms var(--ease-out); }
+.composer-launcher-enter-from,
+.composer-launcher-leave-to { transform: translateY(140%) scale(0.6) rotate(-90deg); opacity: 0; }
+
+/* ── Floating draggable HUD pods ────────────────────────────────────────
+   Round toggles positioned anywhere by the user; menus open around the
+   toggle wherever it sits. */
+.hud-orb {
+  position: fixed;
+  /* above the side panel host (z 190–201) so clicks always land */
+  z-index: 220;
+  width: 2.5rem;
+  height: 2.5rem;
+  touch-action: none;
+}
+
+.session-pod {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: min(18rem, calc(100vw - 5rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-3);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+.session-pod--right { left: calc(100% + 0.75rem); }
+.session-pod--left  { right: calc(100% + 0.75rem); }
+.session-pod__row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.session-pod__label {
+  font-family: var(--font-label);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(165, 243, 252, 0.6);
+}
+
+/* ── Radial session-action menu ─────────────────────────────────────────
+   Tools sit stacked behind the toggle; opening fans them out along a
+   circle (depth + fade + size, staggered per item). */
+.radial-menu {
+  position: relative;
+  width: 2.5rem;
+  height: 2.5rem;
+}
+/* The draggable toggles are miniature 3D orbs: off-center specular light,
+   shaded body, dark lower limb, accent rim glow — tiny kin of the entity. */
+.radial-menu__toggle {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: rgb(var(--logo-cyan));
+  /* opaque base so the orb never lets underlying content bleed through;
+     the translucent gradients above only tint it */
+  background-color: rgb(4, 12, 18);
+  background-image:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 32%),
+    radial-gradient(circle at 50% 42%, rgba(var(--logo-cyan), 0.38), rgba(var(--accent-purple), 0.22) 58%, rgba(2, 8, 14, 0.96) 100%);
+  border: 1px solid rgba(var(--logo-cyan), 0.35);
+  box-shadow:
+    inset -5px -7px 12px rgba(0, 0, 0, 0.6),
+    inset 3px 4px 8px rgba(255, 255, 255, 0.14),
+    0 6px 16px rgba(0, 0, 0, 0.45),
+    0 0 16px rgba(var(--accent-purple), 0.3);
+  cursor: grab;
+  transition: transform 260ms var(--ease-out), box-shadow 220ms var(--ease-out);
+}
+.radial-menu__toggle:active { cursor: grabbing; }
+.radial-menu--open .radial-menu__toggle { transform: rotate(90deg); }
+.radial-menu__toggle:hover {
+  transform: scale(1.08);
+  box-shadow:
+    inset -5px -7px 12px rgba(0, 0, 0, 0.55),
+    inset 3px 4px 8px rgba(255, 255, 255, 0.18),
+    0 8px 20px rgba(0, 0, 0, 0.5),
+    0 0 26px rgba(var(--accent-purple), 0.55);
+}
+.radial-menu--open .radial-menu__toggle:hover { transform: rotate(90deg) scale(1.08); }
+.radial-menu__item {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: rgba(207, 250, 254, 0.92);
+  background: rgb(5, 19, 25);
+  border: 1px solid rgba(var(--accent-purple), 0.4);
+  box-shadow: 0 0 12px rgba(var(--accent-purple), 0.2);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(0, 0) scale(0.25);
+  transition:
+    transform 340ms var(--ease-out) var(--delay, 0ms),
+    opacity 240ms var(--ease-out) var(--delay, 0ms);
+}
+.radial-menu--open .radial-menu__item {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(var(--tx, 0), var(--ty, 0)) scale(1);
+}
+.radial-menu--open .radial-menu__item:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.radial-menu__item:not(:disabled):hover {
+  color: #fff;
+  border-color: rgba(var(--logo-cyan), 0.7);
+  box-shadow: 0 0 18px rgba(var(--accent-purple), 0.45);
+}
+.radial-menu__item--danger {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: rgba(254, 202, 202, 0.95);
 }
 
 .chat-mobile-panels__summary::-webkit-details-marker,
@@ -3822,17 +4360,17 @@ onUnmounted(() => {
 
 .scroll-resume-enter-active,
 .scroll-resume-leave-active {
-  transition: opacity 160ms ease, transform 160ms ease;
+  transition: opacity 220ms var(--ease-out), transform 260ms var(--ease-out);
 }
 .scroll-resume-enter-from,
 .scroll-resume-leave-to {
   opacity: 0;
-  transform: translateX(-50%) translateY(8px);
+  transform: translateX(-50%) perspective(700px) translateY(14px) translateZ(-60px) scale(0.9);
 }
 .scroll-resume-enter-to,
 .scroll-resume-leave-from {
   opacity: 1;
-  transform: translateX(-50%) translateY(0);
+  transform: translateX(-50%) perspective(700px) translateY(0) translateZ(0) scale(1);
 }
 
 /* Drag-and-drop overlay shown while a file drag is hovering the chat surface.
@@ -4125,6 +4663,16 @@ onUnmounted(() => {
   padding: 0.9rem;
   display: grid;
   gap: 0.9rem;
+  transform-origin: bottom right;
+  animation: hud-rise 300ms var(--ease-out) both;
+}
+
+/* Entry-in-space for elements that mount via v-if (no <Transition> needed;
+   the global motion law: depth + opacity + size on every appearance). */
+.wake-feedback-card,
+.chat-job-strip__item,
+.multimodal-status {
+  animation: hud-rise 340ms var(--ease-out) both;
 }
 
 .chat-dropdown__menu--jobs {

@@ -16,13 +16,36 @@
       <span v-if="isActive" class="nav-group__active-bar" aria-hidden="true" />
     </button>
 
+    <!-- Inline accordion: used inside vertical panels (burger nav), where a
+         teleported popover would escape the panel and stack wrong. -->
+    <Transition v-if="inline" name="nav-popover">
+      <div
+        v-if="open"
+        class="nav-group__popover nav-group__popover--inline"
+        role="menu"
+      >
+        <RouterLink
+          v-for="item in items"
+          :key="item.to"
+          :to="item.to"
+          class="nav-group__item"
+          :class="{ 'nav-group__item--active': route.path === item.to }"
+          role="menuitem"
+          @click="open = false"
+        >
+          <span class="nav-group__item-label">{{ item.label }}</span>
+          <span v-if="item.hint" class="nav-group__item-hint">{{ item.hint }}</span>
+        </RouterLink>
+      </div>
+    </Transition>
+
     <!--
       Teleport the popover to <body> so it escapes the parent <nav>'s
       overflow-x clip — without this, the dropdown gets cut off
       vertically because CSS coerces overflow-y to auto whenever
       overflow-x is set to anything other than visible.
     -->
-    <Teleport to="body">
+    <Teleport v-else to="body">
       <Transition name="nav-popover">
         <div
           v-if="open"
@@ -59,7 +82,7 @@ export interface NavGroupItem {
   hint?: string;
 }
 
-const props = defineProps<{ label: string; items: NavGroupItem[] }>();
+const props = defineProps<{ label: string; items: NavGroupItem[]; inline?: boolean }>();
 
 const route = useRoute();
 const rootRef = ref<HTMLElement | null>(null);
@@ -87,7 +110,7 @@ function updatePopoverPosition(): void {
 
 function toggle(): void {
   open.value = !open.value;
-  if (open.value) void nextTick(updatePopoverPosition);
+  if (open.value && !props.inline) void nextTick(updatePopoverPosition);
 }
 
 function close(): void {
@@ -152,7 +175,21 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 0.1rem;
   box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(var(--accent-purple), 0.06);
-  z-index: 60;
+  z-index: 240;
+}
+
+/* Inline accordion variant: flows inside the panel under its trigger. */
+.nav-group__popover--inline {
+  position: static;
+  min-width: 0;
+  background: transparent;
+  backdrop-filter: none;
+  border: none;
+  border-left: 1px solid rgba(var(--accent-purple), 0.3);
+  border-radius: 0;
+  margin: 0.25rem 0 0.4rem 0.7rem;
+  padding: 0.1rem 0 0.1rem 0.5rem;
+  box-shadow: none;
 }
 
 .nav-group__item {
