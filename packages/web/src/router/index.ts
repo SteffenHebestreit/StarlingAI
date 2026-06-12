@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router";
+import { extensionRoutes } from "@/extensions/registry";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -21,6 +22,9 @@ const router = createRouter({
     { path: "/cost", component: () => import("@/pages/Cost.vue") },
     { path: "/definitions", redirect: "/agents" },
     { path: "/config-assistant", redirect: "/agents" },
+    // Fork-owned web extensions (src/extensions/<name>/) contribute routes
+    // here — after every core route, ahead of the catch-all.
+    ...extensionRoutes(),
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });
