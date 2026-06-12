@@ -108,7 +108,7 @@ import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { PRODUCT } from "../product/index.js";
-import { listExtensionRoles, listLoadedExtensions } from "../extension/index.js";
+import { getExtensionAuthProvider, listExtensionRoles, listLoadedExtensions } from "../extension/index.js";
 import { mountExtensionRoutes } from "../extension/loader.js";
 import { findRoutePolicy } from "./route-policies.js";
 
@@ -1416,6 +1416,31 @@ export function createGateway() {
       return c.json({ error: "Username and password are required" }, 400);
     }
 
+    // Extension credential backend (e.g. a fork's encrypted user store)
+    // replaces the config-file user list entirely when registered.
+    const authProvider = getExtensionAuthProvider();
+    if (authProvider) {
+      const providerUser = await authProvider.verifyCredentials(username, password);
+      if (!providerUser) {
+        recordAuthFailure(ip);
+        return c.json({ error: "Invalid username or password" }, 401);
+      }
+      clearAuthFailures(ip);
+      const token = await createToken(providerUser.id, {
+        role: providerUser.role,
+        ...(providerUser.displayName ? { displayName: providerUser.displayName } : {}),
+        ...(providerUser.claims ?? {}),
+      });
+      logAudit("auth_success", { username: providerUser.username, role: providerUser.role }, { userId: providerUser.id });
+      return c.json({
+        token,
+        username: providerUser.username,
+        displayName: providerUser.displayName,
+        role: providerUser.role,
+        user: providerUser,
+      });
+    }
+
     const authConfig = getConfig().auth;
     if (!authConfig.enabled) {
       return c.json({ error: "Username/password login is disabled. Set auth.enabled = true and configure auth.users[] to enable it." }, 503);
@@ -1450,6 +1475,14 @@ export function createGateway() {
   app.get("/api/auth/me", async (c) => {
     const user = await authenticatedUser(c.req.header("Authorization"));
     if (!user) return c.json({ error: "Unauthorized" }, 401);
+    // With an extension credential backend, also verify the account still
+    // exists and surface its full public record (extra fields like kvnr).
+    const authProvider = getExtensionAuthProvider();
+    if (authProvider) {
+      const record = authProvider.getUserById(user.username);
+      if (!record) return c.json({ error: "User no longer exists" }, 401);
+      return c.json({ ...user, user: record });
+    }
     return c.json(user);
   });
 
