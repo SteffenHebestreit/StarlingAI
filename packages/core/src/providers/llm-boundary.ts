@@ -93,23 +93,31 @@ function applyAfterResponse(response: LLMResponse): LLMResponse {
 
 /**
  * Wrap a provider so every model call passes through the registered
- * transformers. Identity when nothing is registered at CALL time (the check
- * happens per call, so load order doesn't matter).
+ * transformers. Implemented as a Proxy so the wrapper is transparent to
+ * everything else about the provider: `instanceof` checks (failover status
+ * reporting), provider-specific telemetry methods, and optional-method
+ * presence all behave exactly as on the unwrapped instance. Transformers are
+ * consulted per call, so registration order vs. provider construction order
+ * doesn't matter.
  */
-export function wrapProviderWithBoundary(provider: ChatProvider): ChatProvider {
-  const wrapped: ChatProvider = {
-    checkHealth: () => provider.checkHealth(),
-    verifyToolCallSupport: (modelId) => provider.verifyToolCallSupport(modelId),
-    isHealthy: () => provider.isHealthy(),
-    embed: (texts, model) => provider.embed(texts, model),
-    complete: async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
-      applyAfterResponse(await provider.complete(applyBeforeRequest(messages), tools, signal)),
-    stream: (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk> =>
-      provider.stream(applyBeforeRequest(messages), tools, signal, options),
-  };
-  if (provider.completeViaStream) {
-    wrapped.completeViaStream = async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
-      applyAfterResponse(await provider.completeViaStream!(applyBeforeRequest(messages), tools, signal));
-  }
-  return wrapped;
+export function wrapProviderWithBoundary<T extends ChatProvider>(provider: T): T {
+  return new Proxy(provider, {
+    get(target, prop, receiver) {
+      if (prop === "complete") {
+        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
+          applyAfterResponse(await target.complete(applyBeforeRequest(messages), tools, signal));
+      }
+      if (prop === "completeViaStream" && typeof target.completeViaStream === "function") {
+        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
+          applyAfterResponse(await target.completeViaStream!(applyBeforeRequest(messages), tools, signal));
+      }
+      if (prop === "stream") {
+        return (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }) =>
+          target.stream(applyBeforeRequest(messages), tools, signal, options);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      // Preserve `this` for ordinary methods (class providers keep internals private).
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  }) as T;
 }
