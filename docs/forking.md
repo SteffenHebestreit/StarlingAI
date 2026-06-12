@@ -86,6 +86,13 @@ export default defineCoreExtension({
   roles: [{ name: "doctor", description: "Arzt — sign-off authority", rank: 80 }],
   guardrails: { checkOutput: (text) => ({ allowed: true, redacted: pseudonymize(text) }) },
   registerRoutes(app, ctx) { app.get("/api/mfa/knowledge/status", handler); },
+  // Declarative RBAC: role lists per route pattern, enforced by the gateway
+  // gate before handlers run — also works for CORE routes, so forks tighten
+  // built-in endpoints without touching them.
+  routePolicies: [
+    { method: "POST", pattern: "/api/knowledge/refresh", roles: ["mfa", "doctor", "admin"] },
+    { pattern: "/api/admin/*", roles: ["admin"] },
+  ],
   configSchema: z.object({ praxisTyp: z.string().default("hausarzt") }),
   async boot(ctx) { await initBillingGraphSchema(); },
   async shutdown() { /* ... */ },

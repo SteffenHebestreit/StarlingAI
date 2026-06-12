@@ -110,6 +110,7 @@ import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 import { PRODUCT } from "../product/index.js";
 import { listExtensionRoles, listLoadedExtensions } from "../extension/index.js";
 import { mountExtensionRoutes } from "../extension/loader.js";
+import { findRoutePolicy } from "./route-policies.js";
 
 const log = childLogger("gateway");
 
@@ -138,6 +139,20 @@ function originFromUrl(url: string | undefined): string | null {
 export function createGateway() {
   const config = getConfig();
   const app = new Hono();
+
+  // Route-policy RBAC gate (gateway/route-policies.ts): declarative per-route
+  // role lists, registered by core extensions. Runs before every /api handler;
+  // unpoliced routes fall through to their own auth checks.
+  app.use("/api/*", async (c, next) => {
+    const policy = findRoutePolicy(c.req.method, c.req.path);
+    if (!policy) return next();
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+    if (!policy.roles.includes(user.role)) {
+      return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
+    }
+    return next();
+  });
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
   const currentMultimodalConfig = () => getConfig().multimodal;
   const ModelEndpointGuardSchema = z.object({

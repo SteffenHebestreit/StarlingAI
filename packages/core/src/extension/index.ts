@@ -29,6 +29,9 @@ import type { ToolContext, ToolResult } from "../tools/registry.js";
 import { ToolTier } from "../guardrails/tool-tiers.js";
 import type { GuardrailResult } from "../guardrails/input.js";
 import type { Logger } from "pino";
+import type { RoutePolicy as RoutePolicyDef } from "../gateway/route-policies.js";
+
+export type { RoutePolicyDef };
 
 // Re-exports so an extension only needs one import for the common cases.
 export { ToolTier };
@@ -137,6 +140,12 @@ export interface CoreExtension {
   roles?: ExtensionRoleDef[];
   /** Guardrail pipeline hooks, appended after built-ins. */
   guardrails?: ExtensionGuardrailHooks;
+  /**
+   * Declarative RBAC for gateway routes (core or extension ones): role-name
+   * lists per route pattern, enforced by the gateway's policy gate before
+   * handlers run. See gateway/route-policies.ts for pattern syntax.
+   */
+  routePolicies?: RoutePolicyDef[];
   /**
    * Mount gateway routes. Called once during gateway construction, AFTER all
    * core routes (extensions cannot shadow core endpoints). Convention:

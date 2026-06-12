@@ -9,6 +9,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
 import { PRODUCT } from "../product/index.js";
+import { getExtensionRole } from "../extension/index.js";
 
 const log = childLogger("gateway:auth");
 const BCRYPT_ROUNDS = 12;
@@ -146,7 +147,23 @@ export function extractBearerToken(authHeader: string | null | undefined): strin
   return match?.[1] ?? null;
 }
 
-export type AuthRole = "operator" | "viewer";
+/**
+ * Role identifier. Upstream ships "operator" (full access) and "viewer"
+ * (read-only); core extensions register additional roles (with ranks) via
+ * their manifest — see extension/index.ts. Unknown role claims normalize to
+ * "operator" for pre-Wave-B token compatibility.
+ */
+export type AuthRole = string;
+
+/** Built-in role ranks; extension roles carry their own rank in the registry. */
+const BUILTIN_ROLE_RANKS: Record<string, number> = { viewer: 10, operator: 50 };
+
+/** Rank for any known role name; unknown roles rank as -1 (never sufficient). */
+export function roleRank(role: string): number {
+  const builtin = BUILTIN_ROLE_RANKS[role];
+  if (builtin !== undefined) return builtin;
+  return getExtensionRole(role)?.rank ?? -1;
+}
 
 export interface AuthenticatedUser {
   username: string;
@@ -155,7 +172,10 @@ export interface AuthenticatedUser {
 }
 
 function normalizeRole(value: unknown): AuthRole {
-  return value === "viewer" ? "viewer" : "operator";
+  if (typeof value === "string" && (value in BUILTIN_ROLE_RANKS || getExtensionRole(value))) return value;
+  // Unknown / missing role claims default to operator — matches the legacy
+  // single-operator behavior so unupgraded tokens keep working until expiry.
+  return "operator";
 }
 
 /**
@@ -189,8 +209,9 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
  */
 export function userHasRole(user: AuthenticatedUser | null, required: AuthRole): boolean {
   if (!user) return false;
-  if (required === "viewer") return true; // both roles can read
-  return user.role === "operator";
+  const requiredRank = roleRank(required);
+  if (requiredRank < 0) return false; // unknown requirement — fail closed
+  return roleRank(user.role) >= requiredRank;
 }
 
 export function resetAuthStateForTests(): void {
