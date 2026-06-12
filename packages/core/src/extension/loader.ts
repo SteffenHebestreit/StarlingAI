@@ -26,6 +26,7 @@ import { getConfig } from "../config/loader.js";
 import { registerTool, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
+import { registerRoutePolicies } from "../gateway/route-policies.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
@@ -128,6 +129,10 @@ function registerExtension(ext: CoreExtension, source: string): void {
   // Group first so config-driven disabling recognizes the extension's group
   // name without warnings.
   registerExtensionGroup(ext.name);
+
+  if (ext.routePolicies?.length) {
+    registerRoutePolicies(ext.name, ext.routePolicies);
+  }
 
   const toolNames: string[] = [];
   for (const tool of ext.tools ?? []) {

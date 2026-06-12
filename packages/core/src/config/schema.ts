@@ -286,7 +286,10 @@ export const GatewaySchema = z.object({
  * initiate turns); for now viewers can chat like operators, they just
  * can't administer the deployment.
  */
-export const AuthRoleSchema = z.enum(["operator", "viewer"]).default("operator");
+/** Role names are open strings: upstream ships operator/viewer; core
+ *  extensions register additional roles (the gateway validates against the
+ *  live role registry at runtime — config stays fork-agnostic). */
+export const AuthRoleSchema = z.string().min(1).max(32).regex(/^[a-z][a-z0-9_-]*$/i).default("operator");
 
 export const AuthUserSchema = z.object({
   username: z.string().min(1).max(64).regex(/^[a-z0-9_.-]+$/i, "username must be alphanumeric/_/-/."),
