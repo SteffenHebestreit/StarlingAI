@@ -9,6 +9,7 @@ import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestIm
 import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("tool:multimodal");
 
@@ -239,7 +240,7 @@ registerTool({
       }
 
       const audio = new Uint8Array(await response.arrayBuffer());
-      const outputPath = stringArg(args["outputPath"]) ?? `.starlingai/generated/tts-${Date.now()}.wav`;
+      const outputPath = stringArg(args["outputPath"]) ?? `${PRODUCT.stateDirName}/generated/tts-${Date.now()}.wav`;
       const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, audio);
@@ -365,7 +366,7 @@ registerTool({
       const requestedOutputPath = stringArg(args["outputPath"]);
       const outputPath = requestedOutputPath
         ? (extname(requestedOutputPath) ? requestedOutputPath : `${requestedOutputPath}${result.extension}`)
-        : `.starlingai/generated/image-${Date.now()}${result.extension}`;
+        : `${PRODUCT.stateDirName}/generated/image-${Date.now()}${result.extension}`;
       const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, imageBytes);
