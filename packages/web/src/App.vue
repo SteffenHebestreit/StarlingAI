@@ -25,9 +25,6 @@
               Guarded Agent Swarm
             </span>
           </div>
-          <span class="hidden md:inline text-xs bg-purple-900/40 text-purple-400 border border-purple-700/30 px-2 py-0.5 rounded-full font-medium">
-            v{{ appVersion }}
-          </span>
         </div>
 
         <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
@@ -43,6 +40,41 @@
               {{ gateway.connected ? 'Connected' : gateway.connecting ? 'Connecting…' : 'Disconnected' }}
             </span>
           </div>
+
+          <!-- Burger: the main nav and header tools live behind this toggle so
+               the default chrome is just brand + status + account. -->
+          <button
+            type="button"
+            class="nav-burger hud-btn inline-flex h-9 w-9 shrink-0 items-center justify-center"
+            :class="navOpen ? 'hud-btn--active' : ''"
+            :aria-expanded="navOpen"
+            aria-label="Toggle navigation"
+            title="Navigation"
+            @click="navOpen = !navOpen"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="h-[18px] w-[18px]">
+              <path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h16" />
+            </svg>
+          </button>
+
+          <!-- Click-away catcher + nav panel (everything beyond brand/status/
+               account lives here, summoned by the burger). Teleported to
+               <body> so it escapes the header's stacking context — otherwise
+               the chat content paints over it. -->
+          <Teleport to="body">
+          <div v-if="navOpen" class="fixed inset-0 z-[225]" @click="navOpen = false" />
+          <Transition name="hud-pop">
+          <div v-if="navOpen" class="app-nav-panel">
+            <div class="app-nav-panel__meta">
+              <span>v{{ appVersion }}</span>
+              <span>{{ gateway.connected ? 'Online' : 'Offline' }}</span>
+            </div>
+
+          <!-- Drill-down: the panel content is REPLACED by a group's items;
+               the back row climbs up a level. Slide direction follows the
+               navigation direction. -->
+          <Transition :name="navLevel ? 'nav-fwd' : 'nav-back'" mode="out-in">
+          <div v-if="!navLevel" key="root" class="app-nav-panel__level">
 
           <!-- Model switch: Local ⇄ presets (e.g. Claude via the Anthropic
                provider). Appears once the gateway reports at least one
@@ -113,18 +145,13 @@
             Enable Notifications
           </button>
 
-          <!-- Nav: keep a single desktop row, but let it wrap below the
-               metadata cluster on small screens so every control stays
-               reachable without collapsing into a hamburger menu. -->
-          <nav
-            class="app-nav order-last flex min-w-0 basis-full items-center justify-end gap-1 overflow-x-auto scroll-smooth pt-1 -mr-3 pr-3 sm:order-none sm:basis-auto sm:flex-1 sm:pt-0 sm:mr-0 sm:pr-0"
-            aria-label="Main navigation"
-          >
+          <!-- Top-level nav: leaf routes navigate, groups drill down. -->
+          <nav class="app-nav flex flex-col items-stretch gap-1" aria-label="Main navigation">
             <template v-for="entry in navEntries" :key="entry.kind === 'leaf' ? entry.to : entry.label">
               <RouterLink
                 v-if="entry.kind === 'leaf'"
                 :to="entry.to"
-                class="inline-flex shrink-0 items-center rounded-full border px-3 py-2 text-sm font-medium transition-colors"
+                class="inline-flex items-center rounded-full border px-3 py-2 text-sm font-medium transition-colors"
                 :class="$route.path === entry.to
                   ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
                   : 'border-transparent text-gray-300 hover:border-white/10 hover:bg-white/5 hover:text-white'"
@@ -132,13 +159,48 @@
               >
                 {{ entry.label }}
               </RouterLink>
-              <NavGroup
+              <button
                 v-else
-                :label="entry.label"
-                :items="entry.items"
-              />
+                type="button"
+                class="nav-group__trigger inline-flex items-center rounded-full border border-transparent px-3 py-2 text-sm font-medium transition-colors hover:border-white/10 hover:bg-white/5"
+                @click="navLevel = entry.label"
+              >
+                <span>{{ entry.label }}</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5" aria-hidden="true">
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+              </button>
             </template>
           </nav>
+
+          </div>
+
+          <!-- Sub-level: the group's items replace the panel content. -->
+          <div v-else key="sub" class="app-nav-panel__level">
+            <button type="button" class="app-nav-panel__back" @click="navLevel = null">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+              <span>{{ navLevel }}</span>
+            </button>
+            <nav class="app-nav-panel__sublist" aria-label="Section navigation">
+              <RouterLink
+                v-for="item in activeGroupItems"
+                :key="item.to"
+                :to="item.to"
+                class="app-nav-panel__subitem"
+                :class="$route.path === item.to ? 'app-nav-panel__subitem--active' : ''"
+              >
+                <span>{{ item.label }}</span>
+                <span v-if="item.hint" class="app-nav-panel__subitem-hint">{{ item.hint }}</span>
+              </RouterLink>
+            </nav>
+          </div>
+          </Transition>
+
+          </div>
+          </Transition>
+          </Teleport>
 
           <!-- Account: far-right icon that opens a small menu — username + sign
                out when signed in, or a sign-in entry point in token mode. -->
@@ -146,10 +208,8 @@
             <button
               ref="accountBtnRef"
               type="button"
-              class="inline-flex h-9 w-9 items-center justify-center rounded-full border transition"
-              :class="signedInUser
-                ? 'border-purple-400/40 bg-purple-500/15 text-purple-100 hover:bg-purple-500/25'
-                : 'border-white/10 bg-white/5 text-gray-300 hover:border-white/20 hover:bg-white/10 hover:text-white'"
+              class="hud-btn inline-flex h-9 w-9 items-center justify-center"
+              :class="signedInUser ? 'hud-btn--active' : ''"
               :title="signedInUser ? (currentUser?.displayName ?? currentUser?.username) : 'Sign in'"
               :aria-label="signedInUser ? 'Account menu' : 'Sign in'"
               aria-haspopup="menu"
@@ -172,6 +232,7 @@
             <Teleport to="body">
               <div v-if="accountMenuOpen" class="fixed inset-0 z-[60]" @click="accountMenuOpen = false" />
 
+              <Transition name="hud-pop">
               <div
                 v-if="accountMenuOpen"
                 class="fixed z-[70] w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
@@ -211,6 +272,7 @@
                 Sign out
               </button>
               </div>
+              </Transition>
             </Teleport>
           </div>
         </div>
@@ -298,7 +360,7 @@ import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
-import NavGroup, { type NavGroupItem } from "@/components/NavGroup.vue";
+import { type NavGroupItem } from "@/components/NavGroup.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
 
@@ -338,6 +400,21 @@ const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+
+// Burger nav panel: the main nav + header tools are hidden by default and
+// summoned here; navigating closes it. Groups drill down into a sub-level
+// that replaces the panel content (navLevel = the open group's label).
+const navOpen = ref(false);
+const navLevel = ref<string | null>(null);
+watch(() => $route.path, () => { navOpen.value = false; });
+watch(navOpen, (open) => { if (open) navLevel.value = null; });
+
+const activeGroupItems = computed<NavGroupItem[]>(() => {
+  const entry = navEntries.value.find(
+    (candidate) => candidate.kind === "group" && candidate.label === navLevel.value,
+  );
+  return entry && entry.kind === "group" ? entry.items : [];
+});
 
 // Claude subscription connect/manage modal (browser OAuth verification).
 const showModelConnect = ref(false);
@@ -540,6 +617,118 @@ watch(() => gateway.connected, (now) => {
   border-bottom: 1px solid var(--hairline);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.28);
 }
+
+/* Burger nav panel: header tools + main nav, summoned on demand.
+   Fixed + teleported to <body> so it always paints above page content. */
+.app-nav-panel {
+  position: fixed;
+  right: 0.75rem;
+  top: 4.4rem;
+  /* above the floating HUD pods (z 220) — the summoned menu always wins */
+  z-index: 230;
+  width: min(22rem, calc(100vw - 1.5rem));
+  max-height: calc(100vh - 5.5rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--hairline);
+  background: rgba(var(--app-bg), 0.92);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.app-nav-panel__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-label);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(165, 243, 252, 0.55);
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* Drill-down levels: forward slides in from the right, back from the left. */
+.app-nav-panel__level {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.nav-fwd-enter-active, .nav-fwd-leave-active,
+.nav-back-enter-active, .nav-back-leave-active {
+  transition: opacity 180ms var(--ease-out), transform 220ms var(--ease-out);
+}
+.nav-fwd-enter-from  { opacity: 0; transform: translateX(28px); }
+.nav-fwd-leave-to    { opacity: 0; transform: translateX(-28px); }
+.nav-back-enter-from { opacity: 0; transform: translateX(-28px); }
+.nav-back-leave-to   { opacity: 0; transform: translateX(28px); }
+
+.app-nav-panel__back {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  font-family: var(--font-label);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  color: rgb(var(--logo-cyan));
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.25rem;
+  background: rgba(var(--accent-purple), 0.08);
+  border: 1px solid rgba(var(--accent-purple), 0.25);
+  cursor: pointer;
+  transition: background 180ms var(--ease-out);
+}
+.app-nav-panel__back:hover { background: rgba(var(--accent-purple), 0.16); }
+
+.app-nav-panel__sublist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.app-nav-panel__subitem {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: rgb(203 213 225);
+  text-decoration: none;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.app-nav-panel__subitem:hover {
+  background: rgba(var(--accent-purple), 0.16);
+  color: rgb(241 245 249);
+}
+.app-nav-panel__subitem--active {
+  background: linear-gradient(90deg, rgba(var(--accent-purple), 0.22), rgba(var(--accent-pink), 0.16));
+  color: rgb(var(--acc1-200));
+}
+.app-nav-panel__subitem-hint {
+  font-size: 0.7rem;
+  color: rgb(148 163 184);
+}
+.app-nav-panel .app-nav {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: visible;
+  flex-basis: auto;
+  margin: 0;
+  padding: 0;
+}
+.app-nav-panel .app-nav a { justify-content: flex-start; width: 100%; }
+.app-nav-panel .app-nav .nav-group__trigger { width: 100%; justify-content: space-between; }
 
 /* Energy line: a slow accent current flowing along the header's lower edge —
    the one continuous "alive" cue of the chrome. background-position only. */

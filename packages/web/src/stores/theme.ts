@@ -28,6 +28,7 @@ export interface TypefaceDef {
  */
 export const PALETTES: PaletteDef[] = [
   { id: "nebula",   label: "Nebula",   description: "Purple & pink — the signature look", swatch: ["#a855f7", "#ec4899"] },
+  { id: "jarvis",   label: "Jarvis",   description: "HUD cyan on near-black, holographic", swatch: ["#22d3ee", "#2dd4bf"] },
   { id: "midnight", label: "Midnight", description: "Cool indigo & sky blue",             swatch: ["#6366f1", "#38bdf8"] },
   { id: "aurora",   label: "Aurora",   description: "Teal & violet, northern-lights",     swatch: ["#14b8a6", "#8b5cf6"] },
   { id: "ember",    label: "Ember",    description: "Warm crimson & amber",               swatch: ["#f43f5e", "#fb923c"] },
@@ -90,6 +91,7 @@ export interface PresetDef {
  */
 export const PRESETS: PresetDef[] = [
   { id: "signature", label: "Signature", description: "Nebula · Clean",        palette: "nebula",   typeface: "clean" },
+  { id: "hud",       label: "HUD",       description: "Jarvis · Technical",    palette: "jarvis",   typeface: "technical" },
   { id: "magazine",  label: "Magazine",  description: "Ember · Editorial",     palette: "ember",    typeface: "editorial" },
   { id: "terminal",  label: "Terminal",  description: "Graphite · Technical",  palette: "graphite", typeface: "technical" },
   { id: "blueprint", label: "Blueprint", description: "Midnight · Geometric",  palette: "midnight", typeface: "geometric" },
@@ -99,7 +101,7 @@ export const PRESETS: PresetDef[] = [
 
 const PALETTE_KEY = "starlingai.theme";
 const TYPEFACE_KEY = "starlingai.typeface";
-const DEFAULT_PALETTE = "nebula";
+const DEFAULT_PALETTE = "jarvis";
 const DEFAULT_TYPEFACE = "clean";
 
 function read(key: string): string | null {
@@ -159,6 +161,14 @@ export const useThemeStore = defineStore("theme", () => {
 
   /** Apply both persisted choices. Call once at app start (before mount). */
   function init(): void {
+    // One-time migration to the HUD default: sessions that stored the old
+    // default palette ("nebula") move to "jarvis" once. Re-picking Nebula in
+    // Settings afterwards sticks, because the flag is then already set.
+    const HUD_MIGRATION_KEY = "starlingai.theme.hud-default";
+    if (read(HUD_MIGRATION_KEY) === null) {
+      write(HUD_MIGRATION_KEY, "1");
+      if (read(PALETTE_KEY) === "nebula") write(PALETTE_KEY, "jarvis");
+    }
     applyPalette(read(PALETTE_KEY) ?? DEFAULT_PALETTE);
     applyTypeface(read(TYPEFACE_KEY) ?? DEFAULT_TYPEFACE);
   }

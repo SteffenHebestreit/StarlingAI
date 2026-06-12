@@ -53,6 +53,20 @@
     font-feature-settings: "tnum" 1;
   }
 
+  /* Native form controls follow the dark HUD: color-scheme switches the
+     browser-rendered parts (select dropdowns, scrollbars, pickers) to their
+     dark variants, and options get explicit HUD colors. */
+  select, input, textarea {
+    color-scheme: dark;
+  }
+  select option {
+    background-color: rgb(6, 16, 24);
+    color: rgb(207, 250, 254);
+  }
+  select option:checked {
+    background-color: rgba(var(--accent-purple), 0.25);
+  }
+
   /* ──────────────────────────────────────────────────────────────────────
      THEME TOKENS
      :root is the default "Nebula" theme. Each [data-theme="…"] block below
@@ -148,6 +162,39 @@
     --acc2-300: 125 211 252; --acc2-400: 56 189 248; --acc2-500: 14 165 233;
     --acc2-600: 2 132 199; --acc2-700: 3 105 161; --acc2-800: 7 89 133;
     --acc2-900: 12 74 110; --acc2-950: 8 47 73;
+  }
+
+  /* ── Jarvis — HUD cyan line-work on near-black teal (holographic) ───────── */
+  [data-theme="jarvis"] {
+    --accent-purple: 34, 211, 238;   /* cyan-400 (primary)    */
+    --accent-pink: 45, 212, 191;     /* teal-400 (gradient B) */
+    --logo-blue: 8, 145, 178;
+    --logo-cyan: 103, 232, 249;
+    --logo-indigo: 14, 116, 144;
+    --orb-1: 34, 211, 238;
+    --orb-2: 20, 184, 166;
+    --orb-opacity: 0.10;
+    --app-bg: 2, 10, 14;
+    /* HUD chrome: angular panels, teal glass, instrument-panel labels */
+    --radius-xs: 0.2rem;
+    --radius-sm: 0.3rem;
+    --radius-md: 0.45rem;
+    --radius-lg: 0.6rem;
+    --radius-xl: 0.75rem;
+    --surface-1: rgba(6, 24, 31, 0.55);
+    --surface-2: rgba(10, 36, 46, 0.62);
+    --surface-3: rgba(4, 18, 24, 0.85);
+    --surface-input: rgba(4, 16, 22, 0.6);
+    --font-label: var(--font-mono);
+    /* cyan + teal ramps */
+    --acc1-50: 236 254 255; --acc1-100: 207 250 254; --acc1-200: 165 243 252;
+    --acc1-300: 103 232 249; --acc1-400: 34 211 238; --acc1-500: 6 182 212;
+    --acc1-600: 8 145 178; --acc1-700: 14 116 144; --acc1-800: 21 94 117;
+    --acc1-900: 22 78 99; --acc1-950: 8 51 68;
+    --acc2-50: 240 253 250; --acc2-100: 204 251 241; --acc2-200: 153 246 228;
+    --acc2-300: 94 234 212; --acc2-400: 45 212 191; --acc2-500: 20 184 166;
+    --acc2-600: 13 148 136; --acc2-700: 15 118 110; --acc2-800: 17 94 89;
+    --acc2-900: 19 78 74; --acc2-950: 4 47 46;
   }
 
   /* ── Aurora — teal & violet, northern-lights ────────────────────────────── */
@@ -505,18 +552,34 @@
   100% { box-shadow: 0 0 0 0 rgba(var(--pulse-rgb, 52, 211, 153), 0); }
 }
 
-/* Modal entrance: settle in with a slight rise + scale. */
-.modal-pop { animation: modal-pop 260ms var(--ease-out) both; }
+/* ── Motion law ──────────────────────────────────────────────────────────
+   Every appear/disappear travels through space: depth (translateZ via
+   perspective), opacity, and size move together. `hud-rise` is the entry
+   animation for v-if mounts; `hud-pop` is the matching Vue <Transition>. */
+@keyframes hud-rise {
+  from { opacity: 0; transform: perspective(900px) translateY(14px) translateZ(-60px) scale(0.95); }
+  to   { opacity: 1; transform: perspective(900px) translateY(0) translateZ(0) scale(1); }
+}
+.hud-pop-enter-active { transition: opacity 240ms var(--ease-out), transform 300ms var(--ease-out); }
+.hud-pop-leave-active { transition: opacity 180ms ease, transform 220ms ease; }
+.hud-pop-enter-from,
+.hud-pop-leave-to {
+  opacity: 0;
+  transform: perspective(900px) translateY(12px) translateZ(-70px) scale(0.93);
+}
+
+/* Modal entrance: arrives from space with a slight tilt. */
+.modal-pop { animation: modal-pop 300ms var(--ease-out) both; }
 @keyframes modal-pop {
-  from { opacity: 0; transform: translateY(10px) scale(0.97); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: perspective(1100px) translateY(18px) translateZ(-90px) rotateX(4deg) scale(0.95); }
+  to   { opacity: 1; transform: perspective(1100px) translateY(0) translateZ(0) rotateX(0deg) scale(1); }
 }
 
 /* Router page transition (used by App.vue's <Transition name="page">). */
-.page-enter-active { transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out); }
-.page-leave-active { transition: opacity 120ms ease; }
-.page-enter-from   { opacity: 0; transform: translateY(8px); }
-.page-leave-to     { opacity: 0; }
+.page-enter-active { transition: opacity 220ms var(--ease-out), transform 260ms var(--ease-out); }
+.page-leave-active { transition: opacity 140ms ease, transform 140ms ease; }
+.page-enter-from   { opacity: 0; transform: perspective(1200px) translateY(10px) translateZ(-80px) scale(0.985); }
+.page-leave-to     { opacity: 0; transform: perspective(1200px) translateZ(-60px) scale(0.99); }
 
 /* ── Markdown prose (dark) ────────────────────────────────────────────────── */
 .prose-invert pre {
@@ -557,4 +620,146 @@
   }
   .btn-grad::after { display: none; }
   .app-header::after { animation: none; }
+}
+
+/* ── Jarvis HUD chrome ─────────────────────────────────────────────────────
+   Theme-scoped interface lean: when the Jarvis palette is active the chrome
+   itself follows the HUD design language — scanlines over the canvas,
+   corner brackets on glass panels, and sharpened corners app-wide. Selectors
+   carry [data-theme] specificity so they beat the raw utilities. */
+
+/* Hologram scanlines across the whole canvas (on top of the dot grid). */
+[data-theme="jarvis"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(103, 232, 249, 0.024) 0px,
+    rgba(103, 232, 249, 0.024) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* HUD corner brackets on every glass panel. */
+[data-theme="jarvis"] .glass-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  --hud-bracket: rgba(var(--accent-purple), 0.55);
+  background-image:
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket)),
+    linear-gradient(var(--hud-bracket), var(--hud-bracket));
+  background-position:
+    top left, top left,
+    top right, top right,
+    bottom left, bottom left,
+    bottom right, bottom right;
+  background-size:
+    12px 1px, 1px 12px,
+    12px 1px, 1px 12px,
+    12px 1px, 1px 12px,
+    12px 1px, 1px 12px;
+  background-repeat: no-repeat;
+}
+
+/* Sharpen the raw Tailwind radius utilities (rounded-full stays circular —
+   pills and status dots match the HUD's circles). */
+[data-theme="jarvis"] .rounded-3xl,
+[data-theme="jarvis"] .rounded-2xl { border-radius: 0.5rem; }
+[data-theme="jarvis"] .rounded-xl  { border-radius: 0.4rem; }
+[data-theme="jarvis"] .rounded-lg  { border-radius: 0.3rem; }
+[data-theme="jarvis"] .rounded-md  { border-radius: 0.25rem; }
+[data-theme="jarvis"] .rounded     { border-radius: 0.2rem; }
+
+/* Round HUD chrome buttons (header burger, account, …): glassy disc with a
+   soft specular light and accent rim — quieter siblings of the 3D pods. */
+.hud-btn {
+  border-radius: 999px;
+  color: rgba(165, 243, 252, 0.8);
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 42%),
+    rgba(var(--app-bg), 0.6);
+  border: 1px solid rgba(var(--logo-cyan), 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 10px rgba(var(--accent-purple), 0.18);
+  transition: color 200ms var(--ease-out), border-color 200ms var(--ease-out),
+    box-shadow 220ms var(--ease-out), transform 220ms var(--ease-out);
+}
+.hud-btn:hover {
+  color: rgb(var(--logo-cyan));
+  border-color: rgba(var(--logo-cyan), 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 18px rgba(var(--accent-purple), 0.4);
+  transform: translateY(-1px);
+}
+.hud-btn--active {
+  color: rgb(var(--logo-cyan));
+  border-color: rgba(var(--logo-cyan), 0.6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 20px rgba(var(--accent-purple), 0.45);
+}
+
+/* Header & nav as instrument console: mono uppercase nav chips, angular,
+   with a tick-underline on the active route. Part of the global design
+   language (every palette); colors derive from the accent tokens. */
+/* Chip typography applies to the TOP-LEVEL entries only (direct links and
+   group triggers) — group sub-items keep their readable label/hint layout. */
+.app-nav > a,
+.app-nav .nav-group__trigger {
+  font-family: var(--font-label);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  border-radius: 0.25rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+.app-nav > a:not([aria-current="page"]),
+.app-nav .nav-group__trigger {
+  color: rgba(148, 211, 230, 0.6);
+}
+.app-nav > a:hover,
+.app-nav .nav-group__trigger:hover {
+  color: rgb(var(--logo-cyan));
+  background: rgba(var(--accent-purple), 0.08);
+  border-color: rgba(var(--accent-purple), 0.3);
+}
+.app-nav > a[aria-current="page"] {
+  color: rgb(var(--logo-cyan));
+  box-shadow: inset 0 -2px 0 rgba(var(--logo-cyan), 0.8), 0 12px 30px rgba(var(--acc1-900), 0.25);
+}
+[data-theme="jarvis"] .app-header {
+  background:
+    linear-gradient(180deg, rgba(var(--logo-cyan), 0.05), rgba(255, 255, 255, 0)),
+    rgba(var(--app-bg), 0.78);
+}
+/* Corner tick on the brand block — the header's bracket accent. */
+.app-header > div {
+  position: relative;
+}
+.app-header > div::before {
+  content: "";
+  position: absolute;
+  left: -0.4rem;
+  top: 0.1rem;
+  bottom: 0.1rem;
+  width: 2px;
+  background: linear-gradient(180deg, rgba(var(--logo-cyan), 0.7), transparent 70%);
+  pointer-events: none;
 }
