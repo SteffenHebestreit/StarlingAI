@@ -12,6 +12,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { PRODUCT } from "./product.mjs";
 
 // ── Parse args ──────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -47,7 +48,7 @@ function getSecret() {
   const configSecret = readConfigJwtSecret();
   if (configSecret && configSecret.length >= 32) return configSecret;
 
-  const secretPath = join(homedir(), ".starlingai", ".jwt_secret");
+  const secretPath = join(homedir(), PRODUCT.stateDirName, ".jwt_secret");
   try {
     const stored = readFileSync(secretPath, "utf8").trim();
     if (stored.length >= 32) return stored;
@@ -57,7 +58,7 @@ function getSecret() {
 
   const generated = randomBytes(32).toString("hex");
   try {
-    mkdirSync(join(homedir(), ".starlingai"), { recursive: true });
+    mkdirSync(join(homedir(), PRODUCT.stateDirName), { recursive: true });
     writeFileSync(secretPath, generated, { mode: 0o600 });
     console.error(`ℹ  Generated new JWT secret → ${secretPath}`);
   } catch (err) {
@@ -80,7 +81,7 @@ function readConfigJwtSecret() {
 function resolveConfigPath() {
   const explicit = process.env["SAI_CONFIG_PATH"];
   if (explicit && explicit.trim()) return resolve(explicit);
-  return resolve(process.cwd(), "starlingai.json");
+  return resolve(process.cwd(), PRODUCT.configFileName);
 }
 
 function parseTtlSeconds(value) {
