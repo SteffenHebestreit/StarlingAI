@@ -31,7 +31,13 @@ const allowedFiles = new Set([
   "scene-eval.jsonc",
   PRODUCT.exampleConfigFileName,
   PRODUCT.configFileName,
+  // Upstream default names stay allowed in forks (the upstream example config
+  // ships in the tree even when product.json renames the active one).
+  "starlingai.example.json",
+  "starlingai.json",
   "product.json",
+  // Fork-owned compose overlay (docs/forking.md §6) — upstream ships none.
+  "docker-compose.override.yml",
   "start.bat",
   "start.command",
   "start.ps1",
@@ -43,6 +49,8 @@ const allowedDirectories = new Set([
   ".git",
   ".github",
   PRODUCT.stateDirName,
+  ...PRODUCT.legacyStateDirNames,
+  ".starlingai",
   ".vscode",
   "artifacts",
   "assets",
