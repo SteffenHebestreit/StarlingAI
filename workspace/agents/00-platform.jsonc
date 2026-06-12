@@ -14,6 +14,9 @@
         "topP": 0.9,
         "repeatPenalty": 1.05,
         "maxTokens": 4096,
+        // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
+        // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").
+        "promptCache": true,
         "embeddingModel": "lmstudio/text-embedding-bge-m3"
       }
     },
