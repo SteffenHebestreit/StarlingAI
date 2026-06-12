@@ -3,6 +3,7 @@
  * Scans LLM output for accidentally leaked secrets before sending to user.
  */
 import { getGuardrails } from "./store.js";
+import { getExtensionGuardrailHooks } from "../extension/index.js";
 
 export interface OutputScanResult {
   safe: boolean;
@@ -38,26 +39,49 @@ const SECRET_PATTERNS: SecretPattern[] = [
 
 export function scanOutput(output: string): OutputScanResult {
   if (!output) return { safe: true };
-  if (!getGuardrails().outputSecretScan) return { safe: true };
 
   let result = output;
   const detected: string[] = [];
 
-  for (const { name, pattern, redact } of SECRET_PATTERNS) {
-    if (name === "high_entropy_token") continue; // Too many false positives on base64 data
+  if (getGuardrails().outputSecretScan) {
+    for (const { name, pattern, redact } of SECRET_PATTERNS) {
+      if (name === "high_entropy_token") continue; // Too many false positives on base64 data
 
-    const matches = output.match(pattern);
-    if (matches && matches.length > 0) {
-      detected.push(name);
-      if (redact) {
-        result = result.replace(pattern, `[REDACTED:${name}]`);
+      const matches = output.match(pattern);
+      if (matches && matches.length > 0) {
+        detected.push(name);
+        if (redact) {
+          result = result.replace(pattern, `[REDACTED:${name}]`);
+        }
       }
+    }
+  }
+
+  // Extension-contributed output guardrails (e.g. a medical fork's PII
+  // pseudonymizer) run after the built-in secret scan, each seeing the
+  // previous stage's text. They can rewrite via `redacted` and block via
+  // `allowed: false`; hook errors fail open. They run even when the built-in
+  // secret scan is config-disabled — an extension's compliance redaction must
+  // not silently vanish with an unrelated toggle.
+  for (const { extension, hooks } of getExtensionGuardrailHooks()) {
+    if (!hooks.checkOutput) continue;
+    try {
+      const hookResult = hooks.checkOutput(result);
+      if (typeof hookResult.redacted === "string") {
+        if (hookResult.redacted !== result) detected.push(`ext:${extension}`);
+        result = hookResult.redacted;
+      } else if (!hookResult.allowed) {
+        detected.push(`ext:${extension}`);
+        result = `[BLOCKED by ${extension} guardrail${hookResult.reason ? `: ${hookResult.reason}` : ""}]`;
+      }
+    } catch {
+      // fail open
     }
   }
 
   if (detected.length > 0) {
     return {
-      safe: false, // raw output is NOT safe — secrets detected; caller must use `redacted`
+      safe: false, // raw output is NOT safe — caller must use `redacted`
       redacted: result,
       detectedTypes: detected,
     };

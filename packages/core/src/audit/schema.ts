@@ -1,4 +1,16 @@
-export type AuditEventType =
+/**
+ * Audit events emitted by core extensions, always namespaced
+ * `<extension>.<event>` (e.g. "mfa.patient_data_accessed"). The dot keeps the
+ * fork-owned namespace disjoint from the core union forever — extensions
+ * declare their events in their manifest instead of editing this file.
+ */
+export type ExtensionAuditEventType = `${string}.${string}`;
+
+export type AuditEventType = CoreAuditEventType | ExtensionAuditEventType;
+
+export type CoreAuditEventType =
+  | "extension_loaded"
+  | "extension_load_failed"
   | "session_created"
   | "session_ended"
   | "serve_app_started"

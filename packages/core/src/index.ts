@@ -36,6 +36,7 @@ import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
 import { loadPlugins, watchPluginsDirectory, stopPluginWatcher } from "./plugin/loader.js";
+import { loadCoreExtensions, runExtensionBoot, runExtensionShutdown } from "./extension/loader.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeGraphDb } from "./db/neo4j.js";
 import { initGraphSchema } from "./db/graph-schema.js";
@@ -211,6 +212,21 @@ export async function main() {
     } catch (err) {
       log.warn({ err }, "Plugin SDK loader threw — continuing without plugins");
     }
+  }
+
+  // Load first-party core extensions (src/extensions/<name>/ — fork-owned
+  // domain packages; see extension/index.ts). Registration adds their tools,
+  // tiers, roles, guardrail hooks, and audit events; boot hooks then run their
+  // async init (db schemas, knowledge loads). Both phases are per-extension
+  // fault-isolated, so a broken extension cannot take down the gateway.
+  try {
+    const ext = await loadCoreExtensions();
+    if (ext.loaded > 0 || ext.failed > 0) {
+      log.info({ loaded: ext.loaded, failed: ext.failed, dir: ext.dir }, "Core extension loader complete");
+    }
+    await runExtensionBoot();
+  } catch (err) {
+    log.warn({ err }, "Core extension loader threw — continuing without extensions");
   }
 
   // Recover persisted dev sessions, capability gaps, and task checkpoints
@@ -395,6 +411,7 @@ export async function main() {
     }
     await shutdownMcpServers();
     shutdownDynamicTools();
+    await runExtensionShutdown();
     stopPluginWatcher();
     stopCostAggregator();
     stopTimeseriesTelemetry();

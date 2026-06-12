@@ -82,6 +82,14 @@ export const BUILTIN_TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = 
   ],
 });
 
+/** Group names contributed by loaded core extensions (one per extension). */
+const _extensionGroups = new Set<string>();
+
+/** @internal extension-loader-only: make an extension's group name known. */
+export function registerExtensionGroup(name: string): void {
+  _extensionGroups.add(name);
+}
+
 let _toolToGroup: Map<string, string> | null = null;
 
 function toolToGroup(): Map<string, string> {
@@ -122,7 +130,7 @@ export function isToolDisabled(toolName: string, declaredGroup?: string): boolea
   const groups = cfg.disabledGroups ?? [];
   if (groups.length === 0) return false;
   for (const g of groups) {
-    if (!(g in BUILTIN_TOOL_GROUPS) && !_warnedUnknownGroups.has(g)) {
+    if (!(g in BUILTIN_TOOL_GROUPS) && !_extensionGroups.has(g) && !_warnedUnknownGroups.has(g)) {
       // Unknown names are tolerated (configs travel across versions/forks
       // whose extensions declare their own groups) but surfaced once.
       _warnedUnknownGroups.add(g);
@@ -137,4 +145,5 @@ export function isToolDisabled(toolName: string, declaredGroup?: string): boolea
 export function _resetToolGroupsForTests(): void {
   _toolToGroup = null;
   _warnedUnknownGroups.clear();
+  _extensionGroups.clear();
 }

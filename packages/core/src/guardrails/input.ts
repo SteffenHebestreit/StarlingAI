@@ -3,6 +3,7 @@
  * Scans user messages for prompt injection attempts before they reach the LLM.
  */
 import { getGuardrails } from "./store.js";
+import { getExtensionGuardrailHooks } from "../extension/index.js";
 
 export interface GuardrailResult {
   allowed: boolean;
@@ -50,6 +51,30 @@ const SUSPICIOUS_REPETITION_THRESHOLD = 50; // same char repeated > N times
  *   redaction) remains fully active when the workflow runs.
  */
 export function checkInput(input: string, opts?: { trusted?: boolean }): GuardrailResult {
+  const builtin = checkInputBuiltins(input, opts);
+  if (!builtin.allowed) return builtin;
+
+  // Extension-contributed input guardrails run AFTER the built-ins: they can
+  // only tighten, never loosen. First block wins; failures fail open (a buggy
+  // extension hook must not take the input pipeline down with it).
+  for (const { extension, hooks } of getExtensionGuardrailHooks()) {
+    if (!hooks.checkInput) continue;
+    try {
+      const result = hooks.checkInput(input);
+      if (!result.allowed) {
+        return {
+          ...result,
+          reason: `[ext:${extension}] ${result.reason ?? "blocked by extension guardrail"}`,
+        };
+      }
+    } catch {
+      // fail open — extension hook errors are not a reason to block users
+    }
+  }
+  return builtin;
+}
+
+function checkInputBuiltins(input: string, opts?: { trusted?: boolean }): GuardrailResult {
   const { promptInjectionBlock, maxInputLength } = getGuardrails();
 
   if (!input || input.trim().length === 0) {

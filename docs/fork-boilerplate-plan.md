@@ -38,15 +38,19 @@ files at those paths (beyond documented examples):
 
 ```
 fork repo
-├── product.json                     ← identity: name, slug, state dir, env prefix, theme
-├── extensions/                      ← in-process trusted extensions (TS, compiled with core)
+├── product.json                       ← identity: name, slug, state dir, env prefix, theme
+├── packages/core/src/extensions/      ← in-process trusted extensions (TS, compiled with core)
 │   └── mfa/
-│       ├── extension.ts             ← defineCoreExtension({ tools, tiers, roles, routes, guardrails, boot… })
+│       ├── index.ts                   ← defineCoreExtension({ tools, tiers, roles, routes, guardrails, boot… })
 │       └── …domain code…
-├── packages/web/src/extensions/     ← web extension modules (routes + nav + theme), glob-discovered
+├── packages/web/src/extensions/       ← web extension modules (routes + nav + theme), glob-discovered
 │   └── mfa/…
-└── workspace/                       ← agents / jobs / scenes / knowledge overlays (existing mechanism)
+└── workspace/                         ← agents / jobs / scenes / knowledge overlays (existing mechanism)
 ```
+
+(Core extensions live inside `packages/core/src/` rather than at the repo root
+so they compile with core's existing tsconfig — zero build wiring. Upstream
+ships only `extensions/README.md` + the dormant `_example/`.)
 
 Everything else is upstream-owned. The fork's git history on top of upstream
 touches only these paths → rebase/merge never conflicts.
@@ -167,12 +171,12 @@ in-process code:
 | Step | Scope | Status |
 |------|-------|--------|
 | 1 | Plan + recon (this doc) | ✅ 2026-06-13 |
-| 2 | WS1 product module + core literal sweep (non-test) | in progress |
-| 3 | WS1 test sweep + web `/api/product` + branding | pending |
-| 4 | WS2 tool groups + config | pending |
-| 5 | WS3 extension SDK + discovery + example | pending |
+| 2 | WS1 product module + core literal sweep incl. tests + `GET /api/product` | ✅ e73f8fe |
+| 3 | WS1 web-shell branding from /api/product | pending (waits for in-flight App.vue work to land) |
+| 4 | WS2 tool groups + config | ✅ b565554 |
+| 5 | WS3 extension SDK + discovery + example + guardrail hooks | ✅ (this commit) |
 | 6 | WS4 web extension points | pending |
-| 7 | WS5+WS6 docs, drift script, compose overlays | pending |
+| 7 | WS5+WS6 docs (forking.md), drift script, compose overlays | pending |
 | 8 | WS7 MFA-AI migration | pending |
 | 9 | End-to-end verification: build, tests, rebase dry-run in MFA-AI | pending |
 
