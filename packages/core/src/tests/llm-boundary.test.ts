@@ -10,7 +10,7 @@ afterEach(_resetLlmBoundaryForTests);
 
 function fakeProvider(): { provider: ChatProvider; seen: { messages: LLMMessage[][] } } {
   const seen = { messages: [] as LLMMessage[][] };
-  const response: LLMResponse = { content: "Patient [PATIENT_A] ist stabil.", tool_calls: [] };
+  const response: LLMResponse = { content: "Patient [PATIENT_A] ist stabil.", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" };
   const provider: ChatProvider = {
     checkHealth: async () => ({ healthy: true }),
     verifyToolCallSupport: async () => true,
