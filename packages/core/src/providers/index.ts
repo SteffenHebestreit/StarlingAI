@@ -8,6 +8,7 @@ import { childLogger } from "../logger.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "../runtime/status.js";
 import { logAudit } from "../audit/logger.js";
 import type { Config, ModelConfig, ModelPreset } from "../config/schema.js";
+import { wrapProviderWithBoundary } from "./llm-boundary.js";
 
 const log = childLogger("providers");
 
@@ -301,9 +302,12 @@ export function createChatProvider(modelConfig: ModelConfig, endpoint = resolveP
     };
   });
 
-  return bindings.length === 1
+  const provider = bindings.length === 1
     ? bindings[0]!.provider
     : new FailoverChatProvider(bindings);
+  // Extension LLM-boundary transformers (e.g. DSGVO pseudonymization) wrap
+  // every provider built here — the single choke point for model traffic.
+  return wrapProviderWithBoundary(provider);
 }
 
 export function getChatProvider(): ChatProvider {
