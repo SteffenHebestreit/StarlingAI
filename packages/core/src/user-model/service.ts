@@ -18,6 +18,8 @@ import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("user-model");
 
 const USER_MODEL_FILENAME = "user-model.json";
@@ -71,7 +73,7 @@ const EMPTY_EDITABLE: UserModelEditable = Object.freeze({
 function storePath(): string {
   const baseDir = process.env["SAI_USER_MEMORY_PATH"]?.trim()
     ? resolve(process.env["SAI_USER_MEMORY_PATH"])
-    : resolve(homedir(), ".starlingai", "state");
+    : resolve(homedir(), PRODUCT.stateDirName, "state");
   return resolve(baseDir, USER_MODEL_FILENAME);
 }
 

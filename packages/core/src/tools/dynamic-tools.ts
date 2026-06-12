@@ -27,6 +27,8 @@ import { recordSelfdevToolSuccess } from "../agent/self-improve.js";
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import type { TestRun } from "../agent/tool-dev-session.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("dynamic-tools");
 
 // ── Candidate bundle format ─────────────────────────────────────────────────
@@ -85,7 +87,7 @@ const _runtimeStats = new Map<string, _CallStats>(); // keyed by bare tool name
  */
 const LEGACY_DYNAMIC_TOOLS_DIR = join(
     process.env["SAI_DATA_DIR"] ?? (process.env["HOME"] ?? "/data"),
-    ".starlingai",
+    PRODUCT.stateDirName,
     "dynamic_tools",
 );
 

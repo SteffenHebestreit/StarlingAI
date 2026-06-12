@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Mock the embedding provider ─────────────────────────────────────────
 // Deterministic 4-dim embeddings per query — similar text → similar vector.
 function fakeEmbed(text: string): Float32Array {
@@ -74,7 +76,7 @@ describe("G33: trajectory cache", () => {
     }, ws, false);
 
     // File should exist
-    const cachePath = join(ws, ".starlingai", "trajectory_cache.ndjson");
+    const cachePath = join(ws, PRODUCT.stateDirName, "trajectory_cache.ndjson");
     expect(existsSync(cachePath)).toBe(true);
 
     // Similar query (same marker words) should match
@@ -169,7 +171,7 @@ describe("G33: trajectory cache", () => {
     }, ws, false);
 
     // File should NOT have been created
-    const cachePath = join(ws, ".starlingai", "trajectory_cache.ndjson");
+    const cachePath = join(ws, PRODUCT.stateDirName, "trajectory_cache.ndjson");
     expect(existsSync(cachePath)).toBe(false);
   });
 
@@ -183,7 +185,7 @@ describe("G33: trajectory cache", () => {
     }, ws, true /* fresh-sensitive → 30 min TTL */);
 
     // Manually rewrite the entry with a finishedAt of 2 hours ago
-    const cachePath = join(ws, ".starlingai", "trajectory_cache.ndjson");
+    const cachePath = join(ws, PRODUCT.stateDirName, "trajectory_cache.ndjson");
     const raw = readFileSync(cachePath, "utf-8").trim();
     const entry = JSON.parse(raw);
     entry.finishedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();

@@ -13,6 +13,8 @@ import {
 import { computeHybridRoutingScore, isCircuitOpen, shortenOverspecifiedRoutingQuery } from "../tools/sub-agent.js";
 import type { OutcomeEntry } from "../agent/outcomes.js";
 
+import { PRODUCT } from "../product/index.js";
+
 describe("agent search helpers", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -1386,7 +1388,7 @@ describe("circuit breaker", () => {
   it("does not trip with fewer than 3 samples", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-circuit-"));
     try {
-      const dir = join(tempDir, ".starlingai");
+      const dir = join(tempDir, PRODUCT.stateDirName);
       mkdirSync(dir, { recursive: true });
       const file = join(dir, "agent_outcomes.ndjson");
       const entry = (outcome: "success" | "failure"): OutcomeEntry => ({
@@ -1405,7 +1407,7 @@ describe("circuit breaker", () => {
   it("trips when failure rate exceeds 60% over last 10 calls", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-circuit-"));
     try {
-      const dir = join(tempDir, ".starlingai");
+      const dir = join(tempDir, PRODUCT.stateDirName);
       mkdirSync(dir, { recursive: true });
       const file = join(dir, "agent_outcomes.ndjson");
       const entry = (outcome: "success" | "failure"): OutcomeEntry => ({
@@ -1424,7 +1426,7 @@ describe("circuit breaker", () => {
   it("does not trip at exactly 60% failures (must exceed threshold)", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-circuit-"));
     try {
-      const dir = join(tempDir, ".starlingai");
+      const dir = join(tempDir, PRODUCT.stateDirName);
       mkdirSync(dir, { recursive: true });
       const file = join(dir, "agent_outcomes.ndjson");
       const entry = (outcome: "success" | "failure"): OutcomeEntry => ({
@@ -1443,7 +1445,7 @@ describe("circuit breaker", () => {
   it("only looks at the last 10 outcomes for an agent", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-circuit-"));
     try {
-      const dir = join(tempDir, ".starlingai");
+      const dir = join(tempDir, PRODUCT.stateDirName);
       mkdirSync(dir, { recursive: true });
       const file = join(dir, "agent_outcomes.ndjson");
       const entry = (outcome: "success" | "failure", agent = "researcher"): OutcomeEntry => ({

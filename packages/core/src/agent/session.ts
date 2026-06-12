@@ -17,6 +17,8 @@ import {
   loadAllSessionsFromRedis,
 } from "./session-redis.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[SYNTHESIS REQUIRED]",
@@ -926,8 +928,8 @@ function resolveSessionStorePath(): string {
   const explicit = process.env["SAI_SESSION_STORE"]?.trim();
   if (explicit) return resolve(explicit);
 
-  const workspacePath = resolve(process.cwd(), ".starlingai", "sessions.json");
-  const homePath = resolve(homedir(), ".starlingai", "sessions.json");
+  const workspacePath = resolve(process.cwd(), PRODUCT.stateDirName, "sessions.json");
+  const homePath = resolve(homedir(), PRODUCT.stateDirName, "sessions.json");
   if (existsSync(workspacePath)) return workspacePath;
   if (existsSync(homePath)) return homePath;
   return workspacePath;

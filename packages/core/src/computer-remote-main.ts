@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { childLogger } from "./logger.js";
 import { createRemoteComputerServer } from "./agent/computer-remote/server.js";
+import { PRODUCT } from "./product/index.js";
 
 const log = childLogger("computer-remote-main");
 
@@ -22,7 +23,7 @@ async function main() {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  log.info({ host, port, authEnabled: Boolean(authToken) }, "StarlingAI remote access sidecar ready");
+  log.info({ host, port, authEnabled: Boolean(authToken) }, `${PRODUCT.name} remote access sidecar ready`);
 }
 
 main().catch((error) => {

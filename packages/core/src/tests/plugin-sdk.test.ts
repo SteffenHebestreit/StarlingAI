@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { Plugin, PluginTool } from "../plugin/index.js";
+import { PRODUCT } from "../product/index.js";
 
 /**
  * Plugin SDK loader — exercises the loader against an injected importer so
@@ -36,7 +37,7 @@ describe("plugin SDK loader", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
     delete process.env["SAI_AUDIT_LOG"];
-    delete process.env["STARLINGAI_PLUGINS_DIR"];
+    delete process.env[`${PRODUCT.envPrefix}_PLUGINS_DIR`];
     rmSync(tempDir, { recursive: true, force: true });
     const configLoader = await import("../config/loader.js");
     configLoader.resetConfigForTests();

@@ -13,6 +13,8 @@ import { resolve, dirname } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:computer-recording");
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -73,7 +75,7 @@ export async function startRecording(sessionId: string, adapter: string): Promis
     return "";
   }
 
-  const recordingsDir = resolve(config.workspacePath, ".starlingai", "recordings");
+  const recordingsDir = resolve(config.workspacePath, PRODUCT.stateDirName, "recordings");
   await mkdir(recordingsDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");

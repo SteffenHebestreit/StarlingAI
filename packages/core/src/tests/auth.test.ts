@@ -3,6 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PRODUCT } from "../product/index.js";
+
 describe("gateway auth secret resolution", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
@@ -54,7 +56,7 @@ describe("gateway auth secret resolution", () => {
 
     process.chdir(tempDir);
     process.env["SAI_CONFIG_PATH"] = configPath;
-    process.env["SAI_JWT_SECRET_PATH"] = join(tempDir, ".starlingai", ".jwt_secret");
+    process.env["SAI_JWT_SECRET_PATH"] = join(tempDir, PRODUCT.stateDirName, ".jwt_secret");
     delete process.env["SAI_JWT_SECRET"];
 
     vi.resetModules();
@@ -63,7 +65,7 @@ describe("gateway auth secret resolution", () => {
     try {
       const token = await auth.createToken("workspace-user");
       const payload = await auth.verifyToken(token);
-      const secretPath = join(tempDir, ".starlingai", ".jwt_secret");
+      const secretPath = join(tempDir, PRODUCT.stateDirName, ".jwt_secret");
 
       expect(payload?.sub).toBe("workspace-user");
       expect(existsSync(secretPath)).toBe(true);

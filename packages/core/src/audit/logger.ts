@@ -6,6 +6,8 @@ import { randomUUID } from "node:crypto";
 import type { AuditEvent, AuditEventType } from "./schema.js";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("audit");
 
 // In-memory subscribers for real-time streaming to web dashboard
@@ -85,8 +87,8 @@ export function resolveAuditLogPath(): string {
   const explicit = process.env["SAI_AUDIT_LOG"];
   if (explicit?.trim()) return resolve(explicit);
 
-  const workspaceAuditLog = resolve(process.cwd(), ".starlingai", "audit.jsonl");
-  const homeAuditLog = resolve(homedir(), ".starlingai", "audit.jsonl");
+  const workspaceAuditLog = resolve(process.cwd(), PRODUCT.stateDirName, "audit.jsonl");
+  const homeAuditLog = resolve(homedir(), PRODUCT.stateDirName, "audit.jsonl");
 
   if (existsSync(workspaceAuditLog)) return workspaceAuditLog;
   if (existsSync(homeAuditLog)) return homeAuditLog;

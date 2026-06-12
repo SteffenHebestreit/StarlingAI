@@ -14,17 +14,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractTaskKeywords, computeOutcomeRoutingMultiplier, type OutcomeEntry } from "../agent/outcomes.js";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function makeWorkspace(): string {
   const dir = join(tmpdir(), `sai-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(join(dir, ".starlingai"), { recursive: true });
+  mkdirSync(join(dir, PRODUCT.stateDirName), { recursive: true });
   return dir;
 }
 
 function seedOutcomes(ws: string, entries: OutcomeEntry[]): void {
   const ndjson = entries.map(e => JSON.stringify(e)).join("\n") + "\n";
-  writeFileSync(join(ws, ".starlingai", "agent_outcomes.ndjson"), ndjson, "utf-8");
+  writeFileSync(join(ws, PRODUCT.stateDirName, "agent_outcomes.ndjson"), ndjson, "utf-8");
 }
 
 function makeEntry(

@@ -21,6 +21,8 @@ import type { AuditEvent } from "../audit/schema.js";
 import { subscribeToAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("observability:recovery-metrics");
 
 /** Audit event types that represent a recovery/intervention "net" firing. */
@@ -90,7 +92,7 @@ interface PersistedRecoveryStats {
 function resolveStatsPath(): string {
   const explicit = process.env["SAI_RECOVERY_NET_STATS"]?.trim();
   if (explicit) return resolve(explicit);
-  return resolve(process.cwd(), ".starlingai", "recovery-net-stats.json");
+  return resolve(process.cwd(), PRODUCT.stateDirName, "recovery-net-stats.json");
 }
 
 function loadPersistedStats(path: string): void {

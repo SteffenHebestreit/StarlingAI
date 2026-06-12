@@ -117,6 +117,7 @@ import { syncWebhookTools } from "./tools/webhooks.js";
 import { stopAllCronJobs } from "./runtime/scheduler.js";
 import { stopAllReminders } from "./runtime/reminders.js";
 import { stopAllTimers } from "./runtime/timers.js";
+import { PRODUCT } from "./product/index.js";
 
 const log = childLogger("main");
 
@@ -132,7 +133,7 @@ const log = childLogger("main");
  * filesystem, and connecting to every configured backing service.
  */
 export async function main() {
-  log.info("StarlingAI starting...");
+  log.info(`${PRODUCT.name} starting...`);
   const embeddedSceneWorkerEnabled = process.env["SAI_DISABLE_EMBEDDED_SCENE_WORKER"] !== "1";
 
   // Surface missing/weak/placeholder secrets before they break things downstream
@@ -414,7 +415,7 @@ export async function main() {
 
   log.info(
     { wsPort: config.gateway.port },
-    `StarlingAI ready — ws://localhost:${config.gateway.port}/ws`
+    `${PRODUCT.name} ready — ws://localhost:${config.gateway.port}/ws`
   );
 
   // Print a login token to the logs on first start so the user can access the dashboard

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { PRODUCT } from "../product/index.js";
 import {
   appendAgentMessage,
   consumeAgentMessages,
@@ -319,7 +320,7 @@ describe("Swarm Concurrency — semaphore", () => {
   });
 
   it("queues across agent types once the global ceiling is reached", async () => {
-    process.env["STARLINGAI_MAX_GLOBAL_CONCURRENCY"] = "2";
+    process.env[`${PRODUCT.envPrefix}_MAX_GLOBAL_CONCURRENCY`] = "2";
     resetConcurrencyForTests();
     try {
       await acquireSlot("type-1", 10);
@@ -338,7 +339,7 @@ describe("Swarm Concurrency — semaphore", () => {
       expect(resolved).toBe(true);
       expect(getGlobalConcurrencySnapshot().active).toBe(2);
     } finally {
-      delete process.env["STARLINGAI_MAX_GLOBAL_CONCURRENCY"];
+      delete process.env[`${PRODUCT.envPrefix}_MAX_GLOBAL_CONCURRENCY`];
       resetConcurrencyForTests();
     }
   });

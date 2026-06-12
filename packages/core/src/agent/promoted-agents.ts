@@ -11,9 +11,11 @@ import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import type { SubAgentConfig } from "../config/schema.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:promoted-agents");
 
-const PROMOTED_FILE = ".starlingai/promoted_agents.json";
+const PROMOTED_FILE = `${PRODUCT.stateDirName}/promoted_agents.json`;
 
 /** Minimum successful runs before an ephemeral agent is promoted to the catalog. */
 export const PROMOTION_MIN_SUCCESSES = 3;
@@ -33,7 +35,7 @@ export function readPromotedAgents(workspacePath: string): Record<string, SubAge
 }
 
 export function writePromotedAgents(workspacePath: string, agents: Record<string, SubAgentConfig>): void {
-  const dir = resolve(workspacePath, ".starlingai");
+  const dir = resolve(workspacePath, PRODUCT.stateDirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(resolve(workspacePath, PROMOTED_FILE), JSON.stringify(agents, null, 2), "utf-8");
 }

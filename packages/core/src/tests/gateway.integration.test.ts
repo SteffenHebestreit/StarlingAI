@@ -6,6 +6,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import WebSocket from "ws";
 import { DEFAULT_TTS_CHUNK_MAX_CHARS } from "../multimodal/tts-chunking.js";
 
+import { PRODUCT } from "../product/index.js";
+
 function createPcmWav(sampleCount: number, seed = 0): Buffer {
   const dataSize = sampleCount * 2;
   const wav = Buffer.alloc(44 + dataSize);
@@ -98,8 +100,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -171,8 +173,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -230,8 +232,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
     process.env["N8N_USERNAME"] = "admin@n8n.local";
     process.env["N8N_KEY"] = "runtime-secret-from-env";
 
@@ -323,9 +325,9 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
-    process.env["SAI_USER_MEMORY_PATH"] = join(tempDir, ".starlingai", "state");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+    process.env["SAI_USER_MEMORY_PATH"] = join(tempDir, PRODUCT.stateDirName, "state");
 
     vi.resetModules();
 
@@ -460,8 +462,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -558,8 +560,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -622,7 +624,7 @@ describe("gateway HTTP bridge", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-audit-log-"));
     const port = 19750 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
-    const auditLogPath = join(tempDir, ".starlingai", "audit.jsonl");
+    const auditLogPath = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     writeFileSync(configPath, JSON.stringify({
       gateway: {
@@ -634,7 +636,7 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
     process.env["SAI_AUDIT_LOG"] = auditLogPath;
 
     vi.resetModules();
@@ -691,8 +693,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -782,8 +784,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -861,8 +863,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -984,8 +986,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1119,8 +1121,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1321,8 +1323,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1418,8 +1420,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1577,8 +1579,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1805,8 +1807,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -1919,8 +1921,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 
@@ -2025,8 +2027,8 @@ describe("gateway HTTP bridge", () => {
     process.env["SAI_CONFIG_PATH"] = configPath;
     delete process.env["SAI_JWT_SECRET"];
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.resetModules();
 

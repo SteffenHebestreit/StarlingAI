@@ -20,6 +20,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 import type { SwarmState } from "../tools/registry.js";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Scenario types ─────────────────────────────────────────────────────────
 
 interface ScenarioAssert {
@@ -170,7 +172,7 @@ describe("G35: scenario harness", () => {
    */
   async function setupScenario(scenario: Scenario) {
     const ws = mkdtempSync(join(tmpdir(), `sai-scenario-${scenario.id}-`));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
     workspacePath = ws;
 

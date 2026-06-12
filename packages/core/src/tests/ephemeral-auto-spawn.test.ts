@@ -15,6 +15,8 @@ import { join } from "node:path";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 import type { SwarmState } from "../tools/registry.js";
 
+import { PRODUCT } from "../product/index.js";
+
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
 /**
@@ -115,7 +117,7 @@ describe("G34: ephemeral auto-spawn", () => {
 
   it("drafts and runs an ephemeral agent when no catalog match exists", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-g34-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     // Write a minimal config with no sub-agents so routing finds nothing
@@ -169,7 +171,7 @@ describe("G34: ephemeral auto-spawn", () => {
 
   it("ephemeral fallback is skipped when architect generation is disabled", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-g34-disabled-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     const cfgPath = join(ws, "starlingai.json");
@@ -217,11 +219,11 @@ describe("G34: ephemeral auto-spawn", () => {
 
   it("promoted ephemeral agent is preferred on the second matching task", async () => {
     const ws = mkdtempSync(join(tmpdir(), "sai-g34-promote-"));
-    mkdirSync(join(ws, ".starlingai"), { recursive: true });
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
     tempDirs.push(ws);
 
     // Pre-seed a promoted agent entry to simulate a previously-successful ephemeral
-    const promotedPath = join(ws, ".starlingai", "promoted_agents.json");
+    const promotedPath = join(ws, PRODUCT.stateDirName, "promoted_agents.json");
     writeFileSync(promotedPath, JSON.stringify({
       niche_specialist: {
         description: "One-shot specialist for niche-data-api tasks",

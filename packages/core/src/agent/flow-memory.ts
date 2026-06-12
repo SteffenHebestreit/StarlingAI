@@ -3,9 +3,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 const log = childLogger("agent:flow-memory");
 
-const FLOW_MEMORY_FILE = ".starlingai/flow_memory.ndjson";
+const FLOW_MEMORY_FILE = `${PRODUCT.stateDirName}/flow_memory.ndjson`;
 const MAX_ACTIONS = 8;
 const MAX_TAGS = 10;
 
@@ -54,7 +56,7 @@ export function appendFlowMemoryEntry(
   };
 
   try {
-    const dir = resolve(workspacePath, ".starlingai");
+    const dir = resolve(workspacePath, PRODUCT.stateDirName);
     mkdirSync(dir, { recursive: true });
     appendFileSync(resolve(workspacePath, FLOW_MEMORY_FILE), `${JSON.stringify(normalized)}\n`, "utf-8");
   } catch (err) {

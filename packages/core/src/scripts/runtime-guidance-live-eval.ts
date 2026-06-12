@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { SignJWT } from "jose";
 
+import { PRODUCT } from "../product/index.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../../../..");
@@ -395,8 +397,8 @@ async function readAuditEventsForSession(sessionId: string): Promise<AuditEvent[
 async function readLocalAuditEventsForSession(sessionId: string): Promise<AuditEvent[]> {
   const candidates = [
     process.env["SAI_AUDIT_LOG"]?.trim(),
-    resolve(repoRoot, ".starlingai", "audit.jsonl"),
-    resolve(homedir(), ".starlingai", "audit.jsonl"),
+    resolve(repoRoot, PRODUCT.stateDirName, "audit.jsonl"),
+    resolve(homedir(), PRODUCT.stateDirName, "audit.jsonl"),
   ].filter((value): value is string => Boolean(value));
 
   for (const candidate of candidates) {
@@ -495,7 +497,7 @@ async function resolveGatewaySecret(): Promise<string> {
   const configSecret = await readConfigJwtSecret();
   if (configSecret && configSecret.length >= 32) return configSecret;
 
-  const userSecretPath = join(homedir(), ".starlingai", ".jwt_secret");
+  const userSecretPath = join(homedir(), PRODUCT.stateDirName, ".jwt_secret");
   if (existsSync(userSecretPath)) {
     const stored = (await readFile(userSecretPath, "utf8")).trim();
     if (stored.length >= 32) return stored;

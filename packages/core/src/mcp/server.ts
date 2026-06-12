@@ -39,6 +39,7 @@ import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("mcp:server");
 
@@ -76,7 +77,7 @@ export function createStarlingMcpServer(ctx: ExposeContext): Server {
       tools: { listChanged: false },
     },
     instructions:
-      "StarlingAI multi-agent swarm.  Tools include native swarm tools, " +
+      `${PRODUCT.name} multi-agent swarm.  Tools include native swarm tools, ` +
       "sub-agent delegations (prefix `agent__`), and packaged scenes " +
       "(prefix `scene__`).  Tool tiers and human-in-the-loop gates are " +
       "enforced by the gateway — calls that require approval will pause " +
@@ -167,7 +168,7 @@ function collectAdvertisedTools(): AdvertisedTool[] {
     out.push({
       name: synthName,
       description:
-        `Delegate work to the StarlingAI sub-agent "${agentName}".  ` +
+        `Delegate work to the ${PRODUCT.name} sub-agent "${agentName}".  ` +
         (agentCfg.description ?? "Specialized swarm agent."),
       inputSchema: {
         type: "object",
@@ -189,7 +190,7 @@ function collectAdvertisedTools(): AdvertisedTool[] {
     out.push({
       name: `${SCENE_TOOL_PREFIX}${scene.name}`,
       description:
-        `Run the StarlingAI scene "${scene.name}".  ` +
+        `Run the ${PRODUCT.name} scene "${scene.name}".  ` +
         (scene.description || "Multi-step workflow."),
       inputSchema: sceneInputSchema(scene),
     });

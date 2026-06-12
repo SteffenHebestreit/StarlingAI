@@ -7,6 +7,8 @@ import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
 
+import { PRODUCT } from "../product/index.js";
+
 type ConfigSourceType = "file" | "directory";
 
 type ConfigSource = {
@@ -18,7 +20,7 @@ type ConfigSource = {
   compiledPath: string;
 };
 
-const DEFAULT_CONFIG_FILE_NAME = "starlingai.json";
+const DEFAULT_CONFIG_FILE_NAME = PRODUCT.configFileName;
 const DEFAULT_CONFIG_DIRECTORY_NAME = "config";
 const DEFAULT_WORKSPACE_DIRECTORY_NAME = "workspace";
 const LEGACY_CONFIG_DIRECTORY_NAMES = ["starling_config", "starling-config"];
@@ -464,19 +466,19 @@ function resolveConfigPaths(): { basePath: string; workspacePath: string | null 
   if (existsSync(workspaceConfigFile)) return { basePath: workspaceConfigFile, workspacePath: null };
 
   // Home directory fallbacks
-  const homeConfigDir = resolve(homedir(), ".starlingai", DEFAULT_CONFIG_DIRECTORY_NAME);
-  const homeWorkspaceDir = resolve(homedir(), ".starlingai", DEFAULT_WORKSPACE_DIRECTORY_NAME);
+  const homeConfigDir = resolve(homedir(), PRODUCT.stateDirName, DEFAULT_CONFIG_DIRECTORY_NAME);
+  const homeWorkspaceDir = resolve(homedir(), PRODUCT.stateDirName, DEFAULT_WORKSPACE_DIRECTORY_NAME);
   if (existsSync(homeConfigDir) && existsSync(homeWorkspaceDir)) {
     return { basePath: homeConfigDir, workspacePath: homeWorkspaceDir };
   }
   for (const legacyName of LEGACY_CONFIG_DIRECTORY_NAMES) {
-    const legacyDir = resolve(homedir(), ".starlingai", legacyName);
+    const legacyDir = resolve(homedir(), PRODUCT.stateDirName, legacyName);
     if (existsSync(legacyDir)) {
       logger.warn({ path: legacyDir }, "Using legacy config directory — migrate to config/ + workspace/ layout");
       return { basePath: legacyDir, workspacePath: null };
     }
   }
-  const homeConfigFile = resolve(homedir(), ".starlingai", DEFAULT_CONFIG_FILE_NAME);
+  const homeConfigFile = resolve(homedir(), PRODUCT.stateDirName, DEFAULT_CONFIG_FILE_NAME);
   if (existsSync(homeConfigFile)) return { basePath: homeConfigFile, workspacePath: null };
 
   // Default: expect two-zone layout

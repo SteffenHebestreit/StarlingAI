@@ -14,6 +14,7 @@
 import { getConfig } from "../config/loader.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
+import { PRODUCT } from "../product/index.js";
 
 // ── Intent term / pattern tables ─────────────────────────────────────────────
 
@@ -639,8 +640,8 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string): strin
     ? "For short or greeting-only openings, reply with one short, polite sentence and move directly to helping. Do not use small talk. Do not introduce yourself or mention your name unless the user explicitly asks."
     : "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
   const nameInstruction = profile.identity.name
-    ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself "StarlingAI" in conversation unless the user is explicitly asking about the product or platform name.`
-    : "Do not use the platform name \"StarlingAI\" as your personal name in conversation. If the user did not ask for your name, reply without naming yourself.";
+    ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself ${JSON.stringify(PRODUCT.name)} in conversation unless the user is explicitly asking about the product or platform name.`
+    : `Do not use the platform name ${JSON.stringify(PRODUCT.name)} as your personal name in conversation. If the user did not ask for your name, reply without naming yourself.`;
   return `Language and identity for this turn: ${languageInstruction} ${behaviorInstruction} ${nameInstruction}`;
 }
 

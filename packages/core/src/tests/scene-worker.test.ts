@@ -3,6 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PRODUCT } from "../product/index.js";
+
 describe("scene job worker", () => {
   afterEach(async () => {
     try {
@@ -136,8 +138,8 @@ describe("scene job worker", () => {
 
     process.env["SAI_CONFIG_PATH"] = configPath;
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
-    process.env["SAI_AUDIT_LOG"] = join(tempDir, ".starlingai", "audit.jsonl");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     vi.doMock("../agent/runtime.js", () => ({
       runTurn: vi.fn((opts: Record<string, unknown>) => {
@@ -211,7 +213,7 @@ describe("scene job worker", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-webhook-"));
     const port = 23100 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
-    const auditLogPath = join(tempDir, ".starlingai", "audit.jsonl");
+    const auditLogPath = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
 
     writeFileSync(configPath, JSON.stringify({
       gateway: {
@@ -231,7 +233,7 @@ describe("scene job worker", () => {
 
     process.env["SAI_CONFIG_PATH"] = configPath;
     process.env["SAI_MASTER_KEY"] = "m".repeat(32);
-    process.env["SAI_CRED_STORE"] = join(tempDir, ".starlingai", "credentials.enc");
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
     process.env["SAI_AUDIT_LOG"] = auditLogPath;
 
     vi.doMock("../agent/runtime.js", () => ({
