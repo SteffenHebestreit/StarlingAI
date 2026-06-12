@@ -18,6 +18,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { PRODUCT } from "./product.mjs";
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -95,7 +96,7 @@ async function cmdStart() {
   const pentest     = values.pentest || values.all;
   const desktop     = values["computer-desktop"] || values.all;
 
-  hdr("StarlingAI — Starting up");
+  hdr(`${PRODUCT.name} — Starting up`);
 
   // Prerequisites
   ensureCommand("docker", "Docker not found. Install Docker Desktop first.");
@@ -119,8 +120,8 @@ async function cmdStart() {
   hdr("Building configuration...");
   await run("node", ["scripts/config-layout.mjs", "build"]);
 
-  if (!existsSync("starlingai.json")) { fail("starlingai.json not found after config build."); return; }
-  ok("starlingai.json generated");
+  if (!existsSync(PRODUCT.configFileName)) { fail(`${PRODUCT.configFileName} not found after config build.`); return; }
+  ok(`${PRODUCT.configFileName} generated`);
 
   // Preflight: warn loudly about config "$VAR" references that .env does not
   // satisfy, so a stored site/channel/webhook does not silently turn into
@@ -158,8 +159,8 @@ async function cmdStart() {
     ok("Images built");
   } else {
     try {
-      execSync("docker image inspect starlingai/gateway:dev", { stdio: "ignore" });
-      execSync("docker image inspect starlingai/agent-worker:dev", { stdio: "ignore" });
+      execSync(`docker image inspect ${PRODUCT.slug}/gateway:dev`, { stdio: "ignore" });
+      execSync(`docker image inspect ${PRODUCT.slug}/agent-worker:dev`, { stdio: "ignore" });
     } catch {
       hdr("First run — building images...");
       await run(dc("build"));
@@ -189,7 +190,7 @@ async function cmdStart() {
   }
 
   // Summary
-  hdr("StarlingAI is up");
+  hdr(`${PRODUCT.name} is up`);
   console.log(`
   ${BOLD}Dashboard${RESET}     →  ${CYAN}http://localhost:3001${RESET}
   ${BOLD}Tutorials${RESET}     →  ${CYAN}http://localhost:3002${RESET}
@@ -224,10 +225,10 @@ const MEMORY_FLATFILE_TARGETS = [
   "config_assistant_proposals.json",   // pending self-improvement proposals
 ];
 const MEMORY_FLATFILE_ZONES = [
-  ".starlingai",                       // gateway cwd zone
-  "workspace/.starlingai",             // workspace zone (durable memory store)
-  "packages/core/.starlingai",         // residue from running vitest / sai memory in packages/core
-  "packages/core/workspace/.starlingai",
+  PRODUCT.stateDirName,                // gateway cwd zone
+  `workspace/${PRODUCT.stateDirName}`, // workspace zone (durable memory store)
+  `packages/core/${PRODUCT.stateDirName}`, // residue from running vitest / sai memory in packages/core
+  `packages/core/workspace/${PRODUCT.stateDirName}`,
 ];
 
 function wipeFlatFileMemory() {
@@ -263,7 +264,7 @@ async function cmdStop() {
   const composeFiles = ["-f", "docker-compose.yml"];
   const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop"];
 
-  hdr("Stopping StarlingAI...");
+  hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
   const downArgs = values.volumes ? ["down", "-v"] : ["down"];
   await run(["docker", "compose", ...composeFiles, ...allProfiles, ...downArgs]);
@@ -276,7 +277,7 @@ async function cmdStop() {
     hdr("Clearing flat-file agent memory (memory store, skills, learning history)...");
     wipeFlatFileMemory();
     ok("Clean slate: containers, networks, DB volumes, and flat-file memory removed.");
-    info("Preserved: credentials, JWT secret, dashboard token, audit log — delete .starlingai by hand for a full factory reset.");
+    info(`Preserved: credentials, JWT secret, dashboard token, audit log — delete ${PRODUCT.stateDirName} by hand for a full factory reset.`);
   } else {
     ok("All containers and networks removed. Data volumes preserved.");
   }
@@ -290,7 +291,7 @@ async function cmdWipe() {
   });
   loadDotEnv();
 
-  hdr("Wipe StarlingAI runtime data (containers stay up; config + credentials untouched)");
+  hdr(`Wipe ${PRODUCT.name} runtime data (containers stay up; config + credentials untouched)`);
   info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings), QuestDB (telemetry + research notes), MemGraph (knowledge graph), and the audit-log mirror.");
   if (!values.yes) {
     warn("This permanently deletes that data. Re-run to proceed:  pnpm sai wipe --yes");

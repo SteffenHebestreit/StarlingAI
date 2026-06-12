@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PRODUCT } from "./product.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,8 +28,9 @@ const allowedFiles = new Set([
   "sai",
   "sai.cmd",
   "scene-eval.jsonc",
-  "starlingai.example.json",
-  "starlingai.json",
+  PRODUCT.exampleConfigFileName,
+  PRODUCT.configFileName,
+  "product.json",
   "start.bat",
   "start.command",
   "start.ps1",
@@ -39,7 +41,7 @@ const allowedDirectories = new Set([
   ".claude",
   ".git",
   ".github",
-  ".starlingai",
+  PRODUCT.stateDirName,
   ".vscode",
   "artifacts",
   "assets",

@@ -3,12 +3,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
+import { PRODUCT } from "./product.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const defaultSourceFile = join(repoRoot, "starlingai.json");
+const defaultSourceFile = join(repoRoot, PRODUCT.configFileName);
 const defaultConfigDir = join(repoRoot, "config");
 const defaultWorkspaceDir = join(repoRoot, "workspace");
-const defaultTargetFile = join(repoRoot, "starlingai.json");
+const defaultTargetFile = join(repoRoot, PRODUCT.configFileName);
 // Legacy single-directory layout
 const legacySourceDir = join(repoRoot, "starling_config");
 
