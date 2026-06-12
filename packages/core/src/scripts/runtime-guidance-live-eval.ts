@@ -118,7 +118,7 @@ async function main(): Promise<void> {
 
   console.log(formatReport(report));
 
-  const outputPath = resolveFromRepo(outputArg ?? plan.outputPath ?? "./.starlingai/live-check/runtime-guidance-eval-report.json");
+  const outputPath = resolveFromRepo(outputArg ?? plan.outputPath ?? `./${PRODUCT.stateDirName}/live-check/runtime-guidance-eval-report.json`);
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   console.log(`\nReport written to ${outputPath}`);
