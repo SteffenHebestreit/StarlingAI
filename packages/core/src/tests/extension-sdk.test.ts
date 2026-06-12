@@ -239,6 +239,23 @@ describe("extension loader via SAI_EXTENSIONS_DIR", () => {
   });
 });
 
+describe("extension auth provider", () => {
+  it("registers a provider and rejects a second one from another extension", async () => {
+    const { _recordLoadedExtension, getExtensionAuthProvider } = await import("../extension/index.js");
+    const provider = {
+      verifyCredentials: async () => null,
+      getUserById: () => null,
+    };
+    const record = (name: string) =>
+      ({ name, version: "1", toolNames: [], auditEvents: [], roles: [], loadedAt: "", source: "test" });
+    _recordLoadedExtension(record("authy"), { name: "authy", version: "1", authProvider: provider });
+    expect(getExtensionAuthProvider()).toBe(provider);
+    expect(() =>
+      _recordLoadedExtension(record("other"), { name: "other", version: "1", authProvider: provider }),
+    ).toThrow(/already registered/);
+  });
+});
+
 describe("extension input guardrails", () => {
   it("blocks input when an extension checkInput hook blocks", async () => {
     const { _recordLoadedExtension } = await import("../extension/index.js");

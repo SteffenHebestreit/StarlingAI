@@ -97,6 +97,29 @@ export interface ExtensionGuardrailHooks {
   checkOutput?: (output: string) => GuardrailResult & { redacted?: string };
 }
 
+/**
+ * Pluggable credential backend. When an extension registers one, the CORE
+ * /api/auth/login and /api/auth/me routes authenticate against it instead of
+ * the config-file user list — forks get their own user store without touching
+ * gateway code. Exactly one provider may be registered per process.
+ */
+export interface ExtensionAuthUser {
+  /** Stable id — becomes the JWT `sub`. */
+  id: string;
+  username: string;
+  role: string;
+  displayName?: string;
+  /** Extra JWT claims (e.g. a medical fork's kvnr). Keep small + non-secret. */
+  claims?: Record<string, unknown>;
+}
+
+export interface ExtensionAuthProvider {
+  /** Validate credentials; null = reject. */
+  verifyCredentials(username: string, password: string): Promise<ExtensionAuthUser | null>;
+  /** Resolve a token subject back to a user; null = account gone (401). */
+  getUserById(id: string): ExtensionAuthUser | null;
+}
+
 /** Per-extension context handed to routes/boot/shutdown. */
 export interface CoreExtensionContext {
   /** Extension name (= directory name). */
@@ -138,6 +161,8 @@ export interface CoreExtension {
   auditEvents?: string[];
   /** Roles this extension contributes to the auth model. */
   roles?: ExtensionRoleDef[];
+  /** Credential backend consumed by the core /api/auth routes. One per process. */
+  authProvider?: ExtensionAuthProvider;
   /** Guardrail pipeline hooks, appended after built-ins. */
   guardrails?: ExtensionGuardrailHooks;
   /**
@@ -186,6 +211,7 @@ const _extensions = new Map<string, LoadedExtensionRecord>();
 const _roles = new Map<string, ExtensionRoleDef>();
 const _auditEvents = new Set<string>();
 const _guardrailHooks: Array<{ extension: string; hooks: ExtensionGuardrailHooks }> = [];
+let _authProvider: { extension: string; provider: ExtensionAuthProvider } | null = null;
 
 /** @internal loader-only */
 export function _recordLoadedExtension(record: LoadedExtensionRecord, ext: CoreExtension): void {
@@ -193,6 +219,19 @@ export function _recordLoadedExtension(record: LoadedExtensionRecord, ext: CoreE
   for (const role of ext.roles ?? []) _roles.set(role.name, role);
   for (const event of record.auditEvents) _auditEvents.add(event);
   if (ext.guardrails) _guardrailHooks.push({ extension: record.name, hooks: ext.guardrails });
+  if (ext.authProvider) {
+    if (_authProvider && _authProvider.extension !== record.name) {
+      throw new Error(
+        `extension "${record.name}" declares an authProvider but "${_authProvider.extension}" already registered one — only one credential backend per process`,
+      );
+    }
+    _authProvider = { extension: record.name, provider: ext.authProvider };
+  }
+}
+
+/** The registered credential backend, if any extension declared one. */
+export function getExtensionAuthProvider(): ExtensionAuthProvider | null {
+  return _authProvider?.provider ?? null;
 }
 
 /** Metadata for loaded extensions (dashboard / diagnostics). */
@@ -225,4 +264,5 @@ export function _resetExtensionsForTests(): void {
   _roles.clear();
   _auditEvents.clear();
   _guardrailHooks.length = 0;
+  _authProvider = null;
 }
