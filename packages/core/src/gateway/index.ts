@@ -108,6 +108,8 @@ import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { PRODUCT } from "../product/index.js";
+import { listExtensionRoles, listLoadedExtensions } from "../extension/index.js";
+import { mountExtensionRoutes } from "../extension/loader.js";
 
 const log = childLogger("gateway");
 
@@ -1282,15 +1284,18 @@ export function createGateway() {
   // ── Health endpoints ─────────────────────────────────────────────────────
   app.get("/healthz", (c) => c.json({ status: "ok" }));
 
-  // Product identity for the web shell (name, tagline, theme). Public and
-  // unauthenticated by design: the login screen renders branding before any
-  // token exists. Forks override via product.json (docs/fork-boilerplate-plan.md).
+  // Product identity for the web shell (name, tagline, theme) plus
+  // extension-contributed role metadata for badges. Public and unauthenticated
+  // by design: the login screen renders branding before any token exists.
+  // Forks override via product.json (docs/fork-boilerplate-plan.md).
   app.get("/api/product", (c) =>
     c.json({
       name: PRODUCT.name,
       slug: PRODUCT.slug,
       tagline: PRODUCT.tagline,
       theme: PRODUCT.theme,
+      roles: listExtensionRoles(),
+      extensions: listLoadedExtensions().map((e) => ({ name: e.name, version: e.version, description: e.description })),
     })
   );
   app.get("/readyz", (c) => {
@@ -5397,6 +5402,10 @@ export function createGateway() {
 
     socket.destroy();
   });
+
+  // Core-extension routes mount LAST so extensions can never shadow a core
+  // endpoint (first-match-wins routing). Convention: /api/<extension>/...
+  mountExtensionRoutes(app);
 
   return {
     async start(): Promise<void> {

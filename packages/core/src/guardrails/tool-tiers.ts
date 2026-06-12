@@ -17,7 +17,7 @@ export const enum ToolTier {
   FOUR_BLOCKED = 4,
 }
 
-interface ToolTierDef {
+export interface ToolTierDef {
   tier: ToolTier;
   description: string;
   requiresPerCallApproval: boolean;
@@ -1647,8 +1647,32 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
 });
 
+/**
+ * Tiers declared by first-party core extensions (extension/loader.ts).
+ * Extensions are repo-compiled code, so this is still "enforced in code", not
+ * runtime config: nothing reachable from config files can write here, and
+ * built-in names cannot be shadowed.
+ */
+const EXTENSION_TIER_MAP = new Map<string, ToolTierDef>();
+
+/** @internal extension-loader-only. Throws on built-in shadowing or blocked tiers. */
+export function registerExtensionToolTier(toolName: string, def: ToolTierDef, source: string): void {
+  if (Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName)) {
+    throw new Error(`extension "${source}" must not shadow built-in tool "${toolName}"`);
+  }
+  if (def.tier >= ToolTier.FOUR_BLOCKED) {
+    throw new Error(`extension "${source}" tool "${toolName}": registering at FOUR_BLOCKED is not allowed`);
+  }
+  EXTENSION_TIER_MAP.set(toolName, Object.freeze({ ...def, description: `[ext:${source}] ${def.description}` }));
+}
+
+/** Test hook: clear extension-declared tiers. */
+export function _resetExtensionToolTiersForTests(): void {
+  EXTENSION_TIER_MAP.clear();
+}
+
 export function getToolTier(toolName: string): ToolTierDef {
-  const def = TOOL_TIER_MAP[toolName];
+  const def = TOOL_TIER_MAP[toolName] ?? EXTENSION_TIER_MAP.get(toolName);
   if (def) return def;
 
   // Bridged MCP tools not explicitly listed above -> Tier 3, requires per-call approval.
@@ -1732,5 +1756,7 @@ export function getRegisteredTools(): string[] {
  * `webhook__*`) are NOT considered compile-time mapped.
  */
 export function isCompileTimeMappedTool(toolName: string): boolean {
-  return Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName);
+  // Extension tiers count as compile-time mappings: they ship in the repo and
+  // must be just as un-shadowable by runtime plugins as built-ins are.
+  return Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName) || EXTENSION_TIER_MAP.has(toolName);
 }

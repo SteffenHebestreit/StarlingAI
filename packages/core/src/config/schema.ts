@@ -1593,6 +1593,13 @@ export const ConfigSchema = z.object({
     /** Individual tool names to skip at registration. */
     disabledTools: z.array(z.string()).default([]),
   }).default({}),
+  /**
+   * Per-extension config slices for first-party core extensions
+   * (src/extensions/<name>/), keyed by extension name. Passed through opaquely
+   * here; each extension validates its own slice with the `configSchema` from
+   * its manifest at boot.
+   */
+  extensions: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
   orchestration: OrchestrationSchema.default({}),
 });
