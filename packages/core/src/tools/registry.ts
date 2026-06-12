@@ -3,6 +3,10 @@ import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan } from "../observability/tracing.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
+import { childLogger } from "../logger.js";
+import { isToolDisabled, resolveToolGroup } from "./groups.js";
+
+const registryLog = childLogger("tool-registry");
 
 export interface ToolHandler {
   name: string;
@@ -23,6 +27,12 @@ export interface ToolHandler {
   costHint?: "low" | "medium" | "high";
   /** E20: Qualitative latency hint. Same tie-break semantics as costHint. */
   latencyHint?: "low" | "medium" | "high";
+  /**
+   * Capability family for config-driven disabling (`tools.disabledGroups`).
+   * Built-ins are mapped centrally in tools/groups.ts and leave this unset;
+   * extension tools declare it inline.
+   */
+  group?: string;
 }
 
 export interface SwarmTaskAttempt {
@@ -203,6 +213,16 @@ const _registry = new Map<string, ToolHandler>();
 export function registerTool(handler: ToolHandler): void {
   if (!isToolAllowed(handler.name)) {
     throw new Error(`Cannot register blocked tool: ${handler.name}`);
+  }
+  // Config-driven disabling (tools.disabledGroups / disabledTools): skip with
+  // a log rather than throw — registration happens via side-effect imports at
+  // boot, and a disabled family must not abort startup.
+  if (isToolDisabled(handler.name, handler.group)) {
+    registryLog.info(
+      { tool: handler.name, group: resolveToolGroup(handler.name, handler.group) },
+      "tool disabled by config — not registered"
+    );
+    return;
   }
   _registry.set(handler.name, handler);
 }

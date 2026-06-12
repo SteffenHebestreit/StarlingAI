@@ -1580,6 +1580,19 @@ export const ConfigSchema = z.object({
     enabled: z.boolean().default(true),
     dir: z.string().optional(),
   }).default({}),
+  /**
+   * Built-in tool surface control.  Forks disable whole capability families
+   * here instead of deleting upstream tool files (deletions are the worst
+   * rebase-conflict source — see docs/fork-boilerplate-plan.md WS2).
+   * Group names live in tools/groups.ts; unknown names are ignored with a
+   * warning so configs stay portable across versions.
+   */
+  tools: z.object({
+    /** Built-in group names to skip at registration (e.g. "pentest", "infrastructure"). */
+    disabledGroups: z.array(z.string()).default([]),
+    /** Individual tool names to skip at registration. */
+    disabledTools: z.array(z.string()).default([]),
+  }).default({}),
   workspacePath: z.string().default("/workspace"),
   orchestration: OrchestrationSchema.default({}),
 });
