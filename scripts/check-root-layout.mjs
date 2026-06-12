@@ -19,6 +19,7 @@ const allowedFiles = new Set([
   "docker-compose.model-servers.yml",
   "docker-compose.ollama.yml",
   "docker-compose.yml",
+  "eslint.config.mjs",
   "LICENSE",
   "package.json",
   "pnpm-lock.yaml",
