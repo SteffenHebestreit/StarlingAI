@@ -28,8 +28,11 @@
         </div>
       </div>
 
-      <div v-if="message.statusText" class="message-progress">
-        <div class="message-progress__current">{{ message.statusText }}</div>
+      <!-- Live status pill only while streaming; finalized messages keep just the
+           progress-history trail (the carried-over statusText is the last transient
+           status — e.g. "Working on it..." — and must not stay pinned). -->
+      <div v-if="isStreamingMessage ? message.statusText : progressHistory.length > 1" class="message-progress">
+        <div v-if="isStreamingMessage" class="message-progress__current">{{ message.statusText }}</div>
         <div v-if="progressHistory.length > 1" class="message-progress__history">
           <div
             v-for="(entry, index) in progressHistory"
@@ -543,6 +546,7 @@ const artifactPreviewLoading = ref<string | null>(null);
 const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
 const progressHistory = computed(() => props.message.statusHistory?.slice(-4) ?? []);
+const isStreamingMessage = computed(() => props.message.id === "streaming");
 const mermaidPreviewSvg = ref<Record<string, string>>({});
 const mermaidPreviewErrors = ref<Record<string, string>>({});
 const mermaidPreviewLoading = ref<Record<string, boolean>>({});
