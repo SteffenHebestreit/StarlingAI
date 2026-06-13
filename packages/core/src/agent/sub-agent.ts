@@ -1183,8 +1183,27 @@ function isDirectRemoteCliTask(agentName: string, task: string): boolean {
     && /\b(ssh|server|host|docker|container|containers|n8n-server)\b/i.test(task);
 }
 
-function buildModelExecutionGuidance(modelId: string, enableThinking: boolean | undefined): string {
-  if (!modelId.toLowerCase().includes("gemma-4-e4b-it")) {
+/**
+ * Merge a per-agent model override onto the defaults, dropping override keys
+ * whose value is `undefined`. A partial override (e.g. an ephemeral agent that
+ * passes `model: { temperature: 0.3 }` with no `primary`) must NOT spread
+ * `primary: undefined` over the default and blank it out — that left
+ * modelConfig.primary undefined and crashed downstream model-id handling (audit
+ * c33e65dd: create_ephemeral_agent "Cannot read properties of undefined
+ * (reading 'toLowerCase')").
+ */
+export function mergeAgentModelOverride(
+  defaults: import("../config/schema.js").ModelConfig,
+  override: Partial<import("../config/schema.js").ModelConfig> | undefined,
+): import("../config/schema.js").ModelConfig {
+  const defined = Object.fromEntries(
+    Object.entries(override ?? {}).filter(([, value]) => value !== undefined),
+  ) as Partial<import("../config/schema.js").ModelConfig>;
+  return { ...defaults, ...defined };
+}
+
+function buildModelExecutionGuidance(modelId: string | undefined, enableThinking: boolean | undefined): string {
+  if (!modelId || !modelId.toLowerCase().includes("gemma-4-e4b-it")) {
     return "";
   }
 
@@ -2337,7 +2356,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // preset (dashboard Local ⇄ Claude switch) — a preset overrides the model
     // identity for EVERY agent, including ones with their own model override,
     // so capability tests run the whole swarm on the preset model.
-    const modelConfig = applyActiveModelPreset({ ...config.agents.defaults.model, ...(agentCfg.model ?? {}) }, config);
+    // mergeAgentModelOverride drops undefined override keys so a partial
+    // override (e.g. an ephemeral agent passing model:{temperature:0.3} with no
+    // primary) cannot blank out the default primary (audit c33e65dd).
+    const modelConfig = applyActiveModelPreset(mergeAgentModelOverride(config.agents.defaults.model, agentCfg.model), config);
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
