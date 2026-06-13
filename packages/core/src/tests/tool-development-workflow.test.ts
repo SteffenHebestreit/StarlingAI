@@ -16,6 +16,11 @@ describe("tool development workflow", () => {
     process.env["HOME"] = tempDir;
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
     writeFileSync(process.env["SAI_CONFIG_PATH"], JSON.stringify({
+      // Point the workspace at the writable temp dir. The default "/workspace"
+      // is creatable on Windows (C:\workspace) but NOT on Linux CI (root-owned
+      // /), so deployApprovedTool's mkdir under workspacePath/tools threw EACCES
+      // and the deploy test failed only in CI.
+      workspacePath: tempDir,
       toolDevelopment: {
         enabled: true,
         requireApproval: true,
