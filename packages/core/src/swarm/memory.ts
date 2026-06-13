@@ -159,6 +159,36 @@ export interface AgentMessageBacklogSnapshot {
 
 const factsKey = (sid: string) => `starlingai:mem:${sid}:facts`;
 
+// Per-turn tracking of which shared-fact keys were written during the CURRENT
+// top-level user turn, keyed by root session id. Purely in-process and
+// ephemeral — it scopes the delegation reuse short-circuit
+// (findReusableSessionEvidence) to the active mission so a brand-new user
+// query never gets served stale facts gathered for an EARLIER turn (audit
+// 2f4f5fe6: a "Fable 5" query reused turn-2 news facts at 0.38–0.43 noise-level
+// similarity and the researcher never ran). Fail-safe: if the set is empty, or
+// a fact was written on another instance this turn, reuse simply does not fire
+// and the agent re-researches — a latency cost, never a correctness bug.
+const _factKeysThisTurn = new Map<string, Set<string>>();
+
+/** Reset current-turn shared-fact key tracking. Call once at top-level turn start. */
+export function beginFactTurn(sessionId: string): void {
+  _factKeysThisTurn.delete(sessionId);
+}
+
+/** Shared-fact keys written during the current turn for this session. */
+export function currentTurnFactKeys(sessionId: string): ReadonlySet<string> {
+  return _factKeysThisTurn.get(sessionId) ?? new Set<string>();
+}
+
+function recordFactKeyThisTurn(sessionId: string, key: string): void {
+  let set = _factKeysThisTurn.get(sessionId);
+  if (!set) {
+    set = new Set<string>();
+    _factKeysThisTurn.set(sessionId, set);
+  }
+  set.add(key);
+}
+
 /**
  * Write a shared fact for the session.
  * key: short identifier, e.g. "resolved_hostname" or "user_email"
@@ -166,6 +196,7 @@ const factsKey = (sid: string) => `starlingai:mem:${sid}:facts`;
  */
 export async function writeSharedFact(sessionId: string, key: string, value: string): Promise<void> {
   const safeVal = value.slice(0, FACT_VALUE_MAX);
+  recordFactKeyThisTurn(sessionId, key);
   _factEmbeddingCache.delete(sessionId);
   const redis = await getRedis();
 
@@ -559,6 +590,7 @@ export async function resetSharedMemoryForTests(): Promise<void> {
   _results.clear();
   _messages.clear();
   _factEmbeddingCache.clear();
+  _factKeysThisTurn.clear();
   if (_redis) {
     try { await (_redis as { quit: () => Promise<void> }).quit(); } catch { /* ignore */ }
   }
