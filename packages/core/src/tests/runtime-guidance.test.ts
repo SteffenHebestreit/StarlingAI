@@ -114,6 +114,49 @@ describe("runtime turn guidance", () => {
     }
   });
 
+  it("treats assistant naming as a durable personality change to persist this turn", () => {
+    // Observed live: "dein Name ist ab jetzt Luna" was acknowledged but not
+    // stored until the user separately said to remember it. Naming the
+    // assistant must trigger assistant_personality_update in the same turn.
+    for (const phrase of [
+      "Dein Name ist ab jetzt Luna",
+      "du heißt jetzt Luna",
+      "ich nenne dich Luna",
+      "your name is now Luna",
+      "I'll call you Luna from now on",
+    ]) {
+      const guidance = buildDynamicTurnGuidance(phrase, "orchestration_only");
+      expect(guidance?.assistantNamingSensitive, `phrase: ${phrase}`).toBe(true);
+      expect(guidance?.durableMemorySensitive, `phrase: ${phrase}`).toBe(true);
+      expect(guidance?.prompt, `phrase: ${phrase}`).toContain("assistant_personality_update");
+      expect(guidance?.prompt, `phrase: ${phrase}`).toContain("Do NOT wait for the user to say 'remember this'");
+    }
+  });
+
+  it("treats standing preferences as durable memory to persist without an explicit 'remember'", () => {
+    for (const phrase of [
+      "Ab sofort antworte bitte immer auf Englisch",
+      "From now on, keep all summaries under five bullet points",
+      "ich bevorzuge kurze Antworten",
+    ]) {
+      const guidance = buildDynamicTurnGuidance(phrase, "orchestration_only");
+      expect(guidance?.durableMemorySensitive, `phrase: ${phrase}`).toBe(true);
+      expect(guidance?.assistantNamingSensitive ?? false, `phrase: ${phrase}`).toBe(false);
+      expect(guidance?.prompt, `phrase: ${phrase}`).toContain("memory_store");
+    }
+  });
+
+  it("does not flag ordinary task messages as durable memory", () => {
+    for (const phrase of [
+      "wie gehts?",
+      "Schau mal ob ich neue Emails habe",
+      "fix the failing build in ci",
+    ]) {
+      const guidance = buildDynamicTurnGuidance(phrase, "orchestration_only");
+      expect(guidance?.durableMemorySensitive ?? false, `phrase: ${phrase}`).toBe(false);
+    }
+  });
+
   it("relaxes source-sensitive routing for research-then-create requests (artifact + 'search online')", () => {
     // This is the exact session 006ca6bf turn 1 message. The user wants an
     // artifact created, not a verification of pre-existing facts; the bidding
