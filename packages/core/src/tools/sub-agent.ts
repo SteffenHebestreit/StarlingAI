@@ -21,7 +21,7 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
-import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts } from "../swarm/memory.js";
+import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
@@ -1945,6 +1945,51 @@ function formatReusableSessionEvidenceOutput(
   ].filter(Boolean).join("\n\n");
 }
 
+// Minimum merged (semantic|keyword) similarity for a cached fact/partial to be
+// reuse-eligible. The old 0.18 bar let noise-level embedding similarity through
+// (audit 2f4f5fe6: unrelated news facts scored 0.38–0.43 against a "Fable 5"
+// query). The structural subject-token gate below is the real guard; this is a
+// modest floor that still admits legitimate cross-lingual reuse.
+const REUSE_MIN_SCORE = 0.2;
+
+// Generic research/task boilerplate that must NOT count as subject overlap.
+// Without this, words like "online", "informationen", or "quellen" shared
+// between an unrelated query and a cached fact would falsely qualify as a
+// topical match.
+const REUSE_SUBJECT_STOPWORDS = new Set<string>([
+  // English
+  "the", "and", "for", "you", "with", "about", "into", "what", "why", "how", "who", "when",
+  "find", "search", "online", "latest", "current", "recent", "information", "informations",
+  "source", "sources", "official", "news", "blog", "blogs", "page", "pages", "site", "sites",
+  "large", "language", "model", "models", "data", "details", "task", "use", "cases",
+  // German
+  "und", "der", "die", "das", "den", "dem", "ein", "eine", "einen", "mit", "von", "fur",
+  "nach", "auf", "zum", "zur", "ist", "sind", "war", "gibt", "was", "wie", "wer", "wann", "warum",
+  "suche", "suchen", "aktuell", "aktuelle", "aktuellen", "neueste", "neuesten", "information",
+  "informationen", "quelle", "quellen", "offiziell", "offizielle", "offiziellen", "seiten",
+  "technischen", "technische", "zusammenhang", "klare", "namens",
+]);
+
+/** Distinctive subject tokens (len ≥ 3, minus boilerplate) of a piece of text. */
+function reuseSubjectTokens(text: string): Set<string> {
+  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]{3,}/g) ?? [];
+  return new Set(tokens.filter((token) => !REUSE_SUBJECT_STOPWORDS.has(token)));
+}
+
+/**
+ * True when the query and a candidate cached fact/partial share at least one
+ * distinctive subject token. This is model-independent and decouples reuse from
+ * raw embedding similarity, which can sit at 0.38–0.43 for wholly unrelated text.
+ */
+function shareReuseSubject(queryTokens: Set<string>, candidateText: string): boolean {
+  if (queryTokens.size === 0) return false;
+  const candidateTokens = reuseSubjectTokens(candidateText);
+  for (const token of queryTokens) {
+    if (candidateTokens.has(token)) return true;
+  }
+  return false;
+}
+
 async function findReusableSessionEvidence(
   candidate: string,
   request: DelegationRequest,
@@ -1981,8 +2026,26 @@ async function findReusableSessionEvidence(
   });
   const partialMatches = await searchPartialResults(ctx.sessionId, query, { maxResults: 3 });
 
-  const relevantFacts = factMatches.filter((match) => match.score >= 0.18);
-  const relevantPartials = partialMatches.filter((match) => match.score >= 0.18);
+  // Two independent guards keep a fresh, unrelated query from being served
+  // stale session facts (audit 2f4f5fe6):
+  //  1. Mission scope — only facts written THIS turn can short-circuit a
+  //     research pass. A brand-new user query has no current-turn facts, so its
+  //     researcher actually runs. (enoughEvidence always requires ≥1 fact, so
+  //     this also gates the partial path.)
+  //  2. Subject-token overlap + a modest score floor — the query must share a
+  //     distinctive token with the cached evidence, blocking the noise-level
+  //     embedding matches that the old 0.18 score-only bar admitted.
+  const currentTurnKeys = currentTurnFactKeys(ctx.sessionId);
+  const queryTokens = reuseSubjectTokens(query);
+  const relevantFacts = factMatches.filter((match) =>
+    match.score >= REUSE_MIN_SCORE
+    && currentTurnKeys.has(match.key)
+    && shareReuseSubject(queryTokens, `${match.key} ${match.value}`),
+  );
+  const relevantPartials = partialMatches.filter((match) =>
+    match.score >= REUSE_MIN_SCORE
+    && shareReuseSubject(queryTokens, match.content),
+  );
   const enoughEvidence = relevantFacts.length >= 2 || (relevantFacts.length >= 1 && relevantPartials.length >= 1);
 
   if (!enoughEvidence) {

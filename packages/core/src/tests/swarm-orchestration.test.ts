@@ -325,6 +325,65 @@ describe("swarm orchestration tools", () => {
     expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
   }, 30_000);
 
+  it("does NOT reuse facts gathered in a PRIOR turn — only the current mission's facts short-circuit research (audit 2f4f5fe6)", async () => {
+    // Regression: a "Fable 5 LLM" question in a session that still held an
+    // earlier turn's news facts was served those stale facts (researcher never
+    // ran, 696ms reusedFromSessionMemory). Reuse must be scoped to the active
+    // turn: prior-turn facts persist in session memory but no longer auto-short
+    // a fresh delegation.
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-prior-turn-no-reuse-"));
+    tempDirs.push(tempDir);
+
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        researcher: {
+          description: "Research specialist.",
+          tools: ["web_search", "web_fetch"],
+          capabilities: ["research", "documentation lookup"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const memory = await import("../swarm/memory.js");
+    // A fact that DOES topically match the query — on the old code this would
+    // reuse. The only thing preventing reuse here is that it belongs to a prior
+    // turn, which is exactly the property under test.
+    await memory.writeSharedFact(
+      "session-prior-turn-reuse",
+      "a2a_protocol_sources",
+      "A2A Protocol Primary Sources: official specification https://a2a-protocol.org/latest/specification/ and repository https://github.com/a2aproject/A2A",
+    );
+    // The next user turn begins: clear current-turn fact tracking the way
+    // _runTurn does. The fact stays readable via read_shared_facts; it just no
+    // longer qualifies as this turn's gathered evidence.
+    memory.beginFactTurn("session-prior-turn-reuse");
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+
+    const result = await delegate!.execute({
+      agentName: "researcher",
+      task: "Find citation-grade primary sources for the A2A protocol and summarize the official specification.",
+      routingQuery: "A2A protocol official specification primary sources",
+    }, {
+      sessionId: "session-prior-turn-reuse",
+      workspacePath: tempDir,
+    });
+
+    expect(result.metadata?.["reusedFromSessionMemory"]).not.toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalled();
+    expect(runSubAgentWithStatsMock.mock.calls.map((c) => c[0].agentName)).toContain("researcher");
+  }, 30_000);
+
   it("does NOT reuse session memory for an image-sourcing (fetch_image) delegation — it must actually run", async () => {
     // Regression (audit cdd731d6): image_sourcer has web_search so it looked
     // "research-like", and its "find/save images" task matched cached Zwinger

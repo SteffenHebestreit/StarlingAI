@@ -33,7 +33,7 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
-import { readAllFacts } from "../swarm/memory.js";
+import { readAllFacts, beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
   type DynamicTurnGuidance,
@@ -2451,10 +2451,30 @@ function measureEvidenceCoverage(
   };
 }
 
+/** Index of the most recent `user` message, or -1. Marks the current turn's start. */
+function lastUserMessageIndex(
+  history: readonly { role: string }[],
+): number {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.role === "user") return i;
+  }
+  return -1;
+}
+
 function findRecentDelegateEvidence(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+  options: { scopeToCurrentTurn?: boolean } = {},
 ): { evidence: string; itemCount: number } | null {
-  const recent = [...history].reverse().slice(0, 24);
+  // When scoped to the current turn, drop everything up to and including the
+  // last user message. Without this, the scan reaches back across turns and a
+  // PRIOR turn's richer deliverable wins on `length + items*200`, becoming the
+  // coverage target — or the dumped fallback — for THIS turn's answer (audit
+  // 2f4f5fe6: a Turn-2 news deliverable was force-relayed verbatim as the
+  // answer to an unrelated Turn-4 question).
+  const scoped = options.scopeToCurrentTurn
+    ? history.slice(lastUserMessageIndex(history) + 1)
+    : history;
+  const recent = [...scoped].reverse().slice(0, 24);
   let bestCandidate: { evidence: string; itemCount: number; score: number } | null = null;
 
   for (const message of recent) {
@@ -2748,7 +2768,9 @@ async function enforceDelegateCoverage(
   if (toolIterations === 0) return finalResponse;
   if (!finalResponse || finalResponse.length < 50) return finalResponse;
 
-  const evidence = findRecentDelegateEvidence(session.getHistory());
+  // Coverage is about THIS turn's delegated evidence only — never a prior
+  // turn's deliverable (which would otherwise win the richness score).
+  const evidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   if (!evidence) return finalResponse;
 
   const initialCoverage = measureEvidenceCoverage(finalResponse, evidence);
@@ -3426,6 +3448,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
   const turnStartedAt = Date.now();
+  // Scope the delegation reuse short-circuit to THIS turn's gathered facts:
+  // a fresh user query must not be served stale facts from an earlier turn
+  // (audit 2f4f5fe6). Sub-agent runs do not pass through _runTurn, so their
+  // share_finding calls correctly accumulate into the current turn's set.
+  beginFactTurn(session.id);
   let firstModelResponseMs: number | undefined;
   let llmCalls = 0;
   let llmTimeMs = 0;
