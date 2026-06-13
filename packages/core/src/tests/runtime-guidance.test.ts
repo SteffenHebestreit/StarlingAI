@@ -85,6 +85,25 @@ describe("runtime turn guidance", () => {
     expect(guidance?.sourceSensitive ?? false).toBe(false);
   });
 
+  it("treats a product/model availability question as source-sensitive (audit 2f4f5fe6 turn 3)", () => {
+    // German availability question that previously produced a hallucinated
+    // answer with no delegation — must now route to research.
+    const guidance = buildDynamicTurnGuidance("Kannst du mir kurz zusammenfassen warum Fable 5 nicht mehr in Deutschland verfügbar ist", "orchestration_only");
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("treats an English 'is X available in <region>' question as source-sensitive", () => {
+    const guidance = buildDynamicTurnGuidance("Is the new Claude model available in the EU yet?", "orchestration_only");
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("does NOT treat a self-capability availability question as source-sensitive", () => {
+    // "are you available" is a meta question about the assistant, not a web lookup.
+    const guidance = buildDynamicTurnGuidance("are you available to help me right now?", "orchestration_only");
+    expect(guidance?.sourceSensitive ?? false).toBe(false);
+  });
+
   it("treats downloadable HTML artifact requests as artifact deliverables", () => {
     const guidance = buildDynamicTurnGuidance("now generate a downloadable html page as a detailed how-to blog and generate artifacts we can see here", "orchestration_only");
 

@@ -66,6 +66,23 @@ export const RESEARCH_COMMAND_PATTERNS = [
   /\b(research online|recherchiere online|search the web and|look (it|this|that) up online)\b/i,
 ];
 
+// Availability / release / regional-access questions about a named product,
+// service, model, or title ("warum ist Fable 5 nicht mehr in Deutschland
+// verfügbar", "is X available in the EU", "when is X released"). These depend on
+// current external facts the model cannot know from memory — without a source
+// signal the model answers from (often hallucinated) priors (audit 2f4f5fe6
+// turn 3: a "why is Fable 5 not available" question produced a fabricated
+// video-game answer with no delegation). Each pattern requires an interrogative
+// framing next to an availability term so it does not fire on incidental
+// mentions of the words.
+export const AVAILABILITY_QUESTION_PATTERNS = [
+  /\b(warum|wieso|weshalb|why)\b[\s\S]{0,80}\b(verf[üu]gbar|erh[äa]ltlich|available|released?|erschien\w*|gesperrt|blockiert|blocked|restricted)\b/,
+  /\b(ist|sind|wird|wann|is|are|when|will)\b[\s\S]{0,80}\b(verf[üu]gbar|erh[äa]ltlich|available|released?|launch(?:ed|es|ing)?)\b/,
+  /\b(verf[üu]gbar|erh[äa]ltlich|available)\b[\s\S]{0,30}\b(in|f[üu]r|outside|au[sß]erhalb)\b/,
+  /\bavailability of\b/,
+  /\bverf[üu]gbarkeit (von|der|des)\b/,
+];
+
 export const PRODUCT_RECOMMENDATION_PATTERNS = [
   /\b(product suggestions?|component suggestions?|part suggestions?|module suggestions?|product recommendations?|component recommendations?)\b/,
   /\b(produkt(?:e|vorschl[äa]ge|empfehlungen)|bauteil(?:e|vorschl[äa]ge|empfehlungen)|modul(?:e|vorschl[äa]ge|empfehlungen))\b/,
@@ -417,7 +434,17 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))
     || RESEARCH_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
   const webLookupByTerm = WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
-  const sourceSensitiveByTerm = sourceVerificationByTerm || webLookupByTerm;
+  // Availability/release/regional-access questions need current external facts.
+  // Suppressed when the subject is the assistant itself ("are you available",
+  // "bist du verfügbar") so a meta/small-talk question is not forced into web
+  // research. \byou\b does not match "your", so "is your product available …"
+  // stays a real availability question.
+  const selfAvailabilityQuestion =
+    /\b(you|du|dir|euch|ihr)\b[\s\S]{0,20}\b(available|verf[üu]gbar|free|da|zeit|time)\b/.test(normalized)
+    || /\b(available|verf[üu]gbar|free)\b[\s\S]{0,12}\b(you|du)\b/.test(normalized);
+  const availabilityQuestion = !selfCapabilityQuestion && !selfAvailabilityQuestion
+    && AVAILABILITY_QUESTION_PATTERNS.some((pattern) => pattern.test(normalized));
+  const sourceSensitiveByTerm = sourceVerificationByTerm || webLookupByTerm || availabilityQuestion;
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
