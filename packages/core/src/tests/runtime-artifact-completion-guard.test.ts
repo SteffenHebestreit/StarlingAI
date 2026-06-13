@@ -100,4 +100,30 @@ describe("claimsArtifactWrittenButUnproduced", () => {
       "Soll ich die interaktive Lernplattform direkt als Web-App bauen?",
     )).toBe(false);
   });
+
+  // Session 24826c33: a zero-tool answer to "Schau mal ob ich neue Emails habe" advised
+  // opening the user's OWN mail program — and was suppressed as a fabricated delivery
+  // ("öffne … browser" plus `\bapp\b` matching inside the hyphenated "E-Mail-App"),
+  // then rerouted into a nonsensical corrective build. Advice imperatives pointing the
+  // user at their own programs are not delivery claims; only a FILE object counts.
+  describe("user-advice imperatives are not delivery claims (session 24826c33)", () => {
+    it("does NOT flag 'öffne die E-Mail-App in deinem Browser' advice", () => {
+      expect(claimsArtifactWrittenButUnproduced(
+        "Ich habe keinen Zugriff auf dein E-Mail-Konto. Öffne die E-Mail-App in deinem Browser, um neue Nachrichten zu prüfen.",
+      )).toBe(false);
+    });
+    it("does NOT flag 'open webmail in your browser' advice", () => {
+      expect(claimsArtifactWrittenButUnproduced(
+        "I cannot access your inbox. Open webmail in your browser to check for new messages.",
+      )).toBe(false);
+    });
+    it("still flags 'open the file' delivery instructions anchored to a file object", () => {
+      expect(claimsArtifactWrittenButUnproduced(
+        "Öffne die Datei `lernplattform.html` in deinem Browser und leg los!",
+      )).toBe(true);
+      expect(claimsArtifactWrittenButUnproduced(
+        "Open the file quiz.html in your browser to start.",
+      )).toBe(true);
+    });
+  });
 });

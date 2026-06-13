@@ -3792,6 +3792,57 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ? candidate
       : `Die angeforderte Datei wurde erstellt: ${paths.join(", ")}.\n\n(The requested file was built: ${paths.join(", ")}.)`;
   };
+
+  // One bounded corrective RE-ROUTE for the zero-work fabrication guard on NON-artifact
+  // requests: the model fabricated a tool-minted deliverable for a question that never
+  // asked for an artifact (e.g. a mail/lookup request answered with an invented link).
+  // A BUILD TASK would compound the fabrication with a deliverable nobody wanted
+  // (session 24826c33: "Schau mal ob ich neue Emails habe" → BUILD TASK → researcher →
+  // canned "Der Bau ist fehlgeschlagen"). Instead, re-dispatch the ORIGINAL request once
+  // through autonomous delegation (no agentName — bidding/semantic routing picks the
+  // specialist, the same path the user's manual follow-up would take) and ship the
+  // specialist's answer. Returns the deliverable text, or null when the delegation
+  // failed or returned nothing shippable (the caller then sends an honest denial).
+  const runCorrectiveReroute = async (): Promise<string | null> => {
+    if (signal.aborted) return null;
+    logAudit("guardrail_flagged", {
+      type: "fabricated_zero_work_reroute_delegated",
+      userMessageChars: userMessage.length,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    opts.onStatus?.({ phase: "guardrail", message: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.", iteration: iterationCount });
+    try {
+      const rerouteResult = await executeTool("delegate_to_agent", {
+        task: userMessage,
+      }, { ...toolContext, allowDelegationAfterOperatorStop: true });
+      _turnDelegationCount += 1;
+      // Record a well-formed assistant+tool pair (same as the corrective build) so the
+      // delegated evidence is in history and any artifacts surface as attachments.
+      const rerouteCallId = `qareroute_${Date.now().toString(36)}`;
+      session.addMessage({
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: rerouteCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "REROUTE (zero-work fabrication guard)" }) } }],
+      });
+      session.addMessage({
+        role: "tool",
+        content: (rerouteResult.success ? rerouteResult.output : (rerouteResult.error?.trim() ? `Error: ${rerouteResult.error}` : rerouteResult.output)).slice(0, 4_000),
+        tool_call_id: rerouteCallId,
+        metadata: rerouteResult.metadata,
+      });
+      if (!rerouteResult.success) return null;
+      const rerouteOutput = rerouteResult.output;
+      if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(rerouteOutput)) return null;
+      const evidenceMatch = EVIDENCE_SECTION_RE.exec(rerouteOutput);
+      const body = stripLeadingReasoningPreamble(
+        (evidenceMatch ? rerouteOutput.slice(evidenceMatch.index + evidenceMatch[0].length) : rerouteOutput).trim(),
+      );
+      if (!body || looksLikeDegenerateRepetition(body) || looksLikeTruncatedCodeDeliverable(body)) return null;
+      return body;
+    } catch (err) {
+      log.warn({ err, sessionId: session.id }, "Zero-work fabrication reroute delegation failed");
+      return null;
+    }
+  };
   // G33: Collected share_finding texts for trajectory cache write
   const sharedFindingsThisTurn: string[] = [];
   // Phase 3: skills injected into the planner this turn — outcomes recorded at
@@ -5464,11 +5515,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       const inlinedAppDocumentInsteadOfBuild =
         (deliverableIntent.isAppBuild || deliverableIntent.wantsArtifact)
         && looksLikeInlinedAppDocument(finalResponse);
+      // The completion-claim detector reads only the ANSWER's wording, so scope it to
+      // requests that name an artifact at all (noun/filename, no verb needed — the
+      // need-phrased audit-13523d73 shape stays covered via mentionsArtifact/isAppBuild).
+      // Without this, a plain lookup question gets its answer suppressed over the
+      // answer's own phrasing and rerouted into a nonsensical corrective build
+      // (session 24826c33: "Schau mal ob ich neue Emails habe" shipped the canned
+      // "Der Bau der angeforderten Datei ist fehlgeschlagen" reply). The fabricated
+      // tool-link detector stays unscoped: a tool-minted URL is conclusive on any turn.
+      const requestIsArtifactShaped =
+        deliverableIntent.mentionsArtifact
+        || deliverableIntent.wantsArtifactMutation
+        || deliverableIntent.isAppBuild;
       if (
         toolCallsRequested === 0
         && collectTurnArtifactAttachments(session).length === 0
         && (looksLikeFabricatedToolDeliveryLink(finalResponse)
-          || claimsArtifactWrittenButUnproduced(finalResponse)
+          || (requestIsArtifactShaped && claimsArtifactWrittenButUnproduced(finalResponse))
           || inlinedAppDocumentInsteadOfBuild)
       ) {
         logAudit("guardrail_flagged", {
@@ -5478,34 +5541,55 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           answerLength: finalResponse.length,
         }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_zero_work_delivery_suppressed" });
-        // The model FABRICATED a finished deliverable with zero work — which means it
-        // decided this turn should PRODUCE an artifact (the LLM's own build judgement).
-        // Honor that intent: actually build it now (one bounded corrective build) instead
-        // of only denying. This turns a useless "I built nothing, confirm" first-turn answer
-        // into the real app (audit 13523d73: a fresh "brauche eine Lernplattform … Fragekatalog
-        // … multiple-choice" turn fabricated "…erstellt" with 0 tools — the user wants the app,
-        // not a denial). Keys off the model's own fabrication, so no brittle need-verb routing
-        // keyword is required. Gated behind finalResponseQaGate + the qaCorrectiveBuildUsed latch
-        // (runCorrectiveBuild self-guards re-entry); a source-sensitive turn still needs gathered
-        // facts. Falls back to the honest message only when the build produces nothing.
+        // The model FABRICATED a finished deliverable with zero work. When the REQUEST is
+        // artifact-shaped, honor the model's own build judgement: actually build it now
+        // (one bounded corrective build) instead of only denying. This turns a useless
+        // "I built nothing, confirm" first-turn answer into the real app (audit 13523d73:
+        // a fresh "brauche eine Lernplattform … Fragekatalog … multiple-choice" turn
+        // fabricated "…erstellt" with 0 tools — the user wants the app, not a denial).
+        // Keys off the model's own fabrication, so no brittle need-verb routing keyword is
+        // required. When the request is NOT artifact-shaped (only the fabricated-link
+        // signal can get here then), a build would be nonsense — re-route the original
+        // request to a specialist instead. Gated behind finalResponseQaGate + the
+        // qaCorrectiveBuildUsed latch (runCorrectiveBuild self-guards re-entry); a
+        // source-sensitive turn still needs gathered facts. Falls back to the honest
+        // message only when the build/reroute produces nothing.
         let fabricationCorrectiveBuild: string | null = null;
         let fabricationBuildAttempted = false;
+        let fabricationReroute: string | null = null;
+        let fabricationRerouteAttempted = false;
         if (
           (getConfig().orchestration?.finalResponseQaGate ?? true)
           && !qaCorrectiveBuildUsed
           && !signal.aborted
         ) {
-          const factsCtx = initialDynamicGuidance?.sourceSensitive
-            ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
-            : "";
-          if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
-            fabricationBuildAttempted = true;
-            fabricationCorrectiveBuild = await runCorrectiveBuild(factsCtx);
+          if (requestIsArtifactShaped) {
+            const factsCtx = initialDynamicGuidance?.sourceSensitive
+              ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
+              : "";
+            if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
+              fabricationBuildAttempted = true;
+              fabricationCorrectiveBuild = await runCorrectiveBuild(factsCtx);
+            }
+          } else {
+            // The request never asked for an artifact (the model fabricated a tool-minted
+            // link on e.g. a mail/lookup question) — a BUILD would compound the fabrication
+            // with a deliverable nobody wanted. Re-route the ORIGINAL request once instead.
+            fabricationRerouteAttempted = true;
+            fabricationReroute = await runCorrectiveReroute();
           }
         }
         if (fabricationCorrectiveBuild) {
           finalResponse = fabricationCorrectiveBuild;
           guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_zero_work_corrective_build" });
+        } else if (fabricationReroute) {
+          finalResponse = fabricationReroute;
+          guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_zero_work_corrective_reroute" });
+        } else if (fabricationRerouteAttempted) {
+          // The reroute produced nothing shippable. NO build ran and none was wanted —
+          // the build-framed denials below would invent a "Datei/Bau" that was never
+          // part of the request (the session-24826c33 failure shape). Stay in-domain.
+          finalResponse = "Meine vorherige Antwort enthielt ein Ergebnis, das durch keine ausgeführte Arbeit gedeckt war — ich habe sie verworfen, und die Weiterleitung an einen Spezialisten hat kein Ergebnis geliefert. Formuliere die Anfrage kurz neu oder bestätige, dann versuche ich es erneut.\n\nMy previous answer referenced a result that no actual work produced — I discarded it, and re-routing the request to a specialist returned nothing either. Rephrase briefly or confirm, and I'll try again.";
         } else if (fabricationBuildAttempted || qaCorrectiveBuildUsed) {
           // A real build WAS attempted and produced no file — saying "no tools ran" here
           // would be its own false statement (audit 0ac7d3fc: the denial claimed nothing
