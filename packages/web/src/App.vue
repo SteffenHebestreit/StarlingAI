@@ -10,8 +10,8 @@
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
-        <!-- Logo + brand -->
-        <div class="flex items-center gap-2 sm:gap-3 min-w-0">
+        <!-- Logo + brand: always a way home to the chat interface -->
+        <router-link to="/" class="flex items-center gap-2 sm:gap-3 min-w-0" title="Open chat">
           <img
             src="/swarmLogo.svg"
             alt="StarlingAI logo"
@@ -25,7 +25,7 @@
               Guarded Agent Swarm
             </span>
           </div>
-        </div>
+        </router-link>
 
         <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
           <!-- Connection status -->

@@ -2169,7 +2169,10 @@ onBeforeUnmount(() => {
 /* The first block in a message shouldn't push down from the top edge. */
 .prose-content :deep(> :first-child) { margin-top: 0; }
 .prose-content :deep(hr) { border: none; border-top: 1px solid rgba(168,85,247,0.2); margin: 0.75rem 0; }
-.prose-content :deep(table)       { width: 100%; border-collapse: collapse; font-size: 0.82em; margin: 0.5rem 0; }
+/* display:block + overflow-x lets wide tables scroll INSIDE the bubble
+   instead of punching past its edge (tables can't shrink below their
+   min-content width, so width:100% alone doesn't contain them). */
+.prose-content :deep(table)       { display: block; max-width: 100%; width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.82em; margin: 0.5rem 0; }
 .prose-content :deep(th)          { background: rgba(168,85,247,0.12); color: #d8b4fe; font-weight: 600; text-align: left; padding: 0.35rem 0.6rem; border: 1px solid rgba(168,85,247,0.2); }
 .prose-content :deep(td)          { padding: 0.3rem 0.6rem; border: 1px solid rgba(168,85,247,0.12); color: #e2d9f3; }
 .prose-content :deep(tr:nth-child(even) td) { background: rgba(168,85,247,0.04); }

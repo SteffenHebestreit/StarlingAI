@@ -869,14 +869,15 @@
                 </div>
               </div>
             </details>
-          </div>
 
-          <div class="chat-composer__primary-actions">
+            <!-- Thinking toggle lives beside the dropdowns; its state is
+                 carried by color/glow alone (active = cyan glow, off =
+                 dashed + dim, auto = dim). -->
             <button
               @click="cycleThinkingMode"
               class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
               :class="thinkingMode === true
-                ? 'multimodal-action-active'
+                ? 'multimodal-action-active thinking-toggle--on'
                 : thinkingMode === false
                   ? 'opacity-40 border-dashed'
                   : 'opacity-60 hover:opacity-100'"
@@ -892,11 +893,10 @@
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
                 <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
               </svg>
-              <span v-if="thinkingMode !== undefined" class="text-[10px] leading-none mt-0.5">
-                {{ thinkingMode ? 'on' : 'off' }}
-              </span>
             </button>
+          </div>
 
+          <div class="chat-composer__primary-actions">
             <button
               v-if="gateway.isLoading"
               @click="gateway.cancelTurn()"
@@ -3711,7 +3711,12 @@ onUnmounted(() => {
 }
 
 .multimodal-icon-button {
+  /* own display so buttons without .multimodal-action (e.g. the thinking
+     toggle) still center their icon + label instead of inline baseline flow */
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
+  gap: 0.3rem;
   min-width: 2.75rem;
   min-height: 2.75rem;
   padding-left: 0.75rem;
@@ -4052,13 +4057,20 @@ onUnmounted(() => {
 
 @media (min-width: 1100px) {
   /* Half the corridor width; flanks end at 50% ± this, so the protected
-     zone stays centered on the orb whatever the column width is. */
-  .chat-message-scroll { --orbit-gap: clamp(7rem, 11vw, 14rem); }
+     zone stays centered on the orb whatever the column width is. The gap
+     is deliberately small and the bubble cap generous: readable content
+     beats orb visibility, so wide content (tables, code) may partially
+     cover the entity — accepted trade-off. */
+  .chat-message-scroll { --orbit-gap: clamp(2.5rem, 4vw, 6rem); }
+  /* No max-width on the rows: the 50% in the flank padding resolves against
+     the scroller (the rows' containing block), so a row cap would make the
+     flanks SHRINK as the viewport grows past the cap (the padding kept
+     growing while the row stopped). Uncapped, the corridor always centers
+     on the viewport-centered orb; the bubble max-width below keeps content
+     out of the far corners on ultrawide screens. */
   .chat-message-scroll :deep(.message-row--ai),
   .chat-message-scroll :deep(.message-row--user) {
     width: 100%;
-    max-width: 110rem;
-    margin-inline: auto;
   }
   .chat-message-scroll :deep(.message-row--ai) {
     justify-content: flex-end;
@@ -4069,7 +4081,7 @@ onUnmounted(() => {
     padding-left: calc(50% + var(--orbit-gap));
   }
   .chat-message-scroll :deep(.message-bubble--ai),
-  .chat-message-scroll :deep(.message-bubble--user) { max-width: min(100%, 34rem); }
+  .chat-message-scroll :deep(.message-bubble--user) { max-width: min(100%, 52rem); }
 }
 
 /* ── Fly-out input bay ──────────────────────────────────────────────────
@@ -4108,6 +4120,7 @@ onUnmounted(() => {
   padding-bottom: clamp(12rem, 26vh, 18rem);
 }
 
+/* Miniature 3D orb like the radial toggles, one size up. */
 .chat-composer-launcher {
   position: fixed;
   z-index: 220;
@@ -4143,6 +4156,12 @@ onUnmounted(() => {
 .chat-composer-launcher__core {
   width: 1.25rem;
   height: 1.25rem;
+  /* engraved into the orb surface and glowing: top-lip occlusion,
+     lower-lip light catch, cyan bloom */
+  filter:
+    drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.7))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.3))
+    drop-shadow(0 0 5px rgba(var(--logo-cyan), 0.85));
   animation: launcher-breathe 3.2s ease-in-out infinite;
 }
 @keyframes launcher-breathe {
@@ -4159,7 +4178,8 @@ onUnmounted(() => {
    toggle wherever it sits. */
 .hud-orb {
   position: fixed;
-  /* above the side panel host (z 190–201) so clicks always land */
+  /* above the closed side-panel handle (201) so clicks always land, but
+     below the OPEN side panel (scrim/panel/handle at 221–223) */
   z-index: 220;
   width: 2.5rem;
   height: 2.5rem;
@@ -4207,7 +4227,8 @@ onUnmounted(() => {
   height: 2.5rem;
 }
 /* The draggable toggles are miniature 3D orbs: off-center specular light,
-   shaded body, dark lower limb, accent rim glow — tiny kin of the entity. */
+   shaded body, dark lower limb, accent rim glow — tiny kin of the entity.
+   The glyphs sit engraved into the surface (see filter below). */
 .radial-menu__toggle {
   position: absolute;
   inset: 0;
@@ -4230,6 +4251,15 @@ onUnmounted(() => {
     0 0 16px rgba(var(--accent-purple), 0.3);
   cursor: grab;
   transition: transform 260ms var(--ease-out), box-shadow 220ms var(--ease-out);
+}
+/* Engraved glowing glyphs: occlusion shadow at the top lip, light catch on
+   the lower lip, cyan bloom around the stroke. */
+.radial-menu__toggle > svg,
+.radial-menu__toggle > span {
+  filter:
+    drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.7))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.3))
+    drop-shadow(0 0 5px rgba(var(--logo-cyan), 0.85));
 }
 .radial-menu__toggle:active { cursor: grabbing; }
 .radial-menu--open .radial-menu__toggle { transform: rotate(90deg); }
@@ -4601,20 +4631,39 @@ onUnmounted(() => {
   line-height: 1.35;
 }
 
+/* Two stacked control rows: dropdowns + thinking toggle on top, Send/Stop
+   below stretched to the same width as the row above, items vertically
+   centered on a 2.75rem line. */
 .chat-composer__controls {
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
-  align-items: flex-start;
+  align-items: stretch;
 }
 
 .chat-composer__menus,
 .chat-composer__primary-actions {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   justify-content: flex-start;
   gap: 0.55rem;
   flex-wrap: wrap;
+}
+
+/* Send/Stop fills the full column width. */
+.chat-composer__primary-actions > button { flex: 1 1 auto; }
+
+/* Thinking ON: the state reads through glow alone — cyan halo on the
+   button, bloom on the brain glyph. */
+.thinking-toggle--on {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 1px rgba(var(--logo-cyan), 0.25),
+    0 0 18px rgba(var(--logo-cyan), 0.45);
+}
+.thinking-toggle--on .multimodal-icon {
+  color: rgb(var(--logo-cyan));
+  filter: drop-shadow(0 0 4px rgba(var(--logo-cyan), 0.9));
 }
 
 .chat-dropdown {
@@ -4628,11 +4677,12 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 0.55rem;
   min-width: 6.5rem;
+  min-height: 2.75rem;
   border-radius: 1rem;
   border: 1px solid rgba(125, 211, 252, 0.2);
   background: linear-gradient(180deg, rgba(9, 18, 34, 0.85), rgba(8, 15, 28, 0.68));
   color: rgb(224 242 254);
-  padding: 0.7rem 0.9rem;
+  padding: 0.5rem 0.9rem;
   font-size: 0.8rem;
   cursor: pointer;
   user-select: none;

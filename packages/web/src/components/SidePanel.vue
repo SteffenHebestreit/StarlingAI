@@ -136,7 +136,8 @@ const hasContent = computed(() => props.hasLiveContent || (props.artifactCount ?
 .sp-scrim {
   position: fixed;
   inset: 0;
-  z-index: 190;
+  /* above the floating HUD pods (220) so the open panel dims them too */
+  z-index: 221;
   background: rgba(0, 0, 0, 0.52);
   backdrop-filter: blur(2px);
 }
@@ -181,9 +182,11 @@ const hasContent = computed(() => props.hasLiveContent || (props.artifactCount ?
   color: rgb(216 180 254);
 }
 
-/* When the panel is open, the handle moves to the panel's left edge */
+/* When the panel is open, the handle moves to the panel's left edge and
+   rises with it (closed it stays at 201, under the HUD pods). */
 .sp-handle--open {
   right: 22rem; /* matches panel width */
+  z-index: 223;
 }
 
 @media (min-width: 640px) {
@@ -217,7 +220,9 @@ const hasContent = computed(() => props.hasLiveContent || (props.artifactCount ?
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 200;
+  /* above the floating HUD pods (220), below the nav scrim/panel (225/230) —
+     the open drawer always covers the draggable toggles */
+  z-index: 222;
   width: 22rem;
   display: flex;
   flex-direction: column;
