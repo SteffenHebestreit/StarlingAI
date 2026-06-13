@@ -25,7 +25,7 @@
 
 import { childLogger } from "../logger.js";
 import { currentUserId } from "../runtime/request-context.js";
-import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk, LLMToolDef } from "./lmstudio.js";
+import type { ChatProvider, LLMMessage, LLMResponse, LLMToolDef } from "./lmstudio.js";
 
 const log = childLogger("llm-boundary");
 
