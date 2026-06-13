@@ -16,9 +16,12 @@ import { ambientVertexShader, ambientFragmentShader } from "./shaders/ambientSys
 const props = withDefaults(defineProps<{ aiState?: string }>(), { aiState: "default" });
 
 // ─── Constants (matching original Orb.jsx) ────────────────────────────────────
+// Main cloud: full particle density spread over double the old reach, with
+// smaller points (see torusParticles gl_PointSize) — a fine, wide mist
+// rather than a dense fuzz hugging the core.
 const PARTICLE_COUNT          = 2400;
-const OUTER_RADIUS            = 0.95;
-const INNER_RADIUS            = 0.55;
+const OUTER_RADIUS            = 1.9;
+const INNER_RADIUS            = 0.6;
 const PORTAL_DEPTH            = 1.0;
 const Z_DRIFT_SPEED           = 0.1;
 const SNAKE_EYE_SCALE_X       = 0.8;
@@ -35,7 +38,9 @@ const BASE_PARTICLE_OPACITY   = 0.9;
 const NUM_NODES               = 10;
 const PULSE_COLOR             = new THREE.Color(0xffffff);
 const PULSE_SPEED             = 2.5;
-const PULSE_MAX_TRAVEL_RADIUS = OUTER_RADIUS * 4.5;
+// 2.25× the doubled OUTER_RADIUS keeps the same absolute pulse reach the
+// old 4.5 × 0.95 gave — pulses must not overshoot the ambient star shell.
+const PULSE_MAX_TRAVEL_RADIUS = OUTER_RADIUS * 2.25;
 const MAX_ACTIVE_PULSES       = 9;
 const PULSE_INTERVAL_MIN      = 0.5;
 const PULSE_INTERVAL_MAX      = 2.0;

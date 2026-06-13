@@ -99,7 +99,7 @@ export const vertexShader = `
 
     vec4 mvPosition = modelViewMatrix * vec4(finalPosition, 1.0);
     gl_Position     = projectionMatrix * mvPosition;
-    gl_PointSize    = 3.5;
+    gl_PointSize    = 2.0;
   }
 `;
 
