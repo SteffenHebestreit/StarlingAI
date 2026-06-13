@@ -4551,10 +4551,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents, stashDiscardedBuilderTask);
     llmResponse.tool_calls = collapseMixedOrchestrationLaunchersInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseMixedDiscoveryAndOrchestrationToolsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
+    // Scope the "evidence already exists" check to THIS turn: the gate means
+    // "only rewrite the FIRST delegation, before this turn has gathered any
+    // evidence." Reaching across turns let a PRIOR turn's deliverable disable the
+    // rewrite, so the orchestrator's assumption-laden elaboration passed straight
+    // through instead of being re-anchored on the user's verbatim request (audit
+    // c33e65dd: a "Fable 5" question delegated as "Fable, das neue Spiel von
+    // Playground Games/Xbox …" — fabricated specifics the user never gave).
     const sourceSensitiveOriginalRequestEnforcementActive = Boolean(
       initialDynamicGuidance?.sourceSensitive
       && !inWorkflowStep
-      && (!findRecentDelegateEvidence(session.getHistory()) || _consecutiveDelegationFailures > 0),
+      && (!findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true }) || _consecutiveDelegationFailures > 0),
     );
     if (sourceSensitiveOriginalRequestEnforcementActive) {
       for (const tc of llmResponse.tool_calls) {

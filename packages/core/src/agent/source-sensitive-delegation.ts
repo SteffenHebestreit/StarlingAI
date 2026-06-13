@@ -84,8 +84,13 @@ export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, 
     "Research the parent task below: use web_search and web_fetch to open the most authoritative primary or official sources for the subject(s) the request explicitly names, and gather the concrete facts, names, dates, figures, and source URLs needed to fulfill it.",
     "Stay tightly scoped to the subject(s) the request names: consult a handful of authoritative sources (aim for ~3–6) and then STOP and report — do NOT broaden the search to tangential, adjacent, or merely related topics the request did not ask for.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The parent task below is the canonical request. Search user-supplied identifiers exactly as given; do not treat coordinator-added names, identifiers, dates, quantities, prices, URLs, or specification claims as confirmed unless they appear in this parent task or in completed tool evidence.",
-    "State a concrete fact only after an authoritative or official source confirms it; if evidence is missing, report uncertainty instead of filling gaps.",
+    // The parent task may carry the coordinator's OWN assumptions about the
+    // subject's identity (audit c33e65dd: a "Fable 5" question arrived elaborated
+    // into "Fable, das neue Spiel von Playground Games/Xbox" with a USK/Store
+    // investigation built on that guess). A specific appearing in the parent task
+    // is NOT confirmation — only tool evidence is.
+    "The parent task below states the request, but it may carry the coordinator's own assumptions. Search the subject's identifiers exactly as written; do NOT treat any name, identifier, date, quantity, price, URL, or specification as confirmed merely because it appears in the parent task — establish the subject's real identity from authoritative sources FIRST, and treat every such value as unconfirmed until a completed tool result or shared finding confirms it.",
+    "State a concrete fact only after an authoritative or official source confirms it; if the evidence contradicts an assumption in the task, the evidence wins, and if evidence is missing, report uncertainty instead of filling gaps.",
     // Per-claim citation discipline: the source-sensitive backstop cross-checks
     // every concrete spec value in the final draft against the gathered shared
     // findings. When a draft mentions a spec that is NOT in the findings, it is
