@@ -141,7 +141,12 @@ export function claimsArtifactWrittenButUnproduced(value: string): boolean {
   const availabilityClaim =
     /\b(?:ist|sind|is|are|steht|stehen|liegt|liegen)\b[^.!?\n]{0,60}\b(?:verf[üu]gbar|einsatzbereit|bereit|fertig|available|ready)\b/i;
   // (?:^|\s…) instead of a leading \b: JS \b is ASCII-only and never matches before "Öffne".
-  const openImperative = /(?:^|[\s*_>`"'(])(?:öffne|öffnen sie|open)\b[^.!?\n]{0,50}\b(?:datei|file|browser)\b/i;
+  // Anchored to a FILE object — the word datei/file or a concrete filename ("öffne
+  // index.html im Browser") — NOT a bare device/program target: "öffne dein
+  // E-Mail-Programm im Browser" is everyday advice to the user, not a delivery claim,
+  // and `\bapp\b` matches inside hyphenated compounds like "E-Mail-App" (session
+  // 24826c33: an email-check answer was suppressed over exactly that phrasing).
+  const openImperative = /(?:^|[\s*_>`"'(])(?:öffne|öffnen sie|open)\b[^.!?\n]{0,50}(?:\b(?:datei|file)\b|[\w-]{2,}\.(?:html?|pdf|docx?|pptx?|xlsx?|zip|csv|md|json|svg|png|jpe?g)\b)/i;
   const negation =
     /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
   // Split into clauses so a negated clause ("… wurde NICHT geändert") can't trip the claim.
@@ -274,6 +279,15 @@ export interface DeliverableIntent {
   readonly builder: "content_writer" | "web_coder" | "backend_coder";
   /** True when the deliverable is an interactive/served APP (not a static page/doc). */
   readonly isAppBuild: boolean;
+  /**
+   * The request NAMES a concrete artifact (noun or filename) at all — no verb required,
+   * so need-phrased build requests ("Ich brauche eine Lernplattform …") still count.
+   * Weaker than wantsArtifact; used to scope the ANSWER-side fabrication detectors to
+   * turns that could plausibly be about an artifact, so a plain lookup question
+   * ("Schau mal ob ich neue Emails habe") can never have its answer suppressed over
+   * the answer's own wording (session 24826c33).
+   */
+  readonly mentionsArtifact: boolean;
 }
 
 export function classifyDeliverableIntent(userMessage: string): DeliverableIntent {
@@ -284,5 +298,6 @@ export function classifyDeliverableIntent(userMessage: string): DeliverableInten
     wantsComposedGuide: looksLikeComposedGuideRequest(userMessage),
     builder,
     isAppBuild: builder !== "content_writer",
+    mentionsArtifact: ARTIFACT_NOUN_RE.test(userMessage ?? "") || ARTIFACT_FILENAME_RE.test(userMessage ?? ""),
   };
 }

@@ -538,3 +538,92 @@ describe("swarm simulator — inline-app harvest when the builder writes no file
     expect(result.response).toContain("generated/app/index.html");
   });
 });
+
+describe("swarm simulator — non-artifact question is never dragged into the build pipeline (S7, session 24826c33)", () => {
+  // Live failure: "Schau mal ob ich neue Emails habe" was answered with zero tools; the
+  // fabrication guard misread the answer's own wording as a delivery claim, suppressed it,
+  // launched a BUILD TASK (redirected to researcher), and shipped the canned bilingual
+  // "Der Bau der angeforderten Datei ist fehlgeschlagen" reply — to an email question.
+  const EMAIL_QUESTION = "Schau mal ob ich neue Emails habe";
+
+  it("an honest 'öffne die E-Mail-App im Browser' advice answer ships as-is (heuristic fix)", async () => {
+    pinHybridConfig();
+    const honestAdvice =
+      "Ich habe keinen Zugriff auf dein E-Mail-Konto. Öffne die E-Mail-App in deinem Browser "
+      + "oder dein E-Mail-Programm, um neue Nachrichten zu prüfen.";
+    streamMock.mockImplementation(() => textStream(honestAdvice));
+    const delegateCalls: Array<Record<string, unknown>> = [];
+    registerArtifactlessDelegate(delegateCalls);
+
+    const result = await runTurn({ session: makeSession(), userMessage: EMAIL_QUESTION });
+
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "fabricated_zero_work_delivery_suppressed" }),
+    ]));
+    expect(delegateCalls).toHaveLength(0);
+    expect(result.response).toContain("E-Mail");
+    expect(result.response).not.toMatch(/Bau der angeforderten Datei/);
+  });
+
+  it("a claim-shaped zero-tool answer to a NON-artifact question is not suppressed (request scoping)", async () => {
+    pinHybridConfig();
+    // The answer pairs a claim verb with an artifact noun ("Bericht erstellt") — on an
+    // artifact turn that would be a flagged false completion, but THIS request names no
+    // artifact, so the answer must ship instead of being rerouted into a build.
+    streamMock.mockImplementation(() => textStream(
+      "Ich habe eine Übersicht als Bericht erstellt: keine neuen E-Mails seit heute Morgen.",
+    ));
+    const delegateCalls: Array<Record<string, unknown>> = [];
+    registerArtifactlessDelegate(delegateCalls);
+
+    const result = await runTurn({ session: makeSession(), userMessage: EMAIL_QUESTION });
+
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "fabricated_zero_work_delivery_suppressed" }),
+    ]));
+    expect(delegateCalls).toHaveLength(0);
+    expect(result.response).toContain("E-Mails");
+    expect(result.response).not.toMatch(/Bau der angeforderten Datei/);
+  });
+
+  it("a fabricated tool link on a non-artifact question is REROUTED to a specialist, not built", async () => {
+    pinHybridConfig();
+    // The conclusive zero-work signal (a tool-minted link) still fires on any turn — but
+    // the recovery must re-dispatch the ORIGINAL request via autonomous delegation
+    // (no agentName), not delegate a BUILD TASK nobody asked for.
+    streamMock.mockImplementation(() => textStream(
+      "Deine neuen E-Mails stehen hier zum Download bereit: /api/workspace/file?path=emails.html",
+    ));
+    const delegateCalls: Array<Record<string, unknown>> = [];
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(async (args: Record<string, unknown>) => {
+        delegateCalls.push(args);
+        return {
+          success: true,
+          output: "Delegated result from mail_agent — TASK COMPLETED.\nObserved evidence:\n"
+            + "Sie haben 2 ungelesene E-Mails:\n- Betreff A (heute 16:24)\n- Betreff B (heute 13:18)",
+          metadata: { agentName: "mail_agent", attemptedAgents: ["mail_agent"], delegationOutcome: "success" },
+        };
+      }),
+    });
+
+    const result = await runTurn({ session: makeSession(), userMessage: EMAIL_QUESTION });
+
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "fabricated_zero_work_delivery_suppressed" }),
+      expect.objectContaining({ details: "fabricated_zero_work_corrective_reroute" }),
+    ]));
+    // Exactly ONE delegation: the original request, routed autonomously — no BUILD TASK.
+    expect(delegateCalls).toHaveLength(1);
+    expect(delegateCalls[0]!["agentName"]).toBeUndefined();
+    expect(String(delegateCalls[0]!["task"])).toContain("Emails");
+    expect(String(delegateCalls[0]!["task"])).not.toContain("BUILD TASK");
+    // The user gets the specialist's answer — not the invented link, not a build banner.
+    expect(result.response).toContain("ungelesene E-Mails");
+    expect(result.response).not.toContain("/api/workspace/file");
+    expect(result.response).not.toMatch(/Bau der angeforderten Datei/);
+  });
+});
