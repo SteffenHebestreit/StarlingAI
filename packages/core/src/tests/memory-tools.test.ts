@@ -328,6 +328,7 @@ describe("memory tools", () => {
     }, {
       sessionId: "sub:parent-session:productivity_agent:1",
       workspacePath,
+      userId: "test-user",
     });
 
     expect(storeResult.success).toBe(true);
@@ -343,6 +344,46 @@ describe("memory tools", () => {
 
     expect(searchResult.success).toBe(true);
     expect(searchResult.output).toContain("[user/preference]");
+  });
+
+  it("downgrades a user-scope memory_store to workspace when no user is logged in (token mode)", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-tools-"));
+    const userMemoryPath = mkdtempSync(join(tmpdir(), "starlingai-user-memory-tools-"));
+    dirs.push(workspacePath, userMemoryPath);
+    process.env["SAI_USER_MEMORY_PATH"] = userMemoryPath;
+
+    const { executeTool } = await import("../tools/registry.js");
+    // No userId in the tool context — gateway-token session without login.
+    const storeResult = await executeTool("memory_store", {
+      key: "preferred_assistant_name",
+      subject: "Preferred assistant name",
+      content: "The user prefers to call the assistant 'Luna'.",
+      kind: "preference",
+      scope: "user",
+    }, {
+      sessionId: "token-session",
+      workspacePath,
+    });
+
+    expect(storeResult.success).toBe(true);
+    expect(storeResult.output).toContain("Workspace memory stored");
+    expect(storeResult.output).toContain("no authenticated user");
+    expect(storeResult.metadata?.["scope"]).toBe("workspace");
+    expect(storeResult.metadata?.["requestedScope"]).toBe("user");
+
+    // Nothing may land in the user-global store.
+    const userSearch = await executeTool("memory_search", {
+      query: "Luna",
+      scopes: ["user"],
+    }, { sessionId: "token-session", workspacePath });
+    expect(userSearch.output).not.toContain("[user/preference]");
+
+    // The record is retrievable from workspace scope instead.
+    const workspaceSearch = await executeTool("memory_search", {
+      query: "Luna",
+      scopes: ["workspace"],
+    }, { sessionId: "token-session", workspacePath });
+    expect(workspaceSearch.output).toContain("[workspace/preference]");
   });
 
   it("promotes workspace memory into user-global memory through memory_promote", async () => {
@@ -369,6 +410,7 @@ describe("memory tools", () => {
     }, {
       sessionId: "sub:parent-session:productivity_agent:1",
       workspacePath,
+      userId: "test-user",
     });
 
     expect(promoteResult.success).toBe(true);

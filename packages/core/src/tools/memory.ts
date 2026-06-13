@@ -386,13 +386,30 @@ function formatSharedFindingValue(value: string, metadata: SharedFindingMetadata
   return lines.join("\n");
 }
 
+/** The durable 'user' scope holds cross-workspace personal preferences, so it
+ *  needs an authenticated owner. In single-user/token mode (ctx.userId is
+ *  undefined) a user-scope write would land in a shared anonymous bucket that
+ *  outlives the session and is shared across channels (audit a7b11454: a
+ *  token-mode webchat preference stored as user:user) — fall back to
+ *  workspace scope instead and surface the downgrade in the tool output. */
+function resolveDurableWriteScope(
+  requested: DurableMemoryScope,
+  ctx: ToolContext,
+): { scope: DurableMemoryScope; downgraded: boolean } {
+  if (requested === "user" && !ctx.userId) return { scope: "workspace", downgraded: true };
+  return { scope: requested, downgraded: false };
+}
+
+const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: no authenticated user on this session)";
+
 registerTool({
   name: "memory_store",
   description:
     "Persist a piece of information in the durable memory store. " +
     "Use a descriptive, stable key (e.g. 'project_goals', 'client_preferences'). " +
     "Overwrites any previous entry with the same key. " +
-    "Use scope='workspace' for repo-local memory and scope='user' for durable cross-workspace preferences or habits.",
+    "Use scope='workspace' for repo-local memory and scope='user' for durable cross-workspace preferences or habits. " +
+    "The 'user' scope requires a logged-in user; without one the write falls back to 'workspace'.",
   embeddingDescription: "Save, remember, persist, note, record information for later. Merken, speichern, notieren, festhalten, Notiz machen, sich erinnern. Long-term memory, durable notes, save fact.",
   parameters: {
     type: "object",
@@ -422,7 +439,7 @@ registerTool({
       scope: {
         type: "string",
         enum: ["workspace", "user"],
-        description: "Durable destination scope. Use 'user' for cross-workspace preferences or long-lived personal defaults.",
+        description: "Durable destination scope. Use 'user' for cross-workspace preferences or long-lived personal defaults; requires a logged-in user, otherwise the write falls back to 'workspace'.",
       },
     },
     required: ["key", "content"],
@@ -433,11 +450,12 @@ registerTool({
     const tags = Array.isArray(args["tags"]) ? args["tags"].map(String) : [];
     const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
     const subject = String(args["subject"] ?? "").trim();
-    const scope = String(args["scope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
+    const requestedScope = String(args["scope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
 
     if (!key) return { success: false, output: "", error: "key is required" };
     if (!content) return { success: false, output: "", error: "content is required" };
-    if (scope !== "workspace" && scope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
+    if (requestedScope !== "workspace" && requestedScope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
+    const { scope, downgraded } = resolveDurableWriteScope(requestedScope, ctx);
 
     try {
       const entry = (scope === "user" ? storeUserMemoryRecord : storeWorkspaceMemoryRecord)(ctx.workspacePath, {
@@ -452,8 +470,15 @@ registerTool({
       });
       return {
         success: true,
-        output: `${scope === "user" ? "User" : "Workspace"} memory stored: '${entry.key ?? key}' as ${entry.kind} (${content.length} chars)`,
-        metadata: { key: entry.key ?? key, kind: entry.kind, subject: entry.subject, scope: entry.scope },
+        output: `${scope === "user" ? "User" : "Workspace"} memory stored: '${entry.key ?? key}' as ${entry.kind} (${content.length} chars)`
+          + (downgraded ? SCOPE_DOWNGRADE_NOTE : ""),
+        metadata: {
+          key: entry.key ?? key,
+          kind: entry.kind,
+          subject: entry.subject,
+          scope: entry.scope,
+          ...(downgraded ? { requestedScope } : {}),
+        },
       };
     } catch (err) {
       log.error({ err, key }, "memory_store failed");
@@ -682,7 +707,7 @@ registerTool({
       destinationScope: {
         type: "string",
         enum: ["workspace", "user"],
-        description: "Durable destination scope. Defaults to workspace.",
+        description: "Durable destination scope. Defaults to workspace. 'user' requires a logged-in user, otherwise the promotion falls back to 'workspace'.",
       },
     },
     required: ["query"],
@@ -695,12 +720,13 @@ registerTool({
       : undefined;
     const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
     const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
-    const destinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
+    const requestedDestinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
 
     if (!query) return { success: false, output: "", error: "query is required" };
-    if (destinationScope !== "workspace" && destinationScope !== "user") {
+    if (requestedDestinationScope !== "workspace" && requestedDestinationScope !== "user") {
       return { success: false, output: "", error: "destinationScope must be 'workspace' or 'user'" };
     }
+    const { scope: destinationScope, downgraded } = resolveDurableWriteScope(requestedDestinationScope, ctx);
 
     try {
       const result = await promoteMemoryRecords(ctx.workspacePath, query, {
@@ -722,14 +748,16 @@ registerTool({
 
       return {
         success: true,
-        output: lines.length > 0
+        output: (lines.length > 0
           ? `${result.destinationScope === "user" ? "User" : "Workspace"} memory promotion completed.\n\n${lines.join("\n")}`
-          : `${result.destinationScope === "user" ? "User" : "Workspace"} memory promotion completed, but no matching entries were promoted.`,
+          : `${result.destinationScope === "user" ? "User" : "Workspace"} memory promotion completed, but no matching entries were promoted.`)
+          + (downgraded ? SCOPE_DOWNGRADE_NOTE : ""),
         metadata: {
           promoted: result.promoted.length,
           merged: result.merged.length,
           skipped: result.skipped,
           destinationScope: result.destinationScope,
+          ...(downgraded ? { requestedDestinationScope } : {}),
         },
       };
     } catch (err) {

@@ -1128,6 +1128,11 @@ ${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
 - **Full-coverage synthesis**: When a delegated tool result returns a list, table, or multiple sourced sections (e.g. multiple news outlets, multiple repositories, multiple findings), the final answer MUST include EVERY item and EVERY source. Do NOT keep only the first source, do NOT drop the second half of a list, do NOT replace items with "and others". If the user asked for content from N sources, the answer must visibly cover all N.
 - **Long-form deliverables**: For comprehensive reports, briefings, papers, multi-source summaries, top-N lists with details, or any deliverable that would exceed ~3000 characters, instruct the coordinator/specialist to persist the full content as an artifact. If direct artifact tools are visible, prefer generate_document, generate_website, generate_pdf, or export_workspace_artifact. Only call write_file when it is actually present in your provided tool schema; otherwise delegate to an artifact-capable specialist such as content_writer. The chat reply should contain a structured summary plus the artifact reference for very long outputs.
 
+## Proactive Memory
+- When the user states something durable — their name or role, a lasting preference, a standing instruction ("ab jetzt …", "from now on …"), a decision, or a name for you — persist it in the SAME turn it is stated: assistant_personality_update for your own name or persona, memory_store for everything else. Never wait for an explicit "remember this".
+- Acknowledge the saved fact in one short clause of your reply; do not ask for permission to save it.
+- Do not persist secrets, credentials, or one-off task details this way.
+
 ## Security
 - Your tool calls are audited — use them responsibly
 - Never output passwords, API keys, or secrets

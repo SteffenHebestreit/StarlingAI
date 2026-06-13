@@ -324,6 +324,31 @@ export const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
   "yo",
 ]);
 
+// ── Durable-memory persistence detection ─────────────────────────────────────
+// Statements that establish something meant to OUTLIVE this session — naming
+// the assistant, lasting preferences, standing instructions. Models tend to
+// acknowledge such turns conversationally and persist nothing until the user
+// adds an explicit "remember that" (observed live: "dein Name ist ab jetzt
+// Luna" → name acknowledged but not stored until told to remember it). These
+// patterns trigger guidance to persist in the SAME turn.
+const ASSISTANT_NAMING_PATTERNS: readonly RegExp[] = [
+  /\bdein name (?:ist|sei|lautet|wird)\b/,
+  /\bdu hei(?:ß|ss)t (?:ab )?(?:jetzt|sofort|nun)\b/,
+  /\bich (?:nenne|taufe) dich\b/,
+  /\b(?:werde|will) dich .{1,40}? nennen\b/,
+  /\byour name is(?: now)?\b/,
+  /\bi(?:'ll| will) call you\b/,
+  /\byou are (?:now )?called\b/,
+];
+const DURABLE_PREFERENCE_PATTERNS: readonly RegExp[] = [
+  /\b(?:ab jetzt|ab sofort|von nun an|in zukunft|zuk(?:ü|u)nftig|k(?:ü|u)nftig)\b/,
+  /\b(?:from now on|going forward|for future reference)\b/,
+  /\bich bevorzuge\b/,
+  /\bi prefer\b/,
+  /\bmerke? dir\b/,
+  /\bremember (?:that|this|my)\b/,
+];
+
 // ── DynamicTurnGuidance ───────────────────────────────────────────────────────
 
 export interface DynamicTurnGuidance {
@@ -343,6 +368,13 @@ export interface DynamicTurnGuidance {
    *  explanation/analysis/tutorial — runtime should bias toward direct
    *  synthesis rather than delegating to fetch live state. */
   inlineAnalyticalContent?: boolean;
+  /** The user stated something durable (lasting preference, standing
+   *  instruction, naming) that should be persisted THIS turn without
+   *  waiting for an explicit "remember this". */
+  durableMemorySensitive?: boolean;
+  /** Subset of durableMemorySensitive: the user is naming/renaming the
+   *  assistant itself → assistant_personality_update, not memory_store. */
+  assistantNamingSensitive?: boolean;
 }
 
 /**
@@ -405,6 +437,9 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
   const navigationSensitive = isNavigationRoutingRequest(userMessage);
   const artifactSensitive = ARTIFACT_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(normalized));
+  const assistantNamingSensitive = ASSISTANT_NAMING_PATTERNS.some((pattern) => pattern.test(normalized));
+  const durableMemorySensitive = assistantNamingSensitive
+    || DURABLE_PREFERENCE_PATTERNS.some((pattern) => pattern.test(normalized));
   // ── Inline-content analytical detection ──────────────────────────────────
   // Use the original userMessage (case-preserving) for the technical-content
   // patterns since some matchers (`[Interface]`, `[Service]`, fenced code
@@ -437,7 +472,7 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const freshnessSensitive = (inlineReview || selfCapabilityQuestion) ? false : freshnessSensitiveByTerm;
   const sourceSensitive = (inlineReview || researchThenCreate) ? false : sourceSensitiveByTerm;
 
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent };
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent, durableMemorySensitive };
   if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
@@ -452,12 +487,23 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   if (navigationSensitive) reasons.push("navigation-routing");
   if (artifactSensitive) reasons.push("artifact-deliverable");
   if (inlineAnalyticalContent) reasons.push("inline-analytical-content");
+  if (durableMemorySensitive) reasons.push("durable-memory");
 
   const delegateMode = toolMode !== "hybrid";
   const promptParts: string[] = [];
 
   if (reasons.length > 0) {
     promptParts.push(`This turn is ${reasons.join(" and ")}.`);
+  }
+
+  if (durableMemorySensitive) {
+    promptParts.push(
+      assistantNamingSensitive
+        ? "The user is giving YOU (the assistant) a name or changing it. That IS an explicitly requested durable personality change: call assistant_personality_update in THIS turn to set the preferred assistant name, then answer using that name. Do NOT wait for the user to say 'remember this'."
+        : "The user just stated something durable — a lasting preference, standing instruction, or fact meant to apply beyond this session. Persist it in THIS turn with memory_store (kind 'preference' or 'fact'; scope 'user' for cross-workspace personal preferences when a user is signed in, otherwise 'workspace') alongside your answer. Do NOT wait for an explicit 'remember this'.",
+      "Acknowledge what you saved in one short clause of your reply instead of asking whether to save it.",
+      "If on reflection the statement only concerns the current task and is not durable, skip the store and just answer.",
+    );
   }
 
   if (computerAccessSensitive && !pentestSensitive) {
@@ -625,6 +671,8 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     navigationSensitive,
     artifactSensitive,
     inlineAnalyticalContent,
+    durableMemorySensitive,
+    assistantNamingSensitive,
   };
 }
 
