@@ -1237,6 +1237,26 @@ function agentIsResearchCapable(agentName: string): boolean {
   return agentCfgIsResearchCapable(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
 }
 
+/**
+ * Whether an agent is a meta/factory agent — one whose job is to MINT other
+ * agents (it holds create_ephemeral_agent). Such an agent must never be picked
+ * by UNDIRECTED routing/bidding for an ordinary task: electing "the thing that
+ * builds new agents" for routine work wastes a whole cycle synthesising a
+ * bespoke agent before any real work happens (audit c33e65dd: a plain Fable
+ * research question auto-routed to agent_factory, which attempted
+ * create_ephemeral_agent, crashed, then fell back to researcher). It stays fully
+ * reachable via an EXPLICIT agentName / fallbackAgents — only autonomous
+ * selection is blocked.
+ */
+export function agentCfgIsMetaFactory(cfg: { tools?: string[] } | undefined): boolean {
+  return Boolean(cfg?.tools?.includes("create_ephemeral_agent"));
+}
+
+function agentIsMetaFactory(agentName: string): boolean {
+  const config = getConfig();
+  return agentCfgIsMetaFactory(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
+}
+
 /** Phrases that explicitly ask the swarm to go online and validate/look up. */
 const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check|im internet (such|recherchier)|recherchier[a-z]* online)\b/i;
 
@@ -2732,6 +2752,17 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
   if (ctx.currentAgentName) {
     excluded.add(ctx.currentAgentName);
   }
+  // Meta/factory agents (agent_factory et al.) are never autonomously routable —
+  // they are a deliberate, explicit choice, not something the swarm should elect
+  // for ordinary work (audit c33e65dd). Explicit agentName/fallbacks bypass this
+  // function entirely, so they stay reachable.
+  {
+    const routingConfig = getConfig();
+    const routingPromoted = readPromotedAgents(routingConfig.workspacePath);
+    for (const [name, cfg] of [...Object.entries(routingConfig.subAgents), ...Object.entries(routingPromoted)]) {
+      if (agentCfgIsMetaFactory(cfg)) excluded.add(name);
+    }
+  }
   const preferMissionCoordinator = shouldPreferMissionCoordinator(query, ctx, exclude);
   const preferWebTaskCoordinator = shouldPreferWebTaskCoordinator(query, ctx, exclude);
   const preferProjectPlanner = shouldPreferProjectPlanner(query, ctx, exclude);
@@ -3583,6 +3614,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             taskTitle: title,
             droppedAgents: rawBids.map((b) => b.agentName),
           }, { sessionId: ctx.sessionId });
+        }
+        // Same exclusion as semantic routing: a meta/factory agent must not win
+        // an autonomous bid for ordinary work (audit c33e65dd).
+        {
+          const nonMetaBids = bids.filter((bid) => !agentIsMetaFactory(bid.agentName));
+          if (nonMetaBids.length !== bids.length) {
+            logAudit("delegation_bidding_filtered_meta_factory", {
+              taskTitle: title,
+              droppedAgents: bids.filter((bid) => agentIsMetaFactory(bid.agentName)).map((b) => b.agentName),
+            }, { sessionId: ctx.sessionId });
+          }
+          bids = nonMetaBids;
         }
         // Same research-capability gate as semantic routing (Step 1): never let
         // bidding hand a source-sensitive task to a web-incapable generator.
