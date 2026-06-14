@@ -1430,6 +1430,28 @@ export const OrchestrationSchema = z.object({
 });
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 
+/**
+ * Receptionist fast lane — an opt-in first-contact gatekeeper that answers
+ * trivial conversational turns (greetings, thanks, "how are you") with a tiny
+ * routing-tier model + a compressed memory capsule, skipping the full system
+ * prompt, tool loading, and the swarm loop. Any miss (task intent, a registered
+ * fork escalate term, no routing tier configured, model escalation, or error)
+ * falls through to the full runtime, so enabling it can only cut latency on
+ * trivial turns — it never changes how real work is handled. Requires
+ * `agents.defaults.model.tiers.routing`. Forks specialise the front desk via
+ * registerReceptionistPolicy() (agent/receptionist-policy.ts).
+ */
+export const ReceptionistSchema = z.object({
+  /** Master switch. Default false (opt-in, fail-safe fall-through). */
+  enabled: z.boolean().default(false),
+  /** A fast-lane reply longer than this is treated as an escalation — a real
+   *  answer belongs on the full path, not the front desk. */
+  maxResponseChars: z.number().int().min(40).max(2_000).default(400),
+  /** Extra terms (beyond registered fork policies) that must always escalate to
+   *  the full runtime rather than be answered at the front desk. */
+  alwaysEscalateTerms: z.array(z.string()).default([]),
+});
+
 export const ConfigSchema = z.object({
   providers: ProvidersSchema.default({}),
   agents: z.object({
@@ -1605,6 +1627,7 @@ export const ConfigSchema = z.object({
   extensions: z.record(z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
   orchestration: OrchestrationSchema.default({}),
+  receptionist: ReceptionistSchema.default({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

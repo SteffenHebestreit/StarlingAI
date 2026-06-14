@@ -4,6 +4,7 @@
  */
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
+import { tryReceptionistFastLane } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
@@ -3536,6 +3537,50 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   });
 
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
+
+  // ── Receptionist fast lane ────────────────────────────────────────────────
+  // Opt-in first-contact gatekeeper (config.receptionist.enabled). When no task
+  // intent was detected, try answering a trivial conversational turn with a tiny
+  // routing-tier model + a compressed memory capsule, skipping the full system
+  // prompt, tool loading, and the swarm loop. Any miss — registered escalate
+  // term, no routing tier, model escalation, error — returns null and falls
+  // through to the full path below, so this only ever shortcuts trivial turns.
+  // The user message is already recorded and input guardrails have already run.
+  if (detectedDynamicGuidance === null && getConfig().receptionist?.enabled) {
+    const fastLane = await tryReceptionistFastLane(userMessage, signal).catch(() => null);
+    if (fastLane) {
+      session.addMessage({ role: "assistant", content: fastLane.response });
+      opts.onChunk?.(fastLane.response);
+      logAudit("message_received", { fastLane: true, length: fastLane.response.length }, {
+        sessionId: session.id,
+        channel: session.channel,
+        userId: session.userId,
+      });
+      return {
+        response: fastLane.response,
+        toolCallsExecuted: 0,
+        guardrailEvents,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        blocked: false,
+        performance: {
+          turnDurationMs: Date.now() - turnStartedAt,
+          llmCalls: 1,
+          llmTimeMs: 0,
+          toolCallsRequested: 0,
+          toolExecutionTimeMs: 0,
+          systemPromptChars: 0,
+          collapsedHistoryMessages: 0,
+          collapsedHistoryChars: 0,
+          promptChars: userMessage.length,
+          completionChars: fastLane.response.length,
+          toolIterations: 0,
+          finishReason: "receptionist_fast_lane",
+          blocked: false,
+        },
+      };
+    }
+  }
+
   const priorDelegateEvidenceForFollowUp = findRecentDelegateEvidence(session.getHistory());
   const reusePriorDelegateEvidenceForFollowUp = shouldReusePriorDelegateEvidenceForSourceFollowUp(
     userMessage,
