@@ -54,6 +54,12 @@ workspace/runtime/runtime.overrides.json
 workspace/generated/
 workspace/presentation/
 
+# Document-RAG uploads: files attached in chat or uploaded to the user/workspace
+# library, plus the .registry.json manifest. Runtime user data embedded into
+# engram — not source. (packages/core/workspace/ is test/dev residue.)
+workspace/uploads/
+packages/core/workspace/uploads/
+
 # Test artifacts
 packages/core/tmp/
 # Some tests write process.cwd()-relative paths; when vitest runs from

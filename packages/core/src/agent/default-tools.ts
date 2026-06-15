@@ -29,6 +29,12 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // carrying the whole thing in context. No-op without pgvector.
   "rag_ingest",
   "rag_search",
+  // Document RAG over attached/uploaded files (engram graph-RAG). Retrieval +
+  // listing are always available; the runtime also auto-injects relevant
+  // excerpts and auto-ingests session attachments. No-op when documentRag is
+  // disabled or engram is unreachable.
+  "search_documents",
+  "list_documents",
   // Flat agent capability directory so the assistant can answer "what agents do
   // you have / what can they do" without a semantic query (search_agents and
   // list_agents both require one and never dump the catalog).
@@ -47,6 +53,9 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "web_search",
   "web_fetch",
   "extract_file_content",
+  // Ingest a workspace file into / remove a document from the engram library.
+  "ingest_document",
+  "forget_document",
   "transcribe_audio",
   "synthesize_speech",
   "list_tts_voices",

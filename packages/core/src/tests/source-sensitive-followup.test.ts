@@ -185,10 +185,12 @@ describe("source-sensitive delegation preamble — research-framed + detector ma
       // Detector marker preserved → source-sensitive enforcement + gate still fire.
       expect(task).toContain("SOURCE-SENSITIVE DELEGATION:");
       expect(taskRequiresExternalResearch(task)).toBe(true);
-      // Verification discipline retained (topic-agnostic wording — the preamble no longer
-      // uses hardware-flavored "official or vendor"; it confirms against "authoritative or
-      // official" sources). Both builders share this phrase.
-      expect(task.toLowerCase()).toContain("authoritative or official source");
+      // Verification discipline retained as ONE general instruction (the old
+      // hardware-flavored rulebook — "establish the subject's real identity", the
+      // I²S-mic example — was stripped as overfit; session d251793b). Both builders
+      // share the validate-before-truth line + the unverified-marking clause.
+      expect(task.toLowerCase()).toContain("validate every claim");
+      expect(task.toLowerCase()).toContain("unverified");
       // Scope cap present: stay on the named subject, a handful of sources, then stop.
       expect(task.toLowerCase()).toContain("stay tightly scoped");
       expect(task).toContain(userMessage);
@@ -223,8 +225,8 @@ describe("source-sensitive wrapper idempotency — no Russian-doll boilerplate",
     expect(taskRequiresExternalResearch(slice)).toBe(true);
     // The parent (with the user message) is embedded verbatim.
     expect(slice).toContain(userMessage);
-    // The discipline boilerplate appears exactly ONCE (from the parent), never re-emitted.
-    expect(slice.split("For every concrete spec").length - 1).toBe(1);
+    // The discipline appears exactly ONCE (from the parent), never re-emitted.
+    expect(slice.split("Validate every claim").length - 1).toBe(1);
     expect(slice.split("Stay tightly scoped").length - 1).toBe(1);
     // The focus block is NOT duplicated.
     expect(slice.split("Focus for this slice").length - 1).toBe(1);
@@ -235,7 +237,7 @@ describe("source-sensitive wrapper idempotency — no Russian-doll boilerplate",
   it("a plain (unwrapped) parent still gets the full discipline rulebook", () => {
     const t = buildCanonicalSourceSensitiveDelegationTask(userMessage, "SLICE 2/2", focus);
     expect(t).toContain("SOURCE-SENSITIVE DELEGATION SLICE 2/2:");
-    expect(t).toContain("For every concrete spec");
+    expect(t).toContain("Validate every claim");
     expect(t.toLowerCase()).toContain("stay tightly scoped");
   });
 });

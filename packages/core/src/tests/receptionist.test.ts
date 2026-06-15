@@ -126,16 +126,20 @@ describe("receptionist — micro-call", () => {
 });
 
 describe("receptionist — memory capsule", () => {
-  it("builds a compact decisions/preferences capsule, capped", () => {
+  it("builds a compact facts/decisions/preferences capsule, capped", () => {
     const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
     dirs.push(ws);
     storeWorkspaceMemoryRecord(ws, { key: "tone", subject: "Tone", content: "Greet users politely.", kind: "preference" });
     storeWorkspaceMemoryRecord(ws, { key: "hours", subject: "Hours", content: "Open Monday to Friday.", kind: "decision" });
+    // Durable FACTS (e.g. user identity/role) must be in the capsule too — they
+    // are exactly the "user-memory to rely on" injected as data on every path.
+    storeWorkspaceMemoryRecord(ws, { key: "role", subject: "Role", content: "User is a freelance software engineer.", kind: "fact" });
     storeWorkspaceMemoryRecord(ws, { key: "scratch", subject: "Scratch", content: "ephemeral scratch note", kind: "note" });
 
     const capsule = buildMemoryCapsule(ws, 400);
     expect(capsule).toContain("politely");
     expect(capsule).toContain("Monday to Friday");
+    expect(capsule).toContain("freelance software engineer");
     expect(capsule).not.toContain("ephemeral scratch");
     expect(capsule.length).toBeLessThanOrEqual(420);
   });

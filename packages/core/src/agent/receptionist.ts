@@ -177,7 +177,7 @@ export function buildMemoryCapsule(workspacePath: string, maxChars = 400): strin
     ...listUserMemoryRecords(workspacePath),
     ...listWorkspaceMemoryRecords(workspacePath),
   ]
-    .filter((r) => r.kind === "decision" || r.kind === "preference")
+    .filter((r) => r.kind === "decision" || r.kind === "preference" || r.kind === "fact")
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
   const lines: string[] = [];

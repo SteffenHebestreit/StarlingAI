@@ -149,19 +149,24 @@ export interface TurnRiskSignals {
   planRiskTier?: TurnRiskTier;
   /** The turn makes sourced factual claims (dynamic guidance: source-sensitive). */
   sourceSensitive?: boolean;
+  /** The turn asks for current/external state — news, weather, live data, etc.
+   *  (dynamic guidance: freshness-sensitive). Such an answer is ungrounded
+   *  unless this turn actually retrieved, so it enters the grounding QA gate. */
+  freshnessSensitive?: boolean;
   /** The turn invoked at least one approval-gated tool (external/destructive/credential). */
   invokedApprovalGatedTool?: boolean;
 }
 
 /**
- * Risk-proportional gate input. A turn is high-stakes when it makes sourced
- * factual claims, takes an approval-gated (external/destructive/credential)
+ * Risk-proportional gate input. A turn is high-stakes when it makes sourced or
+ * current factual claims, takes an approval-gated (external/destructive/credential)
  * action, or the orchestrator itself flagged the plan high-risk. Everything else
  * (chat, low-stakes single-domain work) is low — and skips the QA pass entirely.
  */
 export function classifyTurnRisk(signals: TurnRiskSignals): TurnRiskTier {
   if (signals.planRiskTier === "high") return "high";
   if (signals.sourceSensitive === true) return "high";
+  if (signals.freshnessSensitive === true) return "high";
   if (signals.invokedApprovalGatedTool === true) return "high";
   return "low";
 }

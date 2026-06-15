@@ -4,6 +4,35 @@
       "backend": "searxng",
       "searxngBaseUrl": "http://search.k2o",
       "timeoutMs": 15000
+    },
+    // Cross-encoder reranker (the `reranker` TEI sidecar serving bge-reranker-v2-m3,
+    // shared with engram). mode "tei" = POST /rerank {query,texts}.
+    "reranker": {
+      "enabled": true,
+      "mode": "tei",
+      "baseUrl": "http://reranker:80",
+      "model": "BAAI/bge-reranker-v2-m3",
+      "timeoutMs": 15000,
+      "topK": 6
+    },
+    // Document RAG over attached files via the engram graph-RAG service. Files are
+    // extracted to Markdown, ingested into engram, and relevant excerpts retrieved
+    // per turn (a hint + the few best chunks, not the whole file inlined).
+    "documentRag": {
+      "enabled": true,
+      "engramBaseUrl": "http://engram:8088",
+      "autoIngestAttachments": true,
+      "injectContext": true,
+      "searchTimeoutMs": 25000,
+      "retrievalTopK": 6,
+      "candidateTopK": 30,
+      "maxContextChars": 6000,
+      // Search the signed-in user's personal library in every conversation (not
+      // just the session a file was attached to). Files uploaded on the Documents
+      // page → Personal library become available across all of that user's chats.
+      "includeUserDocs": true,
+      "includeWorkspaceDocs": false,
+      "workspaceName": "workspace"
     }
   },
   "computerUse": {

@@ -431,6 +431,23 @@
         </div>
       </div>
 
+      <!-- Pending document attachment chips (ingested into the document library on send) -->
+      <div v-if="pendingDocumentContexts.length > 0" class="flex flex-wrap gap-2 mb-2">
+        <div
+          v-for="(doc, idx) in pendingDocumentContexts"
+          :key="doc.filename + idx"
+          class="flex items-center gap-1.5 rounded-xl border border-cyan-500/40 bg-cyan-900/20 pl-2 pr-1 py-1"
+        >
+          <span class="text-cyan-300 text-sm leading-none" aria-hidden="true">📄</span>
+          <span class="text-xs text-cyan-200 max-w-[10rem] truncate select-none" :title="doc.filename">{{ doc.filename }}</span>
+          <button
+            @click="removeDocument(idx)"
+            class="text-cyan-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            title="Remove"
+          >✕</button>
+        </div>
+      </div>
+
       <!-- Inline override flag chips -->
       <div v-if="activeFlags.length > 0" class="flex flex-wrap gap-1.5 mb-2">
         <button
@@ -618,7 +635,7 @@
 
         <div class="chat-composer__controls">
           <div class="chat-composer__menus">
-            <details v-if="showOptionsDropdown" class="chat-dropdown">
+            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown">
               <summary class="chat-dropdown__summary">
                 <span>Options</span>
                 <span class="chat-dropdown__chevron">▾</span>
@@ -908,7 +925,7 @@
             <button
               v-else
               @click="sendMessage"
-              :disabled="(!inputText.trim() && pendingImageContexts.length === 0) || !gateway.connected"
+              :disabled="(!inputText.trim() && pendingImageContexts.length === 0 && pendingDocumentContexts.length === 0) || !gateway.connected"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
             >
               Send
@@ -1067,6 +1084,11 @@ const pendingSpokenAckLanguage = ref<string | null>(null);
 const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
 const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUrl: string }>>([]);
+/** Documents queued for the current composer message — persisted + ingested into
+ *  the engram document library on submit (not inlined into the prompt). */
+const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([]);
+/** The Options <details> element, so attaching a file can close it. */
+const optionsDetailsEl = ref<HTMLDetailsElement | null>(null);
 const previewModalUrl = ref<string | null>(null);
 const expandedMessageHistory = ref(false);
 const approvalNowMs = ref(Date.now());
@@ -1105,6 +1127,15 @@ function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
   if (img) URL.revokeObjectURL(img.previewUrl);
   pendingImageContexts.value.splice(idx, 1);
+}
+
+function removeDocument(idx: number) {
+  pendingDocumentContexts.value.splice(idx, 1);
+}
+
+/** Close the Options dropdown (a native <details>) — used after picking a file. */
+function closeOptionsDropdown() {
+  if (optionsDetailsEl.value) optionsDetailsEl.value.open = false;
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -1414,6 +1445,7 @@ function maybeCloseComposer() {
     && !gateway.isLoading
     && !analysing.value
     && pendingImageContexts.value.length === 0
+    && pendingDocumentContexts.value.length === 0
   ) {
     composerOpen.value = false;
   }
@@ -1421,7 +1453,13 @@ function maybeCloseComposer() {
 
 function onComposerFocusOut(event: FocusEvent) {
   const root = event.currentTarget as HTMLElement | null;
-  if (!root?.contains(event.relatedTarget as Node | null)) {
+  const next = event.relatedTarget as Node | null;
+  // Focus left to a native dialog (e.g. the file picker) or to nothing focusable
+  // → keep the input bay open. Opening the picker used to collapse the composer
+  // and leave the Options dropdown stuck open. Only fold away on a real focus
+  // move to an element outside the bay.
+  if (next === null) return;
+  if (!root?.contains(next)) {
     composerFocused.value = false;
     maybeCloseComposer();
   }
@@ -2554,45 +2592,31 @@ async function toggleRecording() {
   await startRecording(false);
 }
 
-async function onDocumentSelected(event: Event) {
+function onDocumentSelected(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
+  closeOptionsDropdown();
   if (!file) return;
-  multimodalBusy.value = true;
+  queueAttachment(file);
+}
 
+/**
+ * Queue a file for the current message instead of processing it immediately.
+ * Images are analyzed at send time; documents are persisted + ingested into the
+ * engram document library at send time (not inlined into the prompt). The
+ * composer stays open so the user can type their message before sending.
+ */
+function queueAttachment(file: File): void {
   const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
-
-  try {
-    // ── Image: queue the file — analysis happens at send time ────────────────
-    if (isImage) {
-      pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
-      wakeStatus.value = `Image attached — click Send`;
-      return;
-    }
-
-    // ── Document: convert to markdown and inline the text ──
-    wakeStatus.value = `Converting ${file.name}`;
-    let markdown = "";
-    let sourceName = file.name;
-    if (filesAvailable.value) {
-      const result = await gateway.convertFileToMarkdown(file);
-      markdown = result.markdown?.trim() ?? "";
-      sourceName = result.filename ?? file.name;
-      if (!markdown) throw new Error(result.error ?? "File conversion returned no markdown");
-    } else {
-      if (!isTextLikeFile(file)) {
-        throw new Error("File conversion service is offline. Only text, markdown, CSV, JSON, YAML, and XML files can be attached locally right now.");
-      }
-      markdown = await convertLocalTextFileToMarkdown(file);
-    }
-    appendToComposer(`Context from ${sourceName}:\n\n${markdown}`);
-    wakeStatus.value = `Attached ${file.name}`;
-  } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    multimodalBusy.value = false;
+  if (isImage) {
+    pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
+    wakeStatus.value = `Image attached — click Send`;
+  } else {
+    pendingDocumentContexts.value.push({ filename: file.name, file });
+    wakeStatus.value = `${file.name} attached — click Send`;
   }
+  composerOpen.value = true;
 }
 
 async function onAudioSelected(event: Event) {
@@ -2637,35 +2661,8 @@ async function ingestDroppedFile(file: File): Promise<void> {
     await transcribeDroppedAudio(file);
     return;
   }
-  const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
-  multimodalBusy.value = true;
-  try {
-    if (isImage) {
-      pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
-      wakeStatus.value = `Image attached — click Send`;
-      return;
-    }
-    wakeStatus.value = `Converting ${file.name}`;
-    let markdown = "";
-    let sourceName = file.name;
-    if (filesAvailable.value) {
-      const result = await gateway.convertFileToMarkdown(file);
-      markdown = result.markdown?.trim() ?? "";
-      sourceName = result.filename ?? file.name;
-      if (!markdown) throw new Error(result.error ?? "File conversion returned no markdown");
-    } else {
-      if (!isTextLikeFile(file)) {
-        throw new Error("File conversion service is offline. Only text, markdown, CSV, JSON, YAML, and XML files can be attached locally right now.");
-      }
-      markdown = await convertLocalTextFileToMarkdown(file);
-    }
-    appendToComposer(`Context from ${sourceName}:\n\n${markdown}`);
-    wakeStatus.value = `Attached ${file.name}`;
-  } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    multimodalBusy.value = false;
-  }
+  // Images + documents are queued and processed at send time (see queueAttachment).
+  queueAttachment(file);
 }
 
 function onChatDragOver(event: DragEvent): void {
@@ -3005,12 +3002,13 @@ function onComposerKeydown(event: KeyboardEvent) {
 
 async function sendMessage() {
   const trimmedText = inputText.value.trim();
-  if (!trimmedText && pendingImageContexts.value.length === 0) return;
+  const hasImages = pendingImageContexts.value.length > 0;
+  const hasDocs = pendingDocumentContexts.value.length > 0;
+  if (!trimmedText && !hasImages && !hasDocs) return;
   // Mid-turn steering: a turn is already running → fold this text into it instead
-  // of dropping the message. Text-only (image steering not supported yet). If the
-  // gateway reports no live turn, restore the text and fall through to a normal send.
+  // of dropping the message. Text-only — attachments can't be folded into a turn.
   if (gateway.isLoading) {
-    if (!trimmedText || pendingImageContexts.value.length > 0) return;
+    if (!trimmedText || hasImages || hasDocs) return;
     const sid = gateway.currentSessionId;
     inputText.value = "";
     if (sid && await gateway.steerTurn(sid, trimmedText)) {
@@ -3024,7 +3022,7 @@ async function sendMessage() {
   const spokenAckLanguage = pendingSpokenAckLanguage.value;
   pendingSpokenAckLanguage.value = null;
 
-  const jobMatch = pendingImageContexts.value.length === 0
+  const jobMatch = !hasImages && !hasDocs
     ? trimmedText.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s)
     : null;
   if (jobMatch && jobMatch[1]?.toLowerCase() !== "help") {
@@ -3034,13 +3032,16 @@ async function sendMessage() {
     return;
   }
 
-  const pending = pendingImageContexts.value;
+  const pendingImages = pendingImageContexts.value;
+  const pendingDocs = pendingDocumentContexts.value;
   pendingImageContexts.value = [];
+  pendingDocumentContexts.value = [];
   inputText.value = "";
 
-  // What the user sees in their own bubble — filenames only, no analysis dump
+  // What the user sees in their own bubble — filenames only, no analysis/text dump
+  const allNames = [...pendingImages.map(p => p.filename), ...pendingDocs.map(d => d.filename)];
   const displayParts: string[] = [];
-  if (pending.length > 0) displayParts.push(`📎 ${pending.map(p => p.filename).join(", ")}`);
+  if (allNames.length > 0) displayParts.push(`📎 ${allNames.join(", ")}`);
   if (trimmedText) displayParts.push(trimmedText);
   const displayContent = displayParts.join("\n");
 
@@ -3048,33 +3049,70 @@ async function sendMessage() {
     void speakSendAcknowledgement(spokenAckLanguage);
   }
 
-  if (pending.length > 0) {
-    analysing.value = true;
-    wakeStatus.value = `Analysing image${pending.length > 1 ? "s" : ""}…`;
-    let pendingUserMessageId: string | undefined;
-    try {
-      const dataUrls = await Promise.all(pending.map(p => fileToDataUrl(p.file)));
-      const attachments: ChatAttachment[] = pending.map((p, i) => ({
-        filename: p.filename,
-        dataUrl: dataUrls[i],
-        contentType: p.file.type || "image/*",
-        previewMode: "image",
-        size: p.file.size,
-      }));
-      pendingUserMessageId = await gateway.appendPendingUserMessage(displayContent, attachments);
-      const analyses = await Promise.all(pending.map(p => gateway.analyzeImageFile(p.file)));
-      const imageContext = pending.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
-      const fullText = [imageContext, trimmedText].filter(Boolean).join("\n\n");
-      wakeStatus.value = "";
-      await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
-    } catch (error) {
-      wakeStatus.value = error instanceof Error ? error.message : String(error);
-    } finally {
-      analysing.value = false;
-      for (const p of pending) URL.revokeObjectURL(p.previewUrl);
-    }
-  } else {
+  if (pendingImages.length === 0 && pendingDocs.length === 0) {
     await gateway.sendMessage(trimmedText, thinkingMode.value);
+    return;
+  }
+
+  analysing.value = true;
+  let pendingUserMessageId: string | undefined;
+  try {
+    const attachments: ChatAttachment[] = [];
+
+    // Documents: persist into the session's workspace so the runtime ingests them
+    // into the engram document library. The prompt gets a hint + on-demand
+    // retrieval (search_documents) instead of the whole file's text inlined.
+    if (pendingDocs.length > 0) {
+      wakeStatus.value = `Uploading document${pendingDocs.length > 1 ? "s" : ""}…`;
+      const sid = gateway.currentSessionId ?? "shared";
+      for (const d of pendingDocs) {
+        try {
+          const meta = await gateway.persistAttachment(d.file, sid);
+          attachments.push({
+            filename: meta.filename,
+            relativePath: meta.relativePath,
+            contentType: meta.contentType,
+            size: meta.size,
+            previewMode: "download",
+          });
+        } catch (err) {
+          wakeStatus.value = err instanceof Error ? err.message : String(err);
+        }
+      }
+    }
+
+    // Images: analyzed client-side; the analysis text is inlined (unchanged).
+    let imageContext = "";
+    if (pendingImages.length > 0) {
+      wakeStatus.value = `Analysing image${pendingImages.length > 1 ? "s" : ""}…`;
+      const dataUrls = await Promise.all(pendingImages.map(p => fileToDataUrl(p.file)));
+      for (let i = 0; i < pendingImages.length; i++) {
+        attachments.push({
+          filename: pendingImages[i]!.filename,
+          dataUrl: dataUrls[i],
+          contentType: pendingImages[i]!.file.type || "image/*",
+          previewMode: "image",
+          size: pendingImages[i]!.file.size,
+        });
+      }
+      const analyses = await Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file)));
+      imageContext = pendingImages.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
+    }
+
+    pendingUserMessageId = await gateway.appendPendingUserMessage(displayContent, attachments);
+    // Document text is NOT inlined — the runtime retrieves it from engram on demand.
+    // When there's no user text, give the turn a short instruction so it isn't empty.
+    const docNote = pendingDocs.length > 0 && !trimmedText
+      ? `I've attached ${pendingDocs.length} document(s) (${pendingDocs.map(d => d.filename).join(", ")}). Let me know what you'd like to do with them.`
+      : "";
+    const fullText = [imageContext, trimmedText, docNote].filter(Boolean).join("\n\n");
+    wakeStatus.value = "";
+    await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
+  } catch (error) {
+    wakeStatus.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    analysing.value = false;
+    for (const p of pendingImages) URL.revokeObjectURL(p.previewUrl);
   }
 }
 

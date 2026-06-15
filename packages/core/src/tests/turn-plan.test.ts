@@ -71,6 +71,11 @@ describe("turn plan — risk classification", () => {
     expect(classifyTurnRisk({ sourceSensitive: true })).toBe("high");
     expect(classifyTurnRisk({ invokedApprovalGatedTool: true })).toBe("high");
   });
+  it("is high for freshness-sensitive turns (answer is ungrounded unless retrieved)", () => {
+    // audit fe496ec5: a freshness turn was classified low and skipped QA, so a
+    // fabricated news bulletin shipped. Freshness now enters the grounding gate.
+    expect(classifyTurnRisk({ freshnessSensitive: true })).toBe("high");
+  });
   it("is low for plain chat / low-stakes single-domain work", () => {
     expect(classifyTurnRisk({})).toBe("low");
     expect(classifyTurnRisk({ planRiskTier: "low", sourceSensitive: false, invokedApprovalGatedTool: false })).toBe("low");

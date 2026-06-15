@@ -615,6 +615,44 @@ export interface SkillFeatureConfig {
   toolPipeline: ToolPipelineConfig;
 }
 
+export interface ManagedDocumentScope {
+  scope: "session" | "user" | "workspace" | "unknown";
+  source: string;
+  relativePath?: string;
+  contentType?: string;
+  size?: number;
+}
+export interface ManagedDocument {
+  id: string;
+  title: string | null;
+  chunkCount: number;
+  createdAt: string | null;
+  hasFile: boolean;
+  scopes: ManagedDocumentScope[];
+}
+export interface DocumentListResponse {
+  documents: ManagedDocument[];
+  engramAvailable: boolean;
+  currentUser: string | null;
+}
+
+export interface DocumentRagConfig {
+  enabled: boolean;
+  engramBaseUrl: string;
+  engramApiKey?: string;
+  ingestTimeoutMs: number;
+  searchTimeoutMs: number;
+  autoIngestAttachments: boolean;
+  injectContext: boolean;
+  retrievalTopK: number;
+  candidateTopK: number;
+  minRerankScore: number;
+  maxContextChars: number;
+  includeUserDocs: boolean;
+  includeWorkspaceDocs: boolean;
+  workspaceName: string;
+}
+
 export interface UserModelProfile {
   schemaVersion: 1;
   goals: string[];
@@ -2391,6 +2429,30 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as FileToMarkdownResult;
   }
 
+  /**
+   * Persist a document into the session's workspace uploads/ folder and return
+   * its workspace-relative path. Sent as an attachment on the next message so the
+   * runtime's document-RAG hook ingests it into engram (instead of inlining the
+   * whole file into the prompt).
+   */
+  async function persistAttachment(
+    file: File,
+    sessionId: string,
+  ): Promise<{ filename: string; relativePath: string; contentType: string; size: number }> {
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    formData.append("sessionId", sessionId);
+    const response = await authorizedFetch("/api/multimodal/persist-attachment", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Attachment upload failed (HTTP ${response.status})`);
+    }
+    return await response.json() as { filename: string; relativePath: string; contentType: string; size: number };
+  }
+
   async function transcribeAudio(file: Blob | File, options: { language?: string; prompt?: string; model?: string } = {}): Promise<SpeechToTextResult> {
     const formData = new FormData();
     const filename = file instanceof File ? file.name : "recording.webm";
@@ -2433,6 +2495,57 @@ export const useGatewayStore = defineStore("gateway", () => {
       body: JSON.stringify(config),
     });
     return await response.json() as SkillFeatureConfig;
+  }
+
+  async function getDocumentRagConfig(): Promise<DocumentRagConfig> {
+    const response = await authorizedFetch("/api/retrieval/document-rag/config");
+    return (await response.json() as { documentRag: DocumentRagConfig }).documentRag;
+  }
+
+  async function saveDocumentRagConfig(config: Partial<DocumentRagConfig>): Promise<DocumentRagConfig> {
+    const response = await authorizedFetch("/api/retrieval/document-rag/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentRag: config }),
+    });
+    return (await response.json() as { documentRag: DocumentRagConfig }).documentRag;
+  }
+
+  // ── Document RAG management ─────────────────────────────────────────────
+  async function listDocuments(): Promise<DocumentListResponse> {
+    const response = await authorizedFetch("/api/documents");
+    return await response.json() as DocumentListResponse;
+  }
+
+  async function uploadDocument(file: File, scope: "user" | "workspace" | "session", sessionId?: string): Promise<{ documentId: string; title: string; scope: string; chunkCount: number }> {
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    formData.append("scope", scope);
+    if (sessionId) formData.append("sessionId", sessionId);
+    const response = await authorizedFetch("/api/documents", { method: "POST", body: formData });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Upload failed (HTTP ${response.status})`);
+    }
+    return await response.json() as { documentId: string; title: string; scope: string; chunkCount: number };
+  }
+
+  async function deleteDocument(id: string, scope?: string, sessionId?: string): Promise<void> {
+    const q = new URLSearchParams();
+    if (scope) q.set("scope", scope);
+    if (sessionId) q.set("sessionId", sessionId);
+    const qs = q.toString();
+    const response = await authorizedFetch(`/api/documents/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Delete failed (HTTP ${response.status})`);
+    }
+  }
+
+  async function fetchDocumentFileBlob(id: string): Promise<Blob> {
+    const response = await authorizedFetch(`/api/documents/${encodeURIComponent(id)}/file`);
+    if (!response.ok) throw new Error(`Could not load the original file (HTTP ${response.status})`);
+    return await response.blob();
   }
 
   async function getUserModel(): Promise<UserModelProfile> {
@@ -2735,6 +2848,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     steerTurn,
     rewindToMessage,
     convertFileToMarkdown,
+    persistAttachment,
     transcribeAudio,
     listVoices,
     saveTtsVoice,
@@ -2746,6 +2860,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     saveOrchestrationConfig,
     getSkillLibraryConfig,
     saveSkillLibraryConfig,
+    getDocumentRagConfig,
+    saveDocumentRagConfig,
+    listDocuments,
+    uploadDocument,
+    deleteDocument,
+    fetchDocumentFileBlob,
     getUserModel,
     saveUserModel,
     resetUserModel,

@@ -152,6 +152,27 @@ describe("runtime turn guidance", () => {
     }
   });
 
+  it("treats a name QUESTION as fast-lane-eligible, not a durable naming change (audit acdd6cda)", () => {
+    // "wie heißt du?" matches the `heißt du` naming pattern but is a QUESTION —
+    // no name is being assigned, so it must NOT produce dynamic guidance (which
+    // would skip the receptionist fast lane and drag a trivial "what's your name"
+    // onto the 27KB full-prompt path → 21.8s). null guidance ⇒ the fast lane
+    // handles it from its capsule (which already carries the assistant name).
+    for (const phrase of [
+      "wie heißt du?",
+      "Hi; wie heißt du?",
+      "Wie ist dein Name?",
+      "what's your name?",
+      "heißt du wirklich so?",
+      // "du bist"/"bist du" non-naming uses must also stay fast-lane-eligible
+      // (the rename booleans are gated by extractAssistantName, which needs a quote).
+      "wie bist du drauf?",
+      "du bist echt hilfreich",
+    ]) {
+      expect(buildDynamicTurnGuidance(phrase, "orchestration_only"), `phrase: ${phrase}`).toBeNull();
+    }
+  });
+
   it("treats standing preferences as durable memory to persist without an explicit 'remember'", () => {
     for (const phrase of [
       "Ab sofort antworte bitte immer auf Englisch",
@@ -246,6 +267,43 @@ describe("runtime turn guidance", () => {
     // "now" must not match "know"/"known"; "live" must not match "delivery".
     expect(buildDynamicTurnGuidance("do you know how this feature works?", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
     expect(buildDynamicTurnGuidance("what is the delivery process for our orders?", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
+  });
+
+  it("extracts the assistant name from explicit naming commands (audit b71523fb)", async () => {
+    const { extractAssistantName } = await import("../agent/intent-classifier.js");
+    expect(extractAssistantName("Ab jetzt heißt du Luna")).toBe("Luna");
+    expect(extractAssistantName('Ab jetzt heißt du "Luna"')).toBe("Luna");
+    expect(extractAssistantName("du heißt jetzt Luna")).toBe("Luna");
+    expect(extractAssistantName("dein Name ist ab jetzt Orion")).toBe("Orion");
+    expect(extractAssistantName("your name is now Nova")).toBe("Nova");
+    expect(extractAssistantName("I'll call you Sky")).toBe("Sky");
+    expect(extractAssistantName("ich nenne dich Pip")).toBe("Pip");
+    // "du bist [name]" rename form — QUOTE REQUIRED (audit a6668324:
+    // `ab jetzt bist du "Luna"` was acknowledged but never persisted).
+    expect(extractAssistantName('ab jetzt bist du "Luna"')).toBe("Luna");
+    expect(extractAssistantName('du bist jetzt "Nova"')).toBe("Nova");
+    expect(extractAssistantName('Du bist "Orion"')).toBe("Orion");
+    // Guards: questions / filler words must NOT be read as a name.
+    expect(extractAssistantName("wie heißt du?")).toBeUndefined();
+    expect(extractAssistantName("heißt du wirklich so?")).toBeUndefined();
+    expect(extractAssistantName("what is your name?")).toBeUndefined();
+    // German noun-capitalization trap: an UNQUOTED "du bist X" is NOT a rename
+    // (every German noun is capitalized, so capitalization alone can't signal it).
+    expect(extractAssistantName("du bist Entwickler")).toBeUndefined();
+    expect(extractAssistantName("du bist hilfreich")).toBeUndefined();
+    expect(extractAssistantName("wie bist du drauf?")).toBeUndefined();
+  });
+
+  it("does not flag freshness for the weak temporal words 'now'/'jetzt' alone (audit 31b683e8)", () => {
+    // "nicht jetzt danke" was misread as freshness-sensitive (via "jetzt"),
+    // blocking the receptionist fast lane and forcing a 21.7s heavy turn for a
+    // one-line dismissal. Bare "now"/"jetzt"/"neu"/"new" no longer flip freshness;
+    // genuinely fresh turns carry a stronger signal (today/aktuell/latest/…).
+    expect(buildDynamicTurnGuidance("nicht jetzt danke", "orchestration_only")).toBeNull();
+    expect(buildDynamicTurnGuidance("not now thanks", "orchestration_only")).toBeNull();
+    expect(buildDynamicTurnGuidance("ok now I understand", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
+    // A strong signal still trips it.
+    expect(buildDynamicTurnGuidance("what are today's headlines?", "orchestration_only")?.freshnessSensitive).toBe(true);
   });
 
   it("treats explicit online-search requests as source-sensitive", () => {

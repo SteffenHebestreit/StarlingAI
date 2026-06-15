@@ -4,7 +4,7 @@
  */
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { tryReceptionistFastLane } from "./receptionist.js";
+import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
@@ -37,6 +37,7 @@ import { listAllScenes } from "../credentials/scenes.js";
 import { readAllFacts, beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
+  extractAssistantName,
   type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
   PRODUCT_RECOMMENDATION_PATTERNS,
@@ -3536,7 +3537,25 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     userId: session.userId,
   });
 
+  // ── Deterministic assistant-rename persistence ──────────────────────────────
+  // An explicit naming command ("Ab jetzt heißt du Luna", "your name is now …")
+  // must actually persist. Local models routinely just acknowledge it ("saved!")
+  // without calling assistant_personality_update (audit b71523fb), so we set the
+  // name here too — making the name durable AND the model's claim truthful.
+  try {
+    const namedAs = extractAssistantName(userMessage);
+    if (namedAs) {
+      const { setMainAssistantName, loadMainAssistantPersonality } = await import("../personality/service.js");
+      const before = loadMainAssistantPersonality().identity.name;
+      setMainAssistantName(namedAs, "user");
+      if (before !== namedAs) log.info({ sessionId: session.id, name: namedAs }, "assistant renamed (deterministic persist)");
+    }
+  } catch (err) {
+    log.warn({ err }, "deterministic assistant-name persist failed");
+  }
+
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
+  const hasTurnAttachments = Boolean(opts.userAttachments?.length);
 
   // ── Receptionist fast lane ────────────────────────────────────────────────
   // Opt-in first-contact gatekeeper (config.receptionist.enabled). When no task
@@ -3546,7 +3565,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // term, no routing tier, model escalation, error — returns null and falls
   // through to the full path below, so this only ever shortcuts trivial turns.
   // The user message is already recorded and input guardrails have already run.
-  if (detectedDynamicGuidance === null && getConfig().receptionist?.enabled) {
+  // Runs BEFORE document-RAG augmentation so a trivial "hi" never pays the
+  // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
+  // their files are always ingested + injected below.
+  if (detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled) {
     const fastLane = await tryReceptionistFastLane(userMessage, signal).catch(() => null);
     if (fastLane) {
       session.addMessage({ role: "assistant", content: fastLane.response });
@@ -3579,6 +3601,30 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         },
       };
     }
+  }
+
+  // ── Document RAG augmentation ───────────────────────────────────────────────
+  // Runs AFTER the fast lane, so trivial turns never pay the engram search cost.
+  // Auto-ingests files attached this turn into the session corpus (engram, via
+  // the file-MCP extractor) and injects the most relevant excerpts as a transient
+  // [DOCUMENT CONTEXT] system message so the assistant answers from the source.
+  // No-op when documentRag is disabled / engram is unreachable. Never fatal.
+  try {
+    const { augmentTurnWithDocuments } = await import("../retrieval/document-rag.js");
+    const aug = await augmentTurnWithDocuments({
+      ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}) },
+      workspacePath: session.getWorkspacePath(),
+      query: userMessage,
+      attachments: opts.userAttachments,
+    });
+    if (aug.ingested > 0 || aug.failed > 0) {
+      logAudit("document_rag_ingest", { ingested: aug.ingested, failed: aug.failed }, { sessionId: session.id });
+    }
+    if (aug.contextBlock) {
+      session.addMessage({ role: "system", content: `[DOCUMENT CONTEXT]\n${aug.contextBlock}` });
+    }
+  } catch (err) {
+    log.warn({ err }, "document RAG augmentation failed — continuing without it");
   }
 
   const priorDelegateEvidenceForFollowUp = findRecentDelegateEvidence(session.getHistory());
@@ -3929,15 +3975,6 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // than falling back to training-data hallucinations.
   let _sharedFindingsSystemMessage = "";
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
-  // Trust-the-LLM routing (Phase 2). The weak, false-positive-prone *freshness*
-  // keyword heuristic ("jetzt"/"now"/"latest") no longer forces delegation when
-  // trustModelRouting is on (default) — the model's own decision to answer
-  // directly is respected; freshness stays as advisory guidance in the prompt.
-  // *Source-sensitive* intent is explicit ("cite official sources", "search
-  // online", product research) and still forces delegation for anti-hallucination
-  // value. Set trustModelRouting=false to also force on freshness. Either way the
-  // never-empty release applies if the model declines after the nudge.
-  const trustModelRouting = getConfig().agents.mainAssistant.trustModelRouting !== false;
   // Soft routing enforcement (Flaw 2): when on, the routing-class enforcement
   // prompts (maintenance / workflow-catalog / search-no-match) are injected as
   // advisory hints rather than hard "You MUST … this turn" gates, and the hard
@@ -3957,10 +3994,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // (buildRequiredResearchFallbackRoute) so it targets the step's OWN agent, never an agent
   // outside the scene. The TOP-LEVEL launching turn (user channel) keeps full enforcement.
   const inWorkflowStep = session.channel === "workflow";
+  // Anti-hallucination: a freshness- OR source-sensitive turn must run real
+  // research — never a tool-free answer from training memory. Freshness used to
+  // be exempted (advisory-only) because its keyword heuristic was a false-positive
+  // magnet (weak terms "jetzt"/"now"). Those weak terms were removed from
+  // FRESHNESS_HINT_TERMS, so the flag is now high-precision (heute, aktuell, news,
+  // latest, current, recent, today, neueste, year) and a query carrying one that
+  // the model answers tool-free is fabricating current state (audit fe496ec5:
+  // "news von heute" → a 2.5KB invented bulletin — DAX 24.000, EZB 3,75 %, IPCC,
+  // ESA Artemis, all hallucinated, zero delegations). The model still gets to
+  // answer first; this only catches a tool-free draft and routes it through the
+  // re-nudge → autoResearchOnRefusal path, which ends with REAL searched results
+  // and never dead-ends empty. (`trustModelRouting` governs only soft routing
+  // nudges now; it no longer exempts this correctness gate.)
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(
       initialDynamicGuidance?.sourceSensitive
-      || (initialDynamicGuidance?.freshnessSensitive && !trustModelRouting),
+      || initialDynamicGuidance?.freshnessSensitive,
     );
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.artifactSensitive);
@@ -4218,17 +4268,49 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     let activeTrajectoryInjectionContext = injectTurnContext ? trajectoryInjectionContext : null;
     // In lean mode, replace the always-on context blocks with a one-line pointer
     // so the model knows to pull what it needs instead of assuming it is in view.
-    const contextRecallDigest = (iterationCount === 0 && leanContextInjection)
-      ? "Durable memory, the user model, this session's working facts, recent related sessions, and learned skills are NOT preloaded into this prompt. Before any non-trivial planning or delegation, call recall_context(query) to pull what is relevant. Do not assume that context is already in view."
-      : "";
+    // Lean-mode context pointer. Even when the fuller context is left to
+    // recall_context, the user's DURABLE facts (name/role/preferences/decisions)
+    // must be present as authoritative DATA the model can rely on — not left to a
+    // tool round-trip, and not papered over with per-question classifier special-
+    // cases (user steer: "give it programmatically the user-memory as systemprompt
+    // as data to rely on"). Compact + capped (reuses the receptionist capsule) so
+    // the prompt stays lean; the user model, session facts, related sessions and
+    // skills still come on demand via recall_context.
+    let contextRecallDigest = "";
+    if (iterationCount === 0 && leanContextInjection) {
+      let durableCapsule = "";
+      try {
+        durableCapsule = buildMemoryCapsule(session.getWorkspacePath(), 600);
+      } catch { /* no capsule → recall_context still covers it */ }
+      const parts: string[] = [];
+      if (durableCapsule.trim()) {
+        parts.push(
+          "Durable facts the user has had you remember — authoritative; rely on these and do not re-ask or contradict them:",
+          durableCapsule,
+          "",
+        );
+      }
+      parts.push(
+        "The user model, this session's working facts, recent related sessions, and learned skills are NOT preloaded — call recall_context(query) to pull those when a turn needs them. Do not assume that deeper context is already in view.",
+      );
+      contextRecallDigest = parts.join("\n");
+    }
     // Plan-first checkpoint: on a genuinely multi-area / multi-step turn, nudge
     // the orchestrator to record a short structured plan before fanning out so
     // the risk-gated QA pass can check the answer against acceptance criteria and
     // the operator dock can surface a high-stakes plan for approval. Soft and
     // droppable; trivial and single-domain turns are unaffected.
-    let planGuidance = (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true) && looksMultiDomainResearch(userMessage))
-      ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step that runs it via run_workflow; otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
-      : "";
+    let planGuidance = "";
+    if (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true)) {
+      planGuidance = looksMultiDomainResearch(userMessage)
+        ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step that runs it via run_workflow; otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
+        // Plan on every crucial turn, not just multi-domain research: a brief plan
+        // gives the risk-gated QA gate explicit acceptance criteria to verify the
+        // answer against, and makes the model decide the route before acting. Kept
+        // lightweight so a single-domain task isn't taxed — and a pure direct-
+        // knowledge answer skips it entirely (DIRECT ANSWER FIRST still holds).
+        : "PLAN FIRST: if this needs any tool, delegation, retrieval, or multi-step work, call record_plan ONCE with a SHORT plan before acting — objective; the step(s) (each tagged reuse | delegate | direct, with agentName for delegate steps); the acceptance criteria the final answer must meet; and stop conditions. A one-line objective with one or two acceptance criteria is enough for a simple single-step task — keep it lightweight. Set riskTier 'high' only when the task makes current/sourced factual claims, takes an external/destructive/credential action, or is otherwise consequential. If the request is fully answerable directly from your own knowledge in one reply, SKIP the plan and just answer. Then execute the plan in the same turn.";
+    }
     const collapsedHistory = session.getCollapsedHistory();
 
     const buildSystemMessages = (): LLMMessage[] => [
@@ -5477,15 +5559,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const risk = classifyTurnRisk({
           planRiskTier: qaPlan?.riskTier,
           sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
           invokedApprovalGatedTool,
         });
         if (risk === "high") {
-          if (initialDynamicGuidance?.sourceSensitive) {
-            // The failure-path backstop above only fires on a failed/partial run. For a
-            // source-sensitive turn that delegated SUCCESSFULLY, the answer was never
-            // cross-checked — so a training-data answer can ship while verified facts sit
-            // unused in shared findings. Re-ground it if it references none of them.
-            const anchorEvidence = (getConfig().orchestration?.qaEvidenceAnchoring ?? false) && !signal.aborted
+          if (initialDynamicGuidance?.sourceSensitive || initialDynamicGuidance?.freshnessSensitive) {
+            // Universal grounding gate (step 5). The failure-path backstop above only
+            // fires on a failed/partial run. For a source- OR freshness-sensitive turn
+            // that delegated SUCCESSFULLY, the answer was never cross-checked — so a
+            // training-data answer can ship while verified facts sit unused in shared
+            // findings (audit fe496ec5: fabricated news bulletin). Re-ground it if it
+            // references none of them. The check is CHEAP and deterministic
+            // (answerNeedsEvidenceAnchoringRepair) — the slow-model repair only fires
+            // when the draft is actually unanchored, so clean turns pay nothing.
+            const anchorEvidence = (getConfig().orchestration?.qaEvidenceAnchoring ?? true) && !signal.aborted
               ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
               : null;
             if (anchorEvidence && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {

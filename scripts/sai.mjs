@@ -5,7 +5,7 @@
  * Usage:
  *   sai setup                              Check prerequisites, generate .env secrets
  *   sai start [--pentest] ...              Build config + start Docker services
- *   sai stop  [--volumes]                  Stop services (--volumes also wipes DB volumes + flat-file memory)
+ *   sai stop  [--volumes]                  Stop services (--volumes also wipes DB volumes incl. engram RAG, flat-file memory, and uploaded files)
  *   sai wipe  --yes                        Wipe runtime data in place (all DBs), keep containers
  *   sai config build                       Merge config/ + workspace/ → starlingai.json
  *   sai config split [--from <file>]       Decompose monolithic config into two zones
@@ -199,7 +199,7 @@ async function cmdStart() {
 
   ${BOLD}Useful commands:${RESET}
     sai stop                      Stop all services
-    sai stop --volumes            Stop + wipe all data (DB volumes + flat-file memory store/skills)
+    sai stop --volumes            Stop + wipe all data (DB volumes incl. engram RAG, flat-file memory/skills, uploaded files)
     sai start --build             Force rebuild
     sai start --pentest           Start with Kali pentest service
     sai health                    Check service health
@@ -252,6 +252,33 @@ function wipeFlatFileMemory() {
   if (removed === 0) info("No flat-file memory found on disk (already clean).");
 }
 
+// Files attached to chats are persisted under the workspace `uploads/` bind mount
+// (NOT a docker volume), then ingested into the engram document-RAG store. The
+// engram graph itself lives in the gc-engram-neo4j-* volumes (removed by
+// `down -v`), but these original files survive on the host — wipe them too so a
+// clean slate doesn't leave orphaned document content behind.
+const UPLOAD_ZONES = [
+  "workspace/uploads",
+  "packages/core/workspace/uploads", // test/dev residue
+];
+
+function wipeUploadedFiles() {
+  let removed = 0;
+  for (const rel of UPLOAD_ZONES) {
+    const abs = resolve(repoRoot, rel);
+    if (!abs.startsWith(repoRoot)) continue; // never delete outside the repo
+    if (!existsSync(abs)) continue;
+    try {
+      rmSync(abs, { recursive: true, force: true });
+      ok(`Removed ${rel}`);
+      removed += 1;
+    } catch (err) {
+      warn(`Could not remove ${rel} — ${(err?.message || "error").slice(0, 120)}`);
+    }
+  }
+  if (removed === 0) info("No uploaded attachment files found on disk (already clean).");
+}
+
 async function cmdStop() {
   const { values } = parseArgs({
     args: restArgs,
@@ -271,12 +298,16 @@ async function cmdStop() {
 
   if (values.volumes) {
     // `down -v` cleared the DB-backed memory (Redis session facts, MemGraph
-    // knowledge graph, Postgres agent store + embeddings, QuestDB research notes).
-    // The flat-file durable memory store + learned skills survive on the host bind
-    // mount, so wipe them here for a real clean slate.
+    // knowledge graph, Postgres agent store + pgvector embeddings, QuestDB research
+    // notes) AND the document-RAG graph DB (engram's gc-engram-neo4j-* volumes) +
+    // the reranker model cache. The flat-file durable memory + learned skills and
+    // the uploaded attachment files survive on the host bind mount, so wipe those
+    // here for a real clean slate.
     hdr("Clearing flat-file agent memory (memory store, skills, learning history)...");
     wipeFlatFileMemory();
-    ok("Clean slate: containers, networks, DB volumes, and flat-file memory removed.");
+    hdr("Clearing uploaded attachment files (document-RAG source files)...");
+    wipeUploadedFiles();
+    ok("Clean slate: containers, networks, DB volumes (incl. engram RAG + reranker cache), flat-file memory, and uploaded files removed.");
     info(`Preserved: credentials, JWT secret, dashboard token, audit log — delete ${PRODUCT.stateDirName} by hand for a full factory reset.`);
   } else {
     ok("All containers and networks removed. Data volumes preserved.");
@@ -292,7 +323,7 @@ async function cmdWipe() {
   loadDotEnv();
 
   hdr(`Wipe ${PRODUCT.name} runtime data (containers stay up; config + credentials untouched)`);
-  info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings), QuestDB (telemetry + research notes), MemGraph (knowledge graph), and the audit-log mirror.");
+  info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings = pgvector RAG), QuestDB (telemetry + research notes), MemGraph (knowledge graph), engram (document-RAG graph) + its uploaded source files, and the audit-log mirror.");
   if (!values.yes) {
     warn("This permanently deletes that data. Re-run to proceed:  pnpm sai wipe --yes");
     warn("For a full clean slate (volumes + flat-file memory/skills) use:  pnpm sai stop --volumes");
@@ -335,8 +366,18 @@ async function cmdWipe() {
   // MemGraph — drop every node + relationship.
   dcExec("MemGraph cleared", "memgraph", `sh -lc "echo 'MATCH (n) DETACH DELETE n;' | mgconsole"`);
 
+  // engram — drop the whole document-RAG graph (chunks, keywords, doc nodes) from
+  // its Neo4j store. Recreated lazily on the next ingest.
+  const engramPw = process.env.ENGRAM_NEO4J_PASSWORD || "engram";
+  // cypher-shell isn't on PATH in the neo4j image — use its full bin path.
+  dcExec("engram document-RAG graph cleared", "engram-neo4j", `sh -lc "echo 'MATCH (n) DETACH DELETE n;' | /var/lib/neo4j/bin/cypher-shell -u neo4j -p ${engramPw} --non-interactive"`);
+
   // On-disk audit-log mirror on the gateway data volume.
   dcExec("Audit log mirror cleared", "gateway", `sh -lc ": > /data/audit.jsonl"`);
+
+  // Uploaded attachment files (document-RAG source files) on the workspace bind mount.
+  hdr("Clearing uploaded attachment files...");
+  wipeUploadedFiles();
 
   hdr("Runtime data wiped.");
   info("Schemas are recreated lazily on next use; no restart required.");
@@ -431,7 +472,7 @@ ${BOLD}Commands:${RESET}
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
-  stop  [--volumes]                  Stop services (--volumes wipes DB volumes + flat-file memory)
+  stop  [--volumes]                  Stop services (--volumes wipes DB volumes incl. engram RAG, flat-file memory, uploaded files)
   wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
                                      incl. pgvector, QuestDB, MemGraph, audit log)
                                      while containers keep running; config kept

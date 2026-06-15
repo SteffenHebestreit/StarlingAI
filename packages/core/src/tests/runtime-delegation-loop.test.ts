@@ -3831,36 +3831,42 @@ describe("runtime delegated-loop regressions", () => {
     );
   });
 
-  it("trusts the model's direct answer on a research-sensitive turn by default (no forced delegation)", async () => {
-    // Phase 2: with trustModelRouting on (default), a freshness-sensitive turn the
-    // model chooses to answer directly is accepted on the first pass — no nudge,
-    // no rejection, no wasted round-trip. This is the fix for the blank reply to
-    // "kannst du jetzt eigene skills erlernen?".
+  it("rejects a tool-free answer on a freshness-sensitive turn (anti-hallucination)", async () => {
+    // Audit fe496ec5: "aktuelle news von heute" was answered tool-free with a
+    // 2.5KB fabricated bulletin (DAX/EZB/IPCC/ESA all invented), zero delegations.
+    // Freshness is now high-precision (the weak "jetzt"/"now" terms were removed
+    // from FRESHNESS_HINT_TERMS) so it forces real research like source-sensitive
+    // intent: a tool-free freshness draft is rejected and re-nudged. Capability
+    // questions like "kannst du jetzt eigene skills erlernen?" are no longer
+    // freshness-flagged (no strong term + SELF_CAPABILITY suppression), so this
+    // does not regress the blank-reply fix. autoResearchOnRefusal disabled here so
+    // this asserts the nudge+release path deterministically without a delegate mock.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { autoResearchOnRefusal: false },
+    });
+
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
       return createTextStream("Here is what I know about the latest 2026 updates from my own knowledge.");
     });
 
-    const session = new AgentSession({
+    const session = new freshRuntime.AgentSession({
       channel: "test",
       workspacePath: "/workspace",
       systemPrompt: "You are a test agent.",
     });
 
-    const result = await runTurn({
+    const result = await freshRuntime.runTurn({
       session,
       userMessage: "What are the latest 2026 AI breakthroughs?",
     });
 
     expect(result.blocked).toBe(false);
-    expect(result.response).toContain("latest 2026 updates");
-    expect(llmCallCount).toBe(1);
-    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "delegation_required" }),
-    ]));
-    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "routing_nudge_released" }),
+    // Re-nudged once (forced research), then released — never ends empty.
+    expect(llmCallCount).toBe(2);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
     ]));
   });
 
@@ -3974,7 +3980,8 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.blocked).toBe(false);
     const messages = streamMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
     const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
-    expect(systemText).toContain("are NOT preloaded into this prompt");
+    expect(systemText).toContain("are NOT preloaded");
+    expect(systemText).toContain("recall_context");
     expect(logAudit).toHaveBeenCalledWith(
       "prompt_section_sizes",
       expect.objectContaining({ leanContextInjection: true }),

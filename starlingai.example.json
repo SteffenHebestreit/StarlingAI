@@ -75,19 +75,35 @@
       "backend": "auto"
       // auto mode priority: SearXNG → Playwright (browser-rendered DuckDuckGo) → DuckDuckGo (HTML scraping)
       // Set "backend": "playwright" to force browser-based search only
+    },
+    // Cross-encoder reranker. mode "tei" = a real /rerank endpoint (the `reranker`
+    // TEI sidecar in docker-compose serving bge-reranker-v2-m3 — also used by
+    // engram). mode "llm" = score with an OpenAI-compatible chat model instead.
+    "reranker": {
+      "enabled": true,
+      "mode": "tei",
+      "baseUrl": "http://reranker:80",
+      "model": "BAAI/bge-reranker-v2-m3",
+      "timeoutMs": 15000,
+      "topK": 6
+    },
+    // Document RAG over attached/uploaded files via the engram graph-RAG service
+    // (docker-compose `engram` + `engram-neo4j`). Files are extracted to Markdown
+    // by the file-conversion service (multimodal.files) and ingested into engram;
+    // relevant chunks are retrieved per turn. Scope: session by default; flip the
+    // include* toggles to also search the user's / workspace's shared corpus.
+    "documentRag": {
+      "enabled": true,
+      "engramBaseUrl": "http://engram:8088",
+      "autoIngestAttachments": true,
+      "injectContext": true,
+      "retrievalTopK": 6,
+      "candidateTopK": 30,
+      "maxContextChars": 6000,
+      "includeUserDocs": false,
+      "includeWorkspaceDocs": false,
+      "workspaceName": "workspace"
     }
-    //,
-    // "search": {
-    //   "backend": "searxng",
-    //   "searxngBaseUrl": "http://search.k2o",
-    //   "timeoutMs": 12000
-    // },
-    // "reranker": {
-    //   "enabled": true,
-    //   "baseUrl": "http://host.docker.internal:1234/v1",
-    //   "apiKey": "lm-studio",
-    //   "model": "Qwen/Qwen3-Reranker-4B"
-    // }
   },
 
   "computerUse": {

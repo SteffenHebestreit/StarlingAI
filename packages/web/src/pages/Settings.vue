@@ -965,6 +965,84 @@
             </div>
           </div>
 
+          <!-- ── Document RAG ────────────────────────────────────────── -->
+          <div v-if="isAgentsPage" class="glass-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0">Document RAG</h3>
+                <div class="text-xs text-gray-500 mt-1">Retrieval-augmented context from attached/uploaded documents (engram graph-RAG). Files are extracted to text and indexed; relevant excerpts are injected into the conversation.</div>
+              </div>
+              <button v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure Document RAG.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required. Requires the engram + reranker services to be running.
+              </div>
+
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Enable Document RAG</div>
+                  <div class="text-xs text-gray-500">Master switch for indexing and retrieving from attached documents.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.enabled" @change="docRagForm.enabled = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Auto-ingest attachments</div>
+                  <div class="text-xs text-gray-500">Index files attached to a message into that conversation's document library automatically.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.autoIngestAttachments" :disabled="!docRagForm.enabled" @change="docRagForm.autoIngestAttachments = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Inject context automatically</div>
+                  <div class="text-xs text-gray-500">Before answering, retrieve relevant excerpts and add them to the prompt.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.injectContext" :disabled="!docRagForm.enabled" @change="docRagForm.injectContext = $event" />
+              </div>
+
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Scope</div>
+                <div class="text-xs text-gray-500 -mt-1">Documents are always searchable within the conversation they were attached to. Extend retrieval to shared libraries:</div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Include the user's personal library</div>
+                    <div class="text-xs text-gray-500">Also search documents scoped to the signed-in user (user:&lt;id&gt;).</div>
+                  </div>
+                  <ToggleSwitch :value="docRagForm.includeUserDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeUserDocs = $event" />
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Include the workspace library</div>
+                    <div class="text-xs text-gray-500">Also search documents shared across the whole workspace.</div>
+                  </div>
+                  <ToggleSwitch :value="docRagForm.includeWorkspaceDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeWorkspaceDocs = $event" />
+                </div>
+              </div>
+
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Excerpts injected per turn <span class="text-gray-600 font-normal">default 6</span></label>
+                  <input v-model.number="docRagForm.retrievalTopK" type="number" min="1" max="20" class="input-box" :disabled="!docRagForm.enabled" />
+                </div>
+                <div>
+                  <label class="field-label">Max context characters <span class="text-gray-600 font-normal">default 6000</span></label>
+                  <input v-model.number="docRagForm.maxContextChars" type="number" min="500" max="50000" step="500" class="input-box" :disabled="!docRagForm.enabled" />
+                </div>
+              </div>
+
+              <div v-if="docRagError" class="text-sm text-red-400">{{ docRagError }}</div>
+
+              <div class="flex justify-end">
+                <button @click="saveDocumentRagConfigUI" :disabled="docRagSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ docRagSaving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!-- ── User Model ──────────────────────────────────────────── -->
           <div v-if="isAgentsPage" class="glass-card p-5">
             <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
@@ -3139,6 +3217,63 @@ async function saveOrchestrationConfigUI() {
   }
 }
 
+// ── Document RAG ───────────────────────────────────────────────────────────
+const docRagSaving = ref(false);
+const docRagError = ref("");
+const docRagForm = reactive<{
+  enabled: boolean;
+  autoIngestAttachments: boolean;
+  injectContext: boolean;
+  includeUserDocs: boolean;
+  includeWorkspaceDocs: boolean;
+  retrievalTopK: number;
+  maxContextChars: number;
+}>({
+  enabled: false,
+  autoIngestAttachments: true,
+  injectContext: true,
+  includeUserDocs: false,
+  includeWorkspaceDocs: false,
+  retrievalTopK: 6,
+  maxContextChars: 6000,
+});
+
+async function reloadDocumentRagConfig() {
+  try {
+    const cfg = await gateway.getDocumentRagConfig();
+    docRagForm.enabled = cfg.enabled;
+    docRagForm.autoIngestAttachments = cfg.autoIngestAttachments;
+    docRagForm.injectContext = cfg.injectContext;
+    docRagForm.includeUserDocs = cfg.includeUserDocs;
+    docRagForm.includeWorkspaceDocs = cfg.includeWorkspaceDocs;
+    docRagForm.retrievalTopK = cfg.retrievalTopK;
+    docRagForm.maxContextChars = cfg.maxContextChars;
+    docRagError.value = "";
+  } catch (e) {
+    docRagError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function saveDocumentRagConfigUI() {
+  docRagSaving.value = true;
+  docRagError.value = "";
+  try {
+    await gateway.saveDocumentRagConfig({
+      enabled: docRagForm.enabled,
+      autoIngestAttachments: docRagForm.autoIngestAttachments,
+      injectContext: docRagForm.injectContext,
+      includeUserDocs: docRagForm.includeUserDocs,
+      includeWorkspaceDocs: docRagForm.includeWorkspaceDocs,
+      retrievalTopK: docRagForm.retrievalTopK,
+      maxContextChars: docRagForm.maxContextChars,
+    });
+  } catch (e) {
+    docRagError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    docRagSaving.value = false;
+  }
+}
+
 // ── Skill Library & Tool Pipeline ─────────────────────────────────────────
 const skillConfigSaving = ref(false);
 const skillConfigError = ref("");
@@ -3346,6 +3481,7 @@ function loadDefinitionsData() {
   void runtime.fetch();
   void reloadOrchestrationConfig();
   void reloadSkillConfig();
+  void reloadDocumentRagConfig();
   void reloadUserModel();
 }
 

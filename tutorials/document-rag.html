@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Document RAG — StarlingAI</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="sidebar-overlay"></div>
+
+<div class="layout">
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="logo-icon logo-icon-image" src="../assets/brand/swarmLogo.svg" alt="StarlingAI logo" />
+      <a href="index.html">StarlingAI</a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-section-title">Getting Started</div>
+        <a class="nav-link" href="index.html"><span class="nav-icon">🏠</span> Overview</a>
+        <a class="nav-link" href="setup.html"><span class="nav-icon">🔧</span> Project Setup</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Configuration</div>
+        <a class="nav-link" href="agents.html"><span class="nav-icon">🤖</span> Agents</a>
+        <a class="nav-link" href="scenes.html"><span class="nav-icon">🎬</span> Scenes</a>
+        <a class="nav-link" href="multimodal.html"><span class="nav-icon">🎙️</span> Multimodal</a>
+        <a class="nav-link active" href="document-rag.html"><span class="nav-icon">📚</span> Document RAG</a>
+        <a class="nav-link" href="pentest.html"><span class="nav-icon">🔐</span> Pentest</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">Channels</div>
+        <a class="nav-link" href="channels/index.html"><span class="nav-icon">📡</span> All Channels</a>
+        <a class="nav-link nav-indent" href="channels/telegram.html"><span class="nav-icon">✈️</span> Telegram</a>
+        <a class="nav-link nav-indent" href="channels/slack.html"><span class="nav-icon">💬</span> Slack</a>
+        <a class="nav-link nav-indent" href="channels/discord.html"><span class="nav-icon">🎮</span> Discord</a>
+        <a class="nav-link nav-indent" href="channels/whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
+        <a class="nav-link nav-indent" href="channels/email.html"><span class="nav-icon">📧</span> Email</a>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" aria-label="Toggle sidebar">☰</button>
+      <nav class="breadcrumb">
+        <a href="index.html">Home</a>
+        <span class="sep">›</span>
+        <span class="current">Document RAG</span>
+      </nav>
+    </header>
+
+    <div class="content">
+      <!-- Hero -->
+      <div class="page-hero">
+        <h1>📚 Document RAG</h1>
+        <p class="tagline">Attach a document, ask about it — the swarm extracts, indexes, and answers from the source automatically.</p>
+      </div>
+
+      <!-- Overview -->
+      <div class="section">
+        <div class="section-title">What is Document RAG?</div>
+        <p>
+          Document RAG (retrieval-augmented generation) lets StarlingAI answer from the contents of files you
+          attach to a conversation — PDFs, Word/PowerPoint/Excel documents, images, Markdown, and more — without
+          stuffing the whole file into the prompt. Files are converted to text, indexed into a knowledge graph,
+          and the most relevant excerpts are retrieved and injected as context on every turn.
+        </p>
+        <p>
+          It is powered by <a href="https://github.com/SteffenHebestreit/engram" target="_blank" rel="noopener">engram</a>,
+          a graph-RAG service: each document is chunked, summarised and keyword-tagged by the LLM, embedded across
+          multiple channels, and linked in a Neo4j graph. Search runs a HyDE → multi-channel retrieval → fusion →
+          graph-expansion → cross-encoder rerank pipeline, so retrieval is far sharper than plain vector similarity.
+        </p>
+      </div>
+
+      <!-- How it flows -->
+      <div class="section">
+        <div class="section-title">How it works</div>
+        <ol>
+          <li><strong>Extract.</strong> A file attached to your message is converted to Markdown by the file-conversion service (the <code>fastapi-mcp-template</code> running <code>file_to_markdown</code>, with OCR/vision fallback for images).</li>
+          <li><strong>Ingest.</strong> The text is sent to engram and tagged with a <em>scope</em> — by default <code>session:&lt;id&gt;</code>, so it is only visible inside that conversation. engram chunks it, extracts a summary + keywords, builds embeddings, and stores the graph. Re-attaching the same file is idempotent (deduped by content hash).</li>
+          <li><strong>Retrieve.</strong> Before answering, the runtime searches engram for the most relevant excerpts <em>within your active scope</em> and injects them as hidden context. It also exposes the <code>search_documents</code>, <code>list_documents</code>, <code>ingest_document</code>, and <code>forget_document</code> tools for explicit control.</li>
+          <li><strong>Answer.</strong> The assistant responds using the retrieved excerpts and cites the document name.</li>
+        </ol>
+      </div>
+
+      <!-- Services -->
+      <div class="section">
+        <div class="section-title">Services it runs</div>
+        <p>Document RAG adds three containers, started by the normal <code>sai start</code> / <code>docker compose up</code>:</p>
+        <ul>
+          <li><code>engram</code> — the graph-RAG API (port 8088). Its embeddings and extraction LLM point at the same LM Studio endpoint as the gateway (<code>SAI_LMSTUDIO_URL</code>), using the loaded <code>text-embedding-bge-m3</code> and chat models.</li>
+          <li><code>engram-neo4j</code> — engram's graph store (Neo4j 5.26 + the Graph Data Science plugin for graph-proximity scoring).</li>
+          <li><code>reranker</code> — a CPU HuggingFace TEI sidecar serving <code>bge-reranker-v2-m3</code>. It powers both engram's rerank stage and the gateway's own retrieval reranker. The model (~2&nbsp;GB) downloads on first start.</li>
+        </ul>
+        <p>The gateway degrades gracefully if these services are absent — Document RAG simply turns into a no-op.</p>
+      </div>
+
+      <!-- Settings -->
+      <div class="section">
+        <div class="section-title">Configuring it</div>
+        <p>
+          Open <strong>Settings → Document RAG</strong> in the dashboard, or edit <code>retrieval.documentRag</code>
+          in <code>starlingai.json</code>:
+        </p>
+        <pre><code>"retrieval": {
+  "reranker": {
+    "enabled": true,
+    "mode": "tei",
+    "baseUrl": "http://reranker:80",
+    "model": "BAAI/bge-reranker-v2-m3"
+  },
+  "documentRag": {
+    "enabled": true,
+    "engramBaseUrl": "http://engram:8088",
+    "autoIngestAttachments": true,   // index files attached to a turn automatically
+    "injectContext": true,           // retrieve + inject excerpts before answering
+    "retrievalTopK": 6,              // excerpts injected per turn
+    "maxContextChars": 6000,
+    "includeUserDocs": false,        // also search the user's personal library
+    "includeWorkspaceDocs": false,   // also search the workspace-shared library
+    "workspaceName": "workspace"
+  }
+}</code></pre>
+        <p>Changes saved from Settings take effect immediately — no restart needed.</p>
+      </div>
+
+      <!-- Scopes -->
+      <div class="section">
+        <div class="section-title">Scopes: session, user, and workspace</div>
+        <p>Every document is stored under a scope token, and retrieval only sees documents in your <em>active</em> scope:</p>
+        <ul>
+          <li><strong>Session</strong> (always on) — documents attached to a conversation are searchable only within that conversation.</li>
+          <li><strong>User</strong> (<code>includeUserDocs</code>) — also search a personal library shared across the signed-in user's conversations.</li>
+          <li><strong>Workspace</strong> (<code>includeWorkspaceDocs</code>) — also search a library shared across the whole workspace.</li>
+        </ul>
+        <p>
+          To put a document into the user or workspace library, ask an agent to
+          <code>ingest_document</code> with the matching scope, e.g. <em>"ingest <code>reports/q3.pdf</code> into the workspace library"</em>.
+        </p>
+      </div>
+
+      <!-- Try it -->
+      <div class="section">
+        <div class="section-title">Try it</div>
+        <ol>
+          <li>Confirm the services are healthy: <code>docker compose ps engram engram-neo4j reranker</code>.</li>
+          <li>In the dashboard chat, attach a PDF or DOCX and ask a specific question about its contents.</li>
+          <li>The first turn extracts + indexes the file (a few seconds), then answers from it. Follow-up questions reuse the index instantly.</li>
+          <li>Ask <em>"what documents are available?"</em> to have the assistant call <code>list_documents</code>.</li>
+        </ol>
+      </div>
+
+      <!-- Notes -->
+      <div class="section">
+        <div class="section-title">Tips &amp; gotchas</div>
+        <ul>
+          <li><strong>Reranker first-start lag.</strong> The TEI sidecar downloads <code>bge-reranker-v2-m3</code> on first run. Until it is ready, engram still works — it falls back to its fused score for ranking.</li>
+          <li><strong>LM Studio JSON mode.</strong> engram's metadata extraction uses the LLM; LM Studio rejects <code>response_format=json_object</code>, so <code>ENGRAM_LLM_JSON_MODE</code> defaults to <code>false</code> (engram parses JSON out of the plain reply).</li>
+          <li><strong>Point engram at the right LM Studio.</strong> engram's embedding/LLM endpoints default to the gateway's <code>SAI_LMSTUDIO_URL</code> — the instance with the models loaded — not <code>host.docker.internal</code>.</li>
+          <li><strong>Lightweight alternative.</strong> For one-off large pasted text (not a file), the <code>rag_ingest</code>/<code>rag_search</code> tools offer a simpler pgvector-backed store without the engram graph pipeline.</li>
+        </ul>
+      </div>
+
+      <footer class="site-footer" style="margin-top:2rem;padding:1rem 0;border-top:1px solid var(--border);">
+        <a href="multimodal.html" style="color:var(--muted);">← Multimodal</a>
+        <a href="pentest.html" style="color:var(--primary);">Next: Pentest →</a>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

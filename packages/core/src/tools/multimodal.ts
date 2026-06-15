@@ -45,6 +45,22 @@ function multimodalServiceConfigured(baseUrl: string | undefined): boolean {
   return typeof baseUrl === "string" && baseUrl.trim().length > 0;
 }
 
+/**
+ * The fastapi-mcp-template REST/MCP endpoint wraps every tool result in
+ * `{ success, result: {...} }`, so the actual `{ markdown, ... }` payload lives
+ * under `.result`. Other/older conversion backends return it at the top level.
+ * Normalize both shapes so callers can read `body.markdown` / `body.error`
+ * directly. (Without this, file_to_markdown extraction silently returned ""
+ * because `body.markdown` was undefined — the markdown was nested in `result`.)
+ */
+function unwrapConversionResult(body: Record<string, unknown>): Record<string, unknown> {
+  const inner = body["result"];
+  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+    return inner as Record<string, unknown>;
+  }
+  return body;
+}
+
 registerTool({
   name: "extract_file_content",
   description: "Convert a workspace file into Markdown using the configured file-conversion backend.",
@@ -556,14 +572,14 @@ async function convertFileToMarkdown(file: WorkspaceBinaryFile): Promise<Record<
 
   if (config.mcpServer) {
     try {
-      const body = await callMultimodalToolViaMcp({
+      const body = unwrapConversionResult(await callMultimodalToolViaMcp({
         serverName: config.mcpServer,
         toolName: config.toolName,
         filename: file.filename,
         contentType: file.contentType,
         fileBytes: file.bytes,
         timeoutMs: config.timeoutMs,
-      });
+      }));
       if (String(body["markdown"] ?? "").trim()) {
         return body;
       }
@@ -587,8 +603,15 @@ async function convertFileToMarkdown(file: WorkspaceBinaryFile): Promise<Record<
       config.timeoutMs,
     );
     if (upstream.ok) {
-      const body = await parseUpstreamJsonResponse(upstream, "File conversion returned a non-JSON response");
+      const body = unwrapConversionResult(
+        await parseUpstreamJsonResponse(upstream, "File conversion returned a non-JSON response"),
+      );
       if (String(body["markdown"] ?? "").trim()) return body;
+      // The service wraps a tool-level failure as { success:false, error } inside
+      // the result envelope (HTTP is still 200). Surface it for non-image files
+      // instead of silently returning empty markdown.
+      const innerError = typeof body["error"] === "string" ? body["error"].trim() : "";
+      if (!isImage && innerError) throw new Error(`File conversion failed: ${innerError}`);
     } else if (!isImage) {
       throw new Error(await extractUpstreamError(upstream, "File conversion failed"));
     }

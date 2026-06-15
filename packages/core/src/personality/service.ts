@@ -338,6 +338,7 @@ export function updateMainAssistantPersonality(
   if (
     !parsed.reset
     && !normalized.identityCore
+    && !normalized.identityName
     && !normalized.tone
     && !normalized.style
     && !normalized.quirks
@@ -373,6 +374,25 @@ export function updateMainAssistantPersonality(
     reason: parsed.reason,
     revisionBase: current.revision,
   });
+}
+
+/**
+ * Set just the assistant's preferred name (identity.name), preserving everything
+ * else. No-op (returns the current profile) when the name is already set to the
+ * same value. Used for deterministic persistence of explicit naming commands.
+ */
+export function setMainAssistantName(
+  name: string,
+  actor: MainAssistantPersonalityActor = "user",
+): MainAssistantPersonalityProfile {
+  const trimmed = name.trim();
+  const current = loadMainAssistantPersonality();
+  if (!trimmed || current.identity.name === trimmed) return current;
+  // append/reset get their schema defaults at parse time inside the call.
+  return updateMainAssistantPersonality(
+    { identity: { name: trimmed }, reason: `User named the assistant "${trimmed}"` } as MainAssistantPersonalityUpdate,
+    actor,
+  );
 }
 
 export function resetMainAssistantPersonality(

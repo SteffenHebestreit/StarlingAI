@@ -88,6 +88,7 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Parallel Delegation** — Independent sub-tasks run concurrently. Task graphs handle complex dependencies with per-node fallbacks.
 - **Reusable Workflows** — Scenes and multi-step jobs can be discovered with `search_workflows` and executed inline with `run_workflow`, so recurring packets do not have to be replanned from scratch.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
+- **Document RAG** — Files attached to a conversation are extracted to Markdown by the file-conversion service and indexed into the [engram](https://github.com/SteffenHebestreit/engram) graph-RAG store (chunk → keywords/summary → multi-channel embeddings → graph). Relevant excerpts are auto-retrieved and injected as context per turn, with a cross-encoder rerank (`bge-reranker-v2-m3` via a TEI sidecar). Scope is the conversation by default, extendable to the user's or the workspace's shared library from settings.
 - **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
 - **Federated Swarms** — Instances delegate work to one another over HMAC-signed, short-lived, peer-scoped tokens. Each side keeps full control of its own tool tiers and approval policies — federation never bypasses local guardrails.
 - **Open Interoperability** — StarlingAI both speaks and serves the open agent protocols: an MCP server (HTTP + stdio) exposes its tools to other clients, and a public A2A protocol (server + client) lets external agents collaborate with the swarm.
@@ -175,6 +176,8 @@ pnpm sai start --pentest           # include Kali Linux pentest service
 pnpm sai start --computer-desktop  # include VNC desktop for computer-use
 pnpm sai start --all               # all remaining optional services
 ```
+
+**Document RAG services.** Document RAG adds three containers — `engram` (graph-RAG API), `engram-neo4j` (graph store with the GDS plugin), and `reranker` (a CPU HuggingFace TEI sidecar serving `bge-reranker-v2-m3`). They come up with the normal `sai start` / `docker compose up`. The reranker downloads its model (~2 GB) on first start, and `engram` points its embeddings + extraction LLM at the same LM Studio endpoint as the gateway (`SAI_LMSTUDIO_URL`). See [`.env.example`](.env.example) for the `ENGRAM_*` / `RERANKER_MODEL` overrides. The gateway degrades gracefully if these are absent.
 
 ### Other CLI commands
 

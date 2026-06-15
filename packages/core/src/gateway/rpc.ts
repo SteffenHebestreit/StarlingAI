@@ -276,10 +276,15 @@ export class RpcConnection {
   private sessionTurnRequestIds = new Map<string, string>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingInputRequests = new Map<string, PendingInputRequest>();
+  /** Authenticated user for this connection (JWT subject), set at WS connect.
+   *  Sessions are attributed to this so document-RAG user scope + per-user RBAC
+   *  match the same identity uploads use. Undefined only if the token had no sub. */
+  private readonly connUserId: string | undefined;
 
-  constructor(ws: WebSocket) {
+  constructor(ws: WebSocket, connUserId?: string) {
     this.connId = randomUUID();
     this.ws = ws;
+    this.connUserId = connUserId;
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
@@ -341,7 +346,10 @@ export class RpcConnection {
 
         const session = createSession({
           channel: String(params["channel"] ?? "webchat"),
-          userId: params["userId"] ? String(params["userId"]) : undefined,
+          // Attribute the session to the authenticated connection user (so the
+          // document-RAG user scope + RBAC match the identity uploads use). The
+          // server-derived identity wins over any client-supplied userId.
+          userId: this.connUserId ?? (params["userId"] ? String(params["userId"]) : undefined),
           workspacePath,
         });
         this.activeSessionId = session.id;

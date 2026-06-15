@@ -18,6 +18,7 @@ export type CoreAuditEventType =
   | "serve_app_stopped"
   | "message_received"
   | "message_sent"
+  | "document_rag_ingest"
   | "tool_call_requested"
   | "tool_call_approved"
   | "tool_call_blocked"
