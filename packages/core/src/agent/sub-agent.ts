@@ -26,6 +26,7 @@ import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } 
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
+import { loadTurnPlan } from "./turn-plan.js";
 import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
 import {
@@ -68,6 +69,10 @@ const DEFAULT_MAX_ITERATIONS = 5;
 // chains rather than a normal research stopper.
 const SUFFICIENT_EVIDENCE_NUDGE_BYTES = 4_000;    // ~7 extracted findings
 const SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES = 12_000; // ~20 extracted findings
+// Oversight (config.orchestration.oversight): max cheap routing-tier "is the goal
+// already met?" checks per sub-agent run. Bounded so the oversight only trims the
+// long over-fetch tail, never adds an unbounded series of extra model calls.
+const OVERSIGHT_MAX_GOAL_CHECKS = 2;
 const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "delegate_to_agent",
   "parallel_delegate",
@@ -84,6 +89,47 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
   "browser_select_option",
   "site_fill_credentials",
 ]);
+
+/**
+ * Cheap routing-tier oversight check: given the turn's acceptance criteria and
+ * the evidence a worker agent has gathered SO FAR, is the goal already met well
+ * enough to write the final answer now? Returns true ⇒ stop gathering and
+ * finalize. Runs on model.tiers.routing (a small fast model), NOT the worker's
+ * model, and only at evidence boundaries — so it trims the long over-fetch tail
+ * without adding a parallel load on the main model. Any miss (no routing tier,
+ * error, ambiguous reply) returns false, so the existing byte/time ladder still
+ * applies; the oversight only ever ENDS work earlier, never prolongs it.
+ */
+export async function assessOversightGoalMet(
+  acceptanceCriteria: string[],
+  evidence: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (acceptanceCriteria.length === 0) return false;
+  const provider = getChatProviderForTier("routing");
+  if (!provider) return false;
+  const system =
+    "You are a swarm oversight checker. A worker agent is gathering evidence for a task. Given the task's "
+    + "acceptance criteria and the evidence it has gathered SO FAR, decide whether the goal is ALREADY met well "
+    + "enough to write the final answer now. Bias toward stopping: if the evidence already covers the criteria, the "
+    + "worker should STOP gathering more. Reply with EXACTLY one word — DONE if the criteria are already satisfied, "
+    + "or CONTINUE if a criterion is clearly not yet covered.";
+  const user =
+    "Acceptance criteria:\n"
+    + acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+    + "\n\nEvidence gathered so far:\n"
+    + (evidence || "(none)").slice(0, 3_000);
+  try {
+    const res = await provider.complete(
+      [{ role: "system", content: system }, { role: "user", content: user }],
+      [],
+      signal,
+    );
+    return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
+  } catch {
+    return false;
+  }
+}
 
 // Discovery/meta tools whose output is routing metadata about the SWARM, never
 // evidence about the user's subject. Excluded from the useful-evidence snippet
@@ -2721,6 +2767,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
     let sufficiencyToolsStripped = false;
+    // Oversight: load the turn's recorded plan acceptance criteria ONCE (from the
+    // root orchestrator session — loadTurnPlan strips the sub: hops). The goal-met
+    // branch in the loop checks the gathered evidence against them via the cheap
+    // routing tier and authoritatively finalizes early once they are satisfied.
+    const oversightEnabled = config.orchestration?.oversight !== false;
+    const oversightCriteria: string[] = oversightEnabled
+      ? await loadTurnPlan(subSessionId).then((p) => p?.acceptanceCriteria ?? []).catch(() => [])
+      : [];
+    let oversightChecksUsed = 0;
     // Evidence-gathering iterations the model has run AFTER the sufficiency
     // nudge told it to answer — past the threshold, the soft nudge escalates
     // to the hard tool strip (see strip condition below).
@@ -5128,6 +5183,49 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // timed out, eventually hit the per-agent cap, and only then
       // produce a 1097-char shrug ignoring whatever real fragments came
       // back. Both branches fire at most once per run.
+      // ── Oversight: goal-aware early finalize ─────────────────────────────
+      // The byte-threshold strip below is blunt — it lets a worker grind through
+      // far more sources than the goal needs before the 12K brake trips (session
+      // d251793b: a "today's news" run hit 9 outlets / 5+ min while the soft
+      // nudge was ignored). When the turn recorded acceptance criteria, ask the
+      // cheap routing-tier model whether the evidence ALREADY satisfies them; on
+      // DONE, fire the SAME authoritative strip+finalize early. Goal-aware, not a
+      // per-task source cap. Bounded: only at an evidence boundary, only when
+      // criteria exist, ≤ OVERSIGHT_MAX_GOAL_CHECKS calls/run, and a routing-tier
+      // miss/error falls through to the byte/time ladder (oversight only ends work
+      // early, never prolongs it).
+      let oversightGoalMet = false;
+      if (
+        oversightEnabled
+        && oversightCriteria.length > 0
+        && !sufficiencyToolsStripped
+        && !cascadeSynthesisForced
+        && oversightChecksUsed < OVERSIGHT_MAX_GOAL_CHECKS
+        && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_NUDGE_BYTES
+        && toolResults.length > 0
+        && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))
+        && !signal?.aborted
+      ) {
+        oversightChecksUsed += 1;
+        const sharedForOversight = await formatSharedFactsContext(subSessionId).catch(() => ({ content: "" }));
+        const oversightEvidence = sharedForOversight.content
+          || toolResults.map((tr) => tr.content).join("\n");
+        oversightGoalMet = await assessOversightGoalMet(oversightCriteria, oversightEvidence, signal);
+        if (oversightGoalMet) {
+          logAudit(
+            "sub_agent_synthesis_forced",
+            {
+              agentName: opts.agentName,
+              reason: "oversight_goal_met",
+              usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+              acceptanceCriteria: oversightCriteria.length,
+              iterations,
+            },
+            { sessionId: subSessionId, severity: "info" },
+          );
+        }
+      }
+
       if (!cascadeSynthesisForced && cumulativeTimeoutSignalCount >= 2 && toolResults.length > 0) {
         cascadeSynthesisForced = true;
         const beforeLen = tools.length;
@@ -5205,6 +5303,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // brake. A nudge ignored this many times IS the convergence failure
           // the brake exists for — escalate soft → hard.
           || (sufficiencySynthesisNudged && evidenceIterationsSinceNudge >= NUDGE_IGNORED_STRIP_ITERATIONS)
+          // Oversight judged the recorded acceptance criteria already met —
+          // finalize NOW rather than grinding to the byte brake (goal-aware).
+          || oversightGoalMet
         )
         && toolResults.length > 0
         && tools.some((tool) => EVIDENCE_GATHERING_TOOL_NAMES.has(tool.name))

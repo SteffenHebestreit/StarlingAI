@@ -27,6 +27,9 @@ const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[USER RESPONSE REQUIRED]",
   "[DELEGATION FAILED]",
   "[USER INTERACTION OWNERSHIP]",
+  // Per-turn document-RAG context (engram excerpts for the current message).
+  // Pruned next turn so retrieved excerpts never accumulate in history.
+  "[DOCUMENT CONTEXT]",
 ];
 
 function isTransientTurnSystemMessage(message: Pick<SessionHistoryMessage, "role" | "content">): boolean {
@@ -1130,6 +1133,7 @@ ${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
 
 ## Proactive Memory
 - When the user states something durable — their name or role, a lasting preference, a standing instruction ("ab jetzt …", "from now on …"), a decision, or a name for you — persist it in the SAME turn it is stated: assistant_personality_update for your own name or persona, memory_store for everything else. Never wait for an explicit "remember this".
+- Validate before you save: persist only what the user actually stated or what tool evidence confirmed as true. NEVER store an assumption, an inference, OR a stated "fact" you have not verified — a confident-sounding fact may be fabricated/hallucinated — as a durable truth; when unsure a detail is correct, verify it first or leave it unsaved rather than committing it to memory as fact.
 - Acknowledge the saved fact in one short clause of your reply; do not ask for permission to save it.
 - Do not persist secrets, credentials, or one-off task details this way.
 

@@ -109,6 +109,7 @@ import "./tools/graph.js";
 import "./tools/timeseries.js";
 import "./tools/research-scratch.js";
 import "./tools/rag.js";
+import "./tools/documents.js";
 import "./tools/sql.js";
 import "./tools/spreadsheet.js";
 import "./tools/pdf-forms.js";

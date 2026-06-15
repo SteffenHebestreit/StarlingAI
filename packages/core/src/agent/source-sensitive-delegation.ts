@@ -84,22 +84,13 @@ export function buildCanonicalSourceSensitiveDelegationTask(parentTask: string, 
     "Research the parent task below: use web_search and web_fetch to open the most authoritative primary or official sources for the subject(s) the request explicitly names, and gather the concrete facts, names, dates, figures, and source URLs needed to fulfill it.",
     "Stay tightly scoped to the subject(s) the request names: consult a handful of authoritative sources (aim for ~3–6) and then STOP and report — do NOT broaden the search to tangential, adjacent, or merely related topics the request did not ask for.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    // The parent task may carry the coordinator's OWN assumptions about the
-    // subject's identity (audit c33e65dd: a "Fable 5" question arrived elaborated
-    // into "Fable, das neue Spiel von Playground Games/Xbox" with a USK/Store
-    // investigation built on that guess). A specific appearing in the parent task
-    // is NOT confirmation — only tool evidence is.
-    "The parent task below states the request, but it may carry the coordinator's own assumptions. Search the subject's identifiers exactly as written; do NOT treat any name, identifier, date, quantity, price, URL, or specification as confirmed merely because it appears in the parent task — establish the subject's real identity from authoritative sources FIRST, and treat every such value as unconfirmed until a completed tool result or shared finding confirms it.",
-    "State a concrete fact only after an authoritative or official source confirms it; if the evidence contradicts an assumption in the task, the evidence wins, and if evidence is missing, report uncertainty instead of filling gaps.",
-    // Per-claim citation discipline: the source-sensitive backstop cross-checks
-    // every concrete spec value in the final draft against the gathered shared
-    // findings. When a draft mentions a spec that is NOT in the findings, it is
-    // either re-grounded or marked unverifiziert. Researchers must therefore
-    // attach each concrete spec to the source line that supports it — generic
-    // "the manufacturer says X" prose is not enough; the exact value (e.g.
-    // "analog differential", "73 dB(A)", "IP57") must be attributable.
-    "For every concrete spec, name, date, figure, quantity, price, or interface you report, you MUST include the exact value as the source states it and a direct source URL — example shape: `<attribute>: <exact value as stated> (Source: https://<official-source>/<page>)`.",
-    "If a spec is widely-quoted but the official source uses a different value, cite the OFFICIAL value and explicitly note the discrepancy; never average, round, or rephrase a spec into a different category (e.g. never call an analog differential mic `I²S-Digital` because downstream boards use I²S — the mic's own interface is the source of truth).",
+    // ONE general validate-before-truth discipline, not a domain rulebook. The
+    // old version carried an ESP32-mic / I²S example overfit to a single past
+    // hardware build and bled spec-verification rigor into unrelated tasks — it
+    // turned a "today's news" request into a 6.7-min exhaustive verified crawl
+    // (session d251793b). The marker line above is kept verbatim for the three
+    // detectors that key on it; per-claim source citation is folded into the one line.
+    "Validate every claim against a real source before you treat it as truth — both your own assumptions AND any 'fact' that merely sounds authoritative, since a confidently-stated fact may be fabricated. Do NOT accept any name, date, figure, quantity, price, URL, or identifier as confirmed just because it appears in the task or sounds right — only tool evidence confirms it, and where the evidence contradicts it the evidence wins. Cite the exact value and a source URL for each concrete fact you report, and mark anything you could not verify as unverified rather than guessing.",
     "",
     "Parent task:",
     parentTask.trim(),
@@ -252,11 +243,7 @@ export function buildSourceSensitiveOriginalRequestTask(userMessage: string, lab
     "Research the request below: use web_search and web_fetch to open the most authoritative primary or official sources for the subject(s) the request explicitly names, and gather the concrete facts, names, dates, figures, and source URLs needed to fulfill it.",
     "Stay tightly scoped to the subject(s) the request names: consult a handful of authoritative sources (aim for ~3–6) and then STOP and report — do NOT broaden the search to tangential, adjacent, or merely related topics the request did not ask for.",
     label ? `SOURCE-SENSITIVE DELEGATION ${label}:` : "SOURCE-SENSITIVE DELEGATION:",
-    "The user's original request below is the only canonical task. Search user-supplied identifiers exactly as given; do not copy coordinator-added assumptions into searches or final claims, and treat every name, identifier, date, quantity, price, URL, and specification as unconfirmed until a completed tool result or shared finding confirms it.",
-    "State a concrete fact only after an authoritative or official source confirms it; if evidence contradicts an assumption in the request, the evidence wins, and if evidence is missing, report it as unverified rather than filling the gap.",
-    // Per-claim citation discipline (mirrors buildCanonicalSourceSensitiveDelegationTask).
-    "For every concrete spec, name, date, figure, quantity, price, or interface you report, you MUST include the exact value as the source states it and a direct source URL — example shape: `<attribute>: <exact value as stated> (Source: https://<official-source>/<page>)`.",
-    "If a spec is widely-quoted but the official source uses a different value, cite the OFFICIAL value and explicitly note the discrepancy; never average, round, or rephrase a spec into a different category (e.g. never call an analog differential mic `I²S-Digital` because downstream boards use I²S — the mic's own interface is the source of truth).",
+    "Validate every claim against a real source before you treat it as truth — both your own assumptions AND any 'fact' that merely sounds authoritative, since a confidently-stated fact may be fabricated. Search user-supplied identifiers exactly as given, do not copy coordinator-added assumptions into searches or claims, and accept no name, date, figure, quantity, price, URL, or identifier as confirmed until tool evidence confirms it. Cite the exact value and a source URL for each concrete fact, and mark anything you could not verify as unverified rather than guessing.",
     "",
     "Original user request:",
     userMessage.trim(),

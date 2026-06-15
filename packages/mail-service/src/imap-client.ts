@@ -56,7 +56,7 @@ export class MailAccountClient {
 
       for (const imapQuery of imapQueries) {
         for (const mailbox of allMailboxes) {
-          const messages = await this.fetchFromMailbox(mailbox, imapQuery);
+          const messages = await this.fetchFromMailbox(mailbox, imapQuery, limit);
           for (const message of messages) {
             const dedupeKey = message.envelope?.messageId || `${message.mailbox}:${message.uid}`;
             if (seen.has(dedupeKey)) continue;
@@ -254,13 +254,20 @@ export class MailAccountClient {
     return null;
   }
 
-  private async fetchFromMailbox(mailbox: string, imapQuery: Record<string, unknown>): Promise<RawMailMessage[]> {
+  private async fetchFromMailbox(mailbox: string, imapQuery: Record<string, unknown>, limit = 50): Promise<RawMailMessage[]> {
     const lock = await this.client!.getMailboxLock(mailbox);
     try {
       const uids = await this.client!.search(imapQuery, { uid: true });
       if (!uids || uids.length === 0) return [];
+      // Only fetch the most recent `limit` messages. Without this cap a broad
+      // query (e.g. an empty "ALL" search) fetched the FULL raw source of EVERY
+      // message in the mailbox, hanging past the 20s tool timeout on a real inbox
+      // (session d251793b: mail_search aborted twice while mail_list_unread —
+      // which matches few messages — stayed fast). IMAP UID SEARCH returns UIDs
+      // ascending by arrival, so the newest are at the tail.
+      const recentUids = uids.length > limit ? uids.slice(-limit) : uids;
       const messages: RawMailMessage[] = [];
-      for await (const message of this.client!.fetch(uids, { uid: true, envelope: true, source: true }, { uid: true })) {
+      for await (const message of this.client!.fetch(recentUids, { uid: true, envelope: true, source: true }, { uid: true })) {
         messages.push({
           accountId: this.account.id,
           mailbox,

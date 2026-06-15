@@ -598,6 +598,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  search_documents: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Graph-RAG search over attached/uploaded documents (engram), scoped to the conversation/user/workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  list_documents: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List documents available to this conversation's RAG library (engram)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  ingest_document: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Extract a workspace file and index it into the engram document library at a chosen scope",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  forget_document: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Remove a document from the engram library (scope reference or hard delete)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   graph_upsert_entity: {
     tier: ToolTier.ONE_WRITE,
     description: "Create or update a node in the MemGraph knowledge graph",

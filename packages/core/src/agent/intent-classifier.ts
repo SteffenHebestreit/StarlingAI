@@ -18,10 +18,18 @@ import { PRODUCT } from "../product/index.js";
 
 // ── Intent term / pattern tables ─────────────────────────────────────────────
 
+// NOTE: "jetzt" / "now" are deliberately EXCLUDED. They are the weakest, most
+// ambiguous temporal words — overwhelmingly used in non-freshness contexts
+// ("nicht jetzt danke", "now I see", "right now please") — so on their own they
+// produced false freshnessSensitive hits that blocked the receptionist fast lane
+// and dragged trivial turns onto the heavy path (audit 31b683e8: "nicht jetzt
+// danke" → 21.7s). Genuinely fresh queries carry a stronger signal (heute,
+// aktuell, latest, current, recent, today, news, a year). Keep this list to
+// terms that are freshness-bearing on their own.
 export const FRESHNESS_HINT_TERMS = [
-  "aktuell", "aktuelle", "aktuellen", "heute", "jetzt", "live", "neu", "neueste", "neusten",
+  "aktuell", "aktuelle", "aktuellen", "heute", "live", "neueste", "neusten",
   "letzte ziehung", "letzten ziehung", "gewinnzahlen", "zahlen heute",
-  "2025", "2026", "current", "currently", "fresh", "latest", "live", "new", "news", "now",
+  "2025", "2026", "current", "currently", "fresh", "latest", "news",
   "recent", "recently", "today", "updated", "updates",
 ];
 
@@ -351,12 +359,72 @@ export const AMBIGUOUS_SHORT_LANGUAGE_TOKENS = new Set([
 const ASSISTANT_NAMING_PATTERNS: readonly RegExp[] = [
   /\bdein name (?:ist|sei|lautet|wird)\b/,
   /\bdu hei(?:ß|ss)t (?:ab )?(?:jetzt|sofort|nun)\b/,
+  // Verb-subject inversion: "Ab jetzt heißt du Luna" (the most common phrasing —
+  // previously unmatched, so the turn only got generic durable-memory guidance).
+  /\bhei(?:ß|ss)t du\b/,
   /\bich (?:nenne|taufe) dich\b/,
   /\b(?:werde|will) dich .{1,40}? nennen\b/,
   /\byour name is(?: now)?\b/,
   /\bi(?:'ll| will) call you\b/,
   /\byou are (?:now )?called\b/,
+  // "ab jetzt bist du Luna" / "du bist (jetzt) Luna" — the German "you ARE X"
+  // rename form (audit a6668324: `ab jetzt bist du "Luna"` was acknowledged but
+  // never persisted). Broad here, but harmless: assistantNamingSensitive AND the
+  // deterministic persist both gate on extractAssistantName, which requires a
+  // QUOTED name for this form (German capitalizes every noun, so an unquoted
+  // "du bist Entwickler" must NOT read as a rename).
+  /\bbist du\b/,
+  /\bdu bist\b/,
 ];
+
+// Capturing variants used to extract the actual name for deterministic
+// persistence (see extractAssistantName). Each captures the name token in $1.
+const ASSISTANT_NAMING_CAPTURE_PATTERNS: readonly RegExp[] = [
+  /\bhei(?:ß|ss)t\s+du\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\bdu\s+hei(?:ß|ss)t(?:\s+(?:ab|jetzt|sofort|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\bdein\s+name\s+(?:ist|sei|lautet|wird)(?:\s+(?:ab|jetzt|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\b(?:nenne|taufe)\s+dich(?:\s+ab\s+jetzt)?\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\byour\s+name\s+is(?:\s+now)?\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\bi(?:'ll|\s+will)\s+call\s+you\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  /\byou\s+are\s+(?:now\s+)?called\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  // "ab jetzt bist du \"Luna\"" / "du bist (jetzt) \"Luna\"" — QUOTE REQUIRED.
+  // Unlike "heißt du X" (where the verb unambiguously introduces a name), German
+  // "du bist X" + noun-capitalization is ambiguous, so only an explicitly quoted
+  // name counts as a rename here.
+  /\b(?:du\s+)?bist\s+(?:du\s+)?(?:ab\s+|jetzt\s+|sofort\s+|nun\s+)*["“”'«»]\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+];
+
+// Common words that follow a naming phrase but are NOT names — guards the
+// extractor against e.g. "heißt du wirklich so?" capturing "wirklich".
+const NON_NAME_TOKENS = new Set([
+  "wirklich", "eigentlich", "so", "denn", "nicht", "jetzt", "now", "not", "really",
+  "ab", "der", "die", "das", "ein", "eine", "the", "a", "an", "you", "du", "wie",
+]);
+
+/**
+ * Extract the assistant name from an explicit naming command, or undefined.
+ * Conservative: the name must be quoted OR capitalized (a proper-noun signal),
+ * and not a known filler word. Used by the runtime to persist the name
+ * deterministically — local models tend to *acknowledge* a rename ("saved!")
+ * without ever calling assistant_personality_update (audit b71523fb: "Ab jetzt
+ * heißt du Luna" → claimed saved, toolCalls=0, nothing persisted).
+ */
+export function extractAssistantName(message: string): string | undefined {
+  const text = message.trim();
+  for (const re of ASSISTANT_NAMING_CAPTURE_PATTERNS) {
+    const match = re.exec(text);
+    const captured = match?.[1];
+    if (!captured) continue;
+    const quoted = /["“”'«»]/.test(match![0]);
+    const name = captured.replace(/["“”'»«]+$/u, "").trim();
+    if (name.length < 2) continue;
+    if (NON_NAME_TOKENS.has(name.toLowerCase())) continue;
+    // Require a proper-noun signal: quoted in the message, or capitalized.
+    if (!quoted && !/^\p{Lu}/u.test(name)) continue;
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+  return undefined;
+}
 const DURABLE_PREFERENCE_PATTERNS: readonly RegExp[] = [
   /\b(?:ab jetzt|ab sofort|von nun an|in zukunft|zuk(?:ü|u)nftig|k(?:ü|u)nftig)\b/,
   /\b(?:from now on|going forward|for future reference)\b/,
@@ -464,7 +532,17 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
   const navigationSensitive = isNavigationRoutingRequest(userMessage);
   const artifactSensitive = ARTIFACT_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(normalized));
-  const assistantNamingSensitive = ASSISTANT_NAMING_PATTERNS.some((pattern) => pattern.test(normalized));
+  // A naming turn is durable-memory-sensitive only when a name is actually being
+  // ASSIGNED (a command), not merely asked about. "wie heißt du?" matches the
+  // `heißt du` pattern too, but it's a QUESTION — no memory write, and the
+  // receptionist capsule already carries the assistant name, so it must stay
+  // fast-lane-eligible. Gating on extractAssistantName (the same signal the
+  // deterministic persist keys on) cleanly separates command from question:
+  // a command yields an extractable name, a question yields none (audit
+  // acdd6cda: "Hi; wie heißt du?" took 21.8s on the full path because this flag
+  // fired and skipped the fast lane).
+  const assistantNamingSensitive = ASSISTANT_NAMING_PATTERNS.some((pattern) => pattern.test(normalized))
+    && extractAssistantName(userMessage) !== undefined;
   const durableMemorySensitive = assistantNamingSensitive
     || DURABLE_PREFERENCE_PATTERNS.some((pattern) => pattern.test(normalized));
   // ── Inline-content analytical detection ──────────────────────────────────

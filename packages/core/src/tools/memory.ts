@@ -604,10 +604,15 @@ registerTool({
   name: "assistant_personality_update",
   description:
     "Update the persistent main-assistant personality profile. " +
-    "This changes long-lived voice guidance only. Do not use it to store ordinary user facts such as names, roles, preferences, project notes, or workspace knowledge; use memory_store for those. Never use it to alter safety rules, honesty rules, or authorization boundaries.",
+    "Use `name` to set the assistant's OWN preferred name when the user names you (e.g. 'your name is now Luna', 'ab jetzt heißt du Luna'). " +
+    "This changes long-lived voice guidance only. Do not use it to store ordinary USER facts such as the user's name, roles, preferences, project notes, or workspace knowledge; use memory_store for those. Never use it to alter safety rules, honesty rules, or authorization boundaries.",
   parameters: {
     type: "object",
     properties: {
+      name: {
+        type: "string",
+        description: "The assistant's own preferred name (what it calls itself when asked). Set this when the user explicitly names or renames you.",
+      },
       identity: {
         type: "string",
         description: "Optional replacement for the core identity statement.",
@@ -660,7 +665,20 @@ registerTool({
   },
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
     try {
-      const profile = updateMainAssistantPersonality(args as MainAssistantPersonalityUpdate, "assistant");
+      // Map the convenience `name` param onto identity.name (the schema stores
+      // the assistant's name there; the tool otherwise only exposed identity.core).
+      const update = { ...args } as Record<string, unknown>;
+      if (typeof update["name"] === "string" && update["name"].trim()) {
+        const nm = (update["name"] as string).trim();
+        const existing = update["identity"];
+        update["identity"] = existing && typeof existing === "object"
+          ? { ...(existing as Record<string, unknown>), name: nm }
+          : typeof existing === "string"
+            ? { core: existing, name: nm }
+            : { name: nm };
+        delete update["name"];
+      }
+      const profile = updateMainAssistantPersonality(update as MainAssistantPersonalityUpdate, "assistant");
       return {
         success: true,
         output: `Main assistant personality updated to revision ${profile.revision}. Identity: ${profile.identity.core}`,

@@ -411,6 +411,25 @@ Routing accuracy is validated by the evaluation CI pipeline at a 75% gate across
 
 ---
 
+## Retrieval & Reranking
+
+Two distinct retrieval paths share one cross-encoder reranker:
+
+**Reranker (`retrieval.reranker`).** A small reranking layer that reorders candidate sets (agent routing, retrieval hits). Two modes: `tei` calls a cross-encoder rerank endpoint (HuggingFace TEI / Infinity) at `POST {baseUrl}/rerank` with `{query, texts}` → `[{index, score}]`, normalized to `[0,1]`; `llm` asks an OpenAI-compatible chat model to score candidates as JSON. The default deployment runs a CPU TEI `reranker` sidecar serving `bge-reranker-v2-m3` — the correct way to use a cross-encoder, since LM Studio only exposes such models through `/embeddings`. Failures degrade to the base ordering (`reranker.ts` returns `null`).
+
+**Lightweight RAG (`rag_*` tools).** `rag_ingest` / `rag_search` / `rag_forget` chunk + embed arbitrary inline text into the unified pgvector store (`db/vector-store.ts`), session- or globally-scoped. Used to keep a large pasted document or attachment out of the live context window and pull back only the relevant chunks.
+
+**Document RAG (`retrieval.documentRag`, engram).** Graph-RAG over attached/uploaded files, backed by the [engram](https://github.com/SteffenHebestreit/engram) service (API `:8088`) and its own Neo4j (with the Graph Data Science plugin for personalized-PageRank graph proximity). The flow:
+
+1. **Extract** — a file attached to a turn is converted to Markdown by the file-conversion service (`multimodal.files` → fastapi-mcp-template `file_to_markdown`).
+2. **Ingest** — the Markdown is posted to engram `POST /documents` with a scope `source` token (`session:<id>`, `user:<id>`, or `workspace:<name>`). engram chunks it, extracts keywords/summary via the LLM, builds multi-channel embeddings, and links chunks in the graph. Documents are reference-counted by source and deduped by content hash, so re-attaching the same file is idempotent.
+3. **Retrieve** — at the start of a turn, `retrieveDocumentContext` lists documents, keeps those whose `source` intersects the active scope (session always; user/workspace when the settings toggles are on), runs engram `POST /search` (HyDE → multi-channel retrieval → fusion → graph expansion → cross-encoder rerank) with a generous candidate `final_top_k`, then post-filters to in-scope documents and trims to `retrievalTopK`. engram search is global within an instance, so scoping is enforced by this post-filter — never by leaking other scopes.
+4. **Inject** — the top excerpts are added as a transient `[DOCUMENT CONTEXT]` system message (pruned next turn), so the assistant answers from the source. The same retrieval is also exposed to agents via the `search_documents` / `list_documents` / `ingest_document` / `forget_document` tools.
+
+Implemented in `retrieval/engram.ts` (thin HTTP client), `retrieval/document-rag.ts` (scope logic, extract→ingest, retrieve+format), and the runtime turn hook in `agent/runtime.ts`. The whole path no-ops gracefully when `documentRag.enabled` is false or engram is unreachable.
+
+---
+
 ## Project Structure
 
 ```

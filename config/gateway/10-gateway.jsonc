@@ -29,5 +29,14 @@
     "corsAllowedOrigins": [
       "https://chat.starlingai.example.com"
     ]
+  },
+  // First-contact fast lane: trivial conversational turns ("hi") are answered by
+  // the small routing-tier model (agents.defaults.model.tiers.routing) with a tiny
+  // prompt, skipping the full system prompt + swarm. Fail-safe — any miss escalates
+  // to the full path. Requires a routing tier to be configured.
+  "receptionist": {
+    "enabled": true,
+    "maxResponseChars": 400,
+    "alwaysEscalateTerms": []
   }
 }

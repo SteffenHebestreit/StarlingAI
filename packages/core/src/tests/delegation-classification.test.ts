@@ -277,6 +277,29 @@ describe("classifyDelegationResult — D14", () => {
     expect(r).toBe<DelegationClassification>("coordinator_noop");
   });
 
+  it("returns coordinator_noop for a LONG zero-tool refusal (audit 3a0fd176)", () => {
+    // web_task_coordinator wrote a 767-char "I have no web tools, but here are
+    // some news sites" answer with zero tool calls. The old <80-char guard let
+    // it pass as success so the researcher fallback never ran. Zero tool calls
+    // is the structural tell regardless of output length.
+    const longRefusal =
+      "Ich kann keine aktuellen Nachrichten von heute abrufen, da ich über keine Tools für " +
+      "Live-News-Recherchen verfüge. Meine Fähigkeiten beschränken sich auf Browser-Automatisierung, " +
+      "Code-Ausführung und Datenanalyse — nicht auf News-Suche oder -Aggregation. Was stattdessen " +
+      "möglich wäre: Wenn Sie eine spezifische Nachrichten-URL haben, kann ich die Seite mit Playwright " +
+      "rendern und den Inhalt extrahieren. Ich kann Ihnen empfehlen, direkt auf Nachrichtenportalen wie " +
+      "tagesschau.de, heise.de, Handelsblatt oder Reuters nachzuschauen.";
+    const r = classifyDelegationResult(
+      longRefusal,
+      "success",
+      { ...noToolStats, terminalState: "completed" },
+      { tags: ["coordination"] } as never,
+      "web_task_coordinator",
+      "kannst du mir die aktuellen news von heute zusammenfassen?",
+    );
+    expect(r).toBe<DelegationClassification>("coordinator_noop");
+  });
+
   it("does NOT flag coordinator_noop when coordinator called delegate_to_agent", () => {
     const r = classifyDelegationResult(
       "The researcher found the following headlines: ...",

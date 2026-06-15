@@ -550,9 +550,21 @@ export const MultimodalSchema = z.object({
 
 export const RetrievalRerankerSchema = z.object({
   enabled: z.boolean().default(false),
-  baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
+  /**
+   * How candidates are scored:
+   *  - "tei": a real cross-encoder rerank endpoint (HuggingFace TEI / Infinity)
+   *    via `POST {baseUrl}/rerank` with `{query, texts}` → `[{index, score}]`.
+   *    This is the correct way to use bge-reranker-v2-m3 (LM Studio cannot serve
+   *    a cross-encoder over REST — it only exposes it via /embeddings).
+   *  - "llm": ask an OpenAI-compatible chat model to score candidates as JSON
+   *    via `POST {baseUrl}/chat/completions`. Works with any loaded chat model
+   *    but is slower and less precise than a dedicated cross-encoder.
+   */
+  mode: z.enum(["tei", "llm"]).default("tei"),
+  /** Rerank service base URL. For "tei" the server root (NO /v1 suffix); for "llm" an OpenAI-compatible base (…/v1). */
+  baseUrl: z.string().url().default("http://reranker:80"),
   apiKey: z.string().default("lm-studio"),
-  model: z.string().min(1).default("Qwen/Qwen3-Reranker-4B"),
+  model: z.string().min(1).default("BAAI/bge-reranker-v2-m3"),
   timeoutMs: z.number().int().min(1000).max(120000).default(15000),
   topK: z.number().int().min(2).max(12).default(6),
 });
@@ -563,9 +575,48 @@ export const RetrievalSearchSchema = z.object({
   timeoutMs: z.number().int().min(1000).max(60000).default(15000),
 });
 
+/**
+ * Document RAG over attached/uploaded files, backed by the engram graph-RAG
+ * service (separate from the lightweight pgvector `rag_*` tools). Files are
+ * extracted to Markdown via the file-conversion service (`multimodal.files`),
+ * then ingested into engram; relevant chunks are retrieved on demand and can be
+ * auto-injected as turn context. Scoping is done with engram's `source` token:
+ * `session:<id>` (default), `user:<id>`, or `workspace:<name>`.
+ */
+export const DocumentRagSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** engram API base URL (the graph-RAG service). */
+  engramBaseUrl: z.string().url().default("http://engram:8088"),
+  /** Optional bearer token for the engram API (engram itself is usually unauthenticated on the internal network). */
+  engramApiKey: z.string().optional(),
+  /** Ingest can be slow (chunk → LLM metadata → embeddings → graph), so allow a generous timeout. */
+  ingestTimeoutMs: z.number().int().min(1000).max(600000).default(120000),
+  searchTimeoutMs: z.number().int().min(1000).max(120000).default(20000),
+  /** When a file is attached to a session, auto-extract + ingest it into the session-scoped corpus. */
+  autoIngestAttachments: z.boolean().default(true),
+  /** Before answering, retrieve relevant chunks for the user's message and inject them as additional context. */
+  injectContext: z.boolean().default(true),
+  /** How many chunks to inject / return after scope filtering. */
+  retrievalTopK: z.number().int().min(1).max(20).default(6),
+  /** engram final_top_k requested before the scope post-filter (kept generous so in-scope chunks survive). */
+  candidateTopK: z.number().int().min(4).max(100).default(30),
+  /** Drop retrieved chunks whose engram rerank score is below this (0 = keep all). */
+  minRerankScore: z.number().min(0).max(1).default(0),
+  /** Cap on the total characters of injected document context per turn. */
+  maxContextChars: z.number().int().min(500).max(50000).default(6000),
+  /** Settings toggle: also search the current user's personal document corpus (`user:<id>`). */
+  includeUserDocs: z.boolean().default(false),
+  /** Settings toggle: also search the workspace-shared document corpus (`workspace:<name>`). */
+  includeWorkspaceDocs: z.boolean().default(false),
+  /** Token used for the workspace-shared scope. */
+  workspaceName: z.string().min(1).default("workspace"),
+});
+export type DocumentRagConfig = z.infer<typeof DocumentRagSchema>;
+
 export const RetrievalSchema = z.object({
   reranker: RetrievalRerankerSchema.default({}),
   search: RetrievalSearchSchema.default({}),
+  documentRag: DocumentRagSchema.default({}),
 });
 
 // ─── MCP Server configuration ────────────────────────────────────────────────
@@ -1335,20 +1386,28 @@ export const OrchestrationSchema = z.object({
    *  entirely. Source-sensitive turns reuse the existing evidence backstop.
    *  Default: true. */
   riskGatedQA: z.boolean().default(true),
+  /** Runtime oversight: when true, a sub-agent gathering evidence is checked at
+   *  evidence boundaries against the turn's recorded plan acceptance criteria using
+   *  the cheap routing-tier model; once the goal is already satisfied it is
+   *  authoritatively finalized (the existing strip+synthesis path) instead of
+   *  grinding through more sources. Goal-aware, not a per-task source cap; a
+   *  routing-tier miss/error falls through to the byte/time ladder. Default: true. */
+  oversight: z.boolean().default(true),
   /** Final-response completion QA gate. When true, before shipping the final answer the
    *  runtime verifies that an interactive/served app the user asked to BUILD was actually
    *  produced as a file; if not, it runs ONE bounded corrective build (the right builder)
    *  and ships the built artifact instead of a concept/description. Bounded to a single
    *  corrective iteration per turn. Default: true. */
   finalResponseQaGate: z.boolean().default(true),
-  /** When true, a source-sensitive turn that delegated SUCCESSFULLY (so the
-   *  failure-path evidence backstop never fired) has its final answer cross-checked
-   *  against the curated shared findings: if the answer references none of the
-   *  verified tokens, it is re-synthesized grounded in those findings before
-   *  shipping. Catches the "ships a training-data answer while verified facts sit
-   *  in shared findings" case. Off by default pending a live smoke test (it can add
-   *  one synthesis call on the unanchored-answer path). */
-  qaEvidenceAnchoring: z.boolean().default(false),
+  /** When true, a source- OR freshness-sensitive turn that delegated SUCCESSFULLY
+   *  (so the failure-path evidence backstop never fired) has its final answer
+   *  cross-checked against the curated shared findings: if the answer references
+   *  none of the verified tokens, it is re-synthesized grounded in those findings
+   *  before shipping. This is the universal grounding gate (step 5) — it catches the
+   *  "ships a training-data answer while verified facts sit in shared findings" case.
+   *  The cross-check is deterministic; the extra synthesis call only fires on the
+   *  unanchored-answer path, so clean turns are unaffected. Default ON. */
+  qaEvidenceAnchoring: z.boolean().default(true),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes

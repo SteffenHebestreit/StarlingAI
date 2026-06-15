@@ -2512,7 +2512,28 @@ export function classifyDelegationResult(
       "swarm_delegate", "share_finding", "run_workflow",
     ]);
     const actuallyWorked = (stats.toolNames ?? []).some((n) => COORDINATOR_WORK_TOOLS.has(n));
-    if (!actuallyWorked && (output.trim().length < 80 || planningOnly)) {
+    // A coordinator's only job is orchestration via tools. If it called ZERO
+    // tools at all and just emitted prose, it did nothing real — no matter how
+    // long or plausible that prose reads. The previous (<80 chars || planningOnly)
+    // guard let a 767-char capability refusal ("I have no tools for live news…
+    // but here are some news sites") slip through as a "successful" completion,
+    // so the explicit researcher fallback never ran and the orchestrator relayed
+    // the refusal (audit 3a0fd176: "aktuelle news von heute" dead-ended while
+    // searxng was reachable). Zero tool calls is the structural, language-
+    // independent tell of a no-op. Keep the length/planning guard for the case
+    // where the coordinator DID call some non-work tool (e.g. discovery) but
+    // never delegated or shared evidence.
+    // Restrict the zero-tool extension to PURE orchestration coordinators
+    // (delegation/read tools only). A coordinator that also owns artifact tools
+    // (write_file, generate_*, shell_exec, browser_*) narrating "I'll build this"
+    // without calling them must stay an artifact-deliverable-miss failure below,
+    // which carries the "expected write_file" hint — so don't pre-empt it here.
+    const hasArtifactTools = (agentCfg?.tools ?? []).some((name) =>
+      /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
+    );
+    const calledNoTools =
+      !hasArtifactTools && (stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0;
+    if (!actuallyWorked && (calledNoTools || output.trim().length < 80 || planningOnly)) {
       return "coordinator_noop";
     }
   }
