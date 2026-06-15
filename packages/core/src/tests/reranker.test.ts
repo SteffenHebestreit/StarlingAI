@@ -43,6 +43,9 @@ describe("rerankCandidates", () => {
       const body = JSON.parse(String(init.body));
       expect(body.query).toBe("which fruit?");
       expect(body.texts).toHaveLength(3);
+      // Also sent as `documents` so the same request works against Cohere/Jina
+      // style servers (llama.cpp rerank, Infinity) — see rerankViaTei.
+      expect(body.documents).toHaveLength(3);
       // TEI returns [{index, score}] with raw (non-normalized) scores
       return new Response(JSON.stringify([
         { index: 0, score: 4 },

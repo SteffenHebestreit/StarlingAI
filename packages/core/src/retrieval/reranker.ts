@@ -49,10 +49,13 @@ export async function rerankCandidates(
 type RerankerConfig = ReturnType<typeof getConfig>["retrieval"]["reranker"];
 
 /**
- * Cross-encoder rerank via the TEI / Infinity `/rerank` contract:
- *   request:  { query, texts: string[] }
+ * Cross-encoder rerank via the TEI / Infinity / Cohere `/rerank` contract:
+ *   request:  { query, texts: string[], documents: string[] }
  *   response: [{ index: number, score: number }, ...]  (TEI)
- *             or { results: [{ index, relevance_score }] }  (Infinity/Cohere-style)
+ *             or { results: [{ index, relevance_score }] }  (Infinity/Cohere/llama.cpp)
+ * We send BOTH `texts` (TEI naming) and `documents` (Cohere/Jina naming, used by
+ * llama.cpp's rerank server and Infinity) so a single request works against any
+ * of them — each server reads the field it knows and ignores the other.
  * Scores are model-dependent (logits for raw TEI), so they are min-max
  * normalized into [0, 1] for a stable contract with callers.
  */
@@ -69,7 +72,7 @@ async function rerankViaTei(
       "Content-Type": "application/json",
       ...(reranker.apiKey ? { Authorization: `Bearer ${reranker.apiKey}` } : {}),
     },
-    body: JSON.stringify({ query, texts, model: reranker.model }),
+    body: JSON.stringify({ query, texts, documents: texts, model: reranker.model }),
     signal,
   });
 
