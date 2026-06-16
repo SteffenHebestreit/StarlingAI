@@ -216,6 +216,13 @@ services:
       # Rerank shortlist size. Cheap on the GPU reranker, so use engram's default
       # (15) for good recall. Lower it (e.g. 6) only if the reranker runs on CPU.
       - RERANK_TOP_K=${ENGRAM_RERANK_TOP_K:-15}
+      # SINGLE-GPU ingest throttle. engram defaults to 4 parallel per-chunk LLM
+      # metadata-extraction calls (extraction_concurrency) + 4 embedding requests
+      # — on one shared GPU that fires 4 concurrent 35B calls when a document is
+      # added, saturating VRAM and starving the chat turn. Serialize extraction
+      # (1) and keep embeddings modest (2). Raise on a dedicated/multi-GPU host.
+      - EXTRACTION_CONCURRENCY=${ENGRAM_EXTRACTION_CONCURRENCY:-1}
+      - EMBEDDING_CONCURRENCY=${ENGRAM_EMBEDDING_CONCURRENCY:-2}
       # Adopt (don't refuse) when the embedding model/dim differs from prior indexes.
       - SCHEMA_GUARD_MODE=${ENGRAM_SCHEMA_GUARD_MODE:-warn}
     networks:
