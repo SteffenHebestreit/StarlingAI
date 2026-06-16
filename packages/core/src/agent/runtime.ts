@@ -4,7 +4,7 @@
  */
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { salvageToolCallArguments, stripModelControlTokens } from "../providers/lmstudio.js";
+import { salvageToolCallArguments, stripModelControlTokens, recoverLeakedToolCalls } from "../providers/lmstudio.js";
 import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
@@ -7667,7 +7667,7 @@ async function collectStream(
   }
 
   const cleanContent = stripModelControlTokens(content);
-  return { content: cleanContent || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason };
+  return recoverLeakedToolCalls({ content: cleanContent || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason });
 }
 
 function buildTurnPerformanceMetrics(input: {

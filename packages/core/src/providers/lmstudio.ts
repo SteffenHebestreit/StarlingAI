@@ -179,6 +179,92 @@ export function stripModelControlTokens(value: string): string {
   return out;
 }
 
+interface ParsedLeakedCall { name: string; arguments: Record<string, unknown>; }
+
+/** Coerce a `<parameter=…>` value: JSON arrays/objects/numbers/bools/quoted
+ *  strings are parsed; everything else stays a trimmed string. */
+function coerceLeakedParamValue(raw: string): unknown {
+  const v = raw.trim();
+  if (v === "") return "";
+  if (/^(\[|\{|-?\d|true\b|false\b|null\b|")/.test(v)) {
+    try { return JSON.parse(v); } catch { /* keep as string */ }
+  }
+  return v;
+}
+
+/**
+ * Recover tool calls a model emitted as TEXT (in content or reasoning) that the
+ * provider failed to surface as structured `tool_calls`. Qwen/Hermes models emit
+ * `<tool_call>…</tool_call>` and LM Studio's template parser only recognizes the
+ * JSON body form — the `<function=NAME><parameter=KEY>…</parameter></function>`
+ * variant (audit 2026-06) leaks as text and the call is silently lost. Handles
+ * BOTH forms. Returns [] when nothing tool-call-shaped is present.
+ */
+export function parseLeakedToolCalls(text: string | null | undefined): ParsedLeakedCall[] {
+  if (!text || text.indexOf("<tool_call>") === -1) return [];
+  const out: ParsedLeakedCall[] = [];
+  const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(text)) !== null) {
+    const inner = (m[1] ?? "").trim();
+    // Hermes JSON body: {"name": "...", "arguments"|"parameters": {...}}
+    if (inner.startsWith("{")) {
+      try {
+        const obj = JSON.parse(inner) as { name?: string; arguments?: unknown; parameters?: unknown };
+        if (obj && typeof obj.name === "string") {
+          const a = obj.arguments ?? obj.parameters;
+          out.push({ name: obj.name, arguments: (a && typeof a === "object" && !Array.isArray(a)) ? a as Record<string, unknown> : {} });
+          continue;
+        }
+      } catch { /* fall through to XML form */ }
+    }
+    // XML body: <function=NAME> <parameter=KEY>VALUE</parameter> … </function>
+    const fn = inner.match(/<function\s*=\s*([^>\s]+)\s*>/i);
+    const name = (fn?.[1] ?? "").trim();
+    if (!name) continue;
+    const args: Record<string, unknown> = {};
+    const paramRe = /<parameter\s*=\s*([^>\s]+)\s*>([\s\S]*?)<\/parameter>/gi;
+    let p: RegExpExecArray | null;
+    while ((p = paramRe.exec(inner)) !== null) {
+      const key = (p[1] ?? "").trim();
+      if (key) args[key] = coerceLeakedParamValue(p[2] ?? "");
+    }
+    out.push({ name, arguments: args });
+  }
+  return out;
+}
+
+/** Remove `<tool_call>` / `<function=…>` / `<parameter=…>` blocks from text. */
+export function stripLeakedToolCallBlocks(text: string): string {
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function=[^>]*>[\s\S]*?<\/function>/gi, "")
+    .replace(/<parameter=[^>]*>[\s\S]*?<\/parameter>/gi, "")
+    .replace(/<\/?tool_call>/gi, "")
+    .trim();
+}
+
+/**
+ * If the provider returned NO structured tool calls but the model wrote one as
+ * text (content or reasoning), recover it and strip the block from content.
+ * No-op when real tool_calls exist or nothing tool-call-shaped is present.
+ */
+export function recoverLeakedToolCalls<T extends {
+  content: string | null;
+  reasoning?: string;
+  tool_calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+}>(resp: T): T {
+  if (resp.tool_calls.length > 0) return resp;
+  const leaked = [...parseLeakedToolCalls(resp.content), ...parseLeakedToolCalls(resp.reasoning)];
+  if (leaked.length === 0) return resp;
+  const cleaned = resp.content ? (stripLeakedToolCallBlocks(resp.content) || null) : resp.content;
+  return {
+    ...resp,
+    content: cleaned,
+    tool_calls: leaked.map((c, i) => ({ id: `leaked_${i}`, name: c.name, arguments: c.arguments })),
+  };
+}
+
 /**
  * Parse tool-call `arguments` tolerantly. The OpenAI-compatible field is
  * supposed to be a bare JSON object string, but thinking models that reason in
@@ -680,7 +766,7 @@ export class LMStudioProvider {
         const reasoningField = (choice.message as { reasoning_content?: string }).reasoning_content;
         const split = splitReasoning(choice.message.content, reasoningField);
 
-        return {
+        return recoverLeakedToolCalls({
           content: split.content,
           ...(split.reasoning ? { reasoning: split.reasoning } : {}),
           tool_calls: toolCalls,
@@ -690,7 +776,7 @@ export class LMStudioProvider {
             totalTokens: response.usage?.total_tokens ?? 0,
           },
           finishReason: choice.finish_reason ?? "stop",
-        };
+        });
       } catch (err: unknown) {
         endProviderCall(callId);
         this.recordRequestFailure(startedAt, err);
@@ -787,13 +873,13 @@ export class LMStudioProvider {
     // Strip stray control tokens from the FINAL assembled content (catches tokens
     // even when they spanned chunk boundaries during streaming).
     const cleanContent = stripModelControlTokens(content);
-    return {
+    return recoverLeakedToolCalls({
       content: cleanContent.length > 0 ? cleanContent : null,
       ...(reasoning ? { reasoning } : {}),
       tool_calls,
       usage,
       finishReason,
-    };
+    });
   }
 
   async *stream(

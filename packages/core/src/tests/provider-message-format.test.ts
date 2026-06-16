@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LMStudioProvider, normalizeMessagesForModel, salvageToolCallArguments, splitReasoning, stripModelControlTokens, type LLMMessage } from "../providers/lmstudio.js";
+import { LMStudioProvider, normalizeMessagesForModel, parseLeakedToolCalls, recoverLeakedToolCalls, salvageToolCallArguments, splitReasoning, stripModelControlTokens, type LLMMessage } from "../providers/lmstudio.js";
 
 describe("splitReasoning", () => {
   it("returns content unchanged when there is no reasoning", () => {
@@ -68,6 +68,70 @@ describe("stripModelControlTokens", () => {
     expect(stripModelControlTokens("a < b and c > d")).toBe("a < b and c > d");
     expect(stripModelControlTokens("see [link](url) and [1] and [a, b]")).toBe("see [link](url) and [1] and [a, b]");
     expect(stripModelControlTokens("no tokens here")).toBe("no tokens here");
+  });
+});
+
+describe("parseLeakedToolCalls (Qwen/Hermes tool calls emitted as text)", () => {
+  it("parses the <function=…><parameter=…> XML form (audit 2026-06)", () => {
+    const text = [
+      "<tool_call>",
+      "<function=delegate_to_agent>",
+      "<parameter=agentName>",
+      "web_task_coordinator",
+      "</parameter>",
+      "<parameter=task>",
+      "Sammle die wichtigsten Nachrichten von heute.",
+      "</parameter>",
+      "<parameter=fallbackAgents>",
+      '["researcher", "mission_coordinator"]',
+      "</parameter>",
+      "</function>",
+      "</tool_call>",
+      "The user is asking for today's news.",
+    ].join("\n");
+    expect(parseLeakedToolCalls(text)).toEqual([
+      {
+        name: "delegate_to_agent",
+        arguments: {
+          agentName: "web_task_coordinator",
+          task: "Sammle die wichtigsten Nachrichten von heute.",
+          fallbackAgents: ["researcher", "mission_coordinator"],
+        },
+      },
+    ]);
+  });
+
+  it("parses the Hermes JSON-body form", () => {
+    const text = '<tool_call>{"name":"web_search","arguments":{"query":"news"}}</tool_call>';
+    expect(parseLeakedToolCalls(text)).toEqual([{ name: "web_search", arguments: { query: "news" } }]);
+  });
+
+  it("returns [] when there is no tool_call block", () => {
+    expect(parseLeakedToolCalls("just a normal answer with <code> and [a]")).toEqual([]);
+    expect(parseLeakedToolCalls(null)).toEqual([]);
+  });
+});
+
+describe("recoverLeakedToolCalls", () => {
+  it("recovers a leaked call from REASONING when no structured tool_calls were returned, and strips it from content", () => {
+    const resp = {
+      content: "<tool_call><function=delegate_to_agent><parameter=task>do it</parameter></function></tool_call>Here you go.",
+      reasoning: "thinking…",
+      tool_calls: [] as Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+    };
+    const out = recoverLeakedToolCalls(resp);
+    expect(out.tool_calls).toHaveLength(1);
+    expect(out.tool_calls[0]!.name).toBe("delegate_to_agent");
+    expect(out.tool_calls[0]!.arguments).toEqual({ task: "do it" });
+    expect(out.content).toBe("Here you go.");
+  });
+
+  it("is a no-op when real structured tool_calls already exist", () => {
+    const resp = {
+      content: "<tool_call><function=x></function></tool_call>",
+      tool_calls: [{ id: "c1", name: "real_tool", arguments: { a: 1 } }],
+    };
+    expect(recoverLeakedToolCalls(resp)).toBe(resp);
   });
 });
 
