@@ -116,18 +116,23 @@ export function splitReasoning(
   if (typeof field === "string" && field.trim()) reasoningParts.push(field.trim());
 
   let answer = typeof rawContent === "string" ? rawContent : "";
-  if (answer.includes("<think>")) {
-    // Extract every closed <think>…</think> block.
-    answer = answer.replace(/<think>([\s\S]*?)<\/think>/gi, (_m, inner: string) => {
+  // Inline reasoning blocks: <think>…</think> (qwen and most families) OR
+  // <thought>…</thought> (Gemma 4). Both are moved to the reasoning channel so
+  // the answer stays clean — even on backends that don't separate it into the
+  // reasoning_content field.
+  const OPEN_TAG_RE = /<(?:think|thought)>/i;
+  if (OPEN_TAG_RE.test(answer)) {
+    // Extract every closed block of either tag (matched pair via backreference).
+    answer = answer.replace(/<(think|thought)>([\s\S]*?)<\/\1>/gi, (_m, _tag, inner: string) => {
       if (inner.trim()) reasoningParts.push(inner.trim());
       return "";
     });
-    // Unterminated <think> with no closer: everything after it is reasoning.
-    const openIdx = answer.indexOf("<think>");
-    if (openIdx >= 0) {
-      const tail = answer.slice(openIdx + "<think>".length).trim();
+    // Unterminated open tag (token budget exhausted mid-thought): the rest is reasoning.
+    const open = OPEN_TAG_RE.exec(answer);
+    if (open) {
+      const tail = answer.slice(open.index + open[0].length).trim();
       if (tail) reasoningParts.push(tail);
-      answer = answer.slice(0, openIdx);
+      answer = answer.slice(0, open.index);
     }
   }
 
@@ -141,6 +146,71 @@ export function splitReasoning(
   return { content: cleaned.length > 0 ? cleaned : null, reasoning };
 }
 
+/**
+ * Parse tool-call `arguments` tolerantly. The OpenAI-compatible field is
+ * supposed to be a bare JSON object string, but thinking models that reason in
+ * the same stream (notably **Gemma 4**, whose `<thought>` thinking llama.cpp
+ * cannot reliably disable on the 12B/26B/31B sizes — ggml-org/llama.cpp#21338)
+ * leak reasoning or markdown fences INTO the arguments string. The backend then
+ * hands us e.g. `<thought>I should plan…</thought>{"plan":[…]}` or
+ * ```json\n{…}\n``` — and a strict `JSON.parse` throws, surfacing as
+ * "Could not parse arguments for tool 'record_plan'/'delegate_to_agent'".
+ *
+ * Strategy is purely structural (no per-model keywords): try the raw string,
+ * then strip reasoning tags + code fences, then extract the first BALANCED
+ * `{…}` object and parse that. Returns null only when nothing JSON-shaped is
+ * recoverable.
+ */
+export function salvageToolCallArguments(raw: string | undefined | null): Record<string, unknown> | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(s) as unknown;
+      return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryParse(raw.trim());
+  if (direct) return direct;
+
+  // Drop reasoning blocks (<think>/<thought>, closed or unterminated) and any
+  // markdown code-fence markers (```json / ```tool_call / ```) the model wrapped
+  // around the JSON. We do NOT keep the reasoning here — only the arguments.
+  let s = raw
+    .replace(/<(think|thought)>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<\/?(?:think|thought)>/gi, "")
+    .replace(/```[a-zA-Z_]*\n?/g, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const cleaned = tryParse(s);
+  if (cleaned) return cleaned;
+
+  // Extract the first balanced {…} object, honoring strings/escapes so braces
+  // inside string values don't throw off the depth count.
+  const start = s.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let i = start; i < s.length; i += 1) {
+    const ch = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return tryParse(s.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
 const GEMMA_INSTRUCTION_PREAMBLE = "Follow these instructions for the entire conversation.";
 
 function isGemmaModelId(modelId: string): boolean {
@@ -151,9 +221,62 @@ function isQwenModelId(modelId: string): boolean {
   return modelId.toLowerCase().includes("qwen");
 }
 
-function supportsThinkingToggle(modelId: string): boolean {
-  const normalized = modelId.toLowerCase();
-  return normalized.includes("qwen") || normalized.includes("gemma-4");
+/** Reasoning/thinking control mechanism by model family (researched June 2026).
+ *  Families are grouped by the API MECHANISM they share, not the vendor:
+ *  - enable_thinking → chat_template_kwargs { enable_thinking: bool }. Shared by
+ *      Qwen3/3.5/3.6, GLM-4.x, and **Gemma 4** (released 2026-04: E2B, E4B, 12B,
+ *      26B-MoE `26b-a4b`, 31B dense — base + `-it`; all named `gemma-4-*`, same
+ *      enable_thinking key). CAVEAT: on the larger Gemma 4 sizes (12B/26B/31B)
+ *      disabling thinking can be unreliable in llama.cpp — the 26B MoE especially
+ *      (ggml-org/llama.cpp#21338). The toggle call is correct; the backend may
+ *      keep thinking on. Gemma 4 emits reasoning in <thought> tags (handled by
+ *      splitReasoning) and small E2B/E4B think by default.
+ *  - deepseek → chat_template_kwargs { thinking: bool } (DeepSeek-V3.1 hybrid;
+ *      DIFFERENT key vs enable_thinking).
+ *  - gpt-oss → reasoning_effort (low|medium|high). LM Studio IGNORES the API
+ *      param (lmstudio-bug-tracker#988), so the effort is ALSO injected as a
+ *      `Reasoning: <effort>` system line (harmony format).
+ *  - none → no programmatic toggle; the backend/GUI default applies. */
+export type ThinkingFamily = "enable_thinking" | "deepseek" | "gpt-oss" | "none";
+
+export function detectThinkingFamily(modelId: string): ThinkingFamily {
+  const m = modelId.toLowerCase();
+  if (m.includes("gpt-oss") || m.includes("gpt_oss")) return "gpt-oss";
+  if (m.includes("deepseek")) return "deepseek";
+  if (m.includes("qwen") || m.includes("glm") || m.includes("gemma-4")) return "enable_thinking";
+  return "none";
+}
+
+export type ReasoningEffort = "low" | "medium" | "high";
+
+/** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
+ *  the boolean toggle (off→low, on→high); undefined → leave the model/GUI default. */
+function resolveReasoningEffort(
+  cfg: { reasoningEffort?: ReasoningEffort; enableThinking?: boolean },
+): ReasoningEffort | undefined {
+  if (cfg.reasoningEffort) return cfg.reasoningEffort;
+  if (cfg.enableThinking === false) return "low";
+  if (cfg.enableThinking === true) return "high";
+  return undefined;
+}
+
+/** Family-aware thinking controls for a model. Pure + exported for testing. */
+export function resolveThinkingControls(
+  modelId: string,
+  cfg: { enableThinking?: boolean; reasoningEffort?: ReasoningEffort },
+): { chatTemplateKwargs?: Record<string, boolean>; reasoningEffort?: ReasoningEffort; systemReasoningLine?: string } {
+  switch (detectThinkingFamily(modelId)) {
+    case "enable_thinking":
+      return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {};
+    case "deepseek":
+      return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { thinking: cfg.enableThinking } } : {};
+    case "gpt-oss": {
+      const effort = resolveReasoningEffort(cfg);
+      return effort ? { reasoningEffort: effort, systemReasoningLine: `Reasoning: ${effort}` } : {};
+    }
+    default:
+      return {};
+  }
 }
 
 export function normalizeMessagesForModel(
@@ -326,8 +449,14 @@ export class LMStudioProvider {
    */
   private buildExtraBody(modelId: string): Record<string, unknown> | undefined {
     const extraBody: Record<string, unknown> = {};
-    if (supportsThinkingToggle(modelId) && this.modelConfig.enableThinking !== undefined) {
-      extraBody["chat_template_kwargs"] = { enable_thinking: this.modelConfig.enableThinking };
+    const controls = resolveThinkingControls(modelId, this.modelConfig);
+    if (controls.chatTemplateKwargs) {
+      extraBody["chat_template_kwargs"] = controls.chatTemplateKwargs;
+    }
+    if (controls.reasoningEffort) {
+      // Sent for portability (vLLM / OpenAI honor it). LM Studio ignores it (#988);
+      // the system-message `Reasoning:` line injected below is what it reads.
+      extraBody["reasoning_effort"] = controls.reasoningEffort;
     }
     if (this.modelConfig.promptCache) {
       // llama.cpp / LM Studio: reuse the KV cache for the common prompt prefix
@@ -335,6 +464,14 @@ export class LMStudioProvider {
       extraBody["cache_prompt"] = true;
     }
     return Object.keys(extraBody).length > 0 ? extraBody : undefined;
+  }
+
+  /** Prepend the gpt-oss `Reasoning: <effort>` system line — the only reasoning-
+   *  effort control LM Studio honors over the API (it ignores reasoning_effort,
+   *  #988). No-op for every other family. */
+  private withReasoningSystemLine(modelId: string, msgs: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+    const line = resolveThinkingControls(modelId, this.modelConfig).systemReasoningLine;
+    return line ? [{ role: "system", content: line } as ChatCompletionMessageParam, ...msgs] : msgs;
   }
 
   // The OpenAI SDK's `timeout` option has been observed not to fire when
@@ -423,7 +560,7 @@ export class LMStudioProvider {
     signal?: AbortSignal
   ): Promise<LLMResponse> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = normalizeMessagesForModel(messages, modelId);
+    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId));
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -484,11 +621,10 @@ export class LMStudioProvider {
           id: tc.id,
           name: tc.function.name,
           arguments: (() => {
-            try { return JSON.parse(tc.function.arguments) as Record<string, unknown>; }
-            catch {
-              log.warn({ toolName: tc.function.name, rawArgs: tc.function.arguments.slice(0, 200) }, "Failed to parse tool call arguments");
-              return { _parse_error: true, _raw: tc.function.arguments } as Record<string, unknown>;
-            }
+            const salvaged = salvageToolCallArguments(tc.function.arguments);
+            if (salvaged) return salvaged;
+            log.warn({ toolName: tc.function.name, rawArgs: tc.function.arguments.slice(0, 200) }, "Failed to parse tool call arguments");
+            return { _parse_error: true, _raw: tc.function.arguments } as Record<string, unknown>;
           })(),
         }));
 
@@ -589,11 +725,16 @@ export class LMStudioProvider {
     const tool_calls = toolOrder.map((id) => {
       const buf = toolBuffers.get(id)!;
       let args: Record<string, unknown>;
-      try {
-        args = buf.args.trim() ? (JSON.parse(buf.args) as Record<string, unknown>) : {};
-      } catch {
-        log.warn({ toolName: buf.name, rawArgs: buf.args.slice(0, 200) }, "Failed to parse streamed tool call arguments");
-        args = { _parse_error: true, _raw: buf.args };
+      if (!buf.args.trim()) {
+        args = {};
+      } else {
+        const salvaged = salvageToolCallArguments(buf.args);
+        if (salvaged) {
+          args = salvaged;
+        } else {
+          log.warn({ toolName: buf.name, rawArgs: buf.args.slice(0, 200) }, "Failed to parse streamed tool call arguments");
+          args = { _parse_error: true, _raw: buf.args };
+        }
       }
       return { id: buf.id, name: buf.name, arguments: args };
     });
@@ -615,7 +756,7 @@ export class LMStudioProvider {
     options?: { toolChoice?: "auto" | "required" | "none" }
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = normalizeMessagesForModel(messages, modelId);
+    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId));
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
