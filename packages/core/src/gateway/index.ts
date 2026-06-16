@@ -4218,7 +4218,7 @@ export function createGateway() {
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-    const allowed = ["primary", "baseUrl", "apiKey", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow", "enableThinking"];
+    const allowed = ["primary", "baseUrl", "apiKey", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow", "enableThinking", "reasoningEffort"];
     const patch: Record<string, unknown> = {};
     for (const key of allowed) {
       if (key in body) patch[key] = body[key];

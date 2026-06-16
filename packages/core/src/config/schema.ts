@@ -89,6 +89,16 @@ export const ModelConfigSchema = z.object({
    *  build a ModelConfig object inline (not via `.parse()`) MUST include
    *  `enableThinking` explicitly — the default only applies on schema parse. */
   enableThinking: z.boolean().default(false),
+  /** Reasoning EFFORT for models with graded thinking (gpt-oss / o-series:
+   *  low | medium | high). Family-aware (resolveThinkingControls):
+   *  - gpt-oss: injected as a `Reasoning: <effort>` line in the system message
+   *    (the only form LM Studio honors — it ignores the `reasoning_effort` API
+   *    parameter, lmstudio-bug-tracker#988) AND sent as `reasoning_effort` in
+   *    extra_body for backends that DO honor it (vLLM / OpenAI).
+   *  - enable_thinking-toggle families (Qwen / GLM / DeepSeek) are on/off only via
+   *    `enableThinking`; this field is ignored there. Undefined → model/GUI default;
+   *    falls back to enableThinking (false→low, true→high) for gpt-oss when unset. */
+  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
   /** Reuse the provider's KV/prefix cache across calls (sends
    *  `extra_body.cache_prompt: true`). The ~22KB base system prompt is the
    *  stable first message on every call, so on llama.cpp / LM Studio this skips

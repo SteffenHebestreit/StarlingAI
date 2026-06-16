@@ -173,6 +173,7 @@ function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, un
               temperature: agent.model.temperature,
               maxTokens: agent.model.maxTokens,
               enableThinking: agent.model.enableThinking,
+              reasoningEffort: agent.model.reasoningEffort,
             }
           : undefined,
         ...(name === targetAgent ? { systemPrompt: agent.systemPrompt ?? "" } : {}),
@@ -191,6 +192,7 @@ function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, un
           temperature: config.agents.defaults.model.temperature,
           maxTokens: config.agents.defaults.model.maxTokens,
           enableThinking: config.agents.defaults.model.enableThinking,
+          reasoningEffort: config.agents.defaults.model.reasoningEffort,
           embeddingModel: config.agents.defaults.model.embeddingModel,
         },
       },
