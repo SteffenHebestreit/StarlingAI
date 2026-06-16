@@ -100,6 +100,20 @@ describe("deduplicateRunnableDelegations", () => {
     expect(removed).toBe(1);
   });
 
+  it("preserves same-agent topic slices that share boilerplate but differ by domain (audit 71fc1a0a)", () => {
+    // A news request partitioned into two researcher slices that differ ONLY by the topic
+    // domains. The shared "Research the most important news stories for today… provide key
+    // headlines…" boilerplate pushes containment to ~0.92, but they are distinct work; the
+    // old containment-only rule collapsed slice 2 and half the coverage was silently lost.
+    const tasks = [
+      { agentName: "researcher", task: "Research the most important news stories for today, June 16, 2026, in the domains of Politics and World Events. Provide key headlines and brief descriptions for each major story." },
+      { agentName: "researcher", task: "Research the most important news stories for today, June 16, 2026, in the domains of Technology and Economy. Provide key headlines and brief descriptions for each major story." },
+    ];
+    const { kept, removed } = deduplicateRunnableDelegations(tasks);
+    expect(kept).toHaveLength(2);
+    expect(removed).toBe(0);
+  });
+
   it("preserves a genuine multi-topic decomposition (distinct bodies)", () => {
     const tasks = [
       { agentName: "researcher", task: "Research the MEMS microphone IM73A135V01 datasheet specs, SNR, package, interface and confirm each from official sources." },

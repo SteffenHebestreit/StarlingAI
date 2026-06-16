@@ -5616,18 +5616,27 @@ function delegationBodyTokenSet(normalized: string): Set<string> {
 }
 
 /**
- * Two normalized bodies are NEAR-duplicates when their containment overlap
- * (|A ∩ B| / |smaller set|) is >= 0.9. Containment (not Jaccard) so a copy that merely
- * dropped/added a word or two — the slow 35B paraphrases its own "identical" slices, e.g.
- * "and we can make a sync button" vs "and and make a sync button" (audit d20a9a5e) — still
- * collapses, while genuinely distinct sub-tasks (low overlap) are kept.
+ * Two normalized bodies are NEAR-duplicates when BOTH hold:
+ *   1. containment overlap (|A ∩ B| / |smaller set|) >= 0.9, AND
+ *   2. the symmetric difference is <= 2 tokens ("a word or two" of distinct content).
+ *
+ * Containment (not Jaccard) so a copy that merely dropped/added a word or two — the slow 35B
+ * paraphrases its own "identical" slices, e.g. "and we can make a sync button" vs "and and
+ * make a sync button" (audit d20a9a5e, differs by 2 tokens) — still collapses. The symmetric-
+ * difference gate is what containment alone misses: a legitimate same-agent topic PARTITION
+ * whose shared boilerplate dominates can still hit 0.9 containment, e.g. "...in the domains of
+ * Politics and World Events" vs "...Technology and Economy" (audit 71fc1a0a: ~0.92 containment
+ * but 5 distinct tokens). Those are distinct work and must be kept, so we only collapse when
+ * the distinguishing content is truly minimal.
  */
 function delegationBodiesAreNearDuplicate(a: Set<string>, b: Set<string>): boolean {
   if (a.size === 0 || b.size === 0) return false;
   const [small, large] = a.size <= b.size ? [a, b] : [b, a];
   let intersection = 0;
   for (const token of small) if (large.has(token)) intersection += 1;
-  return intersection / small.size >= 0.9;
+  const containment = intersection / small.size;
+  const distinctTokens = (small.size - intersection) + (large.size - intersection);
+  return containment >= 0.9 && distinctTokens <= 2;
 }
 
 export function deduplicateRunnableDelegations<T extends { task: string; context?: string; agentName?: string; routingQuery?: string }>(
