@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LMStudioProvider, normalizeMessagesForModel, splitReasoning, type LLMMessage } from "../providers/lmstudio.js";
+import { LMStudioProvider, normalizeMessagesForModel, salvageToolCallArguments, splitReasoning, type LLMMessage } from "../providers/lmstudio.js";
 
 describe("splitReasoning", () => {
   it("returns content unchanged when there is no reasoning", () => {
@@ -29,6 +29,55 @@ describe("splitReasoning", () => {
     const r = splitReasoning("<think>inline thought</think>Done.", "field thought");
     expect(r.content).toBe("Done.");
     expect(r.reasoning).toBe("field thought\n\ninline thought");
+  });
+
+  it("extracts Gemma 4 <thought> blocks out of the content", () => {
+    const r = splitReasoning("<thought>reasoning about the steps</thought>Final answer.");
+    expect(r.content).toBe("Final answer.");
+    expect(r.reasoning).toBe("reasoning about the steps");
+  });
+
+  it("treats an unterminated <thought> as all-reasoning", () => {
+    const r = splitReasoning("<thought>still working through the logic");
+    expect(r.content).toBeNull();
+    expect(r.reasoning).toBe("still working through the logic");
+  });
+});
+
+describe("salvageToolCallArguments (tolerant tool-arg parsing)", () => {
+  it("parses a clean JSON object string", () => {
+    expect(salvageToolCallArguments('{"name":"researcher","task":"news"}'))
+      .toEqual({ name: "researcher", task: "news" });
+  });
+
+  it("recovers JSON when a Gemma <thought> block is prepended to the args", () => {
+    const raw = '<thought>I should record a plan first.</thought>{"plan":["step one"]}';
+    expect(salvageToolCallArguments(raw)).toEqual({ plan: ["step one"] });
+  });
+
+  it("recovers JSON wrapped in a ```json code fence", () => {
+    const raw = '```json\n{"agent":"web_coder","task":"edit"}\n```';
+    expect(salvageToolCallArguments(raw)).toEqual({ agent: "web_coder", task: "edit" });
+  });
+
+  it("extracts the first balanced object even with trailing prose", () => {
+    const raw = '{"name":"record_plan","steps":[{"id":1}]}  // that should do it';
+    expect(salvageToolCallArguments(raw)).toEqual({ name: "record_plan", steps: [{ id: 1 }] });
+  });
+
+  it("does not get confused by braces inside string values", () => {
+    expect(salvageToolCallArguments('{"text":"use {curly} braces"}'))
+      .toEqual({ text: "use {curly} braces" });
+  });
+
+  it("returns null when nothing JSON-shaped is present", () => {
+    expect(salvageToolCallArguments("I cannot do that.")).toBeNull();
+    expect(salvageToolCallArguments("")).toBeNull();
+    expect(salvageToolCallArguments(undefined)).toBeNull();
+  });
+
+  it("rejects a bare JSON array (tool args must be an object)", () => {
+    expect(salvageToolCallArguments('["a","b"]')).toBeNull();
   });
 
   it("handles content that is entirely a closed think block (no answer)", () => {
