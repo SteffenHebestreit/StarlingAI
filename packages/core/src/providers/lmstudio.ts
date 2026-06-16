@@ -621,10 +621,14 @@ export class LMStudioProvider {
           id: tc.id,
           name: tc.function.name,
           arguments: (() => {
-            const salvaged = salvageToolCallArguments(tc.function.arguments);
+            const rawArgs = tc.function.arguments;
+            // An empty argument body is a no-argument call (→ {}), not a parse
+            // error — reserve the _parse_error sentinel for non-empty malformed JSON.
+            if (!rawArgs || !rawArgs.trim()) return {} as Record<string, unknown>;
+            const salvaged = salvageToolCallArguments(rawArgs);
             if (salvaged) return salvaged;
-            log.warn({ toolName: tc.function.name, rawArgs: tc.function.arguments.slice(0, 200) }, "Failed to parse tool call arguments");
-            return { _parse_error: true, _raw: tc.function.arguments } as Record<string, unknown>;
+            log.warn({ toolName: tc.function.name, rawArgs: rawArgs.slice(0, 200) }, "Failed to parse tool call arguments");
+            return { _parse_error: true, _raw: rawArgs } as Record<string, unknown>;
           })(),
         }));
 

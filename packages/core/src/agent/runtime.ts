@@ -3,6 +3,7 @@
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
+import { salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
@@ -1052,6 +1053,29 @@ function collapseDuplicateToolCallsInResponse(
   }
 
   return filtered;
+}
+
+/**
+ * Derive a usable delegation task string from the raw arguments of a tool call
+ * that named a sub-agent as if it were a tool (e.g. `researcher({query:"…"})`).
+ * Returns null when the arguments carry no real task — a parse-error sentinel,
+ * an empty object, or only non-string fields — so the caller rejects the call
+ * instead of fabricating a task by stringifying the argument object. That
+ * fabrication previously leaked `{"_parse_error":true,"_raw":""}` straight into
+ * a delegation as the task (audit a3828367: an empty `web_task_coordinator()`
+ * call), bypassing the delegate tool's own "task is required" guard.
+ * Field names are matched, not content, so this stays language-independent.
+ */
+export function deriveDelegationTaskFromArgs(args: Record<string, unknown> | undefined): string | null {
+  if (!args || typeof args !== "object" || "_parse_error" in args) return null;
+  for (const key of ["task", "query", "prompt", "input", "message", "objective", "request", "instruction"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  // No conventional task field — only stringify when there is genuine string
+  // content to carry; refuse empty or all-non-string argument objects.
+  const hasStringContent = Object.values(args).some(v => typeof v === "string" && v.trim());
+  return hasStringContent ? JSON.stringify(args) : null;
 }
 
 function collapseExcessDirectDelegationsInResponse(
@@ -6107,9 +6131,29 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const knownAgents = getConfig().subAgents ?? {};
         if (tc.name in knownAgents && allowedToolNameSet.has("delegate_to_agent")) {
           const recoveredAgentName = tc.name;
-          const recoveredTask = typeof tc.arguments?.task === "string"
-            ? tc.arguments.task
-            : (typeof tc.arguments?.query === "string" ? tc.arguments.query : JSON.stringify(tc.arguments));
+          const recoveredTask = deriveDelegationTaskFromArgs(tc.arguments);
+          if (!recoveredTask) {
+            // The model named a sub-agent as a tool but supplied no usable task
+            // (empty or malformed arguments). Do NOT fabricate a task by
+            // stringifying the raw arguments — that previously delegated the
+            // literal `{"_parse_error":true,"_raw":""}` sentinel. Reject so the
+            // model retries with a real task, matching delegate_to_agent's own
+            // "task is required" guard.
+            logAudit("tool_call_blocked", {
+              tool: recoveredAgentName,
+              reason: "agent_name_as_tool_missing_task",
+              args: tc.arguments,
+            }, { sessionId: session.id, severity: "warn" });
+            guardrailEvents.push({ type: "tool_blocked", details: `${recoveredAgentName}:agent_name_as_tool_missing_task` });
+            const missingTaskMessage = `Error: You called '${recoveredAgentName}' as if it were a tool but provided no task. To delegate, call delegate_to_agent with agentName: "${recoveredAgentName}" and a task string describing exactly what it should do.`;
+            if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, missingTaskMessage);
+            toolResultMessages.push({
+              role: "tool",
+              content: missingTaskMessage,
+              tool_call_id: tc.id,
+            });
+            continue;
+          }
           tc.arguments = { agentName: recoveredAgentName, task: recoveredTask };
           tc.name = "delegate_to_agent";
           logAudit("tool_call_recovered", {
@@ -7612,9 +7656,14 @@ async function collectStream(
   const tool_calls = [...toolCallBuffers.values()].map(buf => ({
     id: buf.id,
     name: buf.name,
+    // Mirror the lmstudio streaming parser: an empty argument body is a
+    // no-argument call (→ {}), not a parse error; salvage malformed-but-
+    // recoverable JSON before falling back to the _parse_error sentinel.
     arguments: (() => {
-      try { return JSON.parse(buf.args) as Record<string, unknown>; }
-      catch { return { _parse_error: true, _raw: buf.args } as Record<string, unknown>; }
+      if (!buf.args.trim()) return {} as Record<string, unknown>;
+      const salvaged = salvageToolCallArguments(buf.args);
+      if (salvaged) return salvaged;
+      return { _parse_error: true, _raw: buf.args } as Record<string, unknown>;
     })(),
   }));
 

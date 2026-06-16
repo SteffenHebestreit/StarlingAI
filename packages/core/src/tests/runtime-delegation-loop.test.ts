@@ -52,7 +52,7 @@ vi.mock("../audit/logger.js", () => ({
 
 import { AgentSession, resetSessionsForTests } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
-import { buildModelVisibleToolResult, runTurn } from "../agent/runtime.js";
+import { buildModelVisibleToolResult, deriveDelegationTaskFromArgs, runTurn } from "../agent/runtime.js";
 import { getConfig, resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 
@@ -4396,6 +4396,64 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("run_workflow");
   });
 
+  it("rejects an agent-name-as-tool call with empty arguments instead of delegating the parse-error sentinel", async () => {
+    // Repro of audit a3828367: the model called a sub-agent as if it were a tool,
+    // with NO arguments. The streamed empty body became the
+    // {"_parse_error":true,"_raw":""} sentinel, which the agent-name-as-tool recovery
+    // stringified into the delegation task — handing the specialist literal garbage.
+    // (A neutral, non-research request is used so the required-research enforcement
+    // path does not pre-empt the agent-name-as-tool recovery under test.)
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      subAgents: {
+        content_writer: { description: "Writes short creative copy and documents." },
+      },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        // tool_call_start with no argument delta → empty argument buffer.
+        return (async function* () {
+          yield { type: "tool_call_start", toolCallId: "cw_empty_1", toolName: "content_writer" };
+          yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+        })();
+      }
+      return createTextStream("Hier ist dein kurzer Reim über Kaffee.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({ success: true, output: "should-not-run", metadata: {} }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    const observedToolResults: string[] = [];
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "schreib mir bitte einen kurzen reim über kaffee",
+      onToolResult: (_id: string, _name: string, toolResult: string) => observedToolResults.push(toolResult),
+    });
+
+    // The garbage delegation must never have fired, and no sentinel may leak.
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(observedToolResults.some((r) => /provided no task/i.test(r))).toBe(true);
+    expect(observedToolResults.every((r) => !r.includes("_parse_error"))).toBe(true);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool_blocked", details: "content_writer:agent_name_as_tool_missing_task" }),
+    ]));
+    expect(result.blocked).toBe(false);
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
   it("runs the reusable n8n follow-up workflow after a bare approval of the project-list candidate", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
       scenes: {
@@ -5727,5 +5785,26 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.usage.completionTokens).toBe(4097);
     expect(streamedChunks.join("")).toBe("Part one of a long answer. Part two finishes the answer.");
     expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("deriveDelegationTaskFromArgs", () => {
+  it("returns the task/query/prompt field when present", () => {
+    expect(deriveDelegationTaskFromArgs({ task: "do the thing" })).toBe("do the thing");
+    expect(deriveDelegationTaskFromArgs({ query: "look this up" })).toBe("look this up");
+    expect(deriveDelegationTaskFromArgs({ prompt: "  trimmed  " })).toBe("trimmed");
+  });
+
+  it("falls back to stringifying args that carry genuine string content", () => {
+    expect(deriveDelegationTaskFromArgs({ topic: "coffee", style: "haiku" })).toBe('{"topic":"coffee","style":"haiku"}');
+  });
+
+  it("returns null for a parse-error sentinel, empty, or all-non-string args", () => {
+    // The exact shape that leaked into a delegation in audit a3828367.
+    expect(deriveDelegationTaskFromArgs({ _parse_error: true, _raw: "" })).toBeNull();
+    expect(deriveDelegationTaskFromArgs({})).toBeNull();
+    expect(deriveDelegationTaskFromArgs(undefined)).toBeNull();
+    expect(deriveDelegationTaskFromArgs({ task: "   " })).toBeNull();
+    expect(deriveDelegationTaskFromArgs({ count: 3, ready: true })).toBeNull();
   });
 });
