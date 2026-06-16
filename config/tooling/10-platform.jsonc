@@ -37,7 +37,7 @@
   },
   "computerUse": {
     "enabled": true,
-    "visionModel": "lmstudio/google/gemma-4-26b-a4b-qat",
+    "visionModel": "lmstudio/qwen/qwen3.6-35b-a3b",
     "adapters": {
       "local_vscode": {
         "codePath": "code"

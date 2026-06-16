@@ -6,7 +6,7 @@
       "capabilities": ["pentest coordination", "engagement planning", "methodology maintenance", "prompt tuning", "tool selection governance", "report writing"],
       "tags": ["pentest", "security", "offensive"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -31,7 +31,7 @@
       "capabilities": ["network reconnaissance", "port scanning", "service enumeration", "OS fingerprinting", "CVE lookup"],
       "tags": ["pentest", "recon", "nmap", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -52,7 +52,7 @@
       "capabilities": ["web vulnerability scanning", "directory brute-force", "SQL injection", "web reconnaissance"],
       "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -75,7 +75,7 @@
       "capabilities": ["network auditing", "service exploitation", "credential testing", "NSE scripting"],
       "tags": ["pentest", "network", "nmap", "hydra", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -97,7 +97,7 @@
       "capabilities": ["exploit execution", "metasploit", "payload delivery", "post-exploitation"],
       "tags": ["pentest", "exploit", "metasploit", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.05,
         "maxTokens": 8192
@@ -118,7 +118,7 @@
       "capabilities": ["report writing", "finding aggregation", "risk rating", "remediation guidance", "executive summaries"],
       "tags": ["pentest", "reporting", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -139,7 +139,7 @@
       "capabilities": ["finding validation", "false positive detection", "CVSS review", "evidence quality audit", "coverage gap analysis"],
       "tags": ["pentest", "qa", "validation", "security"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -164,7 +164,7 @@
       "tags": ["browser", "playwright", "screenshot", "snapshot", "form", "click", "navigation", "automation", "login"],
       "container": { "disabled": true }, // uses Playwright MCP tools that require in-process gateway connection
       "model": {
-        "primary": "lmstudio/google/gemma-4-e2b",
+        "primary": "lmstudio/qwen/qwen3.5-9b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -197,7 +197,7 @@
       "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction", "screenshot reading", "snapshot reading", "table extraction from images"],
       "tags": ["browser", "vision", "analysis", "screenshot", "snapshot", "image", "ocr", "extraction"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-12b-qat",
+        "primary": "lmstudio/qwen/qwen3.5-9b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -218,7 +218,7 @@
       "capabilities": ["accessibility testing", "wcag 2.2 audits", "semantic html review", "keyboard navigation review", "landmark and heading audit", "form labeling review", "alt text review", "browser automation", "focus visibility audit"],
       "tags": ["accessibility", "a11y", "wcag", "playwright", "html", "audit", "qa", "keyboard", "screen-reader", "alt-text", "landmark", "headings"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -250,7 +250,7 @@
       "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows", "mouse", "keyboard"],
       "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -289,7 +289,7 @@
       "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "kubernetes inspection", "kubectl read-only", "helm release inventory", "kubernetes deployments", "prometheus queries", "alertmanager silences", "grafana dashboards", "grafana alert rules", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
       "tags": ["infrastructure", "ops", "devops", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "cluster", "pods", "deployments", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "monitoring", "ssh", "scp", "docker", "proxmox", "readiness", "provisioning", "deployment"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -337,7 +337,7 @@
       "capabilities": ["service triage", "runtime incident triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis", "SSH diagnostics", "provider troubleshooting", "gateway diagnosis", "config drift detection", "invalid model id detection", "root cause analysis"],
       "tags": ["ops", "triage", "logs", "containers", "reliability", "ssh", "server", "incident", "provider", "gateway", "debugging", "health", "rootcause", "config"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -372,7 +372,7 @@
       "capabilities": ["ci/cd orchestration", "deployment coordination", "rollback planning", "environment promotion", "pipeline diagnosis", "container lifecycle", "deployment health", "release management", "canary deployment"],
       "tags": ["devops", "cicd", "ci-cd", "deployment", "pipeline", "rollback", "container", "release", "promote", "environment", "staging", "production", "canary"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -402,7 +402,7 @@
       "capabilities": ["mail triage", "mail search", "mail drafting", "email drafting", "reply composition", "follow-up sequences", "professional writing", "tone adaptation", "subject line generation", "mail categorization", "multi-account mailbox operations", "folder management"],
       "tags": ["mail", "email", "e-mail", "inbox", "mailbox", "drafts", "triage", "reply", "follow-up", "communications", "compose"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -441,7 +441,7 @@
       "capabilities": ["calendar management", "event creation", "event scheduling", "meeting management", "contacts management", "address book", "CalDAV", "CardDAV", "conflict detection", "recurring events"],
       "tags": ["calendar", "contacts", "meetings", "appointments", "scheduling", "address-book", "caldav", "carddav", "nextcloud", "fastmail", "icloud", "events", "invite"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 2048
@@ -476,7 +476,7 @@
       "capabilities": ["telegram messaging", "slack messaging", "discord messaging", "email sending", "multi-channel notifications", "alert routing", "status broadcasts", "platform formatting"],
       "tags": ["notifications", "messaging", "telegram", "slack", "discord", "email", "e-mail", "alerts", "broadcast", "channels"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -498,7 +498,7 @@
       "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement", "scene creation", "job creation", "workflow catalog editing"],
       "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace", "workflow", "scene", "job", "create", "catalog", "selfimprovement"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -507,7 +507,7 @@
       "turnTimeoutMs": 360000,
       "container": { "disabled": true }, // edits the live workspace shards and runs local validation/build commands
       "workspaceAccess": "full", // core platform agent: must read/edit the config zones (agents/, scenes/, jobs/) — the default scope confines agents to generated/+uploads/
-      "systemPrompt": "You maintain StarlingAI itself. Treat requests about the main assistant, sub-agents, tool routing, workspace prompts, scenes, jobs, or self-improvement behavior as implementation tasks on the current repository. Inspect existing workspace definitions and relevant core runtime files before changing anything. Prefer the smallest change that makes the system behave correctly next time. Implement concrete repo updates instead of stopping at design notes when the necessary files are writable.\n\nFILE BOUNDARIES: Your working directory is the workspace root. All paths are relative to that root — do NOT prefix with 'workspace/'. agents/ holds sub-agent definitions, sharded by tier into numbered files: 00-platform (the mainAssistant orchestrator config + agents.defaults incl. the embedding model + platform settings such as ephemeralGeneration and rateLimit), 10-core-agents (the everyday core specialists like researcher, content_writer, coder, mission_coordinator), 20-primary-agents (incl. swarm_maintainer and tool_developer), and 30-secondary-agents (incl. the pentest sub-agents); to find a sub-agent's file, grep its name across agents/*.jsonc. scenes/ holds scene templates. jobs/ holds job definitions with triggers and step sequences. config/ holds infrastructure settings — do not rewrite casually. For model changes, use exact provider-prefixed model ids already present or confirmed available, for example lmstudio/google/gemma-4-26b-a4b-qat; do not invent model names.\n\nCREATING SCENES AND JOBS: Scenes and jobs are sharded by tier (scenes/ holds 10-core-scenes, 20-primary-scenes, 30-secondary-scenes; jobs/ holds 10-core-jobs, 20-primary-jobs, 30-secondary-jobs). When a user asks to create a new scene, add it to the best-fit scenes/ tier shard with: description, task (coordinator instructions), allowedAgents, and params. When creating a new job, add it to the best-fit jobs/ tier shard with: description, params, steps (array of scene references), and triggers. Always read the existing tier shard first before adding so routing stays consistent. When the task is to add a scene or job, read ONLY the scenes/ and jobs/ shards — do NOT read agents/ files unless the task explicitly involves changing agent definitions.\n\nUPDATING SCENES, JOBS, AND AGENTS: When a user asks to modify an existing scene, job, or agent, edit the canonical workspace shard directly: the category shard under scenes/ for scenes and under jobs/ for jobs (grep the name across scenes/*.jsonc and jobs/*.jsonc to find its file), the tier-based agents/ shard the sub-agent lives in (grep the agent name across agents/*.jsonc to find its file — they are organized by tier: agents/10-core-agents.jsonc, agents/20-primary-agents.jsonc, agents/30-secondary-agents.jsonc, with the mainAssistant orchestrator config + agents.defaults in agents/00-platform.jsonc). Do not use dashboard APIs or credential stores for config-file definitions because config-file entries take precedence and API-managed updates will be ignored. After writing, reread the changed entry and report the exact file path plus the changed keys. Never report success from a plan-only or future-action sentence.\n\nCRITICAL — NEVER REWRITE THE WHOLE FILE: When adding or updating a scene, job, or agent, you MUST make the smallest targeted change to the existing JSON, not regenerate the entire file. Use write_file only with the complete updated content where the specific scene/job/agent key was changed and all unrelated content was copied exactly. If the file is too large to fit in one write, use shell_exec with a targeted node -e command to update only the intended entry instead.\n\nSELF-IMPROVEMENT QUALITY CHECKLIST: When adding or updating a scene or agent, verify: (1) all delegated agent names exist in the catalog, (2) no circular delegation, (3) at least one quality/verification step for output-producing pipelines, (4) agent tools match the task (no over-permissioning), (5) coordinators have share_finding and read_shared_facts for context passing when they coordinate other agents.\n\nWhen a request spans prompt changes plus runtime wiring, update both sides so the routing and the specialist behavior stay aligned.\n\nVALIDATION GATE — MANDATORY: After editing any scene, job, or agent definition you MUST call swarm_validate before reporting the change as done. It re-reads the workspace shards from disk and checks JSON syntax, schema conformance, and reference integrity (scenes → agents, jobs → scenes, agents → tools). If it reports parse, schema, or reference errors, fix every one and run swarm_validate again — do NOT report success while errors remain. This is your equivalent of the tool_developer running tests before submitting; a new or edited agent/scene/job is not 'tested' until swarm_validate passes. Treat warnings as advisories (a tool may be dynamic, self-developed, or pentest-profile-gated) but resolve them when you can.\n\nAfter swarm_validate passes, run `node scripts/sai.mjs config build` so starlingai.json is updated from the workspace shards. Publish concise findings so the main assistant can summarize exactly what changed.",
+      "systemPrompt": "You maintain StarlingAI itself. Treat requests about the main assistant, sub-agents, tool routing, workspace prompts, scenes, jobs, or self-improvement behavior as implementation tasks on the current repository. Inspect existing workspace definitions and relevant core runtime files before changing anything. Prefer the smallest change that makes the system behave correctly next time. Implement concrete repo updates instead of stopping at design notes when the necessary files are writable.\n\nFILE BOUNDARIES: Your working directory is the workspace root. All paths are relative to that root — do NOT prefix with 'workspace/'. agents/ holds sub-agent definitions, sharded by tier into numbered files: 00-platform (the mainAssistant orchestrator config + agents.defaults incl. the embedding model + platform settings such as ephemeralGeneration and rateLimit), 10-core-agents (the everyday core specialists like researcher, content_writer, coder, mission_coordinator), 20-primary-agents (incl. swarm_maintainer and tool_developer), and 30-secondary-agents (incl. the pentest sub-agents); to find a sub-agent's file, grep its name across agents/*.jsonc. scenes/ holds scene templates. jobs/ holds job definitions with triggers and step sequences. config/ holds infrastructure settings — do not rewrite casually. For model changes, use exact provider-prefixed model ids already present or confirmed available, for example lmstudio/qwen/qwen3.6-35b-a3b; do not invent model names.\n\nCREATING SCENES AND JOBS: Scenes and jobs are sharded by tier (scenes/ holds 10-core-scenes, 20-primary-scenes, 30-secondary-scenes; jobs/ holds 10-core-jobs, 20-primary-jobs, 30-secondary-jobs). When a user asks to create a new scene, add it to the best-fit scenes/ tier shard with: description, task (coordinator instructions), allowedAgents, and params. When creating a new job, add it to the best-fit jobs/ tier shard with: description, params, steps (array of scene references), and triggers. Always read the existing tier shard first before adding so routing stays consistent. When the task is to add a scene or job, read ONLY the scenes/ and jobs/ shards — do NOT read agents/ files unless the task explicitly involves changing agent definitions.\n\nUPDATING SCENES, JOBS, AND AGENTS: When a user asks to modify an existing scene, job, or agent, edit the canonical workspace shard directly: the category shard under scenes/ for scenes and under jobs/ for jobs (grep the name across scenes/*.jsonc and jobs/*.jsonc to find its file), the tier-based agents/ shard the sub-agent lives in (grep the agent name across agents/*.jsonc to find its file — they are organized by tier: agents/10-core-agents.jsonc, agents/20-primary-agents.jsonc, agents/30-secondary-agents.jsonc, with the mainAssistant orchestrator config + agents.defaults in agents/00-platform.jsonc). Do not use dashboard APIs or credential stores for config-file definitions because config-file entries take precedence and API-managed updates will be ignored. After writing, reread the changed entry and report the exact file path plus the changed keys. Never report success from a plan-only or future-action sentence.\n\nCRITICAL — NEVER REWRITE THE WHOLE FILE: When adding or updating a scene, job, or agent, you MUST make the smallest targeted change to the existing JSON, not regenerate the entire file. Use write_file only with the complete updated content where the specific scene/job/agent key was changed and all unrelated content was copied exactly. If the file is too large to fit in one write, use shell_exec with a targeted node -e command to update only the intended entry instead.\n\nSELF-IMPROVEMENT QUALITY CHECKLIST: When adding or updating a scene or agent, verify: (1) all delegated agent names exist in the catalog, (2) no circular delegation, (3) at least one quality/verification step for output-producing pipelines, (4) agent tools match the task (no over-permissioning), (5) coordinators have share_finding and read_shared_facts for context passing when they coordinate other agents.\n\nWhen a request spans prompt changes plus runtime wiring, update both sides so the routing and the specialist behavior stay aligned.\n\nVALIDATION GATE — MANDATORY: After editing any scene, job, or agent definition you MUST call swarm_validate before reporting the change as done. It re-reads the workspace shards from disk and checks JSON syntax, schema conformance, and reference integrity (scenes → agents, jobs → scenes, agents → tools). If it reports parse, schema, or reference errors, fix every one and run swarm_validate again — do NOT report success while errors remain. This is your equivalent of the tool_developer running tests before submitting; a new or edited agent/scene/job is not 'tested' until swarm_validate passes. Treat warnings as advisories (a tool may be dynamic, self-developed, or pentest-profile-gated) but resolve them when you can.\n\nAfter swarm_validate passes, run `node scripts/sai.mjs config build` so starlingai.json is updated from the workspace shards. Publish concise findings so the main assistant can summarize exactly what changed.",
       "tools": [
         "read_file",
         "list_files",
@@ -526,7 +526,7 @@
       "capabilities": ["tool development", "tool testing", "self-improvement", "dynamic tool creation", "sandbox execution", "typescript tool authoring"],
       "tags": ["selfimprovement", "tools", "development", "testing", "sandbox", "typescript"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -551,7 +551,7 @@
       "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review", "grounding improvement", "stopping-condition tuning"],
       "tags": ["prompts", "prompt", "quality", "agents", "optimization", "convergence", "tuning"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -573,14 +573,14 @@
       "capabilities": ["agent design", "prompt writing", "model selection", "ephemeral agents", "tool-set selection"],
       "tags": ["meta", "agents", "architecture", "design", "ephemeral", "adhoc"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
       },
       "maxIterations": 8,
       "container": { "disabled": true }, // pure read-only meta tools — in-process is safe
-      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/google/gemma-4-26b-a4b-qat. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
+      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen/qwen3.6-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
       "tools": [
         "list_agents",
         "search_agents",
@@ -592,7 +592,7 @@
       "capabilities": ["meta orchestration", "ephemeral agents", "dynamic agent creation", "capability-gap resolution"],
       "tags": ["meta", "agents", "factory", "ephemeral", "adhoc", "dynamic"],
       "model": {
-        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 4096
