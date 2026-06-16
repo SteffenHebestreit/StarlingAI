@@ -155,14 +155,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - ENABLED_TOOLS=file_converter
-      # qwen/qwen3.6-35b-a3b is used as a text model through the provider.
+      # google/gemma-4-26b-a4b-qat is used as the text/vision model through the provider.
       # Keep LLM-enhanced image conversion disabled unless a real vision-capable model is loaded.
       - FTMD_MARKITDOWN_ENABLE_LLM=false
       # Provider configuration for file conversion features that rely on text-only model access.
       - FTMD_OPENAI_BASE_URL=${FTMD_OPENAI_BASE_URL:-http://host.docker.internal:1234/v1}
       - FTMD_OPENAI_API_KEY=${FTMD_OPENAI_API_KEY:-lm-studio}
       # Bare LM Studio model id (no provider prefix — this hits LM Studio's API directly).
-      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-qwen/qwen3.6-35b-a3b}
+      - FTMD_OPENAI_MODEL=${FTMD_OPENAI_MODEL:-google/gemma-4-26b-a4b-qat}
       - LOG_LEVEL=${FASTAPI_MCP_TEMPLATE_LOG_LEVEL:-INFO}
     networks:
       - starlingai-internal
@@ -203,7 +203,7 @@ services:
       - EMBEDDING_DIM=${ENGRAM_EMBEDDING_DIM:-1024}
       - LLM_API_BASE=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
       - LLM_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
-      - LLM_MODEL=${ENGRAM_LLM_MODEL:-qwen/qwen3.6-35b-a3b}
+      - LLM_MODEL=${ENGRAM_LLM_MODEL:-google/gemma-4-26b-a4b-qat}
       # This LM Studio build rejects response_format={"type":"json_object"} (it only
       # accepts json_schema/text), so disable JSON mode — engram still parses the
       # JSON object out of the plain text reply.
