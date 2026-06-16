@@ -52,7 +52,12 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const plan = normalizeTurnPlan(args);
     if (!plan.objective && plan.steps.length === 0) {
-      return { success: false, output: "", error: "A plan needs at least an objective or one step." };
+      // record_plan is an OPTIONAL checkpoint. An empty call — a model that named
+      // the tool but supplied no objective/steps (common with Gemma) — is a benign
+      // no-op, NOT a failure. Returning success:false here surfaced as a
+      // "tool_failed / stop the run" intervention that derailed the orchestrator
+      // (audit 37382e95). Record nothing and let the turn continue.
+      return { success: true, output: "No plan recorded (no objective or steps were provided). Proceeding." };
     }
     await persistTurnPlan(ctx.sessionId, plan);
     const width = countParallelWidth(plan.steps);

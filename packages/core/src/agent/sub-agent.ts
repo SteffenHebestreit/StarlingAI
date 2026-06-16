@@ -4416,7 +4416,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             }, { sessionId: subSessionId, severity: "warn" });
             // Fall through to normal execution with the salvaged arguments.
           } else {
-            const truncatedWriteCoaching = tc.name === "write_file" && looksTruncatedByOutputLimit
+            const truncatedWriteCoaching = rawArgs.trim() === ""
+              ? " The arguments arrived empty — re-issue the call with its required fields filled in."
+              : tc.name === "write_file" && looksTruncatedByOutputLimit
               ? " Your write_file arguments were CUT OFF by the output limit — the call was too large to finish, and nothing was written. Do NOT retry the whole file in one call. Re-issue write_file with a SMALL first chunk — {\"path\": \"...\", \"mode\": \"create\", \"content\": <first small part>} with \"path\" as the FIRST property — then continue with {\"mode\": \"append\"} chunks until the file is complete."
               : " Do not retry this call with a large inline payload; answer from existing evidence or use a smaller valid tool call.";
             emitSubAgentToolAudit({

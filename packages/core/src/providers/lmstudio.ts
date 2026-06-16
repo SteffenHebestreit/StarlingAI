@@ -140,10 +140,43 @@ export function splitReasoning(
   // If we extracted reasoning, `answer` is the de-thought remainder (may be
   // empty → null). If we extracted nothing, leave the original content as-is.
   if (!reasoning) {
-    return { content: typeof rawContent === "string" ? rawContent : null };
+    return { content: typeof rawContent === "string" ? stripModelControlTokens(rawContent) : null };
   }
-  const cleaned = answer.trim();
+  const cleaned = stripModelControlTokens(answer.trim());
   return { content: cleaned.length > 0 ? cleaned : null, reasoning };
+}
+
+/**
+ * Strip stray LLM template / Harmony control tokens like `<|channel|>`,
+ * `<|message|>`, `<|im_end|>`, `<|endoftext|>` (and the malformed single-pipe
+ * variant `<|channel>` Gemma 4 emits) from a string. These intermittently leak
+ * INLINE into real text — e.g. Gemma 26B produced `Today'<|channel>s date` inside
+ * a tool-call argument value, corrupting the delegated task.
+ *
+ * Two delimiter styles are stripped, both anchored on a pipe right after `<` so
+ * a normal `<tag>` / markdown / code / math is never touched:
+ *   - ASCII bracket-pipe `<|...|>` / `<|...>` — ChatML, Llama 3, Harmony/gpt-oss,
+ *     Phi, GLM, Qwen.
+ *   - FULL-WIDTH pipe `<｜...｜>` (U+FF5C) — the DeepSeek family (`<｜User｜>`,
+ *     `<｜tool▁calls▁begin｜>`, `<｜end▁of▁sentence｜>`), whose tokens also contain
+ *     the `▁` (U+2581) separator, so we match any non-`>` run after `<｜`.
+ *
+ * Angle-only (`<start_of_turn>`) and square-bracket (`[INST]`) template tokens are
+ * handled via an EXPLICIT literal allow-list (not a broad `<...>` / `[...]` regex)
+ * so legitimate `<tag>` / HTML `<s>` / `[link](url)` / markdown is never touched.
+ * Verified leak-prone literals only (deep-research 2026-06, vLLM #32587,
+ * llama.cpp #21316/#21384/#21326): Gemma turn delimiters and Mistral INST markers.
+ */
+const MODEL_CONTROL_TOKEN_RE = /<\|[a-z0-9_]{1,40}\|?>/gi;        // ASCII pipe <|...|> (ChatML, Llama 3, Harmony/gpt-oss, Phi, GLM, Qwen)
+const MODEL_CONTROL_TOKEN_FW_RE = /<｜[^>]{1,60}>/g;              // full-width pipe <｜...｜> (DeepSeek family)
+const MODEL_CONTROL_LITERAL_RE = /<start_of_turn>|<end_of_turn>|\[\/?INST\]|\[TOOL_CALLS\]|\[AVAILABLE_TOOLS\]/g; // exact known literals (Gemma, Mistral)
+export function stripModelControlTokens(value: string): string {
+  if (!value) return value;
+  let out = value;
+  if (out.indexOf("<|") !== -1) out = out.replace(MODEL_CONTROL_TOKEN_RE, "");
+  if (out.indexOf("<｜") !== -1) out = out.replace(MODEL_CONTROL_TOKEN_FW_RE, "");
+  out = out.replace(MODEL_CONTROL_LITERAL_RE, "");
+  return out;
 }
 
 /**
@@ -151,18 +184,24 @@ export function splitReasoning(
  * supposed to be a bare JSON object string, but thinking models that reason in
  * the same stream (notably **Gemma 4**, whose `<thought>` thinking llama.cpp
  * cannot reliably disable on the 12B/26B/31B sizes — ggml-org/llama.cpp#21338)
- * leak reasoning or markdown fences INTO the arguments string. The backend then
- * hands us e.g. `<thought>I should plan…</thought>{"plan":[…]}` or
- * ```json\n{…}\n``` — and a strict `JSON.parse` throws, surfacing as
- * "Could not parse arguments for tool 'record_plan'/'delegate_to_agent'".
+ * leak reasoning, markdown fences, or stray control tokens (`<|channel|>`) INTO
+ * the arguments string. The backend then hands us e.g.
+ * `<thought>I should plan…</thought>{"plan":[…]}`, ```json\n{…}\n```, or a value
+ * with `<|channel>` spliced mid-word — and a strict `JSON.parse` either throws or
+ * (worse) succeeds with the token still inside a string value.
  *
- * Strategy is purely structural (no per-model keywords): try the raw string,
- * then strip reasoning tags + code fences, then extract the first BALANCED
- * `{…}` object and parse that. Returns null only when nothing JSON-shaped is
- * recoverable.
+ * Strategy is purely structural (no per-model keywords): strip control tokens,
+ * try the raw string, then strip reasoning tags + code fences, then extract the
+ * first BALANCED `{…}` object and parse that. Returns null only when nothing
+ * JSON-shaped is recoverable.
  */
 export function salvageToolCallArguments(raw: string | undefined | null): Record<string, unknown> | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
+  // Remove control tokens FIRST — they can sit inside an otherwise-valid JSON
+  // string value (Gemma's `Today'<|channel>s date`), where a direct parse would
+  // happily keep the token. Never valid JSON syntax, so stripping is safe.
+  raw = stripModelControlTokens(raw);
+  if (!raw.trim()) return null;
 
   const tryParse = (s: string): Record<string, unknown> | null => {
     try {
@@ -621,10 +660,15 @@ export class LMStudioProvider {
           id: tc.id,
           name: tc.function.name,
           arguments: (() => {
-            const salvaged = salvageToolCallArguments(tc.function.arguments);
+            const raw = tc.function.arguments;
+            // Genuinely empty (model named the tool but produced no argument
+            // tokens) → {}, matching completeViaStream/collectStream. Treating
+            // empty as a parse error is what fed the empty-args cascade.
+            if (!raw || !raw.trim()) return {};
+            const salvaged = salvageToolCallArguments(raw);
             if (salvaged) return salvaged;
-            log.warn({ toolName: tc.function.name, rawArgs: tc.function.arguments.slice(0, 200) }, "Failed to parse tool call arguments");
-            return { _parse_error: true, _raw: tc.function.arguments } as Record<string, unknown>;
+            log.warn({ toolName: tc.function.name, rawArgs: raw.slice(0, 200) }, "Failed to parse tool call arguments");
+            return { _parse_error: true, _raw: raw } as Record<string, unknown>;
           })(),
         }));
 
@@ -740,8 +784,11 @@ export class LMStudioProvider {
     });
 
     const reasoning = reasoningParts.join("").trim();
+    // Strip stray control tokens from the FINAL assembled content (catches tokens
+    // even when they spanned chunk boundaries during streaming).
+    const cleanContent = stripModelControlTokens(content);
     return {
-      content: content.length > 0 ? content : null,
+      content: cleanContent.length > 0 ? cleanContent : null,
       ...(reasoning ? { reasoning } : {}),
       tool_calls,
       usage,

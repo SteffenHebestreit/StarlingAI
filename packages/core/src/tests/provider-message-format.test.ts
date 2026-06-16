@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LMStudioProvider, normalizeMessagesForModel, salvageToolCallArguments, splitReasoning, type LLMMessage } from "../providers/lmstudio.js";
+import { LMStudioProvider, normalizeMessagesForModel, salvageToolCallArguments, splitReasoning, stripModelControlTokens, type LLMMessage } from "../providers/lmstudio.js";
 
 describe("splitReasoning", () => {
   it("returns content unchanged when there is no reasoning", () => {
@@ -44,6 +44,33 @@ describe("splitReasoning", () => {
   });
 });
 
+describe("stripModelControlTokens", () => {
+  it("removes Harmony/template control tokens (both <|x|> and malformed <|x>)", () => {
+    expect(stripModelControlTokens("Today'<|channel>s date")).toBe("Today's date");
+    expect(stripModelControlTokens("done<|im_end|> ok")).toBe("done ok");
+    expect(stripModelControlTokens("a<|channel|>b<|message|>c")).toBe("abc");
+  });
+
+  it("strips DeepSeek full-width-pipe tokens <｜...｜> (U+FF5C, with ▁ separators)", () => {
+    expect(stripModelControlTokens("answer<｜end▁of▁sentence｜>")).toBe("answer");
+    expect(stripModelControlTokens("<｜User｜>hi<｜Assistant｜>")).toBe("hi");
+    expect(stripModelControlTokens("call<｜tool▁calls▁begin｜>x")).toBe("callx");
+  });
+
+  it("strips known angle/bracket literal tokens (Gemma turn, Mistral INST)", () => {
+    expect(stripModelControlTokens("a<start_of_turn>b<end_of_turn>c")).toBe("abc");
+    expect(stripModelControlTokens("[INST] hi [/INST]")).toBe(" hi ");
+    expect(stripModelControlTokens("x[TOOL_CALLS]y[AVAILABLE_TOOLS]z")).toBe("xyz");
+  });
+
+  it("leaves legitimate angle-bracket / markdown text untouched (only known literals stripped)", () => {
+    expect(stripModelControlTokens("use <html> and <Foo> and <s>strike</s> tags")).toBe("use <html> and <Foo> and <s>strike</s> tags");
+    expect(stripModelControlTokens("a < b and c > d")).toBe("a < b and c > d");
+    expect(stripModelControlTokens("see [link](url) and [1] and [a, b]")).toBe("see [link](url) and [1] and [a, b]");
+    expect(stripModelControlTokens("no tokens here")).toBe("no tokens here");
+  });
+});
+
 describe("salvageToolCallArguments (tolerant tool-arg parsing)", () => {
   it("parses a clean JSON object string", () => {
     expect(salvageToolCallArguments('{"name":"researcher","task":"news"}'))
@@ -58,6 +85,18 @@ describe("salvageToolCallArguments (tolerant tool-arg parsing)", () => {
   it("recovers JSON wrapped in a ```json code fence", () => {
     const raw = '```json\n{"agent":"web_coder","task":"edit"}\n```';
     expect(salvageToolCallArguments(raw)).toEqual({ agent: "web_coder", task: "edit" });
+  });
+
+  it("strips a Gemma control token spliced INSIDE a string value (audit 37382e95)", () => {
+    // The raw JSON is structurally valid — the `<|channel>` sits inside the task
+    // string, so a plain parse would keep it and corrupt the delegated task.
+    const raw = '{"task":"Get today\'<|channel>s news for June 16, 2026"}';
+    expect(salvageToolCallArguments(raw)).toEqual({ task: "Get today's news for June 16, 2026" });
+  });
+
+  it("strips standard <|channel|> / <|im_end|> control tokens too", () => {
+    expect(salvageToolCallArguments('{"a":"x<|channel|>y","b":"z<|im_end|>"}'))
+      .toEqual({ a: "xy", b: "z" });
   });
 
   it("extracts the first balanced object even with trailing prose", () => {

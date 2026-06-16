@@ -4,6 +4,7 @@
  */
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
+import { salvageToolCallArguments, stripModelControlTokens } from "../providers/lmstudio.js";
 import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
@@ -6107,9 +6108,27 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const knownAgents = getConfig().subAgents ?? {};
         if (tc.name in knownAgents && allowedToolNameSet.has("delegate_to_agent")) {
           const recoveredAgentName = tc.name;
+          // Only a real string task/query can be recovered. NEVER fall back to
+          // JSON.stringify(tc.arguments): when the call arrived with no usable
+          // arguments (a {_parse_error,_raw:""} object, or {} after the empty→{}
+          // normalization), that would launder the error/empty object into the
+          // delegated TASK — and overwriting tc.arguments below wipes the
+          // _parse_error key so the guard further down never fires. Refuse and
+          // ask the model to re-issue with an explicit task.
           const recoveredTask = typeof tc.arguments?.task === "string"
             ? tc.arguments.task
-            : (typeof tc.arguments?.query === "string" ? tc.arguments.query : JSON.stringify(tc.arguments));
+            : (typeof tc.arguments?.query === "string" ? tc.arguments.query : "");
+          if (!recoveredTask.trim()) {
+            logAudit("tool_call_recovered", {
+              originalTool: recoveredAgentName,
+              rewrittenTo: "delegate_to_agent",
+              reason: "agent_name_as_tool_empty_args_refused",
+            }, { sessionId: session.id, severity: "warn" });
+            const coaching = `Error: Could not delegate to '${recoveredAgentName}' — the call arrived with no usable arguments. Re-issue delegate_to_agent with agentName: "${recoveredAgentName}" and an explicit task describing what the specialist should do.`;
+            if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, coaching);
+            toolResultMessages.push({ role: "tool", content: coaching, tool_call_id: tc.id });
+            continue;
+          }
           tc.arguments = { agentName: recoveredAgentName, task: recoveredTask };
           tc.name = "delegate_to_agent";
           logAudit("tool_call_recovered", {
@@ -6159,6 +6178,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // Reject tool calls with unparseable arguments from the LLM
       if (tc.arguments && "_parse_error" in tc.arguments) {
         const rawArgs = (tc.arguments as Record<string, unknown>)["_raw"];
+        const rawEmpty = String(rawArgs ?? "").trim() === "";
+        // record_plan is a SOFT, optional checkpoint — an empty/garbled call must
+        // be a benign no-op, not a run-stopping "stop the run" intervention that
+        // pollutes context and (per audit) primes the next confused emission.
+        if (tc.name === "record_plan") {
+          logAudit("tool_call_blocked", { tool: tc.name, reason: "empty_args_noop" }, { sessionId: session.id, severity: "info" });
+          const skipMessage = "No plan was recorded (the call arrived with no usable arguments). Proceed and execute the task; you may call record_plan again with an objective and at least one step if it helps.";
+          if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, skipMessage);
+          toolResultMessages.push({ role: "tool", content: skipMessage, tool_call_id: tc.id });
+          continue;
+        }
         const intervention = classifyToolIntervention({
           toolName: tc.name,
           success: false,
@@ -6175,7 +6205,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sessionId: session.id, severity: "warn",
         });
         if (intervention) opts.onIntervention?.(intervention);
-        const parseErrorMessage = `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Do not retry the same large inline payload; synthesize from existing evidence or use a smaller valid tool call.`;
+        // Tailor the coaching: an EMPTY arg string means "you named the tool but
+        // produced no arguments" — telling the model to drop a "large inline
+        // payload" (which never existed) is actively misleading.
+        const parseErrorMessage = rawEmpty
+          ? `Error: The arguments for tool '${tc.name}' arrived empty. Re-issue the call with its required fields filled in.`
+          : `Error: Could not parse arguments for tool '${tc.name}'. The arguments were malformed JSON. Do not retry the same large inline payload; synthesize from existing evidence or use a smaller valid tool call.`;
         if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, parseErrorMessage);
         toolResultMessages.push({
           role: "tool",
@@ -7612,17 +7647,27 @@ async function collectStream(
   const tool_calls = [...toolCallBuffers.values()].map(buf => ({
     id: buf.id,
     name: buf.name,
-    arguments: (() => {
-      try { return JSON.parse(buf.args) as Record<string, unknown>; }
-      catch { return { _parse_error: true, _raw: buf.args } as Record<string, unknown>; }
-    })(),
+    // Three cases, mirroring the provider's own completeViaStream assembler:
+    //  - GENUINELY EMPTY (no argument tokens at all) → {}. Gemma 4 intermittently
+    //    emits a tool call with zero argument deltas; treating that as a parse
+    //    error is what triggered the cascade (an empty {_parse_error,_raw:""} got
+    //    laundered into a delegated task). {} lets soft tools (record_plan) no-op
+    //    and keeps the error object out of downstream args.
+    //  - NON-EMPTY but reasoning/fences leaked into the JSON → salvage recovers it
+    //    (thinking models like Gemma 4 leak <think>/<thought>; Qwen emits clean
+    //    JSON so this path is unchanged for it).
+    //  - NON-EMPTY and unsalvageable → _parse_error sentinel.
+    arguments: !buf.args.trim()
+      ? {}
+      : (salvageToolCallArguments(buf.args) ?? ({ _parse_error: true, _raw: buf.args } as Record<string, unknown>)),
   }));
 
   if (options.deferTextUntilToolDecision && onChunk && !sawToolCall && content) {
     onChunk(content);
   }
 
-  return { content: content || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason };
+  const cleanContent = stripModelControlTokens(content);
+  return { content: cleanContent || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason };
 }
 
 function buildTurnPerformanceMetrics(input: {

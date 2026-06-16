@@ -1025,6 +1025,71 @@ describe("runtime delegated-loop regressions", () => {
     expect(visible).not.toContain("10-core-agents.jsonc");
   });
 
+  it("refuses to launder empty agent-name-as-tool args into a delegated task (audit f4dfceab cascade)", async () => {
+    // Gemma intermittently emits a tool call NAMED after a sub-agent
+    // (web_task_coordinator) with ZERO argument tokens. The agent-name-as-tool
+    // recovery used to JSON.stringify those args into the delegated task, so the
+    // sub-agent received the literal '{"_parse_error":true,"_raw":""}' as its task.
+    // The fix: when there is no real string task/query, refuse and coach instead.
+    const {
+      runTurn: freshRunTurn,
+      AgentSession: FreshSession,
+      registerTool: freshRegister,
+      unregisterTool: freshUnregister,
+    } = await loadFreshRuntimeForToolMode("hybrid", {
+      subAgents: {
+        web_task_coordinator: {
+          description: "Coordinator for freshness-sensitive web tasks.",
+          systemPrompt: "Coordinate live web tasks.",
+          model: { primary: "lmstudio/test-model" },
+        },
+      },
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({ success: true, output: "delegated result" }));
+    freshRegister({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        // Tool call named after the sub-agent, with NO arguments delta at all.
+        return (async function* () {
+          yield { type: "tool_call_start", toolCallId: "c1", toolName: "web_task_coordinator" };
+          yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+        })();
+      }
+      return createTextStream("Here are today's top headlines: …");
+    });
+
+    const session = new FreshSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    try {
+      const result = await freshRunTurn({ session, userMessage: "kannst du mir die aktuellen news zusammenstellen?" });
+      expect(result.blocked).toBe(false);
+      // The corrupted {_parse_error,_raw:""} object must NEVER reach a delegated
+      // task/agentName — that was the cascade (it became the sub-agent's task).
+      for (const callArgs of delegateExecuteMock.mock.calls) {
+        const serialized = JSON.stringify(callArgs[0] ?? {});
+        expect(serialized).not.toContain("_parse_error");
+        expect(serialized).not.toContain("_raw");
+      }
+      // Instead of laundering the error blob, the turn recovers by delegating the
+      // REAL user request (or refuses outright). If any delegation ran, its task
+      // is the genuine request, not an empty/error payload.
+      if (delegateExecuteMock.mock.calls.length > 0) {
+        const task = String((delegateExecuteMock.mock.calls[0]![0] as { task?: unknown })?.task ?? "");
+        expect(task).toContain("aktuellen news");
+      }
+    } finally {
+      try { freshUnregister("delegate_to_agent"); } catch { /* ignore */ }
+    }
+  });
+
   it("uses workflow-execution evidence directly when the model tries another delegation after synthesis is required", async () => {
     // Regression: when run_workflow returns a substantive dossier and the
     // model then emits another tool call past [SYNTHESIS REQUIRED], the
