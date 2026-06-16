@@ -6,7 +6,7 @@
       "capabilities": ["data analysis", "csv review", "json inspection", "metrics interpretation", "tabular summarization", "aggregation", "trend analysis", "anomaly detection", "kpi computation"],
       "tags": ["data", "analysis", "csv", "json", "xlsx", "spreadsheet", "metrics", "kpi", "trend", "aggregation", "statistics"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -42,7 +42,7 @@
       "capabilities": ["financial statement analysis", "budget review", "cash flow analysis", "kpi calculation", "financial ratios", "p&l review", "spreadsheet analysis", "financial forecasting", "variance analysis", "runway estimation"],
       "tags": ["finance", "financial", "budget", "cash-flow", "balance-sheet", "income-statement", "kpi", "ratios", "p&l", "forecast", "accounting", "runway", "margin"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -70,7 +70,7 @@
       "capabilities": ["log parsing", "error pattern detection", "anomaly detection", "latency analysis", "access log analysis", "journald", "container logs", "security log analysis", "log summarization", "incident timeline reconstruction", "correlation id tracing"],
       "tags": ["logs", "log-analysis", "errors", "anomaly", "journald", "nginx", "container-logs", "latency", "monitoring", "audit-log", "incident"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -99,7 +99,7 @@
       "capabilities": ["research organization", "evidence indexing", "knowledge graph curation", "timeline logging", "scratchpad maintenance", "entity extraction", "relation extraction"],
       "tags": ["research", "librarian", "scratchpad", "graph", "knowledge-graph", "timeline", "evidence", "indexing"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -129,7 +129,7 @@
       "capabilities": ["document intake", "attachment analysis", "attachment classification", "document extraction", "content normalization", "metadata extraction", "exact text extraction", "PDF form filling", "spreadsheet reading", "image OCR prep", "handoff preparation", "jupyter notebook reading", "email file parsing", "icalendar parsing", "video transcription"],
       "tags": ["documents", "files", "intake", "attachments", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "video", "transcription", "analysis", "extraction", "ocr", "metadata"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -163,7 +163,7 @@
       "tags": ["navigation", "distance", "travel", "maps", "osm", "osrm", "route", "drive", "walking", "geocode"],
       "domain": "navigation",
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -183,7 +183,7 @@
       "capabilities": ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports", "white paper drafting", "citation management"],
       "tags": ["papers", "reports", "citations", "research", "drafting", "whitepaper", "academic", "scientific"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.15,
         "maxTokens": 8192
@@ -209,7 +209,7 @@
       "capabilities": ["meeting briefings", "handoff notes", "status packets", "executive summaries", "action lists", "stand-up prep"],
       "tags": ["briefing", "handoff", "meetings", "summary", "status", "executive", "standup"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 6144
@@ -239,7 +239,7 @@
       "capabilities": ["translation", "localization", "multilingual content", "language detection", "technical term preservation", "tone adaptation"],
       "tags": ["translation", "language", "localization", "i18n", "l10n", "multilingual", "english", "german", "french", "spanish", "japanese"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -261,7 +261,7 @@
       "capabilities": ["mermaid diagrams", "workflow visualization", "architecture mapping", "timeline visualization", "evidence visualization", "flowchart design", "sequence diagrams", "mindmap creation"],
       "tags": ["diagram", "mermaid", "visualization", "workflow", "architecture", "timeline", "flowchart", "sequence", "mindmap"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -288,7 +288,7 @@
       "capabilities": ["html charts", "data visualization", "time-series charting", "table design", "artifact rendering", "line charts", "bar charts", "scatter plots"],
       "tags": ["chart", "html", "visualization", "data", "table", "plot", "graph", "timeseries"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -314,7 +314,7 @@
       "capabilities": ["image generation", "prompt refinement", "illustration creation", "concept art", "visual design", "svg authoring", "qr code generation"],
       "tags": ["image", "design", "multimodal", "illustration", "art", "generation", "visual", "svg", "qr", "qr-code", "vector"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.45,
         "maxTokens": 4096
@@ -343,7 +343,7 @@
       // in `capabilities` ("image url verification", "url validation", "Bild-URL-Verifizierung").
       "tags": ["image", "bild", "images", "bilder", "photo", "foto", "wikimedia", "commons", "free-license", "lizenzfrei", "public-domain", "gemeinfrei", "stock"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -372,7 +372,7 @@
       "capabilities": ["unit test generation", "integration test generation", "test stub creation", "test coverage analysis", "vitest", "jest", "pytest", "test planning", "edge case identification", "mock generation"],
       "tags": ["tests", "testing", "unit-tests", "integration-tests", "vitest", "jest", "pytest", "coverage", "stubs", "tdd", "test-suite", "edge-cases"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -394,7 +394,7 @@
       "capabilities": ["api integration", "webhook design", "mcp setup", "automation glue", "workflow handoff", "retry design", "contract documentation"],
       "tags": ["integration", "api", "webhook", "mcp", "automation", "glue", "contract", "endpoint"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -421,7 +421,7 @@
       "capabilities": ["API testing", "REST calls", "GraphQL queries", "webhook testing", "HTTP debugging", "response validation", "endpoint health checks"],
       "tags": ["api", "http", "rest", "graphql", "integration", "testing", "endpoint", "webhook", "json"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -447,7 +447,7 @@
       "capabilities": ["sql queries", "sql query writing", "query optimization", "database inspection", "schema discovery", "schema design", "index recommendation", "migration scripts", "query performance analysis", "explain plan analysis", "data export", "postgres", "mysql", "mariadb"],
       "tags": ["database", "sql", "postgres", "mysql", "mariadb", "data", "query", "schema", "migration", "index", "performance", "optimization", "explain"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -474,7 +474,7 @@
       "capabilities": ["citation verification", "fact checking", "source validation", "bibliography audit", "quote drift detection", "unsupported claim detection"],
       "tags": ["verification", "citations", "fact-checking", "research", "bibliography", "validation", "sources"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -498,7 +498,7 @@
       "capabilities": ["policy review", "approval analysis", "compliance screening", "risk flagging", "workflow constraints", "credential-handling review", "data-sensitivity assessment"],
       "tags": ["policy", "compliance", "approval", "risk", "review", "guardrail", "privacy"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -520,7 +520,7 @@
       "capabilities": ["contract review", "legal document analysis", "clause extraction", "risk scoring", "nda review", "service-agreement analysis", "liability analysis", "ip clause analysis", "termination clause review", "compliance check", "obligation extraction"],
       "tags": ["contract", "legal", "nda", "agreement", "risk", "compliance", "liability", "ip", "terms", "legal-analysis", "clauses", "termination"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -551,7 +551,7 @@
       "capabilities": ["note taking", "workspace memory", "reminder scheduling", "timer management", "follow-up tracking", "memory promotion", "memory cleanup", "todo tracking"],
       "tags": ["productivity", "notes", "note", "reminder", "reminders", "timer", "timers", "alarm", "todo", "follow-up", "memory", "recall"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096

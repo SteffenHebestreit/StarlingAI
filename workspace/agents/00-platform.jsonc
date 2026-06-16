@@ -6,8 +6,8 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "fallback": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
+        "fallback": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "contextWindow": 32768,
         "temperature": 0.2,
@@ -19,10 +19,10 @@
         "promptCache": true,
         "embeddingModel": "lmstudio/text-embedding-bge-m3",
         // Routing tier — the small/fast model the receptionist fast-lane uses to
-        // answer trivial turns ("hi") without the full prompt + swarm. qwen3.5-9b
+        // answer trivial turns ("hi") without the full prompt + swarm. gemma-4-12b-qat
         // is loaded alongside the 35b primary.
         "tiers": {
-          "routing": "lmstudio/qwen/qwen3.5-9b"
+          "routing": "lmstudio/google/gemma-4-12b-qat"
         }
       }
     },

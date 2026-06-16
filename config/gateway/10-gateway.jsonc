@@ -3,12 +3,12 @@
     "performance": {
       "promptBudgetChars": 36000,
       // Leaf sub-agent timeout. The 60s default is too short for slower local
-      // models (e.g. qwen3.6-35b research turns take 150s+); two timeouts trip
+      // models (e.g. gemma-4-26b-a4b-qat research turns take 150s+); two timeouts trip
       // the coordinator cascade-timeout and force partial synthesis. 240s lets
       // sub-agents finish on this hardware.
       "subAgentTurnSloMs": 240000,
       // Relay long deliverables (guides/reports) in full instead of cutting them
-      // off at the 10k default. qwen3.6-35b has a large context window, so 24k
+      // off at the 10k default. gemma-4-26b-a4b-qat has a large context window, so 24k
       // chars of deliverable fits the relay prompt.
       "maxDelegatedResultChars": 24000,
       // Drop the 16 always-on intent-routing bullets from the base prompt and

@@ -6,7 +6,7 @@
       "capabilities": ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating", "acceptance checking", "ephemeral agent generation", "workflow execution", "task graph execution", "multi-area deliverable orchestration"],
       "tags": ["coordination", "orchestration", "parallel", "workflow", "dependencies", "synthesis", "quality", "acceptance", "mission", "execution", "multi-area", "planning"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -44,7 +44,7 @@
       "tags": ["web", "browser", "news", "headlines", "weather", "live", "freshness", "scores", "lottery", "stocks", "realtime"],
 
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -71,7 +71,7 @@
       "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking", "dependency management", "milestone definition", "acceptance criteria"],
       "tags": ["planning", "project", "tasks", "roadmap", "management", "dependencies", "milestones", "timeline"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -96,7 +96,7 @@
       "capabilities": ["web research", "documentation lookup", "source triangulation", "fact checking", "citation research", "official source lookup", "specification discovery", "bibliography preparation", "security advisory research", "CVE lookup", "vulnerability research", "threat intelligence"],
       "tags": ["research", "web-research", "documentation", "sources", "citations", "fact-checking", "verification", "specifications", "papers", "bibliography", "cve", "vulnerability", "advisory", "threat-intelligence"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -128,7 +128,7 @@
       "capabilities": ["evidence synthesis", "cross-source reconciliation", "document grounding", "research handoff", "claim verification", "conflict detection"],
       "tags": ["evidence", "analysis", "research", "grounding", "reconciliation", "verification", "ledger"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -156,7 +156,7 @@
       "capabilities": ["summarization", "structured summaries", "bullet summaries", "tl;dr creation", "key-point extraction"],
       "tags": ["summary", "summarize", "tldr", "key-points", "bullets"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -178,7 +178,7 @@
       "capabilities": ["blog post writing", "product copy", "newsletter writing", "documentation writing", "social media copy", "press release drafting", "brand tone adaptation", "seo-friendly writing", "headline writing", "call-to-action drafting", "static site generation", "microsite authoring", "landing page authoring", "html presentation authoring", "reveal.js slide deck generation", "pitch deck authoring"],
       "tags": ["content", "writing", "blog", "copy", "text", "newsletter", "documentation", "marketing", "seo", "press-release", "social-media", "headline", "website", "microsite", "landing-page", "static-site", "docs-site", "presentation", "slides", "slide-deck", "reveal.js", "pitch-deck", "slideshow"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.3,
         "maxTokens": 16384
@@ -209,7 +209,7 @@
       "capabilities": ["code generation", "sandbox execution", "javascript scripting", "typescript scripting", "data transformation", "prototype code"],
       "tags": ["code", "sandbox", "javascript", "js", "typescript", "ts", "script", "prototype"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -234,7 +234,7 @@
       // maxTokens 16384: a complete self-contained app (~20KB HTML ≈ 7K tokens) plus thinking must
       // fit in ONE completion — at 8192 the big write_file call was cut mid-arguments every time
       // (audits 77944865, 0ac7d3fc, a438ef4a) and the file content was lost at the provider parser.
-      "model": { "primary": "lmstudio/qwen/qwen3.6-35b-a3b", "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
+      "model": { "primary": "lmstudio/google/gemma-4-26b-a4b-qat", "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
       "maxIterations": 14,
       // 10 min: the chunked-build discipline below means a complete app is 4-6 full completions
       // (skeleton + data batches + logic). The 240s default killed the iSAQB quiz build mid-chunk-2
@@ -250,7 +250,7 @@
       "tags": ["backend", "server", "nodejs", "node", "express", "api", "rest", "serve", "container", "webapp", "fullstack", "endpoint"],
       // maxTokens 16384: same single-completion headroom as web_coder — a full server.js +
       // package.json write must never be cut mid-arguments by the completion cap.
-      "model": { "primary": "lmstudio/qwen/qwen3.6-35b-a3b", "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
+      "model": { "primary": "lmstudio/google/gemma-4-26b-a4b-qat", "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
       "maxIterations": 14,
       // 10 min: chunked builds (server + skeleton + appended data batches + serve_app round trip)
       // need 4-6 full completions; the 240s default cuts them mid-chunk. Same budget as web_coder.
@@ -264,7 +264,7 @@
       "capabilities": ["code reading", "architecture review", "bug diagnosis", "workspace search", "code retrieval", "symbol lookup", "reference tracing", "config value search", "cross-file analysis", "security review", "edge case review"],
       "tags": ["code", "analysis", "retrieval", "workspace", "search", "symbol", "references", "bug", "architecture", "static-review"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -288,7 +288,7 @@
       "capabilities": ["git status", "git log", "git diff", "commit", "branching", "code review", "repository cloning", "merge conflict inspection", "github pull requests", "pr opening", "pr comments", "github actions trigger", "ci status inspection", "github releases"],
       "tags": ["git", "vcs", "version-control", "commits", "branches", "diff", "merge", "review", "repository", "github", "pull-request", "pr", "ci", "actions", "workflow", "check-runs", "release"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -326,7 +326,7 @@
       "capabilities": ["shell execution", "CLI diagnostics", "SSH execution", "remote server inspection", "build checks", "command execution"],
       "tags": ["shell", "cli", "ops", "ssh", "server", "remote", "command", "bash", "powershell", "terminal"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -348,7 +348,7 @@
       "capabilities": ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating", "completeness check", "grounding verification"],
       "tags": ["quality", "qa", "review", "acceptance", "verification", "gaps", "completeness", "gate"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -368,7 +368,7 @@
       "capabilities": ["test execution", "regression verification", "bug reproduction", "implementation review", "acceptance criteria check"],
       "tags": ["qa", "tests", "verification", "regression", "bug", "reproduction", "vitest", "jest", "pytest"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -390,7 +390,7 @@
       "capabilities": ["pull request review", "diff review", "git diff inspection", "change risk assessment", "merge readiness check", "test coverage gap detection", "regression risk analysis", "commit walkthrough", "branch comparison"],
       "tags": ["diff", "patch", "pr", "pullrequest", "merge-request", "review", "codereview", "git", "branch", "commit", "regression-risk", "merge", "staged", "unstaged", "rebase"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "primary": "lmstudio/google/gemma-4-26b-a4b-qat",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 6144
