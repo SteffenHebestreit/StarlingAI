@@ -1,0 +1,14 @@
+# Reranker overlay — CPU only (no GPU).
+#
+# `sai start` applies this automatically when no NVIDIA and no Vulkan-capable GPU
+# is detected. Uses HuggingFace TEI's CPU image and drops the base file's NVIDIA
+# device reservation. A cross-encoder rerank of long chunks is ~10x slower on CPU
+# than GPU (~10s vs ~0.2s), but it works anywhere. engram stays on the TEI rerank
+# contract (the base default), so no engram override is needed here.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.reranker-cpu.yml up -d
+services:
+  reranker:
+    image: ${RERANKER_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.6}
+    # Drop the base's NVIDIA reservation — the CPU image needs no GPU.
+    deploy: !reset null

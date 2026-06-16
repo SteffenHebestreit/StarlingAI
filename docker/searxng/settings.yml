@@ -1,0 +1,32 @@
+# StarlingAI self-hosted SearXNG.
+#
+# Backs the gateway's web_search (retrieval.search backend "auto"/"searxng"),
+# replacing the external search.k2o dependency. The gateway calls
+# GET http://searxng:8080/search?q=...&format=json — so JSON output MUST be
+# enabled, and the limiter/bot-detection MUST be off: the only client is the
+# trusted internal gateway, and with the limiter on, automated JSON queries get
+# 429'd and web_search falls back to Playwright/DuckDuckGo (the failure mode we
+# are fixing). Outbound access to upstream engines comes from the public network.
+use_default_settings: true
+
+general:
+  instance_name: "StarlingAI Search"
+  donation_url: false
+  contact_url: false
+
+server:
+  # Signs preference cookies for this internal LAN instance. Rotate with
+  # `openssl rand -hex 32` if needed (not a high-value credential here).
+  secret_key: "9ff6ee77b35dfc84346b849a380caf09e39602dfd828dad7ea8f8342e1530b2b"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  # `json` is required for the gateway's programmatic API; `html` keeps the UI
+  # usable if you open http://searxng:8080 directly for debugging.
+  formats:
+    - html
+    - json

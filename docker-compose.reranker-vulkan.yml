@@ -1,0 +1,48 @@
+# Reranker overlay — AMD/Intel GPU via Vulkan (llama.cpp).
+#
+# `sai start` applies this automatically when a Vulkan-capable GPU is detected
+# and no NVIDIA GPU is present (e.g. AMD Strix Halo / Radeon, Intel Arc). It
+# overrides the base TEI/NVIDIA reranker to serve bge-reranker-v2-m3 on the GPU
+# via Vulkan (RADV), and switches engram to the Cohere/Jina rerank contract that
+# llama.cpp's /rerank speaks. The gateway's reranker.ts already sends both
+# `texts` and `documents`, so no gateway change is needed.
+#
+# `deploy: !reset null` drops the base file's NVIDIA device reservation (Compose
+# can't otherwise remove an inherited list entry), so this works off-NVIDIA even
+# with a plain `docker compose -f docker-compose.yml -f docker-compose.reranker-vulkan.yml up`.
+#
+# Tag PINNED: the floating :server-vulkan tag has shipped builds whose
+# libggml-vulkan.so has an undefined shader symbol, so ggml can't dlopen the
+# Vulkan backend and silently falls back to CPU ("no usable GPU found"). b5350
+# dlopens cleanly and detects e.g. the Radeon 8060S (RADV GFX1151) with
+# KHR_coopmat. If you bump it, verify GPU init in `docker logs <reranker>`.
+services:
+  reranker:
+    image: ${RERANKER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan-b5350}
+    command: >
+      --host 0.0.0.0 --port 80
+      --hf-repo ${RERANKER_HF_REPO:-gpustack/bge-reranker-v2-m3-GGUF}
+      --hf-file ${RERANKER_HF_FILE:-bge-reranker-v2-m3-Q8_0.gguf}
+      --alias ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      --reranking --pooling rank
+      -ngl 99 -c 8192 -ub 8192
+    environment:
+      - HF_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+      - LLAMA_CACHE=/data
+    # Drop the base's NVIDIA reservation; use the DRM render node instead.
+    deploy: !reset null
+    devices:
+      - /dev/dri
+    group_add:
+      # GID that owns /dev/dri/renderD128 on the host. `sai start` detects and
+      # exports SAI_RENDER_GID; 105 is the common default (Fedora/Freedesktop).
+      - "${SAI_RENDER_GID:-105}"
+    # Model GGUF is pulled from HuggingFace on first start — allow a longer warmup.
+    healthcheck:
+      start_period: 180s
+
+  # llama.cpp's /rerank is the Cohere/Jina contract ({query,documents} ->
+  # {results:[{index,relevance_score}]}), so engram must use its "jina" format.
+  engram:
+    environment:
+      - RERANKER_FORMAT=jina

@@ -134,6 +134,13 @@ async function cmdStart() {
   // Compose file stack
   const composeFiles = ["-f", "docker-compose.yml"];
 
+  // Reranker GPU backend: pick the overlay matching the host GPU so the
+  // cross-encoder runs on CUDA, Vulkan, or CPU automatically. NVIDIA uses the
+  // base file as-is (TEI/CUDA); AMD/Intel use the Vulkan (llama.cpp) overlay; no
+  // GPU falls back to the CPU overlay.
+  const rerankerOverlay = pickRerankerOverlay();
+  if (rerankerOverlay) composeFiles.push("-f", rerankerOverlay);
+
   const profileArgs = [];
   if (pentest) profileArgs.push("--profile", "pentest");
   if (desktop) profileArgs.push("--profile", "computer-desktop");
@@ -598,6 +605,39 @@ function run(cmdOrParts, args) {
     });
     child.on("error", reject);
   });
+}
+
+/**
+ * Detect the host GPU and return the docker-compose reranker overlay to apply
+ * (or null to keep the base TEI/CUDA reranker). Order: NVIDIA → Vulkan → CPU.
+ *  - NVIDIA present  → null   (base docker-compose.yml is already TEI/CUDA)
+ *  - DRM render node → docker-compose.reranker-vulkan.yml  (AMD/Intel via llama.cpp)
+ *  - neither         → docker-compose.reranker-cpu.yml     (TEI CPU image)
+ * For the Vulkan path it also exports SAI_RENDER_GID (the GID that owns
+ * /dev/dri/renderD128) so the container can access the GPU.
+ */
+function pickRerankerOverlay() {
+  const exists = (p) => { try { return existsSync(p); } catch { return false; } };
+  const cmdOk = (c) => { try { execSync(c, { stdio: "ignore" }); return true; } catch { return false; } };
+
+  if (exists("/dev/nvidia0") || exists("/dev/nvidiactl") || cmdOk("nvidia-smi -L")) {
+    ok("Reranker GPU: NVIDIA detected → CUDA (base TEI image)");
+    return null;
+  }
+
+  if (exists("/dev/dri/renderD128")) {
+    // GID owning the render node. Guard against the Flatpak/user-ns "nobody"
+    // mapping (65534) — fall back to the 105 default in the overlay then.
+    try {
+      const gid = Number(execSync("stat -c %g /dev/dri/renderD128", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim());
+      if (Number.isInteger(gid) && gid > 0 && gid < 60000) process.env.SAI_RENDER_GID = String(gid);
+    } catch { /* keep overlay default */ }
+    ok(`Reranker GPU: Vulkan-capable GPU detected → llama.cpp (render GID ${process.env.SAI_RENDER_GID ?? "105"})`);
+    return "docker-compose.reranker-vulkan.yml";
+  }
+
+  warn("Reranker GPU: none detected → CPU (slower; ~10s/rerank). Plug in a GPU or set RERANKER_IMAGE to override.");
+  return "docker-compose.reranker-cpu.yml";
 }
 
 // Run the dispatcher only after every module-scope declaration above is initialized.

@@ -50,7 +50,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - FREELANCEMAP_PASSWORD=${FREELANCEMAP_PASSWORD:-}
-      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://search.k2o}
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://searxng:8080}
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
@@ -208,14 +208,11 @@ services:
       # accepts json_schema/text), so disable JSON mode — engram still parses the
       # JSON object out of the plain text reply.
       - LLM_JSON_MODE=${ENGRAM_LLM_JSON_MODE:-false}
-      # Cross-encoder reranker — the same bge-reranker-v2-m3 the gateway uses,
-      # served by llama.cpp. Its /rerank speaks the Cohere/Jina contract
-      # ({query, documents} -> {results:[{index, relevance_score}]}), so engram
-      # must use its "jina" format (NOT "tei", which would send `texts`).
+      # Cross-encoder reranker (TEI) — the same bge-reranker-v2-m3 the gateway uses.
       - RERANKER_API_BASE=http://reranker:80
       - RERANKER_API_KEY=
       - RERANKER_MODEL=${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
-      - RERANKER_FORMAT=jina
+      - RERANKER_FORMAT=tei
       # Rerank shortlist size. Cheap on the GPU reranker, so use engram's default
       # (15) for good recall. Lower it (e.g. 6) only if the reranker runs on CPU.
       - RERANK_TOP_K=${ENGRAM_RERANK_TOP_K:-15}
@@ -263,55 +260,64 @@ services:
       retries: 10
       start_period: 30s
 
-  # Cross-encoder reranker — bge-reranker-v2-m3 served by llama.cpp in rerank
-  # mode, exposing the Cohere/Jina-style `/rerank` endpoint. Used by BOTH the
-  # gateway (retrieval.reranker, mode "tei" — it sends `documents`) and engram
-  # (RERANKER_FORMAT=jina). A cross-encoder rerank of long chunks is ~10× faster
-  # on GPU than CPU (~0.2s vs ~10s).
-  #
-  # Strix Halo build: runs on the AMD Radeon 8060S iGPU (gfx1150) via Vulkan
-  # (RADV) — the same accel path LM Studio uses, and far better supported on
-  # gfx1150 than ROCm. GPU access is just /dev/dri passthrough + the host
-  # render/video groups; the image bundles its own Mesa/RADV. The GGUF is pulled
-  # from HuggingFace on first start into the cache volume (LLAMA_CACHE=/data).
-  # No-GPU fallback: drop the `devices`/`group_add` lines and remove `-ngl 99`
-  # from the command (CPU inference, ~10× slower but works anywhere).
-  #
-  # Tag is PINNED: the floating `:server-vulkan` tag has shipped builds whose
-  # libggml-vulkan.so has an undefined shader symbol (e.g.
-  # matmul_id_subgroup_q6_k_f32_dot2_aligned_f16acc_data) — ggml then can't
-  # dlopen the Vulkan backend and silently falls back to CPU ("no usable GPU
-  # found"). b5350 dlopens cleanly and detects the 8060S (RADV GFX1151) with
-  # KHR_coopmat. If you bump this, verify GPU init in the logs after restart.
+  # Cross-encoder reranker (HuggingFace text-embeddings-inference) — serves
+  # bge-reranker-v2-m3 over the TEI `/rerank` contract. This is the proper way to
+  # use a cross-encoder (LM Studio exposes the model only via /embeddings, and has
+  # no rerank endpoint). Runs on the host GPU (RTX 4080, Ada/sm_89 → the `89-*`
+  # TEI image): a cross-encoder rerank of long chunks is ~10× faster on GPU than
+  # CPU (~0.2s vs ~10s). Used by BOTH the gateway (retrieval.reranker, mode "tei")
+  # and engram. Pulls the model from HuggingFace on first start (public network +
+  # cache volume). For a host without a Docker-visible GPU, override RERANKER_IMAGE
+  # to ...:cpu-1.6 and drop the deploy.resources block.
   reranker:
-    image: ${RERANKER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan-b5350}
+    image: ${RERANKER_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:89-1.6}
     restart: unless-stopped
-    command: >
-      --host 0.0.0.0 --port 80
-      --hf-repo ${RERANKER_HF_REPO:-gpustack/bge-reranker-v2-m3-GGUF}
-      --hf-file ${RERANKER_HF_FILE:-bge-reranker-v2-m3-Q8_0.gguf}
-      --alias ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
-      --reranking --pooling rank
-      -ngl 99 -c 8192 -ub 8192
+    command: ["--model-id", "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}", "--port", "80"]
     environment:
-      - HF_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
-      - LLAMA_CACHE=/data
-    devices:
-      - /dev/dri
-    group_add:
-      - "105"   # render (host GID)
-      - "39"    # video  (host GID)
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
     volumes:
       - gc-reranker-cache:/data
     networks:
       - starlingai-internal
       - starlingai-public
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:80/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 180s
+      start_period: 60s
+
+  # ── Self-hosted web search (SearXNG) ──────────────────────────────────────
+  # Our own SearXNG so web_search no longer depends on an external instance
+  # (search.k2o). The gateway points at it via SEARXNG_BASE_URL=http://searxng:8080
+  # (the auto/searxng backend in retrieval.search). It needs the public network
+  # for outbound queries to upstream engines; the gateway reaches it over the
+  # internal network. JSON API + limiter-off are configured in
+  # docker/searxng/settings.yml. Consider pinning :latest to a dated tag once
+  # you've confirmed a version works (same lesson as the reranker pin).
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   mail-service:
     build:
