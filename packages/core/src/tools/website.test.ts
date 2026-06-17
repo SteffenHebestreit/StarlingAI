@@ -97,6 +97,28 @@ describe("generate_website", () => {
     expect(css).toContain("--bg:");
   });
 
+  it("defaults outputDir to a stable generated/<title-slug>, and re-gen of the same title overwrites in place", async () => {
+    const ws = tempWorkspace();
+    const r1 = await (await tool()).execute({
+      title: "Portable Mic Array Recorder",
+      pages: [{ path: "index.html", title: "Home", content: "# v1 original" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(r1.success !== false).toBe(true);
+    expect(r1.metadata?.["indexPath"]).toBe("generated/portable-mic-array-recorder/index.html");
+    expect(readFileSync(join(ws, "generated/portable-mic-array-recorder/index.html"), "utf8")).toContain("v1 original");
+
+    // Updating the SAME deliverable (same title, no outputDir) lands on the SAME
+    // path and overwrites — no duplicate directory.
+    const r2 = await (await tool()).execute({
+      title: "Portable Mic Array Recorder",
+      pages: [{ path: "index.html", title: "Home", content: "# v2 updated" }],
+    }, { sessionId: "s1", workspacePath: ws });
+    expect(r2.metadata?.["indexPath"]).toBe("generated/portable-mic-array-recorder/index.html");
+    const html = readFileSync(join(ws, "generated/portable-mic-array-recorder/index.html"), "utf8");
+    expect(html).toContain("v2 updated");
+    expect(html).not.toContain("v1 original");
+  });
+
   it("auto-generates nav from included pages; honors navLabel + includeInNav=false", async () => {
     const ws = tempWorkspace();
     const result = await (await tool()).execute({

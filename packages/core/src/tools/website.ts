@@ -18,6 +18,18 @@ import { inlineLocalImagesInHtml } from "./inline-images.js";
 
 const log = childLogger("tool:website");
 
+/**
+ * Deterministic directory slug from a title, so the SAME logical deliverable
+ * (same title) always resolves to the SAME output path and overwrites in place
+ * instead of scattering near-duplicate sites at agent-chosen paths.
+ */
+function slugifyTitle(value: string): string {
+  return value.toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
 type Theme = "default" | "minimal" | "dark" | "clean-docs" | "corporate";
 
 const THEMES: Theme[] = ["default", "minimal", "dark", "clean-docs", "corporate"];
@@ -48,11 +60,11 @@ registerTool({
     properties: {
       outputDir: {
         type: "string",
-        description: "Workspace-relative directory to write the site into. Will be created if missing.",
+        description: "Optional workspace-relative directory to write the site into (created if missing). DEFAULTS to a stable slug of the title (generated/<title-slug>/). OMIT it for a NEW site so the same deliverable always lands at the same path; to UPDATE an existing site, reuse the SAME title (or pass its exact existing path) so it overwrites in place instead of creating a duplicate.",
       },
       title: {
         type: "string",
-        description: "Site title (appears in <title>, header, and meta description fallback).",
+        description: "Site title (appears in <title>, header, and meta description fallback). Also slugs the default outputDir — keep it stable across updates of the same deliverable.",
       },
       description: {
         type: "string",
@@ -113,17 +125,19 @@ registerTool({
         description: "When false, fail if the output directory is not empty. Default true.",
       },
     },
-    required: ["outputDir", "title", "pages"],
+    required: ["title", "pages"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const outputDir = String(args["outputDir"] ?? "").trim();
     const title = String(args["title"] ?? "").trim();
+    if (!title) return fail("title is required");
+    // Stable, deterministic path: default outputDir to generated/<title-slug> so
+    // the SAME deliverable (same title) overwrites in place instead of scattering
+    // near-duplicates at agent-chosen paths. An explicit outputDir still wins.
+    let outputDir = String(args["outputDir"] ?? "").trim();
+    if (!outputDir) outputDir = `generated/${slugifyTitle(title) || "site"}`;
     const description = typeof args["description"] === "string" ? String(args["description"]).trim() : "";
     const footer = typeof args["footer"] === "string" ? String(args["footer"]) : "";
     const overwrite = args["overwrite"] !== false;
-
-    if (!outputDir) return fail("outputDir is required");
-    if (!title) return fail("title is required");
 
     const theme = normalizeTheme(args["theme"]);
     if (!theme) return fail(`theme must be one of: ${THEMES.join(", ")}`);
@@ -292,7 +306,7 @@ registerTool({
     properties: {
       outputDir: {
         type: "string",
-        description: "Workspace-relative directory to write the deck into (index.html). Created if missing.",
+        description: "Optional workspace-relative directory to write the deck into (index.html; created if missing). DEFAULTS to a stable slug of the title (generated/<title-slug>/). OMIT it for a NEW deck; to UPDATE an existing deck reuse the SAME title (or its exact path) so it overwrites in place.",
       },
       title: {
         type: "string",
@@ -332,15 +346,16 @@ registerTool({
         description: "When false, fail if index.html already exists. Default true.",
       },
     },
-    required: ["outputDir", "title", "slides"],
+    required: ["title", "slides"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const outputDir = String(args["outputDir"] ?? "").trim();
     const title = String(args["title"] ?? "").trim();
-    const overwrite = args["overwrite"] !== false;
-
-    if (!outputDir) return fail("outputDir is required");
     if (!title) return fail("title is required");
+    // Stable path: default to generated/<title-slug> so re-generating the same
+    // deck overwrites in place instead of creating a duplicate at a new path.
+    let outputDir = String(args["outputDir"] ?? "").trim();
+    if (!outputDir) outputDir = `generated/${slugifyTitle(title) || "deck"}`;
+    const overwrite = args["overwrite"] !== false;
 
     const theme = normalizeRevealTheme(args["theme"]);
 
