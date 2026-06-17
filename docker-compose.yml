@@ -27,8 +27,6 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-      - SAI_JWT_SECRET=${SAI_JWT_SECRET}
-      - SAI_MASTER_KEY=${SAI_MASTER_KEY}
       - SAI_LMSTUDIO_URL=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
       - SAI_LMSTUDIO_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
       - SAI_MULTIMODAL_STT_URL=${SAI_MULTIMODAL_STT_URL:-http://host.docker.internal:5002}
@@ -37,30 +35,19 @@ services:
       - REDIS_URL=redis://redis:6379
       - MEMGRAPH_URL=bolt://memgraph:7687
       - MEMGRAPH_USER=memgraph
-      - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-}
       - QUESTDB_URL=http://questdb:9000
       - SAI_AUDIT_LOG=/data/audit.jsonl
       - SAI_CRED_STORE=/data/credentials.enc
       - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
-      - N8N_PASSWORD=${N8N_PASSWORD:-}
-      - N8N_KEY=${N8N_KEY:-}
-      - N8N_USERNAME=${N8N_USERNAME:-}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - FREELANCEMAP_PASSWORD=${FREELANCEMAP_PASSWORD:-}
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://searxng:8080}
-      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
-      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
       - SAI_WORKSPACE_CONFIG_PATH=/workspace/workspace
-      - SAI_N8N_SSH_PASSWORD=${SAI_N8N_SSH_PASSWORD}
-      - SAI_WIN_WORKSTATION_RDP_CREDENTIALS=${SAI_WIN_WORKSTATION_RDP_CREDENTIALS}
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
@@ -107,8 +94,6 @@ services:
       - SAI_COMPUTER_REMOTE_PORT=8890
       - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:-}
       - SAI_COMPUTER_REMOTE_LABEL=${SAI_COMPUTER_REMOTE_LABEL:-Remote access sidecar}
-      - SAI_N8N_SSH_PASSWORD=${SAI_N8N_SSH_PASSWORD}
-      - SAI_WIN_WORKSTATION_RDP_CREDENTIALS=${SAI_WIN_WORKSTATION_RDP_CREDENTIALS}
     networks:
       - starlingai-internal
       - starlingai-public
@@ -340,7 +325,6 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_MAIL_SERVICE_CONFIG_PATH=${SAI_MAIL_SERVICE_CONFIG_PATH:-/config/mail/accounts.json}
       - SAI_MAIL_SERVICE_DATA_PATH=/data/mail-service.json
-      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
     volumes:
       - gc-mail-data:/data
       - ./config/mail:/config/mail:ro
