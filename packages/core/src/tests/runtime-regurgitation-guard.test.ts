@@ -4,6 +4,7 @@ import {
   looksLikeArtifactMutationRequest,
   claimsArtifactWrittenButUnproduced,
   looksLikeFabricatedToolDeliveryLink,
+  findRecentDelegateEvidence,
 } from "../agent/runtime.js";
 import type { SessionHistoryMessage } from "../agent/session.js";
 
@@ -142,5 +143,55 @@ describe("stale-prior-answer replay on a failed build (audit 9a6a8c7f turn 3)", 
       expect(looksLikeFabricatedToolDeliveryLink("Eine Lernplattform könnte Quizfragen und Fortschritt zeigen.")).toBe(false);
       expect(looksLikeFabricatedToolDeliveryLink("Read more at https://www.isaqb.org/news/")).toBe(false);
     });
+  });
+});
+
+/**
+ * Terminal-evidence scoping (audit 2f4f5fe6 / Fable-5 session c852de4a). The
+ * forced terminal synthesis picks the richest recent delegate result as its
+ * backstop via `length + items*200`. Without scopeToCurrentTurn the scan reaches
+ * BACK across turns, so a prior turn's rich news digest outscores the current
+ * turn's sparse result and is force-relayed verbatim as the answer to an
+ * unrelated question. The terminal call now passes { scopeToCurrentTurn: true }.
+ */
+describe("findRecentDelegateEvidence — terminal scoping ignores prior-turn deliverables", () => {
+  const TURN1_NEWS =
+    "Delegated result from web_task_coordinator — TASK COMPLETED.\n"
+    + "Observed evidence:\n"
+    + "## Top-News des Tages — 17. Juni 2026\n"
+    + "- Iran: Außenminister fordert Rückzug aus dem Libanon vor einem Friedensabkommen.\n"
+    + "- Deutschland: Die Stasi-Unterlagen-Behörde wird nach knapp 30 Jahren geschlossen.\n"
+    + "- Großbritannien: Ein Social-Media-Verbot für Personen unter 16 Jahren wird eingeführt.\n"
+    + "- Sport: Lionel Messi erzielt einen Hattrick und egalisiert Kloses WM-Torrekord.\n"
+    + "- Technologie: Neue EU-Regulierung für KI-Dienste angekündigt; Konsultation läuft.\n"
+    + "| Quelle | Link |\n| LiveMint | livemint.com |\n| ABP Live | abplive.com |\n"
+    + "| FAZ | faz.net |\n| Die Welt | welt.de |\n| Yahoo News | yahoo.com |\n| news.de | news.de |";
+
+  const TURN2_FABLE =
+    "Delegated result from researcher — PARTIAL PROGRESS.\n"
+    + "Observed evidence:\n"
+    + "Keine Quellen für \"Fable 5\" als LLM/KI-Modell gefunden — die Suche lieferte nur "
+    + "Ergebnisse zum Videospiel Fable von Playground Games. Bitte den Suchbegriff präzisieren.";
+
+  const history: SessionHistoryMessage[] = [
+    msg("user", "kannst du mir die heutigen news zusammenstellen?"),
+    msg("assistant", "", true),
+    msg("tool", TURN1_NEWS),
+    // current turn starts here
+    msg("user", "fable 5 — als LLM gemeint, nicht das spiel"),
+    msg("assistant", "", true),
+    msg("tool", TURN2_FABLE),
+  ];
+
+  it("UNSCOPED: a richer prior-turn deliverable wins (the bug)", () => {
+    const ev = findRecentDelegateEvidence(history);
+    expect(ev?.evidence).toContain("Top-News");
+    expect(ev?.evidence).not.toContain("Fable 5");
+  });
+
+  it("scopeToCurrentTurn: returns only THIS turn's evidence, never the stale digest (the fix)", () => {
+    const ev = findRecentDelegateEvidence(history, { scopeToCurrentTurn: true });
+    expect(ev?.evidence).toContain("Fable 5");
+    expect(ev?.evidence).not.toContain("Top-News");
   });
 });

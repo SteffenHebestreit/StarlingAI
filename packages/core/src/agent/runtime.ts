@@ -2464,7 +2464,7 @@ function lastUserMessageIndex(
   return -1;
 }
 
-function findRecentDelegateEvidence(
+export function findRecentDelegateEvidence(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
   options: { scopeToCurrentTurn?: boolean } = {},
 ): { evidence: string; itemCount: number } | null {
@@ -6903,7 +6903,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
-  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   const terminalSharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
   const terminalEvidenceBackstop = chooseBetterRecoveryEvidence(
     terminalDelegateEvidence,
@@ -7025,7 +7025,8 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     && lastSuppressedAssistantText !== null
     && !suppressedTextLooksRaw
     && lastSuppressedAssistantText.length >= 200
-    && looksLikeUnderpoweredSynthesis(synthesized);
+    && looksLikeUnderpoweredSynthesis(synthesized)
+    && !looksLikeRegurgitatedPriorAnswer(lastSuppressedAssistantText, session.getHistory());
   if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
     logAudit("sub_agent_synthesis_forced", {
       reason: "underpowered_synthesis_replaced_with_evidence",
