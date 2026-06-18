@@ -42,6 +42,31 @@ describe("turn plan — normalization", () => {
     expect(typeof plan.createdAt).toBe("string");
   });
 
+  it("unwraps a { plan: {…} } envelope the model commonly emits (previously failed every planned turn)", () => {
+    const plan = normalizeTurnPlan({
+      plan: {
+        objective: "Build the tutorial site.",
+        steps: [{ description: "delegate to content_writer", kind: "delegate", agent: "content_writer" }],
+        acceptanceCriteria: ["all sections present"],
+        riskTier: "low",
+      },
+    });
+    expect(plan.objective).toBe("Build the tutorial site.");
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.steps[0]).toMatchObject({ kind: "delegate", agent: "content_writer" });
+    expect(plan.acceptanceCriteria).toEqual(["all sections present"]);
+  });
+
+  it("does NOT unwrap when the real fields are already top-level (a flat call is untouched)", () => {
+    const plan = normalizeTurnPlan({
+      objective: "Top-level objective",
+      steps: [{ description: "do it", kind: "direct" }],
+      plan: { objective: "WRONG", steps: [] }, // stray key must not override real top-level fields
+    });
+    expect(plan.objective).toBe("Top-level objective");
+    expect(plan.steps).toHaveLength(1);
+  });
+
   it("marks a plan wide when more than two steps share a parallel group", () => {
     const plan = normalizeTurnPlan({
       objective: "Wide fan-out",

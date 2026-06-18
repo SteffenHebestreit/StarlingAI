@@ -71,11 +71,32 @@ function clampStringList(value: unknown, max: number): string[] {
 }
 
 /**
+ * If the model wrapped the whole plan in a single envelope key, unwrap it.
+ * Qwen (and others) reliably call record_plan as `{ plan: { objective, steps, … } }`
+ * even though the tool schema declares the fields flat — which previously read as
+ * an empty plan and failed every planned turn with "A plan needs at least an
+ * objective or one step." Only unwraps when the real fields are NOT already at the
+ * top level, so a correct flat call is untouched. Topic-agnostic.
+ */
+function unwrapPlanEnvelope(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return raw ?? {};
+  if ("objective" in raw || "steps" in raw || "acceptanceCriteria" in raw) return raw;
+  for (const key of ["plan", "args", "input"]) {
+    const inner = raw[key];
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return inner as Record<string, unknown>;
+    }
+  }
+  return raw;
+}
+
+/**
  * Coerce loosely-typed tool arguments (from the record_plan tool) into a
  * validated TurnPlan. Never throws — clamps sizes and drops malformed steps so
  * a sloppy model call still yields a usable plan.
  */
-export function normalizeTurnPlan(raw: Record<string, unknown>): TurnPlan {
+export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
+  const raw = unwrapPlanEnvelope(rawInput);
   const rawSteps = Array.isArray(raw["steps"]) ? raw["steps"] : [];
   const steps: TurnPlanStep[] = [];
   for (let i = 0; i < rawSteps.length && steps.length < MAX_STEPS; i += 1) {
