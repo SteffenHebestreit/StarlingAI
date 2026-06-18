@@ -5421,10 +5421,13 @@ export function createGateway() {
         return;
       }
 
-      let rawBody = "";
-      req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+      const bodyChunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => { bodyChunks.push(chunk); });
       req.on("end", async () => {
         try {
+          // Decode once over the full body — per-chunk toString() corrupts a
+          // multi-byte UTF-8 char split across TCP chunks (umlaut mojibake).
+          const rawBody = Buffer.concat(bodyChunks).toString("utf8");
           const body = JSON.parse(rawBody) as { sessionId?: string; message: string };
           await handleAguiStream(res, body);
         } catch {
@@ -5450,11 +5453,14 @@ export function createGateway() {
       }
 
       const agentName = decodeURIComponent(a2aMatch[1]!);
-      let rawBody = "";
-      req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+      const bodyChunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => { bodyChunks.push(chunk); });
       req.on("end", async () => {
         let rpcId: unknown = null;
         try {
+          // Decode once over the full body (per-chunk toString() corrupts UTF-8
+          // multi-byte chars split across TCP chunks).
+          const rawBody = Buffer.concat(bodyChunks).toString("utf8");
           const rpc = JSON.parse(rawBody) as { jsonrpc: string; method: string; params: Record<string, unknown>; id: unknown };
           rpcId = rpc.id;
 

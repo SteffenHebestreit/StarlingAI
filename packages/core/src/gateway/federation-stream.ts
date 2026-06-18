@@ -68,9 +68,12 @@ export async function handleFederationDelegateStream(
   }
 
   // Buffer the request body — same shape as the non-streaming endpoint.
-  let raw = "";
-  req.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+  // Collect Buffers and decode once: per-chunk toString() corrupts a multi-byte
+  // UTF-8 char split across TCP chunks.
+  const rawChunks: Buffer[] = [];
+  req.on("data", (chunk: Buffer) => { rawChunks.push(chunk); });
   await new Promise<void>((resolve) => req.on("end", () => resolve()));
+  const raw = Buffer.concat(rawChunks).toString("utf8");
 
   let body: DelegateStreamBody;
   try {
