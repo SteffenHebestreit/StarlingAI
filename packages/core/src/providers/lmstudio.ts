@@ -57,6 +57,26 @@ export function computeOpenAICompatibleRequestTimeoutMs(
   return Math.min(MAX_PROVIDER_TIMEOUT_MS, Math.max(configuredTimeoutMs, tokenBudgetTimeoutMs));
 }
 
+/**
+ * A streaming call that drops at the connection level — most importantly Node's
+ * ERR_STREAM_PREMATURE_CLOSE during the long, byte-silent prefill of a large
+ * prompt (~25-30s for a 29K-token prompt on a slow local model) — is transient
+ * and worth a retry. Deliberately does NOT match our own hard-timeout /
+ * inactivity-stall messages (those are real stalls, not connection drops) or an
+ * intentional abort, so only genuine connection drops are retried.
+ */
+export function isRetryableStreamError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const code = String(
+    (err as { code?: unknown })?.code
+    ?? (err as { cause?: { code?: unknown } })?.cause?.code
+    ?? "",
+  );
+  if (/exceeded hard timeout|stream stalled|aborted/.test(msg)) return false;
+  return /premature close|econnreset|socket hang up|terminated|epipe|econnrefused|fetch failed|network error/.test(msg)
+    || ["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET", "EPIPE", "ECONNREFUSED", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(code);
+}
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -361,6 +381,12 @@ export class LMStudioProvider {
       apiKey: apiKey,
       timeout: this.requestTimeoutMs,
       maxRetries: 0, // We handle retries manually
+      // Use Node's native fetch (undici) instead of the SDK default (node-fetch@2).
+      // node-fetch@2 drops the idle connection during a large prompt's long,
+      // byte-silent PREFILL and surfaces ERR_STREAM_PREMATURE_CLOSE (~4s), killing
+      // the turn; native fetch holds the identical ~28s prefill against LM Studio
+      // (verified: a 29K-token streaming call from inside the gateway container).
+      fetch: globalThis.fetch as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
     });
   }
 
@@ -753,7 +779,47 @@ export class LMStudioProvider {
     };
   }
 
+  /**
+   * Streaming completion with transient-drop resilience. A connection that drops
+   * DURING prefill (the long, byte-silent window before the first token on a
+   * large prompt) surfaces as "Premature close" and would otherwise kill the
+   * whole turn, because — unlike complete() — the streaming path had no retry.
+   * We retry ONLY when nothing has been yielded yet (so the consumer never sees
+   * duplicated content) and the error is a connection-level drop (not our
+   * hard-timeout / inactivity stall, and not an intentional cancel).
+   */
   async *stream(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    signal?: AbortSignal,
+    options?: { toolChoice?: "auto" | "required" | "none" }
+  ): AsyncGenerator<StreamChunk> {
+    // A transient CONNECTION drop is always worth one retry, independent of
+    // configuredMaxRetries (which governs semantic/API retries and is often 0 on
+    // the slow local model). So floor the budget at 2 attempts.
+    const maxAttempts = Math.max(2, this.configuredMaxRetries + 1);
+    for (let attempt = 1; ; attempt++) {
+      let yielded = 0;
+      try {
+        for await (const chunk of this.streamOnce(messages, tools, signal, options)) {
+          yielded++;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && isRetryableStreamError(err)) {
+          log.warn(
+            { err: String(err), model: this.parseModelId(this.modelConfig.primary), attempt, maxAttempts },
+            "transient stream drop before first chunk — retrying",
+          );
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  private async *streamOnce(
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
