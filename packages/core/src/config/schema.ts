@@ -710,8 +710,6 @@ export const McpServerExposeSchema = z.object({
   exposeAgents: z.array(z.string()).default([]),
   /** Allowlist of scenes exposed as `scene__<name>` tools.  Empty array = all. */
   exposeScenes: z.array(z.string()).default([]),
-  /** Allowlist of jobs exposed as MCP prompts.  Empty array = all. */
-  exposeJobs: z.array(z.string()).default([]),
   /** When true, allow Tier 2 tools listed in `exposeTools` (per-call approval still applies). */
   allowTier2: z.boolean().default(false),
   /** HTTP transport (`/mcp`) on/off.  Stdio transport is governed by whether the entrypoint is launched. */
@@ -1250,8 +1248,6 @@ export const SelfImprovementSchema = z.object({
   minFailuresBeforeProposal: z.number().int().min(1).max(20).default(3),
   /** Max concurrent tool proposals in flight. */
   maxConcurrentProposals: z.number().int().min(1).max(3).default(1),
-  /** If true, skip initial capability-gap approval and start dev session directly. */
-  autoStartDevSession: z.boolean().default(false),
   /**
    * Named approval channel (from approvalChannels config) to notify when a selfdev__ tool
    * reaches the promotion threshold and is awaiting operator sign-off.

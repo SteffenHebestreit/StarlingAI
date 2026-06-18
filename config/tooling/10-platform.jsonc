@@ -139,7 +139,6 @@
       "exposeTools": [],
       "exposeAgents": [],
       "exposeScenes": [],
-      "exposeJobs": [],
       "allowTier2": false,
       "http": {
         "enabled": true,
