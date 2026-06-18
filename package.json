@@ -21,6 +21,7 @@
     "config:build": "node scripts/sai.mjs config build",
     "config:split": "node scripts/sai.mjs config split",
     "config:audit-flags": "node scripts/audit-config-flags.mjs",
+    "config:audit-prompts": "node scripts/audit-agent-prompts.mjs",
     "token": "node scripts/sai.mjs token",
     "health": "node scripts/sai.mjs health",
     "build": "pnpm -r build",

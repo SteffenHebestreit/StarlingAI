@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -61,6 +61,67 @@ describe("agent evaluation harness", () => {
     expect(summary).toContain("Passed 1/2 cases");
     expect(summary).toContain("passing-case");
     expect(summary).toContain("failing-case");
+  });
+
+  const statsFor = (agentName: string, task: string) => ({
+    agentName, sessionId: `eval:${agentName}`, promptChars: 100, userContentChars: task.length,
+    toolCount: 1, toolNames: ["web_search"], iterations: 1,
+    usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+    maxIterations: 4, model: "test", capabilities: [] as string[],
+  });
+
+  it("reports pass^k: a case that passes every run is reliable, not just pass@1", async () => {
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      repeat: 3,
+      cases: [{ name: "stable", agentName: "researcher", task: "summarize", expectIncludes: ["OK"] }],
+    }, async (opts) => ({ output: "OK result", stats: statsFor(opts.agentName, opts.task) }));
+
+    const r = report.results[0]!;
+    expect(r.attempts).toBe(3);
+    expect(r.passCount).toBe(3);
+    expect(r.passCaretK).toBe(true);
+    expect(r.passAtK).toBe(true);
+    expect(r.passed).toBe(true);
+    expect(report.repeat).toBe(3);
+    expect(report.reliableCases).toBe(1);
+    expect(report.flakyCases).toBe(0);
+    expect(formatEvaluationSummary(report)).toContain("Reliable (pass^3) 1/1");
+  });
+
+  it("classifies a case that passes only sometimes as FLAKY (fails pass^k)", async () => {
+    let call = 0;
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      repeat: 4,
+      cases: [{ name: "intermittent", agentName: "coder", task: "do it", expectIncludes: ["DONE"] }],
+    }, async (opts) => {
+      call += 1;
+      // Pass on calls 1 and 3, fail on 2 and 4 → 2/4.
+      const output = call % 2 === 1 ? "DONE" : "still working";
+      return { output, stats: statsFor(opts.agentName, opts.task) };
+    });
+
+    const r = report.results[0]!;
+    expect(r.attempts).toBe(4);
+    expect(r.passCount).toBe(2);
+    expect(r.passCaretK).toBe(false); // not reliable
+    expect(r.passAtK).toBe(true);     // but passed at least once
+    expect(r.passed).toBe(false);     // pass^k governs `passed`
+    expect(r.status).toBe("flaky");
+    expect(report.flakyCases).toBe(1);
+    expect(report.reliableCases).toBe(0);
+    expect(formatEvaluationSummary(report)).toContain("pass^k=2/4");
+  });
+
+  it("a per-case repeat overrides the plan default; repeat=1 stays legacy pass@1", async () => {
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      repeat: 1,
+      cases: [{ name: "override", agentName: "researcher", task: "t", repeat: 2, expectIncludes: ["X"] }],
+    }, async (opts) => ({ output: "X", stats: statsFor(opts.agentName, opts.task) }));
+    expect(report.results[0]?.attempts).toBe(2);
+    expect(report.repeat).toBe(1);
   });
 
   it("detects regressions between baseline and current reports", () => {
@@ -194,5 +255,109 @@ describe("agent evaluation harness", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("agent evaluation harness — artifact inspection (expectArtifact)", () => {
+  // The mock runner doesn't write files; the test pre-creates the artifacts the
+  // agent would have produced, so we exercise the inspection logic deterministically.
+  const benignRunner = async (opts: { agentName: string; task: string }) => ({
+    output: "Wrote the document.",
+    stats: {
+      agentName: opts.agentName, sessionId: "s", promptChars: 0, userContentChars: opts.task.length,
+      toolCount: 1, toolNames: ["write_file"], iterations: 1,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      maxIterations: 5, model: "test", capabilities: [] as string[],
+    },
+  });
+
+  // The runner writes the artifact DURING the run (as a real agent would, after the
+  // per-attempt clear), via the writeFn each test supplies.
+  async function runWithWorkspace(ws: string, expectArtifact: unknown, writeFn?: () => void) {
+    const runner = async (opts: { agentName: string; task: string }) => { writeFn?.(); return benignRunner(opts); };
+    return evaluateAgentPlan({
+      workspacePath: ws,
+      cases: [{ name: "build", agentName: "content_writer", task: "write it", expectArtifact: expectArtifact as never }],
+    }, runner);
+  }
+
+  it("passes when a single artifact file exists with the expected content + size", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      const r = await runWithWorkspace(ws, { path: "generated/doc.md", includes: ["Introduction", "Conclusion"], minBytes: 20 }, () => {
+        mkdirSync(join(ws, "generated"), { recursive: true });
+        writeFileSync(join(ws, "generated/doc.md"), "# Guide\n## Introduction\n...\n## Conclusion\nThe end.", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(true);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("FAILS when the artifact was not produced", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      const r = await runWithWorkspace(ws, { path: "generated/missing.md", includes: ["x"] }); // runner writes nothing
+      expect(r.results[0]?.passed).toBe(false);
+      expect(r.results[0]?.failures.join(" ")).toMatch(/not produced/);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("FAILS when a required section is missing (the content_writer over-trim case)", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      const r = await runWithWorkspace(ws, { path: "generated/doc.md", includes: ["Introduction", "Conclusion"] }, () => {
+        mkdirSync(join(ws, "generated"), { recursive: true });
+        // Dropped the Introduction section — exactly what the trimmed prompt did.
+        writeFileSync(join(ws, "generated/doc.md"), "## Algorithms\n...\n## Conclusion\nend", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(false);
+      expect(r.results[0]?.failures.join(" ")).toMatch(/missing expected content: Introduction/);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("FAILS a truncated/stub artifact via minBytes", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      const r = await runWithWorkspace(ws, { path: "generated/doc.md", minBytes: 1000 }, () => {
+        mkdirSync(join(ws, "generated"), { recursive: true });
+        writeFileSync(join(ws, "generated/doc.md"), "stub", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(false);
+      expect(r.results[0]?.failures.join(" ")).toMatch(/likely truncated\/stub/);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("checks a DIRECTORY artifact as the concatenated content of its files (multi-page sites)", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      const r = await runWithWorkspace(ws, { path: "generated/site", includes: ["Introduction", "Conclusion"] }, () => {
+        const dir = join(ws, "generated/site");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "index.html"), "<h1>Introduction</h1>", "utf8");
+        writeFileSync(join(dir, "section7.html"), "<h2>Conclusion</h2>", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(true);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("clears artifacts between pass^k attempts so a stale file can't mask a later regression", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      mkdirSync(join(ws, "generated"), { recursive: true });
+      let call = 0;
+      const writeOnceRunner = async (opts: { agentName: string; task: string }) => {
+        call += 1;
+        if (call === 1) writeFileSync(join(ws, "generated/doc.md"), "## Introduction\nfull content", "utf8");
+        return { output: "done", stats: (await benignRunner(opts)).stats };
+      };
+      const r = await evaluateAgentPlan({
+        workspacePath: ws,
+        repeat: 2,
+        cases: [{ name: "b", agentName: "content_writer", task: "t", expectArtifact: { path: "generated/doc.md", includes: ["Introduction"] } }],
+      }, writeOnceRunner);
+      // Attempt 1 writes + passes; attempt 2 starts cleared and writes nothing → fails.
+      // Without clearing, attempt 2 would falsely pass on attempt 1's leftover file.
+      expect(r.results[0]?.passCount).toBe(1);
+      expect(r.results[0]?.passCaretK).toBe(false);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
   });
 });
