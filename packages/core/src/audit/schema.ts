@@ -13,6 +13,7 @@ export type CoreAuditEventType =
   | "extension_load_failed"
   | "session_created"
   | "session_ended"
+  | "turn_failed"
   | "serve_app_started"
   | "serve_app_running"
   | "serve_app_stopped"
