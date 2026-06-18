@@ -2,7 +2,9 @@
   "retrieval": {
     "search": {
       "backend": "searxng",
-      "searxngBaseUrl": "http://search.k2o",
+      // Endpoint comes from the SEARXNG_BASE_URL env (docker-compose defaults it to
+      // the bundled self-hosted service, http://searxng:8080). Set SEARXNG_BASE_URL
+      // in .env to point at an external instance instead (e.g. http://search.k2o).
       "timeoutMs": 15000
     },
     // Cross-encoder reranker (the `reranker` TEI sidecar serving bge-reranker-v2-m3,

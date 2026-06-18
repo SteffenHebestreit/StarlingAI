@@ -50,7 +50,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - FREELANCEMAP_PASSWORD=${FREELANCEMAP_PASSWORD:-}
-      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://search.k2o}
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://searxng:8080}
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
@@ -473,6 +473,33 @@ services:
       start_period: 10s
 
   # ── Redis (sessions + rate limiting) ─────────────────────────────────────
+  # ── Web search (SearXNG) ──────────────────────────────────────────────────
+  # Self-hosted metasearch backend for the web_search tool. Previously the stack
+  # relied on an EXTERNAL instance (SEARXNG_BASE_URL=http://search.k2o); this makes
+  # the stack self-contained. JSON format + GET method are enabled, and the bot
+  # limiter disabled, in docker/searxng/settings.yml (the web_search client needs
+  # all three). On starlingai-public so it can reach search engines on the internet
+  # (starlingai-internal has no egress); on starlingai-internal so the gateway can
+  # reach it at http://searxng:8080. To keep using an external instance instead,
+  # set SEARXNG_BASE_URL in .env.
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-starlingai-internal-searxng-key}
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped

@@ -1,0 +1,37 @@
+# StarlingAI bundled SearXNG — headless JSON search backend for the web_search tool.
+#
+# Internal-only: not published to the host; the gateway reaches it on the docker
+# network at http://searxng:8080. Two non-default settings are REQUIRED for the
+# web_search client (packages/core/src/tools/web.ts → searchSearxng), which issues
+# `GET /search?...&format=json`:
+#   - search.formats must include `json` (stock SearXNG enables only `html` and
+#     returns 403 for format=json)
+#   - server.method must allow GET (stock default is POST-only)
+# The bot `limiter` is disabled because requests come from a trusted internal
+# service, not browsers — the limiter otherwise blocks programmatic queries.
+use_default_settings: true
+
+general:
+  instance_name: "StarlingAI Search"
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+server:
+  # Signs cookies/CSRF. This instance is internal-only and unauthenticated (headless
+  # JSON use), so the key carries no real secret; override by editing this file if you
+  # ever expose the instance. Kept literal so the file can be mounted read-only.
+  secret_key: "starlingai-internal-searxng-key"
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
