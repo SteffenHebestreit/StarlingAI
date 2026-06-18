@@ -77,7 +77,7 @@ import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejec
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
 import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
-import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema } from "../config/schema.js";
+import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { handleMcpHttpRequest, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
@@ -2450,6 +2450,47 @@ export function createGateway() {
         raw["orchestration"] = parsed.data;
       });
       return c.json(updatedConfig.orchestration);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // ── Effort profiles ───────────────────────────────────────────────────────
+  // GET /api/effort/config — current effort config (default tier + any profile
+  //   overrides) plus the list of tier names.
+  // PUT /api/effort/config — validate + persist the effort section. The Settings
+  //   UI only edits `default`; per-tier profile overrides are tuned via config
+  //   shards (see runtime/effort-context.ts BUILTIN_EFFORT_PROFILES).
+  app.get("/api/effort/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ config: getConfig().effort, tiers: EFFORT_TIERS });
+  });
+
+  app.put("/api/effort/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    // Merge over the current effort config so a partial PUT (just `default` from
+    // the Settings UI) does not blank out any shard-defined profile overrides.
+    const merged = { ...getConfig().effort, ...(body as Record<string, unknown>) };
+    const parsed = EffortSchema.safeParse(merged);
+    if (!parsed.success) {
+      return c.json({ error: "Invalid effort configuration", details: parsed.error.flatten() }, 400);
+    }
+
+    try {
+      const updatedConfig = updateConfig((raw) => {
+        raw["effort"] = parsed.data;
+      });
+      return c.json(updatedConfig.effort);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }

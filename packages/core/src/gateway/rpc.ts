@@ -16,6 +16,8 @@ import {
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
+import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
+import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
@@ -45,6 +47,7 @@ export type RpcMethod =
   | "session.delete"
   | "session.reset"
   | "session.rewind"
+  | "session.updateSettings"
   | "audit.subscribe"
   | "audit.unsubscribe"
   | "notifications.subscribe"
@@ -138,6 +141,7 @@ interface OverrideFlags {
   maxIterationsOverride?: number;
   forceAgent?: string;
   turnTimeoutSec?: number;
+  effort?: EffortTier;
 }
 
 /**
@@ -147,11 +151,19 @@ interface OverrideFlags {
  *   --iter N       — override sub-agent maxIterations (0 = unlimited, else 1–50)
  *   --agent NAME   — force delegation to a specific agent
  *   --timeout N    — override turn timeout in seconds (0 = unlimited, else 10–3600)
+ *   --effort TIER  — one-off effort tier for this message (low | medium | high | max)
  * Returns the cleaned message (flags stripped) and the parsed flags.
  */
 function parseOverrideFlags(message: string): { clean: string; flags: OverrideFlags } {
   let clean = message;
   const flags: OverrideFlags = { autoApprove: false };
+
+  const effortMatch = clean.match(/--effort\s+(\S+)/i);
+  if (effortMatch) {
+    const tier = resolveEffortTier(effortMatch[1]);
+    if (tier) flags.effort = tier;
+    clean = clean.replace(/\s*--effort\s+\S+/i, "");
+  }
 
   if (/--auto\b/.test(clean)) {
     flags.autoApprove = true;
@@ -390,11 +402,39 @@ export class RpcConnection {
             : undefined;
         const transcript = getSessionTranscript(sid, { limit, beforeMessageId });
         if (!transcript) throw new Error(`Session not found: ${sid}`);
-        return transcript;
+        // Surface per-session effort/time-limit settings so the composer can hydrate
+        // its controls; fall back to the configured default tier when unset.
+        const settings = getSessionRecord(sid)?.getSettings() ?? {};
+        return {
+          ...transcript,
+          settings: { effort: getConfig().effort?.default ?? "medium", ...settings },
+        };
       }
 
       case "session.list":
         return listSessions({ includeArchived: true });
+
+      case "session.updateSettings": {
+        const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        const session = getSessionRecord(sid);
+        if (!session) throw new Error(`Session not found: ${sid}`);
+        const patch: { effort?: EffortTier; turnTimeoutSecOverride?: number } = {};
+        if ("effort" in params) {
+          // null / "" / "default" clears the override (reset to the global default).
+          const raw = params["effort"];
+          patch.effort = raw == null || raw === "" || raw === "default"
+            ? undefined
+            : resolveEffortTier(raw);
+        }
+        if ("turnTimeoutSec" in params) {
+          const raw = params["turnTimeoutSec"];
+          patch.turnTimeoutSecOverride = raw == null || raw === ""
+            ? undefined
+            : Math.max(0, Math.min(86_400, Number(raw) || 0));
+        }
+        const updated = session.setSettings(patch);
+        return { settings: updated };
+      }
 
       case "session.reset": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
@@ -462,11 +502,27 @@ export class RpcConnection {
           enableThinkingRaw === false || enableThinkingRaw === "false" ? false :
           undefined;
 
-        // Parse inline override flags (--auto, --iter N, --agent NAME) before scene handling
+        // Parse inline override flags (--auto, --iter N, --agent NAME, --effort TIER) before scene handling
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
-        const effectiveTurnTimeoutMs = overrideFlags.turnTimeoutSec !== undefined
-          ? overrideFlags.turnTimeoutSec * 1000
+
+        // Resolve the effort tier for this turn: inline --effort flag (one-off) >
+        // per-message `effort` param > persisted session setting > configured default.
+        const sessionSettings = getSessionRecord(sessionId)?.getSettings() ?? {};
+        const effortTier: EffortTier =
+          overrideFlags.effort
+          ?? resolveEffortTier(params["effort"])
+          ?? sessionSettings.effort
+          ?? getConfig().effort?.default
+          ?? "medium";
+        const effortProfile = resolveEffortProfile(effortTier);
+
+        // Effective turn timeout: --timeout flag > per-session time-limit override >
+        // the effort profile's timeout (0 = unlimited) > the gateway config default.
+        const effectiveTurnTimeoutMs =
+          overrideFlags.turnTimeoutSec !== undefined ? overrideFlags.turnTimeoutSec * 1000
+          : sessionSettings.turnTimeoutSecOverride !== undefined ? sessionSettings.turnTimeoutSecOverride * 1000
+          : effortProfile.turnTimeoutMs !== undefined ? effortProfile.turnTimeoutMs
           : turnTimeoutMs;
 
         if (!message.trim()) {
@@ -584,6 +640,8 @@ export class RpcConnection {
             ...(overrideFlags.maxIterationsOverride !== undefined ? { maxIterations: overrideFlags.maxIterationsOverride } : {}),
             ...(overrideFlags.forceAgent ? { agent: overrideFlags.forceAgent } : {}),
             ...(overrideFlags.turnTimeoutSec !== undefined ? { timeout: overrideFlags.turnTimeoutSec } : {}),
+            // Surface a non-baseline effort tier (from --effort flag or session setting).
+            ...(effortTier !== "medium" ? { effort: effortTier } : {}),
           };
           this.sendEvent({ type: "status", data: { status: "accepted", requestId, ...(Object.keys(activeFlagsPayload).length ? { activeFlags: activeFlagsPayload } : {}) } });
         }
@@ -647,12 +705,14 @@ export class RpcConnection {
           || overrideFlags.maxIterationsOverride !== undefined
           || overrideFlags.forceAgent
           || overrideFlags.turnTimeoutSec !== undefined
+          || effortTier !== "medium"
         ) {
           const flagSummary = [
             overrideFlags.autoApprove ? "auto-approve" : null,
             overrideFlags.maxIterationsOverride !== undefined ? `iter=${overrideFlags.maxIterationsOverride}` : null,
             overrideFlags.forceAgent ? `agent=${overrideFlags.forceAgent}` : null,
             overrideFlags.turnTimeoutSec !== undefined ? `timeout=${overrideFlags.turnTimeoutSec}s` : null,
+            effortTier !== "medium" ? `effort=${effortTier}` : null,
           ].filter(Boolean).join(", ");
           log.info({ requestId, flags: flagSummary }, "Inline overrides active");
         }
@@ -667,8 +727,11 @@ export class RpcConnection {
           humanInLoopSteps,
           autoApprove: overrideFlags.autoApprove,
           maxIterationsOverride: overrideFlags.maxIterationsOverride,
-          turnTimeoutOverrideMs: overrideFlags.turnTimeoutSec !== undefined ? overrideFlags.turnTimeoutSec * 1000 : undefined,
+          // Effort-aware timeout (flag > session override > profile > config); the runtime
+          // and this gateway's archival timer share the same resolved value.
+          turnTimeoutOverrideMs: effectiveTurnTimeoutMs,
           enableThinking,
+          effortTier,
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },

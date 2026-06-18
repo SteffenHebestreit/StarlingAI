@@ -15,6 +15,16 @@ import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
+import {
+  runWithEffortContext,
+  resolveEffortProfile,
+  currentEffortProfile,
+  effectiveOrchestration,
+  effectiveMaxDelegatedResultChars,
+  effectiveOrchestratorMaxToolIterations,
+  effectiveOrchestratorTurnSloMs,
+} from "../runtime/effort-context.js";
+import type { EffortTier } from "../config/schema.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
@@ -144,6 +154,9 @@ export interface RunTurnOptions {
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
   enableThinking?: boolean;
+  /** Effort tier for this turn (low | medium | high | max). Selects an effort profile
+   *  that overlays the orchestration/latency/reasoning knobs. Undefined → config default. */
+  effortTier?: EffortTier;
 }
 
 export interface TurnOutput {
@@ -171,6 +184,11 @@ export interface TurnPerformanceMetrics {
   toolIterations: number;
   finishReason: string;
   blocked: boolean;
+  /** Effective orchestrator turn-SLO budget for this turn (ms), reflecting the
+   *  active effort profile. The Warden reads it off the turn_performance event so a
+   *  high/max-effort turn doesn't trip a spurious SLO-breach alert — without the
+   *  Warden having to import the session store (avoids a module cycle). */
+  effortSloBudgetMs?: number;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -3246,7 +3264,7 @@ export function buildModelVisibleToolResult(
       tableRowCount >= 4 || numberedListCount >= 5 || bulletListCount >= 8;
     const isLongDeliverable = cleaned.length > 2500 || looksStructured;
     const successEvidence = isLongDeliverable
-      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), getConfig().agents.performance.maxDelegatedResultChars)
+      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), effectiveMaxDelegatedResultChars())
       : evidence;
     // A runtime-authored research slice returns gathered EVIDENCE, never the
     // user-facing deliverable — the orchestrator must synthesize the actual
@@ -3405,9 +3423,12 @@ export function buildTemporalContextPrompt(now: Date = new Date()): string {
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
-  // Per-turn timeout — inline override wins, then config, then default 15 min.
-  // An explicit override of 0 disables the timeout entirely.
-  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? config.gateway?.turnTimeoutMs ?? 1_800_000;
+  // Per-turn timeout — inline override wins, then the active effort profile's timeout
+  // (0 = unlimited), then config, then default 15 min. An explicit override of 0
+  // disables the timeout entirely. (The gateway normally folds the profile timeout
+  // into turnTimeoutOverrideMs already; this fallback covers non-gateway callers.)
+  const effortProfileTimeout = resolveEffortProfile(opts.effortTier).turnTimeoutMs;
+  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? effortProfileTimeout ?? config.gateway?.turnTimeoutMs ?? 1_800_000;
   const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
@@ -3436,7 +3457,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     : AbortSignal.any(allSignals);
 
   try {
-    const out = await _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal);
+    // Activate the effort profile for the whole turn so the scattered
+    // getConfig().orchestration reads (via effectiveOrchestration()) and the
+    // reasoning/prompt/iteration knobs pick it up without threading a parameter
+    // through every helper.
+    const out = await runWithEffortContext(opts.effortTier, () =>
+      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal));
     return finalizeTurnOutput(out, sessionId);
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -4131,8 +4157,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let searchAgentsNoMatchCount = 0;
   let requiredResearchFallbackRoute: RequiredResearchFallbackRoute | null = null;
   let searchAgentsNoMatchFallbackPrompt = "";
-  const provider = opts.enableThinking !== undefined
-    ? getChatProviderWithOverride({ enableThinking: opts.enableThinking })
+  // Reasoning controls: an explicit per-message thinking toggle wins; otherwise the
+  // active effort profile drives enableThinking + reasoningEffort for this turn.
+  const turnEffortProfile = currentEffortProfile();
+  const turnThinking = opts.enableThinking ?? turnEffortProfile?.enableThinking;
+  const turnReasoningEffort = turnEffortProfile?.reasoningEffort;
+  const provider = (turnThinking !== undefined || turnReasoningEffort !== undefined)
+    ? getChatProviderWithOverride({
+        ...(turnThinking !== undefined ? { enableThinking: turnThinking } : {}),
+        ...(turnReasoningEffort !== undefined ? { reasoningEffort: turnReasoningEffort } : {}),
+      })
     : getChatProvider();
   // Tool development sessions have no iteration cap — they use convergence-based completion
   // and lease/heartbeat oversight via the tool-dev-warden instead.
@@ -4141,7 +4175,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     ? Number.MAX_SAFE_INTEGER
     : (opts.maxIterationsOverride === 0
         ? Number.MAX_SAFE_INTEGER
-        : (opts.maxIterationsOverride ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
+        : (opts.maxIterationsOverride ?? effectiveOrchestratorMaxToolIterations() ?? getConfig().agents.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS));
+  // Lean, droppable effort prompt-chunk (high/max tiers) — nudges the model toward
+  // depth/completeness for the whole turn. Empty for low/medium.
+  const effortPromptAddendum = currentEffortProfile()?.promptAddendum ?? "";
   let terminalSynthesisInstruction =
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalFinishReason = "max_tool_iterations";
@@ -4344,6 +4381,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
+      ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
       ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
@@ -5336,7 +5374,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // nothing. Enforces the source-sensitive correctness invariant without
         // dead-ending (audit bdbace34: a hardware build shipped fabricated mic specs
         // with zero delegations after the single nudge release).
-        const autoRoute = ((getConfig().orchestration?.autoResearchOnRefusal ?? true) && !signal.aborted)
+        const autoRoute = (effectiveOrchestration().autoResearchOnRefusal && !signal.aborted)
           ? (requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents))
           : null;
         if (autoRoute) {
@@ -5577,7 +5615,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // and repair if it falls short. Source-sensitive turns were already
       // anchored by the evidence backstop above, so they skip the redundant
       // verify call. Low-stakes / chat turns skip QA entirely.
-      if (getConfig().orchestration?.riskGatedQA ?? true) {
+      if (effectiveOrchestration().riskGatedQA) {
         const qaPlan = await loadTurnPlan(session.id);
         const invokedApprovalGatedTool = [..._turnToolCallCounts.keys()].some(requiresApproval);
         const risk = classifyTurnRisk({
@@ -5596,7 +5634,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             // references none of them. The check is CHEAP and deterministic
             // (answerNeedsEvidenceAnchoringRepair) — the slow-model repair only fires
             // when the draft is actually unanchored, so clean turns pay nothing.
-            const anchorEvidence = (getConfig().orchestration?.qaEvidenceAnchoring ?? true) && !signal.aborted
+            const anchorEvidence = effectiveOrchestration().qaEvidenceAnchoring && !signal.aborted
               ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
               : null;
             if (anchorEvidence && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {
@@ -5659,7 +5697,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
       // qaCorrectiveBuildUsed latch. (The forced-terminal path has its own build gate above.)
       if (
-        (getConfig().orchestration?.finalResponseQaGate ?? true)
+        effectiveOrchestration().finalResponseQaGate
         && !qaCorrectiveBuildUsed
         && !signal.aborted
         && deliverableIntent.wantsArtifact
@@ -5749,7 +5787,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         let fabricationReroute: string | null = null;
         let fabricationRerouteAttempted = false;
         if (
-          (getConfig().orchestration?.finalResponseQaGate ?? true)
+          effectiveOrchestration().finalResponseQaGate
           && !qaCorrectiveBuildUsed
           && !signal.aborted
         ) {
@@ -7102,11 +7140,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // A non-app source-sensitive deliverable (sourced doc/deck) keeps the conservative
     // gather-facts-first rule under autoBuildAfterResearch to avoid fabricating a sourced
     // document. Non-source-sensitive artifact requests build directly.
+    const effOrch = effectiveOrchestration();
     const buildEnabled = initialDynamicGuidance?.sourceSensitive
       ? (isAppBuild
-          ? ((getConfig().orchestration?.finalResponseQaGate ?? true) && buildContext.trim().length > 0)
-          : ((getConfig().orchestration?.autoBuildAfterResearch ?? true) && hasResearchBackedFacts))
-      : (getConfig().orchestration?.finalResponseQaGate ?? true);
+          ? (effOrch.finalResponseQaGate && buildContext.trim().length > 0)
+          : (effOrch.autoBuildAfterResearch && hasResearchBackedFacts))
+      : effOrch.finalResponseQaGate;
     if (
       buildEnabled
       && turnWantsArtifact
@@ -7707,5 +7746,7 @@ function buildTurnPerformanceMetrics(input: {
     toolIterations: input.toolIterations,
     finishReason: input.finishReason,
     blocked: input.blocked,
+    // Resolved within the turn's effort context (or config default outside one).
+    effortSloBudgetMs: effectiveOrchestratorTurnSloMs(),
   };
 }

@@ -887,6 +887,22 @@
               </div>
             </details>
 
+            <!-- Effort selector: cycles low → medium → high → max for this session.
+                 Higher tiers relax timeouts/iteration & size caps and push reasoning
+                 (high keeps quality gates; max removes them for unbounded runs). -->
+            <button
+              @click="cycleEffort"
+              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
+              :class="effortButtonClass"
+              :title="effortTitle"
+              :aria-label="`Effort: ${currentEffort}`"
+            >
+              <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+              </svg>
+              <span class="capitalize">{{ currentEffort }}</span>
+            </button>
+
             <!-- Thinking toggle lives beside the dropdowns; its state is
                  carried by color/glow alone (active = cyan glow, off =
                  dashed + dim, auto = dim). -->
@@ -935,7 +951,7 @@
       </div>
 
       <div class="text-xs text-gray-700 mt-1 px-1">
-        Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code>
+        Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code> <code class="font-mono">--effort TIER</code>
       </div>
     </div>
     </div>
@@ -1002,7 +1018,7 @@ import { useScenesStore } from "@/stores/scenes";
 import { useMultimodalStore } from "@/stores/multimodal";
 import { useComputerStore } from "@/stores/computer";
 import { useShellStore } from "@/stores/shell";
-import type { GatewaySessionTranscriptMessage, InterventionAction } from "@/stores/gateway";
+import type { GatewaySessionTranscriptMessage, InterventionAction, EffortTier } from "@/stores/gateway";
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
@@ -1151,6 +1167,30 @@ function cycleThinkingMode() {
   if (thinkingMode.value === undefined) thinkingMode.value = true;
   else if (thinkingMode.value === true) thinkingMode.value = false;
   else thinkingMode.value = undefined;
+}
+
+// ── Effort selector ──────────────────────────────────────────────────────────
+const EFFORT_TIERS: EffortTier[] = ["low", "medium", "high", "max"];
+const EFFORT_DESCRIPTIONS: Record<EffortTier, string> = {
+  low: "fast & tight — shorter timeout, fewer iterations, no extended reasoning",
+  medium: "balanced default — today's behavior",
+  high: "thorough — long timeout, deeper delegation, full-length output, extended reasoning (quality gates kept)",
+  max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
+};
+const currentEffort = computed<EffortTier>(() => gateway.currentSessionEffort);
+const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to cycle.`);
+const effortButtonClass = computed(() => {
+  switch (currentEffort.value) {
+    case "max": return "multimodal-action-active thinking-toggle--on ring-1 ring-amber-400/60";
+    case "high": return "multimodal-action-active thinking-toggle--on";
+    case "low": return "opacity-50 border-dashed";
+    default: return "opacity-70 hover:opacity-100"; // medium
+  }
+});
+function cycleEffort() {
+  const idx = EFFORT_TIERS.indexOf(currentEffort.value);
+  const next = EFFORT_TIERS[(idx + 1) % EFFORT_TIERS.length]!;
+  void gateway.updateSessionSettings({ effort: next });
 }
 
 interface SpeechRecognitionResultItem {

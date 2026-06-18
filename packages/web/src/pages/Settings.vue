@@ -820,6 +820,20 @@
                 Changes take effect immediately — no restart required.
               </div>
 
+              <!-- Default effort tier (seeds new sessions; per-session override in chat) -->
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Default Effort <span class="text-gray-600 font-normal">new sessions inherit this</span></label>
+                  <select v-model="effortDefaultForm" @change="saveEffortDefaultUI" class="input-box">
+                    <option value="low">Low — fast &amp; tight</option>
+                    <option value="medium">Medium — balanced (default)</option>
+                    <option value="high">High — thorough, quality gates kept</option>
+                    <option value="max">Max — unbounded, gates relaxed</option>
+                  </select>
+                  <div class="text-xs text-gray-500 mt-1">Per session, change it from the chat composer (or <code class="font-mono">--effort TIER</code>). Per-tier profiles are tuned in config shards.</div>
+                </div>
+              </div>
+
               <!-- Parallel slices -->
               <div class="multimodal-grid">
                 <div>
@@ -3142,6 +3156,22 @@ const orchestrationSaving = ref(false);
 const orchestrationError = ref("");
 const orchestrationDefaults = ref<Record<string, any>>({});
 
+// Default effort tier (seeds new sessions). Saved on change.
+const effortDefaultForm = ref<"low" | "medium" | "high" | "max">("medium");
+async function reloadEffortConfig() {
+  try {
+    const { config } = await gateway.getEffortConfig();
+    effortDefaultForm.value = config?.default ?? "medium";
+  } catch { /* leave at medium */ }
+}
+async function saveEffortDefaultUI() {
+  try {
+    await gateway.saveEffortDefault(effortDefaultForm.value);
+  } catch (e) {
+    orchestrationError.value = `Failed to save default effort: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
 const orchestrationForm = reactive<{
   maxParallelSlices: number | null;
   subAgentWebSearch: number | null;
@@ -3480,6 +3510,7 @@ function loadDefinitionsData() {
   void configAssistant.fetchFlowMemory();
   void runtime.fetch();
   void reloadOrchestrationConfig();
+  void reloadEffortConfig();
   void reloadSkillConfig();
   void reloadDocumentRagConfig();
   void reloadUserModel();

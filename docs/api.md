@@ -481,12 +481,15 @@ Supported RPC methods:
 | `session.archive` | `{ sessionId? }` |
 | `session.delete` | `{ sessionId? }` |
 | `session.reset` | `{ sessionId? }` |
+| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec? }` |
 | `scenes.list` | none |
 | `approval.respond` | `{ approvalId, approved }` |
-| `chat.send` | `{ sessionId, message, requestId? }` |
+| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort? }` |
 | `audit.subscribe` | none |
 
-`chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`.
+`chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
+
+`session.updateSettings` persists per-session controls: `effort` (`low|medium|high|max`, or `null`/`"default"` to clear → inherit the global default) and `turnTimeoutSec` (independent time-limit override; `0` = unlimited, `null`/`""` to clear). It returns `{ settings }`. The active effort tier bundles the orchestration/latency/reasoning knobs into a profile (see the Effort tiers section of the README); the global default lives at `effort.default` and is editable via `GET`/`PUT /api/effort/config`.
 
 `session.list` returns session summaries for both active and archived sessions. `session.get` supports optional transcript paging with `limit` and `beforeMessageId`. When `limit` is omitted, the full transcript is returned. With `limit`, the response returns the newest page before the optional cursor.
 
@@ -514,9 +517,12 @@ Supported RPC methods:
     }
   ],
   "totalMessages": 8,
-  "nextBeforeMessageId": "session:0"
+  "nextBeforeMessageId": "session:0",
+  "settings": { "effort": "medium" }
 }
 ```
+
+`settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`); `effort` falls back to the global `effort.default` when the session has none set.
 
 `session.end` remains accepted for backward compatibility and now archives the session instead of deleting it. Use `session.delete` to permanently remove stored session state.
 

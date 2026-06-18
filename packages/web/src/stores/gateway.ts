@@ -145,11 +145,19 @@ interface GatewayAuditEvent {
   data: Record<string, unknown>;
 }
 
+export type EffortTier = "low" | "medium" | "high" | "max";
+
+export interface SessionEffortSettings {
+  effort?: EffortTier;
+  turnTimeoutSecOverride?: number;
+}
+
 export interface GatewaySessionTranscript {
   session: GatewaySession;
   transcript: GatewaySessionTranscriptMessage[];
   totalMessages: number;
   nextBeforeMessageId?: string;
+  settings?: SessionEffortSettings;
 }
 
 const SESSION_TRANSCRIPT_PAGE_SIZE = 100;
@@ -701,6 +709,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   const currentSessionTranscriptTotalMessages = ref(0);
   const currentSessionTranscriptNextBeforeMessageId = ref<string | null>(null);
   const currentSessionTranscriptLoading = ref(false);
+  // Per-session effort tier + optional time-limit override (composer-controlled,
+  // persisted on the session). Hydrated on load; defaults to "medium" until known.
+  const currentSessionEffort = ref<EffortTier>("medium");
+  const currentSessionTimeLimitSec = ref<number | null>(null);
   const pendingRequestId = ref<string | null>(null);
   const streamingText = ref("");
   // Live chain-of-thought for the in-flight turn. streamingReasoning is the
@@ -1698,6 +1710,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       currentSessionId.value = result.session.archivedAt ? null : sessionId;
       currentSessionTranscriptTotalMessages.value = result.totalMessages;
       currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
+      currentSessionEffort.value = result.settings?.effort ?? "medium";
+      currentSessionTimeLimitSec.value = result.settings?.turnTimeoutSecOverride ?? null;
       hydrateTranscript(result.transcript);
       applyCurrentSessionRunSelection(currentSessionId.value ?? sessionId);
     } catch (err) {
@@ -1712,6 +1726,32 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   async function switchSession(sessionId: string): Promise<void> {
     await loadSession(sessionId);
+  }
+
+  /**
+   * Persist a per-session effort/time-limit setting. Optimistically updates the
+   * local refs, then sends the patch; reconciles with the server's echoed value.
+   * Pass `effort: null` / `turnTimeoutSec: null` to clear an override.
+   */
+  async function updateSessionSettings(patch: {
+    effort?: EffortTier | null;
+    turnTimeoutSec?: number | null;
+  }): Promise<void> {
+    const sessionId = currentSessionId.value;
+    if (!sessionId) return;
+    if (patch.effort !== undefined) currentSessionEffort.value = patch.effort ?? "medium";
+    if (patch.turnTimeoutSec !== undefined) currentSessionTimeLimitSec.value = patch.turnTimeoutSec;
+    try {
+      const result = await rpc("session.updateSettings", {
+        sessionId,
+        ...(patch.effort !== undefined ? { effort: patch.effort ?? "default" } : {}),
+        ...(patch.turnTimeoutSec !== undefined ? { turnTimeoutSec: patch.turnTimeoutSec ?? "" } : {}),
+      }) as { settings?: SessionEffortSettings };
+      currentSessionEffort.value = result.settings?.effort ?? "medium";
+      currentSessionTimeLimitSec.value = result.settings?.turnTimeoutSecOverride ?? null;
+    } catch {
+      /* keep the optimistic value; a reload reconciles from the server */
+    }
   }
 
   async function loadOlderCurrentSessionTranscript(): Promise<void> {
@@ -2483,6 +2523,20 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as OrchestrationConfig;
   }
 
+  // ── Effort profiles (global default tier) ───────────────────────────────
+  async function getEffortConfig(): Promise<{ config: { default: EffortTier }; tiers: EffortTier[] }> {
+    const response = await authorizedFetch("/api/effort/config");
+    return await response.json() as { config: { default: EffortTier }; tiers: EffortTier[] };
+  }
+
+  async function saveEffortDefault(tier: EffortTier): Promise<void> {
+    await authorizedFetch("/api/effort/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ default: tier }),
+    });
+  }
+
   async function getSkillLibraryConfig(): Promise<SkillFeatureConfig> {
     const response = await authorizedFetch("/api/skill-library/config");
     return await response.json() as SkillFeatureConfig;
@@ -2817,6 +2871,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     currentSessionTranscriptTotalMessages,
     currentSessionTranscriptLoading,
     currentSessionHasOlderMessages,
+    currentSessionEffort,
+    currentSessionTimeLimitSec,
     scenes,
     messages,
     streamingText,
@@ -2840,6 +2896,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     getSessionTranscript,
     loadSession,
     switchSession,
+    updateSessionSettings,
     loadOlderCurrentSessionTranscript,
     createSession,
     loadScenes,
@@ -2858,6 +2915,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     analyzeImageFile,
     getOrchestrationConfig,
     saveOrchestrationConfig,
+    getEffortConfig,
+    saveEffortDefault,
     getSkillLibraryConfig,
     saveSkillLibraryConfig,
     getDocumentRagConfig,

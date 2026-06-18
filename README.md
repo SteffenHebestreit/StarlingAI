@@ -231,6 +231,19 @@ The orchestrator's flow is tunable without code edits (all optional, sensible de
 | `riskGatedQA` | `true` | Auto-verify high-stakes answers (sourced claims, external actions) against the plan's acceptance criteria before shipping. |
 | `planApproval` | `false` | Pause a high-risk or wide plan for human approval in the operator dock before executing it. |
 
+### Effort tiers (`effort.*`)
+
+A single per-session **effort** dial bundles the latency / budget / size / depth / reasoning knobs (and, at the top tier, the quality gates above) into named profiles — so a long, maximum-quality deliverable (a detailed paper, a deep plan) isn't cut short by guardrails tuned for fast local turns.
+
+| Tier | Behavior |
+| --- | --- |
+| `low` | Fast & tight — short timeout, fewer iterations, no extended reasoning. |
+| `medium` | Balanced default — identical to today's behavior (zero overrides). |
+| `high` | Thorough — long timeout, deeper delegation, full-length output, extended reasoning; **quality gates kept**. |
+| `max` | Unbounded — no timeout, deepest budget, strongest reasoning; **relaxes the correctness/QA gates** (can ship ungrounded output). |
+
+The tier is **per session** (persisted) and seeded by a configurable global default (`effort.default`, Settings → Agents → Orchestration Tuning, or the chat composer). Set it per message with the `--effort low|medium|high|max` override flag, alongside `--auto`, `--iter N`, `--agent NAME`, and `--timeout N`. Per-tier profiles are tunable in config (`effort.profiles.<tier>`; built-ins in `runtime/effort-context.ts`). Effort never touches the content-safety/security guardrails — only the orchestration quality/latency behavior.
+
 Model wiring is environment-driven (the setup wizard writes these to `.env`): `SAI_DEFAULT_MODEL` pins the default agent model, `SAI_LMSTUDIO_URL` / `ANTHROPIC_API_KEY` select the provider, and `SAI_MODEL_BACKEND=ollama` (with `SAI_OLLAMA_MODEL`) enables the bundled `docker-compose.ollama.yml` local-model overlay.
 
 ---

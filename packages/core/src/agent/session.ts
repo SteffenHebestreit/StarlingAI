@@ -6,6 +6,7 @@ import type { LLMMessage } from "../providers/lmstudio.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
@@ -38,12 +39,24 @@ function isTransientTurnSystemMessage(message: Pick<SessionHistoryMessage, "role
     && TRANSIENT_TURN_SYSTEM_PREFIXES.some((prefix) => content.startsWith(prefix));
 }
 
+/**
+ * Per-session tuning the user controls from the chat composer. `effort` selects an
+ * effort profile (see runtime/effort-context.ts); `turnTimeoutSecOverride` is an
+ * optional independent time-limit override (seconds; 0 = unlimited) that wins over
+ * the profile's own timeout. Both persist with the session.
+ */
+export interface SessionSettings {
+  effort?: EffortTier;
+  turnTimeoutSecOverride?: number;
+}
+
 export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
   userId?: string;
   systemPrompt?: string;
   workspacePath?: string;
+  settings?: SessionSettings;
 }
 
 export interface TurnResult {
@@ -114,6 +127,9 @@ export interface PersistedSessionRecord {
   /** Rolling digest of trimmed-out turns; absent on records written before
    *  history compaction shipped. */
   earlierSummary?: string;
+  /** Per-session effort/time-limit settings; absent on records written before
+   *  session settings shipped (→ inherits the configured default effort). */
+  settings?: SessionSettings;
 }
 
 export class AgentSession {
@@ -142,6 +158,8 @@ export class AgentSession {
    *  long-horizon tasks keep the gist of earlier context (and the original
    *  request, which is pinned verbatim) instead of silently losing it. */
   private earlierSummary = "";
+  /** Per-session effort/time-limit settings (composer-controlled, persisted). */
+  private settings: SessionSettings = {};
 
   constructor(opts: AgentSessionOptions & {
     createdAt?: Date;
@@ -162,6 +180,7 @@ export class AgentSession {
     this.turnCount = opts.turnCount ?? 0;
     this.history = opts.history ? [...opts.history] : [];
     this.earlierSummary = opts.earlierSummary ?? "";
+    this.settings = opts.settings ? { ...opts.settings } : {};
     this.endLogged = Boolean(this.archivedAt);
 
     if (!opts.createdAt) {
@@ -187,6 +206,7 @@ export class AgentSession {
       turnCount: record.turnCount,
       history: record.history,
       earlierSummary: record.earlierSummary,
+      settings: record.settings,
     });
   }
 
@@ -438,7 +458,27 @@ export class AgentSession {
       turnCount: this.turnCount,
       history: this.history.map((message) => ({ ...message })),
       ...(this.earlierSummary ? { earlierSummary: this.earlierSummary } : {}),
+      ...(Object.keys(this.settings).length ? { settings: { ...this.settings } } : {}),
     };
+  }
+
+  /** Per-session effort/time-limit settings (composer-controlled). */
+  getSettings(): SessionSettings {
+    return { ...this.settings };
+  }
+
+  /**
+   * Patch the session settings. Keys set to `undefined` are removed (reset to the
+   * configured default). Touches updatedAt and persists.
+   */
+  setSettings(patch: Partial<SessionSettings>): SessionSettings {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete (this.settings as Record<string, unknown>)[key];
+      else (this.settings as Record<string, unknown>)[key] = value;
+    }
+    this.touch();
+    persistSessionStore(this);
+    return this.getSettings();
   }
 
   toSummary(): SessionSummary {
@@ -724,9 +764,28 @@ export function createSession(opts: AgentSessionOptions): AgentSession {
     }
   }
 
-  const session = new AgentSession(opts);
+  // Seed the effort tier from the configured global default when the caller did
+  // not specify one, so new sessions inherit the operator's chosen baseline.
+  const seededOpts: AgentSessionOptions = opts.settings?.effort
+    ? opts
+    : { ...opts, settings: { ...opts.settings, effort: getConfig().effort?.default ?? "medium" } };
+
+  const session = new AgentSession(seededOpts);
   _sessions.set(session.id, session);
   persistSessionStore(session);
+
+  // Soft observability: surface when live session load exceeds the configured
+  // concurrency advisory (agents.rateLimit.concurrentSessions). Deliberately a
+  // non-blocking SIGNAL, not a hard cap — a hard cap would break legitimate
+  // multi-tab / multi-channel use; operators watch the warning to size capacity.
+  const concurrencyAdvisory = getConfig().agents?.rateLimit?.concurrentSessions;
+  if (concurrencyAdvisory && concurrencyAdvisory > 0) {
+    const activeSessions = [..._sessions.values()].filter((s) => !s.isArchived()).length;
+    if (activeSessions > concurrencyAdvisory) {
+      log.warn({ activeSessions, advisory: concurrencyAdvisory, sessionId: session.id },
+        "Active session count exceeds the concurrentSessions advisory");
+    }
+  }
   return session;
 }
 

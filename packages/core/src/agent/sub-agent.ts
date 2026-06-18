@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
+import { currentEffortProfile, effectiveOrchestration } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -517,7 +518,7 @@ function enforceSourceSensitivePreEvidenceDelegation(
     if (rawTasks.length > 0) {
       const sliceCap = isNested
         ? 1
-        : (getConfig().orchestration?.maxParallelSlices ?? DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
+        : (effectiveOrchestration().maxParallelSlices ?? DEFAULT_MAX_SOURCE_SENSITIVE_PARALLEL_SLICES);
       const cappedTasks = rawTasks.slice(0, sliceCap);
       if (rawTasks.length > cappedTasks.length) {
         logAudit(
@@ -2405,7 +2406,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // mergeAgentModelOverride drops undefined override keys so a partial
     // override (e.g. an ephemeral agent passing model:{temperature:0.3} with no
     // primary) cannot blank out the default primary (audit c33e65dd).
-    const modelConfig = applyActiveModelPreset(mergeAgentModelOverride(config.agents.defaults.model, agentCfg.model), config);
+    const baseModelConfig = applyActiveModelPreset(mergeAgentModelOverride(config.agents.defaults.model, agentCfg.model), config);
+    // Overlay the active effort profile onto the resolved model config so delegated
+    // sub-agents (in-host AND containerized — this flows into the container payload as
+    // resolvedModelConfig) produce larger, more reasoned outputs at high/max effort.
+    // maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
+    const effortRunProfile = currentEffortProfile();
+    const modelConfig = effortRunProfile
+      ? {
+          ...baseModelConfig,
+          ...(effortRunProfile.subAgentMaxTokens !== undefined
+            ? { maxTokens: Math.max(baseModelConfig.maxTokens ?? 0, effortRunProfile.subAgentMaxTokens) }
+            : {}),
+          ...(effortRunProfile.enableThinking !== undefined ? { enableThinking: effortRunProfile.enableThinking } : {}),
+          ...(effortRunProfile.reasoningEffort !== undefined ? { reasoningEffort: effortRunProfile.reasoningEffort } : {}),
+        }
+      : baseModelConfig;
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
@@ -2662,9 +2678,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
+    // Iteration cap: explicit --iter override wins, then the active effort profile's
+    // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
+    const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
     const maxIterations = opts.maxIterationsOverride === 0
       ? Number.MAX_SAFE_INTEGER
-      : (opts.maxIterationsOverride ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
+      : (opts.maxIterationsOverride
+          ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
+          ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
     let iterations = 0;
     let toolCount = 0;
     let successfulToolCount = 0;
@@ -2771,7 +2792,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // root orchestrator session — loadTurnPlan strips the sub: hops). The goal-met
     // branch in the loop checks the gathered evidence against them via the cheap
     // routing tier and authoritatively finalizes early once they are satisfied.
-    const oversightEnabled = config.orchestration?.oversight !== false;
+    const oversightEnabled = effectiveOrchestration().oversight !== false;
     const oversightCriteria: string[] = oversightEnabled
       ? await loadTurnPlan(subSessionId).then((p) => p?.acceptanceCriteria ?? []).catch(() => [])
       : [];
@@ -4376,7 +4397,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // for this run). The orchestrator (depth 0) runs in runtime.ts and is
       // unaffected; this only caps nesting below it.
       const currentDelegationDepth = delegationDepthFromSessionId(subSessionId);
-      const maxDelegationDepth = getConfig().orchestration?.maxDelegationDepth ?? 3;
+      const maxDelegationDepth = effectiveOrchestration().maxDelegationDepth ?? 3;
       const delegationDepthExceeded = currentDelegationDepth >= maxDelegationDepth;
 
       for (const [toolCallIndex, tc] of response.tool_calls.entries()) {

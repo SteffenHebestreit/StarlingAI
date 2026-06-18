@@ -501,7 +501,14 @@ export function startWarden(): void {
         const perf = config.agents.performance;
         // Sub-agent sessions start with "sub:" prefix; orchestrator sessions don't.
         const isSubAgent = event.sessionId.startsWith("sub:");
-        const sloMs = isSubAgent ? perf.subAgentTurnSloMs : perf.orchestratorTurnSloMs;
+        // Prefer the effort-aware budget the runtime stamped on the event (so a
+        // high/max-effort turn doesn't trip a spurious breach); fall back to the
+        // configured per-class SLO. Read off the event so the Warden need not import
+        // the session store (avoids a module cycle — see effortSloBudgetMs).
+        const effortBudget = Number(event.data["effortSloBudgetMs"]);
+        const sloMs = effortBudget > 0
+          ? effortBudget
+          : (isSubAgent ? perf.subAgentTurnSloMs : perf.orchestratorTurnSloMs);
 
         const turnBreach = turnDurationMs > sloMs;
         const firstTokenBreach = firstTokenMs !== undefined && firstTokenMs > perf.firstTokenSloMs;
