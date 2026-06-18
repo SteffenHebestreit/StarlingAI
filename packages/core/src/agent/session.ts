@@ -840,6 +840,55 @@ export function getAllSessions(opts?: { includeArchived?: boolean }): AgentSessi
     .sort((left, right) => right.getUpdatedAt().getTime() - left.getUpdatedAt().getTime());
 }
 
+// ── Archived-session pruning ────────────────────────────────────────────────
+// Sessions persist (in-process + Redis) and accumulate forever once archived,
+// which is an unbounded resource leak on a long-lived gateway. The pruner
+// deletes ARCHIVED sessions whose archive timestamp is older than the configured
+// TTL (gateway.sessionTtlMs), on a fixed interval (agents.sessionPruneIntervalMs).
+// Active sessions are never touched. Wired from the gateway boot path.
+
+let _sessionPrunerTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Delete archived sessions older than `ttlMs`. Active sessions are never pruned.
+ *  Returns the number deleted. A non-positive ttl disables pruning (returns 0). */
+export function pruneArchivedSessions(ttlMs: number): number {
+  if (!(ttlMs > 0)) return 0;
+  const cutoff = Date.now() - ttlMs;
+  let pruned = 0;
+  for (const session of [..._sessions.values()]) {
+    if (!session.isArchived()) continue;
+    const archivedAt = session.getArchivedAt()?.getTime();
+    if (archivedAt !== undefined && archivedAt < cutoff) {
+      deleteSession(session.id);
+      pruned += 1;
+    }
+  }
+  if (pruned > 0) log.info({ pruned, ttlMs }, "Pruned aged archived sessions");
+  return pruned;
+}
+
+/** Start the periodic archived-session pruner (idempotent). Interval and TTL come
+ *  from agents.sessionPruneIntervalMs and gateway.sessionTtlMs. */
+export function startSessionPruner(): void {
+  if (_sessionPrunerTimer) return;
+  const config = getConfig();
+  const intervalMs = config.agents?.sessionPruneIntervalMs ?? 60_000;
+  const ttlMs = config.gateway?.sessionTtlMs ?? 3_600_000;
+  _sessionPrunerTimer = setInterval(() => {
+    try { pruneArchivedSessions(ttlMs); } catch (err) { log.warn({ err }, "session pruner tick failed"); }
+  }, intervalMs);
+  _sessionPrunerTimer.unref?.();
+  log.info({ intervalMs, ttlMs }, "Session pruner started");
+}
+
+/** Stop the periodic pruner (used on shutdown and in tests). */
+export function stopSessionPruner(): void {
+  if (_sessionPrunerTimer) {
+    clearInterval(_sessionPrunerTimer);
+    _sessionPrunerTimer = null;
+  }
+}
+
 /**
  * Async session lookup with Redis fallback.
  *

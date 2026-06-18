@@ -25,7 +25,7 @@ import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./obs
 import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
-import { initSessionRedis } from "./agent/session.js";
+import { initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
 import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
@@ -304,6 +304,10 @@ export async function main() {
   // Start Warden — background anomaly monitor
   startWarden();
 
+  // Start the archived-session pruner (gateway.sessionTtlMs / agents.sessionPruneIntervalMs)
+  // so ended sessions don't accumulate unbounded in the store + Redis.
+  startSessionPruner();
+
   // Start the Skill Library self-improvement driver — periodically retires low
   // performers, archives duplicates, and promotes proven skills to scenes.
   if (getConfig().skillLibrary.enabled) {
@@ -381,6 +385,7 @@ export async function main() {
     stopProviderActivityMonitor();
     stopRecoveryMetrics();
     stopWarden();
+    stopSessionPruner();
     try {
       const { stopSkillImprovementDriver } = await import("./skills/driver.js");
       stopSkillImprovementDriver();

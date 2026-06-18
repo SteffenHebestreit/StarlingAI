@@ -672,3 +672,71 @@ describe("AgentSession collapsed history", () => {
     expect(session.toSummary().preview).toBe("we should look up how to properly do a detailed pentest");
   });
 });
+
+describe("AgentSession effort/time-limit settings", () => {
+  it("round-trips settings through set/get and the persisted record", () => {
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "x" });
+    expect(session.getSettings()).toEqual({});
+
+    session.setSettings({ effort: "high", turnTimeoutSecOverride: 1800 });
+    expect(session.getSettings()).toEqual({ effort: "high", turnTimeoutSecOverride: 1800 });
+
+    const restored = AgentSession.fromRecord(session.toRecord());
+    expect(restored.getSettings()).toEqual({ effort: "high", turnTimeoutSecOverride: 1800 });
+  });
+
+  it("omits settings from the record when empty", () => {
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "x" });
+    expect(session.toRecord().settings).toBeUndefined();
+  });
+
+  it("setSettings with undefined clears a key (reset to default)", () => {
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "x" });
+    session.setSettings({ effort: "max" });
+    session.setSettings({ effort: undefined });
+    expect(session.getSettings().effort).toBeUndefined();
+  });
+
+  it("createSession seeds the effort tier from the configured default", () => {
+    const session = createSession({ channel: "test", workspacePath: "/workspace" });
+    // The built-in config default is "medium"; createSession seeds it so the
+    // composer always has a concrete tier to display.
+    expect(session.getSettings().effort).toBe("medium");
+  });
+});
+
+describe("archived-session pruning", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    resetSessionsForTests();
+  });
+
+  it("prunes archived sessions older than the TTL but keeps recent + active ones", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T00:00:00Z"));
+    const { createSession: mk, archiveSession, getSessionRecord, pruneArchivedSessions } = await import("../agent/session.js");
+
+    const old = mk({ channel: "t", workspacePath: "/workspace" });
+    archiveSession(old.id); // archivedAt = now (fake)
+
+    vi.setSystemTime(new Date("2026-06-18T02:00:00Z")); // +2h
+    const recentArchived = mk({ channel: "t", workspacePath: "/workspace" });
+    archiveSession(recentArchived.id); // archivedAt = +2h
+    const active = mk({ channel: "t", workspacePath: "/workspace" }); // never archived
+
+    // TTL = 1h: the first session (archived 2h ago) is stale; the others are not.
+    const pruned = pruneArchivedSessions(60 * 60 * 1000);
+
+    expect(pruned).toBe(1);
+    expect(getSessionRecord(old.id)).toBeUndefined();          // pruned
+    expect(getSessionRecord(recentArchived.id)).toBeDefined(); // too recent — kept
+    expect(getSessionRecord(active.id)).toBeDefined();         // active — never pruned
+  });
+
+  it("a non-positive TTL disables pruning", async () => {
+    const { createSession: mk, archiveSession, pruneArchivedSessions } = await import("../agent/session.js");
+    const s = mk({ channel: "t", workspacePath: "/workspace" });
+    archiveSession(s.id);
+    expect(pruneArchivedSessions(0)).toBe(0);
+  });
+});
