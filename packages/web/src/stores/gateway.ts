@@ -2736,14 +2736,27 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   /**
-   * Build a URL for the workspace static preview server.
-   * The token is embedded as a query parameter so that an iframe src can use it
-   * (browsers cannot set Authorization headers on iframe src attributes).
+   * Build a URL for the workspace static site preview server.
+   * The directory is base64url-encoded into a single PATH segment so RELATIVE
+   * urls inside the HTML (theme.css, sub-pages like bom.html, images) resolve
+   * against the document path — the older ?root=&file= form dropped them to
+   * /api/workspace/<file> and 404'd, leaving multi-page sites unstyled with dead
+   * inter-page links. The token rides in ?token= on the first navigation; the
+   * gateway mirrors it into a path-scoped cookie so the browser's relative
+   * sub-resource requests authenticate.
    * `root` is the workspace-relative directory. `file` is relative to that root.
    */
   function buildWorkspacePreviewUrl(root: string, file = "index.html"): string {
-    const params = new URLSearchParams({ root, file, token: token.value });
-    return `${restBaseUrl()}/api/workspace/preview?${params.toString()}`;
+    const enc = base64UrlEncode(root);
+    const filePath = file.replace(/^\/+/, "") || "index.html";
+    const params = new URLSearchParams({ token: token.value });
+    return `${restBaseUrl()}/api/workspace/site/${enc}/${filePath}?${params.toString()}`;
+  }
+
+  /** base64url-encode a (UTF-8) string for use as a single URL path segment. */
+  function base64UrlEncode(value: string): string {
+    const utf8 = Array.from(new TextEncoder().encode(value), (b) => String.fromCharCode(b)).join("");
+    return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   // WebSocket URL for the authenticated noVNC proxy (browser-session handoff).

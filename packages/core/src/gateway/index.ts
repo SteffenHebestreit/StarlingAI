@@ -3788,6 +3788,75 @@ export function createGateway() {
     });
   });
 
+  // Path-based static site preview for multi-page websites. Unlike the
+  // query-param form above (?root=&file=), the artifact directory is served
+  // under a PATH prefix, so RELATIVE urls inside the HTML — <link href="theme.css">,
+  // <a href="bom.html">, images — resolve against the document URL instead of
+  // collapsing to /api/workspace/<file> and 404-ing (which left multi-page sites
+  // unstyled with dead inter-page links). The directory is base64url-encoded into
+  // one path segment; the token rides in ?token= on the first navigation and is
+  // mirrored into a path-scoped cookie so the browser's own relative sub-resource
+  // requests authenticate (mirrors the /api/app/:id/* live-app proxy).
+  const SITE_PREVIEW_PREFIX = "/api/workspace/site/";
+  app.get("/api/workspace/site/:enc", (c) => {
+    const enc = c.req.param("enc");
+    const tok = c.req.query("token");
+    return c.redirect(`${SITE_PREVIEW_PREFIX}${enc}/index.html${tok ? `?token=${encodeURIComponent(tok)}` : ""}`);
+  });
+  app.get("/api/workspace/site/:enc/*", async (c) => {
+    const enc = c.req.param("enc");
+    const queryToken = c.req.query("token")?.trim();
+    const cookieToken = /(?:^|;\s*)sai_site_token=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
+    const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.text("Unauthorized", 401);
+
+    let root: string;
+    try {
+      root = Buffer.from(enc, "base64url").toString("utf8");
+    } catch {
+      return c.text("Invalid site root", 400);
+    }
+    if (!root) return c.text("Invalid site root", 400);
+
+    const dirPrefix = `${SITE_PREVIEW_PREFIX}${enc}/`;
+    const rawRel = c.req.path.startsWith(dirPrefix) ? c.req.path.slice(dirPrefix.length) : "";
+    let rel: string;
+    try {
+      rel = decodeURIComponent(rawRel);
+    } catch {
+      rel = rawRel;
+    }
+    const file = rel.trim() || "index.html";
+
+    let fileResolved: string;
+    try {
+      const rootTarget = resolveWorkspaceTarget(root);
+      const candidate = resolve(rootTarget.resolved, file.replace(/^\/+/, ""));
+      if (!candidate.startsWith(rootTarget.resolved + sep) && candidate !== rootTarget.resolved) {
+        return c.text("File path escapes root directory", 400);
+      }
+      fileResolved = candidate;
+    } catch {
+      return c.text("Path escapes workspace boundary", 400);
+    }
+
+    const fileStat = await stat(fileResolved).catch(() => null);
+    if (!fileStat?.isFile()) return c.text("File not found", 404);
+    if (fileStat.size > WORKSPACE_FILE_MAX_BYTES) return c.text("File too large", 413);
+
+    const bytes = await readFile(fileResolved);
+    const headers: Record<string, string> = {
+      "Content-Type": guessWorkspaceContentType(basename(fileResolved)),
+      "Cross-Origin-Resource-Policy": "same-origin",
+    };
+    // Set the path-scoped cookie only on the token-bearing first navigation so the
+    // iframe's subsequent relative requests (CSS, sub-pages, images) authenticate.
+    if (queryToken) {
+      headers["Set-Cookie"] = `sai_site_token=${encodeURIComponent(queryToken)}; Path=${dirPrefix}; HttpOnly; SameSite=Lax`;
+    }
+    return c.body(bytes, 200, headers);
+  });
+
   // ── Live app reverse proxy ────────────────────────────────────────────────
   // /api/app/:id/*  — forwards authenticated requests to a serve_app container
   // (running by name on the gateway's docker network). The first navigation
