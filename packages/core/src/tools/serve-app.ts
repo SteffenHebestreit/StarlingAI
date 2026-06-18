@@ -89,6 +89,30 @@ async function defaultHealthProbe(url: string): Promise<boolean> {
 let healthProbe: HealthProbe = defaultHealthProbe;
 export function __setHealthProbeForTests(fn: HealthProbe | null): void { healthProbe = fn ?? defaultHealthProbe; }
 
+// ── Injectable app fetch (for verify_app) ─────────────────────────────────
+// Full response capture (status + content-type + body) against a served app's
+// internal container URL. Separate from the boolean healthProbe so verify_app can
+// report what it actually found. Injectable for unit tests.
+export interface AppFetchResult { status: number; contentType: string; body: string; error?: string }
+export type AppFetch = (url: string, timeoutMs: number) => Promise<AppFetchResult>;
+async function defaultAppFetch(url: string, timeoutMs: number): Promise<AppFetchResult> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(url, { signal: ctrl.signal, redirect: "manual", headers: { "User-Agent": "StarlingAI-verify/0.1" } });
+    const raw = await res.text().catch(() => "");
+    clearTimeout(t);
+    return { status: res.status, contentType: res.headers.get("content-type") ?? "", body: raw.slice(0, 16_000) };
+  } catch (err) {
+    return { status: 0, contentType: "", body: "", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+let appFetch: AppFetch = defaultAppFetch;
+export function __setAppFetchForTests(fn: AppFetch | null): void { appFetch = fn ?? defaultAppFetch; }
+
+/** Log lines that signal a real runtime fault (not just the word "error" in app output). */
+const FATAL_LOG_RE = /(unhandled(?:rejection)?|uncaughtexception|cannot find module|econnrefused|eaddrinuse|listen e[a-z]+|fatal|segmentation fault|traceback \(most recent call last\)|\b(?:error|exception):|\bthrow new )/i;
+
 // ── Config (env-driven, no schema churn) ──────────────────────────────────
 function serveAppNetwork(): string { return process.env["SAI_APP_NETWORK"]?.trim() || "starlingai-public"; }
 function serveAppImage(): string { return process.env["SAI_APP_NODE_IMAGE"]?.trim() || "node:22-alpine"; }
@@ -261,6 +285,91 @@ async function appLogs(args: Record<string, unknown>): Promise<ToolResult> {
   const logs = await dockerExec(["logs", "--tail", String(tail), app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
   return { success: true, output: (logs.stdout || logs.stderr || "(no logs)").slice(-4000), metadata: appSummary(app) };
 }
+
+async function verifyApp(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const id = String(args["id"] ?? "").trim();
+  const app = id ? apps.get(id) : undefined;
+  if (!app) return { success: false, output: "", error: `No app with id '${id}'. Start it with serve_app first, then verify it (use serve_app action:"list" to see ids).` };
+  if (app.status !== "running") {
+    const logs = await dockerExec(["logs", "--tail", "40", app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
+    return {
+      success: false,
+      output: `App '${app.name}' is not running (status: ${app.status}). It must boot before it can be verified.\nLast logs:\n${(logs.stdout || logs.stderr || "(none)").slice(-1500)}`,
+      error: app.lastError ?? `App status is '${app.status}'.`,
+      metadata: appSummary(app),
+    };
+  }
+
+  const rawPath = String(args["path"] ?? "/").trim() || "/";
+  const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  const expectContent = typeof args["expectContent"] === "string" ? String(args["expectContent"]).trim() : "";
+  const url = `http://${app.containerName}:${app.internalPort}${path}`;
+
+  const res = await appFetch(url, 12_000);
+  const logs = await dockerExec(["logs", "--tail", "60", app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
+  const logText = `${logs.stdout || ""}\n${logs.stderr || ""}`;
+  const errorLines = logText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && FATAL_LOG_RE.test(l)).slice(0, 8);
+
+  const reachable = res.status > 0 && res.error === undefined;
+  const httpOk = res.status >= 200 && res.status < 400;
+  const contentPresent = expectContent ? res.body.toLowerCase().includes(expectContent.toLowerCase()) : undefined;
+  const verdictPass = reachable && httpOk && contentPresent !== false;
+
+  const lines: string[] = [];
+  lines.push(`${verdictPass ? "✅ PASS" : "❌ FAIL"} — verified ${path} on app '${app.name}'.`);
+  lines.push(reachable ? `HTTP ${res.status} (${res.contentType || "no content-type"}), ${res.body.length} bytes.` : `UNREACHABLE: ${res.error ?? "no response"}.`);
+  if (expectContent) lines.push(contentPresent ? `Expected content "${expectContent}" is present.` : `Expected content "${expectContent}" was NOT found in the response.`);
+  if (errorLines.length) lines.push(`⚠ Runtime error lines in the container logs:\n${errorLines.map((l) => `  ${l}`).join("\n")}`);
+  if (reachable && res.body.trim()) lines.push(`Response head:\n${res.body.slice(0, 600)}`);
+  if (!verdictPass) {
+    lines.push(
+      !reachable ? "Fix: ensure the server binds 0.0.0.0:$PORT and does not crash on boot (check serve_app logs)."
+      : !httpOk ? `Fix: the route returned HTTP ${res.status}. Check the route/handler and the logs above.`
+      : "Fix: the page rendered but is missing the expected content — check the template/data path.",
+    );
+    lines.push("Then re-run verify_app. For visual/DOM checks (client-side rendering, layout), browser_navigate to the previewPath and browser_snapshot.");
+  }
+
+  logAudit("verify_app", { id: app.id, path, status: res.status, verdict: verdictPass ? "pass" : "fail", errorLogLines: errorLines.length }, { sessionId: ctx.sessionId, severity: verdictPass ? "info" : "warn" });
+
+  return {
+    success: verdictPass,
+    output: lines.join("\n"),
+    ...(verdictPass ? {} : { error: reachable ? `Verification failed (HTTP ${res.status}${contentPresent === false ? ", missing expected content" : ""}).` : `App unreachable: ${res.error ?? "no response"}.` }),
+    metadata: {
+      ...appSummary(app),
+      verdict: verdictPass ? "pass" : "fail",
+      httpStatus: res.status,
+      contentType: res.contentType,
+      contentPresent,
+      bodyLength: res.body.length,
+      errorLogLines: errorLines,
+      checkedPath: path,
+    },
+  };
+}
+
+registerTool({
+  name: "verify_app",
+  description: "Verify a web app you built and started with serve_app actually boots and serves correctly BEFORE declaring the task done. Fetches the running app server-side (no token needed), checks the HTTP status and (optionally) that expected content is present, and surfaces runtime error lines from the container logs. Returns PASS/FAIL with a concrete fix hint; on FAIL, fix the code and re-run. For visual/DOM/layout checks, additionally browser_navigate to the previewPath and browser_snapshot.",
+  parameters: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "The served app id (from serve_app start / list)." },
+      path: { type: "string", description: "Path to check (default '/'). Use a specific route to verify it, e.g. '/api/health'." },
+      expectContent: { type: "string", description: "Optional substring that must appear in the response body (e.g. a heading or marker) — proves the page rendered, not just that the server answered." },
+    },
+    required: ["id"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    try {
+      return await verifyApp(args, ctx);
+    } catch (err) {
+      log.error({ err }, "verify_app failed");
+      return { success: false, output: "", error: `verify_app failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
 
 registerTool({
   name: "serve_app",

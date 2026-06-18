@@ -16,6 +16,7 @@ export type CoreAuditEventType =
   | "serve_app_started"
   | "serve_app_running"
   | "serve_app_stopped"
+  | "verify_app"
   | "message_received"
   | "message_sent"
   | "document_rag_ingest"

@@ -6,8 +6,10 @@ import {
   listServedApps,
   __setDockerExecForTests,
   __setHealthProbeForTests,
+  __setAppFetchForTests,
   __resetServedAppsForTests,
   type DockerExec,
+  type AppFetch,
   type ServedApp,
 } from "../tools/serve-app.js";
 import { getTool } from "../tools/registry.js";
@@ -121,5 +123,84 @@ describe("serve_app — lifecycle", () => {
     const second = await tool.execute({ action: "start", root: "generated/b" }, ctx);
     expect(second.success).toBe(false);
     expect(second.error).toMatch(/too many running apps/i);
+  });
+});
+
+describe("verify_app — self-inspecting build verification", () => {
+  // Start a healthy app (so the registry has a running entry), with docker logs
+  // returning whatever `logs` we want verify_app to scan.
+  async function startRunningApp(logs = ""): Promise<string> {
+    const exec: DockerExec = async (args) => {
+      if (args[0] === "run") return { code: 0, stdout: "cid", stderr: "" };
+      if (args[0] === "logs") return { code: 0, stdout: logs, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    __setDockerExecForTests(exec);
+    __setHealthProbeForTests(async () => true);
+    const started = await getTool("serve_app")!.execute({ action: "start", root: "generated/demo" }, ctx);
+    return String(started.metadata?.["id"]);
+  }
+  const fetchReturning = (r: Partial<{ status: number; contentType: string; body: string; error: string }>): AppFetch =>
+    async () => ({ status: r.status ?? 200, contentType: r.contentType ?? "text/html", body: r.body ?? "", error: r.error });
+
+  beforeEach(() => { __resetServedAppsForTests(); });
+  afterEach(() => {
+    __setDockerExecForTests(null);
+    __setHealthProbeForTests(null);
+    __setAppFetchForTests(null);
+    __resetServedAppsForTests();
+  });
+
+  it("PASSES when the app responds 2xx with the expected content", async () => {
+    const id = await startRunningApp("Server listening on 3000");
+    __setAppFetchForTests(fetchReturning({ status: 200, body: "<h1>Rate Limiter Dashboard</h1>" }));
+    const res = await getTool("verify_app")!.execute({ id, expectContent: "Rate Limiter Dashboard" }, ctx);
+    expect(res.success).toBe(true);
+    expect(res.metadata?.["verdict"]).toBe("pass");
+    expect(res.metadata?.["contentPresent"]).toBe(true);
+    expect(res.output).toContain("✅ PASS");
+  });
+
+  it("FAILS on a non-2xx HTTP status and gives a route fix hint", async () => {
+    const id = await startRunningApp();
+    __setAppFetchForTests(fetchReturning({ status: 500, body: "Internal Server Error" }));
+    const res = await getTool("verify_app")!.execute({ id }, ctx);
+    expect(res.success).toBe(false);
+    expect(res.metadata?.["verdict"]).toBe("fail");
+    expect(res.output).toMatch(/HTTP 500/);
+    expect(res.error).toMatch(/HTTP 500/);
+  });
+
+  it("FAILS when the expected content is missing even on a 200", async () => {
+    const id = await startRunningApp();
+    __setAppFetchForTests(fetchReturning({ status: 200, body: "<h1>Wrong Page</h1>" }));
+    const res = await getTool("verify_app")!.execute({ id, expectContent: "Rate Limiter" }, ctx);
+    expect(res.success).toBe(false);
+    expect(res.metadata?.["contentPresent"]).toBe(false);
+    expect(res.output).toMatch(/was NOT found/);
+  });
+
+  it("FAILS when the app is unreachable and hints at the 0.0.0.0:$PORT bind", async () => {
+    const id = await startRunningApp();
+    __setAppFetchForTests(fetchReturning({ status: 0, error: "ECONNREFUSED" }));
+    const res = await getTool("verify_app")!.execute({ id }, ctx);
+    expect(res.success).toBe(false);
+    expect(res.output).toMatch(/UNREACHABLE/);
+    expect(res.output).toMatch(/0\.0\.0\.0:\$PORT/);
+  });
+
+  it("surfaces fatal runtime error lines from the container logs", async () => {
+    const id = await startRunningApp("Error: Cannot find module 'express'\n    at require (node:internal)");
+    __setAppFetchForTests(fetchReturning({ status: 200, body: "<h1>ok</h1>" }));
+    const res = await getTool("verify_app")!.execute({ id, expectContent: "ok" }, ctx);
+    expect(Array.isArray(res.metadata?.["errorLogLines"])).toBe(true);
+    expect((res.metadata?.["errorLogLines"] as string[]).join(" ")).toMatch(/Cannot find module/);
+  });
+
+  it("errors for an unknown id", async () => {
+    __resetServedAppsForTests();
+    const res = await getTool("verify_app")!.execute({ id: "nope" }, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/No app with id/);
   });
 });

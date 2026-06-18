@@ -1181,6 +1181,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false, // manages docker itself on the host network — cannot run inside a sandbox
   },
+  verify_app: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Verify a serve_app app boots and serves (server-side HTTP/content check + container error logs)",
+    requiresPerCallApproval: false, // read-only verification, runs in the builder's self-correct loop
+    requiresSandbox: false, // reaches the app container + reads docker logs on the gateway host network
+  },
   ssh_upload: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Upload workspace files or directories to a remote system over SCP",

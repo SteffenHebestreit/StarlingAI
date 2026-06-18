@@ -159,6 +159,31 @@
           "default": "all"
         }
       }
+    },
+    "reviewed_deliverable": {
+      "description": "Build a deliverable and put it through an agent reviewer PANEL — parallel correctness + completeness + safety reviews with one bounded revision pass — before shipping. Review-by-default for ANY artifact (report, plan, app, config), not just code. Use when correctness matters more than speed.",
+      "task": "Build and ship a REVIEWED deliverable for: {{request}}.\n\n1) BUILD: record_plan with the acceptance criteria the result must meet, then delegate to the right builder — content_writer for documents/reports/decks/static sites, backend_coder or web_coder for running apps (the builder must verify_app before reporting done), coder for scripts.\n2) REVIEW PANEL — run these reviewers IN PARALLEL with parallel_delegate, each scoped to ONE dimension and each returning a verdict (PASS or BLOCK) plus a SHORT list of must-fix items only: code_analyst for correctness/accuracy of the built artifact (use source_verifier INSTEAD when the deliverable makes sourced factual claims); quality_supervisor for completeness against the acceptance criteria; policy_compliance_reviewer for safety/security/policy. Instruct each reviewer to BLOCK only on genuine defects, not style preferences.\n3) REVISE (at most ONE pass): if any reviewer returned BLOCK, delegate ONE revision to the ORIGINAL builder addressing EVERY must-fix item together, then re-check with only the reviewer(s) that blocked. Do not loop more than once — if issues remain after one revision, ship the best version with the open items called out explicitly.\n4) SHIP: return the deliverable plus a 2-3 line review summary (dimensions checked, what each reviewer found, what was fixed). Never ship an artifact that failed the correctness reviewer without flagging the unresolved risk.",
+      "allowedAgents": [
+        "content_writer",
+        "backend_coder",
+        "web_coder",
+        "coder",
+        "code_analyst",
+        "source_verifier",
+        "quality_supervisor",
+        "policy_compliance_reviewer",
+        "summarizer"
+      ],
+      "params": {
+        "request": {
+          "description": "The deliverable to build and review (subject + desired shape)",
+          "default": "the deliverable described in the conversation"
+        },
+        "reviewDimensions": {
+          "description": "Which review dimensions to emphasize",
+          "default": "correctness, completeness, safety"
+        }
+      }
     }
   }
 }
