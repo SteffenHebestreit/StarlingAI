@@ -43,9 +43,18 @@ export interface QaDeliveryDeps {
   /** Verify an answer against the criteria. Should never throw (treat a thrown
    *  or malformed verdict as a pass so the gate fails open, never blocking). */
   check: (answer: string, criteria: string[]) => Promise<QaVerdict>;
-  /** Produce an improved answer addressing the flaws, or null if it could not. */
+  /** Produce an improved answer addressing the flaws, or null if it could not.
+   *  Cheap path: re-synthesise/re-word from evidence already in hand. */
   improve: (answer: string, flaws: string) => Promise<string | null>;
-  /** Max improvement rounds (>=1). Each round is one check + one improve call. */
+  /** OPTIONAL heavier repair: hand the flaws back to the coordinator to make a plan
+   *  and do NEW work (re-research / re-build), not just re-word — the user's "send it
+   *  back to the coordinator to make a plan to improve" step. Used only AFTER a cheap
+   *  improve() round has already run and the re-check STILL fails: that re-word-didn't-
+   *  move-the-verdict outcome is the structural signal the gap needs real work, not a
+   *  rewrite (no topic/keyword classification). When absent, the loop is exactly the
+   *  cheap improve-only loop. Returns the new answer, or null if it could not. */
+  escalate?: (answer: string, flaws: string, criteria: string[]) => Promise<string | null>;
+  /** Max improvement rounds (>=1). Each round is one check + one repair call. */
   maxRounds: number;
 }
 
@@ -56,6 +65,8 @@ export interface QaDeliveryResult {
   rounds: number;
   /** Whether the final answer passed the QA check. */
   passed: boolean;
+  /** True if at least one round used the coordinator escalation path. */
+  escalated: boolean;
 }
 
 /**
@@ -70,31 +81,41 @@ export async function runQaDeliveryLoop(
   const maxRounds = Math.max(1, Math.floor(deps.maxRounds));
   // No acceptance criteria → nothing to check against; ship as-is.
   if (!criteria || criteria.length === 0 || !answer.trim()) {
-    return { answer, rounds: 0, passed: true };
+    return { answer, rounds: 0, passed: true, escalated: false };
   }
 
   let current = answer;
+  let escalated = false;
+  // Set once a cheap improve() round has run without yet passing the re-check. The
+  // NEXT failed round then escalates to the coordinator (when provided): re-wording
+  // demonstrably didn't fix it, so the gap needs real re-work.
+  let cheapImproveExhausted = false;
   for (let round = 0; round < maxRounds; round += 1) {
     let verdict: QaVerdict;
     try {
       verdict = await deps.check(current, criteria);
     } catch {
       // Check failed → fail open, ship the current answer.
-      return { answer: current, rounds: round, passed: true };
+      return { answer: current, rounds: round, passed: true, escalated };
     }
     if (verdict.pass) {
-      return { answer: current, rounds: round, passed: true };
+      return { answer: current, rounds: round, passed: true, escalated };
     }
 
+    const useEscalate = cheapImproveExhausted && !!deps.escalate;
     let improved: string | null = null;
     try {
-      improved = await deps.improve(current, verdict.flaws ?? "");
+      improved = useEscalate
+        ? await deps.escalate!(current, verdict.flaws ?? "", criteria)
+        : await deps.improve(current, verdict.flaws ?? "");
     } catch {
       improved = null;
     }
-    // Improvement failed or produced nothing usable → stop; ship the best so far.
+    if (useEscalate) escalated = true;
+    else cheapImproveExhausted = true;
+    // Repair failed or produced nothing usable → stop; ship the best so far.
     if (!improved || !improved.trim()) {
-      return { answer: current, rounds: round + 1, passed: false };
+      return { answer: current, rounds: round + 1, passed: false, escalated };
     }
     current = improved;
   }
@@ -104,5 +125,5 @@ export async function runQaDeliveryLoop(
   // would only refine an audit-only boolean at the cost of one whole slow-model call
   // per turn. Report passed=false (we never got a confirming PASS within budget).
   const finalPass = false;
-  return { answer: current, rounds: maxRounds, passed: finalPass };
+  return { answer: current, rounds: maxRounds, passed: finalPass, escalated };
 }

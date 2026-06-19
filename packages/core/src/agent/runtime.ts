@@ -5792,9 +5792,54 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const dlPlan = await loadTurnPlan(session.id);
         const criteria = dlPlan?.acceptanceCriteria ?? [];
         if (criteria.length > 0) {
+          // Coordinator escalation (orchestration.qaDeliveryLoopEscalateToCoordinator):
+          // when a cheap re-synthesis round has already failed the re-check, the gap
+          // needs NEW work, not a rewrite — hand the flaws to the coordinator to make a
+          // plan and execute it. Reuses the established post-loop delegation path; the
+          // built artifact (if any) surfaces via the recorded assistant+tool pair.
+          const qaEscalate = effectiveOrchestration().qaDeliveryLoopEscalateToCoordinator
+            ? async (current: string, flaws: string, crit: string[]): Promise<string | null> => {
+                if (signal.aborted) return null;
+                const task = "QA RE-PLAN — the delivered answer STILL fails these acceptance criteria after a rewrite, "
+                  + "which means the gap needs real work, not re-wording. Make a focused plan to fix EXACTLY these flaws "
+                  + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable in "
+                  + "the user's language. Ground every claim in tool results; do not fabricate to satisfy a criterion — if "
+                  + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
+                  + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
+                  + "\n\nCurrent answer to improve:\n" + current.slice(0, 6_000);
+                try {
+                  const res = await executeTool("delegate_to_agent", {
+                    agentName: "mission_coordinator",
+                    task,
+                  }, { ...toolContext, allowDelegationAfterOperatorStop: true });
+                  _turnDelegationCount += 1;
+                  // Record the delegation so any artifact the coordinator built surfaces as
+                  // a download and history stays valid (mirrors the corrective-build path).
+                  const callId = `qaescalate_${Date.now().toString(36)}`;
+                  session.addMessage({
+                    role: "assistant", content: "",
+                    tool_calls: [{ id: callId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: "mission_coordinator", task: "QA RE-PLAN (coordinator escalation)" }) } }],
+                  });
+                  session.addMessage({
+                    role: "tool",
+                    content: (res.success ? res.output : (res.error?.trim() ? `Error: ${res.error}` : res.output)).slice(0, 4_000),
+                    tool_call_id: callId, metadata: res.metadata,
+                  });
+                  if (!res.success) return null;
+                  const candidate = sanitizeUserFacingAssistantResponse(res.output, 0);
+                  // Reject a catastrophic shrink (a short "I built X" summary must not replace a long answer).
+                  if (candidate.trim().length < Math.min(200, Math.floor(current.trim().length * 0.5))) return null;
+                  return candidate;
+                } catch (err) {
+                  log.warn({ err, sessionId: session.id }, "QA delivery coordinator escalation failed");
+                  return null;
+                }
+              }
+            : undefined;
           const gate = await runQaDeliveryGate(
             session, provider, signal, finalResponse, criteria,
             effectiveOrchestration().qaDeliveryLoopMaxRounds,
+            qaEscalate,
           );
           if (gate.changed) {
             finalResponse = gate.answer;
@@ -5805,13 +5850,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               finalResponse = rescan.redacted;
               guardrailEvents.push({ type: "output_redacted", details: (rescan.detectedTypes ?? []).join(", ") });
             }
-            guardrailEvents.push({ type: "guardrail_flagged", details: "qa_delivery_loop_improved" });
+            guardrailEvents.push({ type: "guardrail_flagged", details: gate.escalated ? "qa_delivery_loop_escalated" : "qa_delivery_loop_improved" });
           }
           logAudit("flow_verification_passed", {
             reason: "qa_delivery_loop",
             rounds: gate.rounds,
             passed: gate.passed,
             improved: gate.changed,
+            escalated: gate.escalated,
             acceptanceCriteria: criteria.length,
           }, { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
         }
@@ -7482,7 +7528,8 @@ async function runQaDeliveryGate(
   answer: string,
   criteria: string[],
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean }> {
+  escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; escalated: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
@@ -7525,12 +7572,13 @@ async function runQaDeliveryGate(
     return candidate;
   };
 
-  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds });
+  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, ...(escalate ? { escalate } : {}) });
   return {
     answer: result.answer,
     changed: result.answer.trim() !== answer.trim(),
     rounds: result.rounds,
     passed: result.passed,
+    escalated: result.escalated,
   };
 }
 

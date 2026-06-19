@@ -77,6 +77,19 @@ prompt.
   (default 2). Only fires when a plan with acceptance criteria exists, so
   chat / plan-less turns pay nothing. Gate: `pass^k` on a high-stakes
   acceptance-criteria case — quality lift vs. the extra per-round latency.
+  - **S3b — coordinator escalation** *(landed, default-off —
+    `orchestration.qaDeliveryLoopEscalateToCoordinator`).* Closes the gap
+    between the diagram's "back to the Coordinator to plan fixes" and the cheap
+    `improve` (which only re-words existing evidence): once a cheap re-synthesis
+    round has already run and the re-check **still** fails, that round's repair
+    is escalated to `mission_coordinator` via the established `delegate_to_agent`
+    path — it makes a plan and does NEW work (re-research / re-build), then
+    returns the corrected deliverable (any built artifact surfaces via the
+    recorded delegation). The trigger is **structural** (a rewrite didn't move
+    the verdict), not topic-based; still bounded by `qaDeliveryLoopMaxRounds`,
+    fails open, and rejects a catastrophic shrink. Gate: `pass^k` on a
+    needs-new-work acceptance-criteria case — does re-planning actually pass
+    flaws a rewrite can't, and is the extra full sub-agent run worth it.
 - **S4 — parallel discovery prefetch on escalation.** *(landed, default-off —
   `pass^k` pending.)* On a receptionist escalate (the fast-lane declined the
   turn), run agent discovery (`resolveAgentRouting`) and workflow discovery

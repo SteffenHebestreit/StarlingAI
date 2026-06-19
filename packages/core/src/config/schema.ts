@@ -1438,6 +1438,16 @@ export const OrchestrationSchema = z.object({
   /** Max improvement rounds for the QA delivery loop (each round = one check + one
    *  improve call). Bounded low because every round is extra slow-model latency. */
   qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
+  /** When true, the QA delivery loop escalates to the COORDINATOR after a cheap
+   *  re-synthesis round has already failed the re-check — handing the flaws back to
+   *  mission_coordinator to make a plan and do NEW work (re-research / re-build),
+   *  the user's "send it back to the coordinator to make a plan to improve … until
+   *  the qa-agent says it's fine" step. The trigger is structural (a rewrite didn't
+   *  move the verdict), not topic-based. Still bounded by qaDeliveryLoopMaxRounds and
+   *  fails open. Default OFF: a coordinator delegation is a full extra sub-agent run,
+   *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
+   *  qaDeliveryLoop. */
+  qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
   /** Discovery prefetch (staged orchestration S4 — docs/staged-orchestration.md):
    *  when true, an escalated turn (one the receptionist fast-lane declined) runs
    *  agent discovery + workflow discovery CONCURRENTLY up-front and injects a compact,

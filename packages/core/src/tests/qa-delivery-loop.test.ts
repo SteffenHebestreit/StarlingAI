@@ -16,7 +16,7 @@ describe("runQaDeliveryLoop", () => {
   it("ships immediately with no criteria (nothing to check)", async () => {
     const check = vi.fn();
     const r = await runQaDeliveryLoop("answer", [], deps({ check }));
-    expect(r).toEqual({ answer: "answer", rounds: 0, passed: true });
+    expect(r).toEqual({ answer: "answer", rounds: 0, passed: true, escalated: false });
     expect(check).not.toHaveBeenCalled();
   });
 
@@ -71,6 +71,67 @@ describe("runQaDeliveryLoop", () => {
       maxRounds: 3,
     }));
     expect(r.answer).toBe("v0");
+    expect(r.passed).toBe(false);
+    expect(r.escalated).toBe(false);
+  });
+});
+
+describe("runQaDeliveryLoop — coordinator escalation (staged-orchestration fidelity)", () => {
+  it("escalates ONLY after a cheap improve round already failed the re-check", async () => {
+    const improve = vi.fn(async (a: string) => a + " (reworded)");      // round 0 (cheap)
+    const escalate = vi.fn(async () => "rebuilt-by-coordinator");        // round 1 (heavy)
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "criterion 2 needs a real BOM" }), // always fails
+      improve, escalate, maxRounds: 2,
+    }));
+    // round 0 → improve (re-word), re-check still fails → round 1 → escalate
+    expect(improve).toHaveBeenCalledTimes(1);
+    expect(escalate).toHaveBeenCalledTimes(1);
+    expect(r.escalated).toBe(true);
+    expect(r.answer).toBe("rebuilt-by-coordinator");
+  });
+
+  it("never escalates when a cheap re-synthesis round fixes the answer first", async () => {
+    let calls = 0;
+    const escalate = vi.fn(async () => "coordinator-output");
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: ++calls > 1, flaws: "missing sources" }), // fail then pass
+      improve: async () => "v1-fixed",
+      escalate, maxRounds: 3,
+    }));
+    expect(escalate).not.toHaveBeenCalled();
+    expect(r.escalated).toBe(false);
+    expect(r.answer).toBe("v1-fixed");
+  });
+
+  it("passes the unmet criteria through to the escalation (coordinator gets the full target)", async () => {
+    const escalate = vi.fn(async () => "fixed");
+    await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "criterion 1 unmet" }),
+      improve: async (a) => a, // produces something so the loop reaches round 1
+      escalate, maxRounds: 2,
+    }));
+    expect(escalate).toHaveBeenCalledWith("v0", "criterion 1 unmet", CRITERIA);
+  });
+
+  it("without an escalate dep, behaves exactly as the cheap improve-only loop (backward compatible)", async () => {
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "still wrong" }),
+      improve: async (a) => a + "+",
+      maxRounds: 2,
+    }));
+    expect(r.escalated).toBe(false);
+    expect(r.answer).toBe("v0++"); // two improve passes, no escalation
+  });
+
+  it("escalation failing (null) ships the best answer so far, fail-open", async () => {
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "x" }),
+      improve: async () => "v1",
+      escalate: async () => null, // coordinator returned nothing usable
+      maxRounds: 2,
+    }));
+    expect(r.answer).toBe("v1"); // keeps the cheap-round result rather than blocking
     expect(r.passed).toBe(false);
   });
 });
