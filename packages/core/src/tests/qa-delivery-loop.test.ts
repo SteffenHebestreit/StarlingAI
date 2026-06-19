@@ -1,0 +1,69 @@
+import { describe, expect, it, vi } from "vitest";
+import { runQaDeliveryLoop, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
+
+const CRITERIA = ["names a winner", "cites sources"];
+
+function deps(over: Partial<QaDeliveryDeps>): QaDeliveryDeps {
+  return {
+    check: async () => ({ pass: true }),
+    improve: async (a) => a + " (improved)",
+    maxRounds: 2,
+    ...over,
+  };
+}
+
+describe("runQaDeliveryLoop", () => {
+  it("ships immediately with no criteria (nothing to check)", async () => {
+    const check = vi.fn();
+    const r = await runQaDeliveryLoop("answer", [], deps({ check }));
+    expect(r).toEqual({ answer: "answer", rounds: 0, passed: true });
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("ships immediately when the first check passes (no improvement round)", async () => {
+    const improve = vi.fn();
+    const r = await runQaDeliveryLoop("good", CRITERIA, deps({ check: async () => ({ pass: true }), improve }));
+    expect(r.rounds).toBe(0);
+    expect(r.passed).toBe(true);
+    expect(r.answer).toBe("good");
+    expect(improve).not.toHaveBeenCalled();
+  });
+
+  it("loops back to improve on failure, then ships once it passes", async () => {
+    let calls = 0;
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: ++calls > 1, flaws: "missing sources" }), // fail 1st, pass 2nd
+      improve: async () => "v1-fixed",
+      maxRounds: 3,
+    }));
+    expect(r.rounds).toBe(1);
+    expect(r.passed).toBe(true);
+    expect(r.answer).toBe("v1-fixed");
+  });
+
+  it("stops at maxRounds and ships the best-so-far answer", async () => {
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "still wrong" }),
+      improve: async (a) => a + "+",
+      maxRounds: 2,
+    }));
+    expect(r.rounds).toBe(2);
+    expect(r.answer).toBe("v0++"); // two improvement passes applied
+  });
+
+  it("fails OPEN: a thrown check ships the current answer (never blocks delivery)", async () => {
+    const r = await runQaDeliveryLoop("answer", CRITERIA, deps({ check: async () => { throw new Error("model down"); } }));
+    expect(r.passed).toBe(true);
+    expect(r.answer).toBe("answer");
+  });
+
+  it("stops and ships the prior answer when improvement yields nothing", async () => {
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "x" }),
+      improve: async () => "",
+      maxRounds: 3,
+    }));
+    expect(r.answer).toBe("v0");
+    expect(r.passed).toBe(false);
+  });
+});
