@@ -695,7 +695,8 @@ const swarmExecutionItems = computed<ExecutionItem[]>(() => swarmTasks.value
 
 const toolExecutionItems = computed<ExecutionItem[]>(() => (props.message.toolCalls ?? []).map((toolCall, index) => {
   const argsSummary = Object.entries(toolCall.args ?? {})
-    .map(([k, v]) => `${k}: ${String(v).substring(0, 80)}`)
+    // Render object/array values as JSON, not the useless "[object Object]" String() gives.
+    .map(([k, v]) => `${k}: ${(typeof v === "string" ? v : JSON.stringify(v)).substring(0, 80)}`)
     .join(", ");
   const status: ExecutionStatus = toolCall.result === undefined
     ? "running"

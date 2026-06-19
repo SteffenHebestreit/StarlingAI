@@ -1434,12 +1434,16 @@ registerTool({
       }
 
       const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
+      // Recovery guidance: the model invented a workflow name. Steer it AWAY from
+      // either looping on another guessed name OR grabbing an irrelevant "closest"
+      // match — if none clearly fit, delegate instead of forcing a workflow.
+      const recoveryHint = " Do NOT invent another workflow name or pick one of these unless it CLEARLY matches the request — if none fit, delegate to mission_coordinator (or answer directly) instead of calling run_workflow again.";
       return {
         success: false,
         output: "",
         error: workflowMatches.length > 0
-          ? `Workflow not found: ${name}. Closest workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
-          : `Workflow not found: ${name}`,
+          ? `Workflow not found: ${name}. Closest workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.${recoveryHint}`
+          : `Workflow not found: ${name}.${recoveryHint}`,
         metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
       };
     }
