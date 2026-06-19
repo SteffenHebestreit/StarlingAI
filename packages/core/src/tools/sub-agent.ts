@@ -11,7 +11,9 @@ import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../age
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
 import { buildAgentTokenIdf, computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
-import { getEmbeddingProvider } from "../providers/index.js";
+import { getEmbeddingProvider, getChatProviderForTier, getChatProvider } from "../providers/index.js";
+import { effectiveOrchestration } from "../runtime/effort-context.js";
+import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -5496,8 +5498,18 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     // agentName is now optional — omitting it triggers undirected swarm bidding
     const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
-    const task = deriveDelegationTask(args);
+    let task = deriveDelegationTask(args);
     const context = args["context"] ? String(args["context"]) : undefined;
+    // Work internally in English: translate a non-English task to English for routing +
+    // the sub-agent's work, carrying an output-language directive so the deliverable still
+    // comes back in the user's language. Context evidence is left verbatim. Gated, fail-open.
+    if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
+      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
+      if (normalized.sourceLanguage !== "English") {
+        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
+        task = normalized.task;
+      }
+    }
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
@@ -5595,8 +5607,17 @@ registerTool({
     required: ["task"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const task = deriveDelegationTask(args);
+    let task = deriveDelegationTask(args);
     const context = args["context"] ? String(args["context"]) : undefined;
+    // Work internally in English (same as the directed path): translate a non-English task
+    // for routing + the sub-agent's work, with an output-language directive. Gated, fail-open.
+    if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
+      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
+      if (normalized.sourceLanguage !== "English") {
+        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
+        task = normalized.task;
+      }
+    }
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
     const taskTitle = resolveDelegationTaskTitle(args, task);

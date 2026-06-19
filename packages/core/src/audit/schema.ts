@@ -114,6 +114,8 @@ export type CoreAuditEventType =
   // Max-effort turn oversight — orchestrator-level re-plan / never-empty floor
   | "turn_oversight_redirected"
   | "turn_oversight_floor"
+  // Per-delegation language normalization (work internally in English)
+  | "delegation_task_normalized_to_english"
   // Turn watchdog delivered best-available content instead of an empty error
   | "turn_timeout_recovered"
   // Mid-turn user steering — fold user guidance into a running turn

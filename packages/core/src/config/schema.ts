@@ -1471,6 +1471,17 @@ export const OrchestrationSchema = z.object({
    *  user's stack confirms the oversight rescues stuck turns without derailing healthy
    *  long runs. */
   maxEffortTurnOversight: z.boolean().default(false),
+  /** Per-delegation language normalization (delegation-language.ts): "work internally in
+   *  English; deliver in the user's language." When true, a delegated TASK in another
+   *  language is translated to English (one bounded routing-tier call) before routing +
+   *  running the sub-agent, with an output-language directive appended so the deliverable
+   *  still comes back in the user's language. Makes routing/tool-arg matching language-
+   *  independent (the agent catalog is English-only) without bilingual keyword regexes.
+   *  The `context` evidence block is left verbatim (citation fidelity). Fail-open: any
+   *  translation error leaves the task unchanged. Default OFF — it adds one LLM hop per
+   *  non-English delegation on the shared GPU, so it stays gated until live eval shows the
+   *  routing/quality lift beats the latency. */
+  normalizeDelegationToEnglish: z.boolean().default(false),
   /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
    *  research delegation for a source-sensitive turn came back partial / cancelled /
    *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact
