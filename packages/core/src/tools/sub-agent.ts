@@ -64,6 +64,30 @@ function confidenceThreshold(label: "high" | "medium" | "low"): number {
   return 0;
 }
 
+/**
+ * Carve a synthesis-headroom reserve out of the parent turn budget before handing it
+ * to a delegated sub-agent as that sub-agent's OWN hard timeout. A sub-agent today
+ * inherits the FULL parent budget, so one slow node can consume the entire turn and
+ * leave the orchestrator zero time to synthesize + deliver (audit b6f8336e). When
+ * `reserveMs > 0`, the sub-agent gets at most `parentBudget − reserve` (never below
+ * `floorMs`), guaranteeing the parent keeps `reserve` ms to finalize.
+ *
+ * Pure + identity-by-default: `reserveMs = 0` (the config default) returns the parent
+ * budget unchanged, and an absent/unbounded budget is passed through untouched, so the
+ * knob is a true no-op until explicitly enabled.
+ */
+export function reserveSubAgentTimeout(
+  parentBudgetMs: number | undefined,
+  reserveMs: number,
+  floorMs = 60_000,
+): number | undefined {
+  if (typeof parentBudgetMs !== "number" || !Number.isFinite(parentBudgetMs) || parentBudgetMs <= 0) {
+    return parentBudgetMs; // unbounded / absent → leave as-is
+  }
+  if (reserveMs <= 0) return parentBudgetMs; // identity (default off)
+  return Math.max(floorMs, parentBudgetMs - reserveMs);
+}
+
 interface HeuristicRoutingSignals {
   looksBroad: boolean;
   looksFresh: boolean;
@@ -3863,7 +3887,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         onComputerScreenshot: ctx.onComputerScreenshot,
         onComputerSessionState: ctx.onComputerSessionState,
         maxIterationsOverride: ctx.maxIterationsOverride,
-        turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
+        // Reserve synthesis headroom for the parent so a single slow sub-agent can't
+        // consume the entire turn budget and leave nothing for finalize+deliver
+        // (audit b6f8336e). Identity (= ctx.turnTimeoutOverrideMs) until the reserve
+        // knob is set; soft deadline below derives from this same effective value.
+        turnTimeoutOverrideMs: reserveSubAgentTimeout(
+          ctx.turnTimeoutOverrideMs,
+          getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
+        ),
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
@@ -3873,7 +3904,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // E18: Soft deadline — give the specialist 70% of its effective timeout so
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
-          const raw = ctx.turnTimeoutOverrideMs ?? agentCfg?.turnTimeoutMs ?? 60_000;
+          // Derive from the SAME reserved budget as the hard timeout above so the soft
+          // deadline (70%) stays proportional when a synthesis reserve is in effect.
+          const reserved = reserveSubAgentTimeout(
+            ctx.turnTimeoutOverrideMs,
+            getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
+          );
+          const raw = reserved ?? agentCfg?.turnTimeoutMs ?? 60_000;
           // "unbound" (no numeric budget) → push the soft deadline effectively
           // out of reach so it never fires for long-running agents.
           const effective = typeof raw === "number" ? raw : Number.MAX_SAFE_INTEGER;

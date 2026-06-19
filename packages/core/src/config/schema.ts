@@ -1449,6 +1449,16 @@ export const OrchestrationSchema = z.object({
    *  pays off when it actually removes a slower discovery round. Default OFF until
    *  pass^k confirms a net latency/quality win. */
   discoveryPrefetch: z.boolean().default(false),
+  /** Synthesis-headroom reserve (ms) carved out of the parent turn budget when a
+   *  delegated sub-agent inherits that budget as its OWN hard timeout. A sub-agent's
+   *  timeout is currently the FULL parent budget, so one slow node can consume 100% of
+   *  the turn and leave the orchestrator zero time to synthesize+deliver — the gateway
+   *  watchdog then archives the session and returns an error instead of the answer
+   *  (audit b6f8336e: a 19.6-min research graph ate a 20-min turn; the finished answer
+   *  was dropped). When > 0, a sub-agent gets at most (parentBudget − reserve) (floored
+   *  at 60 s), guaranteeing the parent keeps `reserve` ms to finalize. Default 0 =
+   *  identity (today's behavior); set e.g. 90000 to reserve a 90 s synthesis margin. */
+  subAgentSynthesisReserveMs: z.number().int().min(0).max(600_000).default(0),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes
