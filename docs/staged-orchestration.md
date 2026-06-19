@@ -61,9 +61,22 @@ prompt.
   `pass^k` on a multi-section builder case + answer-completeness.
 - **S2 — lean planning prompt.** The planning/routing call keeps routing + swarm
   rules but drops synthesis / response-format / personality boilerplate.
-- **S3 — QA delivery gate with bounded coordinator loopback.** Promote
-  `riskGatedQA` to an explicit gate: on fail, hand the flaws back to the
-  coordinator for a fix plan; cap the rounds.
+- **S3 — QA delivery gate with bounded coordinator loopback.** *(core +
+  runtime wire landed, default-off — `pass^k` pending.)* Generalises the
+  one-shot `riskGatedQA` repair into a bounded loop: a QA check verdicts the
+  final answer against the plan's acceptance criteria, and on a `FAIL` the
+  concrete flaws are handed back for one improvement pass, repeating until the
+  check passes or `qaDeliveryLoopMaxRounds` is reached (then the best answer so
+  far ships). Pure bounded loop in
+  [qa-delivery-loop.ts](../packages/core/src/agent/qa-delivery-loop.ts)
+  (fail-open, unit-tested); the runtime supplies a synthesis-tier verdict `check`
+  and a `forceSynthesis` `improve`, wired into `_runTurn` **after** the existing
+  correctness gates and **before** the downstream safety guards (redaction /
+  fabrication banners) so an improved answer is re-validated by them. Flags:
+  `orchestration.qaDeliveryLoop` (default off), `qaDeliveryLoopMaxRounds`
+  (default 2). Only fires when a plan with acceptance criteria exists, so
+  chat / plan-less turns pay nothing. Gate: `pass^k` on a high-stakes
+  acceptance-criteria case — quality lift vs. the extra per-round latency.
 - **S4 — parallel discovery prefetch on escalation.** On receptionist escalate,
   prefetch agent/workflow candidates in parallel and inject a compact candidate
   capsule so the coordinator plans in fewer round-trips.

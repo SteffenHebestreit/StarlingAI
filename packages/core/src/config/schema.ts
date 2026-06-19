@@ -1422,6 +1422,22 @@ export const OrchestrationSchema = z.object({
    *  slow local models. Default OFF until pass^k confirms synthesis quality is
    *  unchanged; flip per-session via effort or globally once validated. */
   leanSynthesisPrompt: z.boolean().default(false),
+  /** Final stage of staged orchestration (docs/staged-orchestration.md): when true,
+   *  after all existing correctness gates have refined the answer, a bounded QA
+   *  delivery loop verifies the FINAL answer against the turn plan's acceptance
+   *  criteria and — if a criterion is unmet — hands the concrete flaws back for one
+   *  improvement pass, repeating until the QA check passes or qaDeliveryLoopMaxRounds
+   *  is reached (then the best answer so far ships). Generalises the one-shot
+   *  riskGatedQA verify-and-repair into the "loop back until the QA agent says it's
+   *  fine" gate the user asked for. Only fires when a plan with acceptance criteria
+   *  exists and the answer is substantial, so chat/plan-less turns pay nothing. Fails
+   *  OPEN (no criteria, a thrown check, or an empty improvement ships the current
+   *  answer — never blocks delivery). Each round costs extra LLM calls on a slow local
+   *  model, so default OFF until pass^k confirms the quality lift is worth the latency. */
+  qaDeliveryLoop: z.boolean().default(false),
+  /** Max improvement rounds for the QA delivery loop (each round = one check + one
+   *  improve call). Bounded low because every round is extra slow-model latency. */
+  qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes
