@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildLeanSynthesisPrompt } from "../agent/runtime.js";
+import { buildLeanSynthesisPrompt, buildSynthesisRequiredDirective } from "../agent/runtime.js";
 
 /**
  * S1 of staged orchestration: the TERMINAL forced-synthesis call has no tools, so
@@ -38,5 +38,47 @@ describe("buildLeanSynthesisPrompt", () => {
   it("includes the assistant name only when provided", () => {
     expect(buildLeanSynthesisPrompt({ assistantName: "Luna" })).toContain('you are "Luna"');
     expect(buildLeanSynthesisPrompt()).not.toContain("If asked your name");
+  });
+});
+
+/**
+ * Honesty floor (audit 0dc158ad): a source-sensitive turn whose research came back
+ * partial/thin must NOT get the "copy the exact names and numbers from the evidence"
+ * directive — that oversells empty evidence and the model fabricates specifics (it
+ * claimed an analog mic has an I2S interface). The directive selection is pure here.
+ */
+describe("buildSynthesisRequiredDirective", () => {
+  it("standard path: instructs synthesis from the grounded evidence blocks", () => {
+    const d = buildSynthesisRequiredDirective({});
+    expect(d).toContain("[SYNTHESIS REQUIRED]");
+    expect(d).toContain("grounded evidence blocks");
+    expect(d.toLowerCase()).toContain("copy the exact names");
+  });
+
+  it("artifact path: a SHORT completion summary that lists the attached files", () => {
+    const d = buildSynthesisRequiredDirective({ artifactPaths: ["app/index.html", "report.pdf"] });
+    expect(d).toContain("attached to this message as files");
+    expect(d).toContain("app/index.html");
+    expect(d).toContain("report.pdf");
+    expect(d.toLowerCase()).toContain("short final answer");
+    // Must NOT carry the "copy exact names/numbers" framing — there is no evidence block to copy.
+    expect(d.toLowerCase()).not.toContain("copy the exact names");
+  });
+
+  it("partial-evidence path: an HONESTY directive that forbids asserting unverified specifics", () => {
+    const d = buildSynthesisRequiredDirective({ partialEvidence: true });
+    expect(d).toContain("did NOT complete");
+    expect(d).toContain("UNVERIFIED");
+    expect(d.toLowerCase()).toContain("never invent a value");
+    // Crucially, the fabrication-inducing "copy the exact names and numbers" instruction is GONE.
+    expect(d.toLowerCase()).not.toContain("copy the exact names");
+    // It still asks for a useful answer, not a refusal (never dead-end).
+    expect(d.toLowerCase()).toContain("most useful answer");
+  });
+
+  it("artifacts win over partial-evidence (a built deliverable is summarised, not hedged)", () => {
+    const d = buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"], partialEvidence: true });
+    expect(d).toContain("attached to this message as files");
+    expect(d).not.toContain("did NOT complete");
   });
 });

@@ -1448,6 +1448,20 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
+  /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
+   *  research delegation for a source-sensitive turn came back partial / cancelled /
+   *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact
+   *  names and numbers from the evidence" directive OVERSELLS the thin evidence and
+   *  the model fills the gaps from training data — fabricating specifics (specs,
+   *  interfaces, ratings, part numbers) and presenting them as confirmed (audit
+   *  0dc158ad: claimed an analog MEMS mic has an I2S interface). When true, that turn
+   *  instead gets an honesty directive: assert a concrete fact only if it is verbatim
+   *  in the evidence, mark everything else UNVERIFIED, never invent a value. Trigger is
+   *  structural (source-sensitive + partial/thin delegation), not topic-based, and only
+   *  fires on the failure condition, so it cannot regress a good-evidence turn. Default
+   *  ON — it enforces the central "never made-up facts" quality rule; flag exists so it
+   *  can be A/B'd / disabled if a model over-hedges. */
+  honestSynthesisOnPartialEvidence: z.boolean().default(true),
   /** Discovery prefetch (staged orchestration S4 — docs/staged-orchestration.md):
    *  when true, an escalated turn (one the receptionist fast-lane declined) runs
    *  agent discovery + workflow discovery CONCURRENTLY up-front and injects a compact,
