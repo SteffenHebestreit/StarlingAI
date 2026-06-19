@@ -1458,6 +1458,19 @@ export const OrchestrationSchema = z.object({
    *  complete-but-wrong file still gets a fresh rebuild. Default OFF until live eval confirms
    *  the resume reliably terminates the document. Requires finalResponseQaGate. */
   resumePartialOnCorrectiveBuild: z.boolean().default(false),
+  /** Max-effort turn oversight (turn-oversight.ts). At `max` effort agents run unbounded
+   *  and the final-QA gate + never-empty watchdog are OFF, so a turn that keeps
+   *  re-delegating a dying build can churn for minutes and deliver nothing. When true, a
+   *  structural progress check samples the WHOLE turn each window; if it is churning or
+   *  stalled, a small bounded oversight-agent judge decides on_track | redirect | stuck
+   *  and the runtime injects ONE corrective directive so the turn re-plans (e.g. resume a
+   *  truncated partial via append instead of regenerating). If a redirect was already
+   *  tried and the turn is STILL not progressing, the runtime forces the best-available
+   *  delivery so max ALWAYS finishes (the never-empty floor). Fail-open: any judge error
+   *  resolves to on_track. Only fires at `max` effort. Default OFF until live eval on the
+   *  user's stack confirms the oversight rescues stuck turns without derailing healthy
+   *  long runs. */
+  maxEffortTurnOversight: z.boolean().default(false),
   /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
    *  research delegation for a source-sensitive turn came back partial / cancelled /
    *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact

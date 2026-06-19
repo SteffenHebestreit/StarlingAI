@@ -25,7 +25,15 @@ import {
   effectiveMaxDelegatedResultChars,
   effectiveOrchestratorMaxToolIterations,
   effectiveOrchestratorTurnSloMs,
+  currentEffortTier,
 } from "../runtime/effort-context.js";
+import {
+  classifyTurnProgress,
+  buildTurnOversightPrompt,
+  parseTurnOversightVerdict,
+  TURN_OVERSIGHT_CHECK_INTERVAL_MS,
+  type TurnProgressSample,
+} from "./turn-oversight.js";
 import type { EffortTier } from "../config/schema.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
@@ -3906,6 +3914,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   let _consecutiveFullyBlockedIterations = 0;
   // D16: Consecutive delegation failures — when ≥2, escalate to warden-stop synthesis.
   let _consecutiveDelegationFailures = 0;
+  // Max-effort turn oversight (turn-oversight.ts): at `max` the watchdog + final-QA gate
+  // are off, so a turn that keeps re-delegating a dying build can churn forever. These
+  // track the windowed turn-wide progress sample + whether a corrective redirect has
+  // already been injected, so a second stuck window escalates to the never-empty floor.
+  let _oversightLastCheckAt = Date.now();
+  let _oversightLastSample: TurnProgressSample = { completionTokens: 0, toolCalls: 0, delegations: 0, artifacts: 0, delegationFailures: 0 };
+  let _oversightRedirectIssued = false;
   // I8: Reused-delegation counter — `executeDelegationWithFallback` returns
   // metadata.reused=true when a coordinator paraphrases a task whose
   // signature already completed in this session. After 2 reuses in one turn
@@ -4423,6 +4438,129 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           iteration: iterationCount,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
         opts.onStatus?.({ phase: "steering", message: "Folding in your mid-turn message…", iteration: iterationCount });
+      }
+    }
+
+    // Max-effort turn oversight: at `max` agents run unbounded with the final-QA gate +
+    // never-empty watchdog OFF, so a turn that keeps re-delegating a dying build can churn
+    // for minutes and deliver nothing. Once per window, sample the WHOLE turn's forward
+    // progress; if it is churning/stalled, ask a small bounded oversight agent for a
+    // verdict + ONE corrective directive. `redirect` injects the directive so the turn
+    // re-plans (e.g. resume a truncated partial via append); a second stuck window — or a
+    // `stuck` verdict — forces the best-available delivery so max ALWAYS finishes. Gated,
+    // max-only, fail-open (any judge error leaves the run untouched).
+    if (
+      currentEffortTier() === "max"
+      && effectiveOrchestration().maxEffortTurnOversight === true
+      && iterationCount > 0
+      && Date.now() - _oversightLastCheckAt >= TURN_OVERSIGHT_CHECK_INTERVAL_MS
+    ) {
+      _oversightLastCheckAt = Date.now();
+      const turnArtifacts = collectTurnArtifactAttachments(session);
+      const curSample: TurnProgressSample = {
+        completionTokens: totalUsage.completionTokens,
+        toolCalls: toolCallsRequested,
+        delegations: _turnDelegationCount,
+        artifacts: turnArtifacts.length,
+        delegationFailures: _consecutiveDelegationFailures,
+      };
+      const progressSignal = classifyTurnProgress(_oversightLastSample, curSample);
+      _oversightLastSample = curSample;
+      if (progressSignal !== "progressing") {
+        const wsRoot = typeof toolContext.workspacePath === "string" ? toolContext.workspacePath : "";
+        const artifactState = turnArtifacts.length === 0
+          ? "no artifacts produced yet"
+          : turnArtifacts.map((a) => {
+              const rel = typeof a["relativePath"] === "string" ? a["relativePath"] : "";
+              const name = rel || (typeof a["filename"] === "string" ? a["filename"] : "artifact");
+              const trunc = wsRoot && rel ? artifactFileLooksTruncated({ path: join(wsRoot, rel), filename: rel }) : null;
+              return `${name}${trunc ? " (appears truncated/incomplete)" : ""}`;
+            }).join(", ");
+        // Last failure reason, if any — the most recent tool result that reads as an error.
+        let lastFailure: string | undefined;
+        const hist = session.getHistory();
+        for (let i = hist.length - 1, scanned = 0; i >= 0 && scanned < 12; i--, scanned++) {
+          const m = hist[i] as unknown as { role: string; content?: unknown };
+          if (m.role !== "tool" || typeof m.content !== "string") continue;
+          if (/\b(error|failed|interrupted|timed out|cancelled)\b/i.test(m.content)) {
+            lastFailure = m.content.slice(0, 400);
+            break;
+          }
+        }
+        const oversightPlan = await loadTurnPlan(session.id);
+        const recentActivity = [
+          _lastAssistantContent.trim() ? `Latest orchestrator output:\n${_lastAssistantContent.slice(0, 1000)}` : "",
+          _iterationToolSets.length ? `Recent tool calls by iteration: ${_iterationToolSets.slice(-6).join(" | ")}` : "",
+          `Delegations dispatched: ${_turnDelegationCount}; consecutive delegation failures: ${_consecutiveDelegationFailures}`,
+        ].filter(Boolean).join("\n\n") || "(no orchestrator output or tool calls yet)";
+        let oversight = { verdict: "on_track" as "on_track" | "stuck" | "redirect", directive: "", reason: "" };
+        try {
+          const judgeProvider = getChatProviderForTier("routing") ?? provider;
+          const oversightResp = await judgeProvider.complete(
+            buildTurnOversightPrompt({
+              objective: oversightPlan?.objective?.trim() || userMessage,
+              ...(oversightPlan?.acceptanceCriteria?.length ? { acceptanceCriteria: oversightPlan.acceptanceCriteria } : {}),
+              recentActivity,
+              artifactState,
+              ...(lastFailure ? { lastFailure } : {}),
+              signal: progressSignal,
+            }),
+            [],
+            signal,
+          );
+          oversight = parseTurnOversightVerdict(oversightResp.content);
+        } catch {
+          // fail-open: an oversight error must never derail a healthy run.
+        }
+        if (oversight.verdict === "redirect" && oversight.directive && !_oversightRedirectIssued) {
+          // RE-PLAN: inject ONE corrective directive and let the turn try again.
+          _oversightRedirectIssued = true;
+          session.addMessage({
+            role: "user",
+            content: "[OVERSIGHT — max-effort progress check] A progress monitor judged this turn is not converging on the deliverable. "
+              + "Apply this correction in your NEXT step — do NOT restart from scratch or re-do finished work:\n" + oversight.directive,
+          });
+          logAudit("turn_oversight_redirected", {
+            iteration: iterationCount,
+            signal: progressSignal,
+            reason: oversight.reason,
+            directive: oversight.directive.slice(0, 300),
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          opts.onStatus?.({ phase: "oversight", message: "Fortschritts-Check: Ich korrigiere den Kurs, um den Auftrag noch abzuschließen.", iteration: iterationCount });
+        } else if (oversight.verdict !== "on_track") {
+          // STUCK, or a redirect was already tried and the turn is STILL not progressing →
+          // never-empty floor: deliver the best result obtainable from what already exists.
+          logAudit("turn_oversight_floor", {
+            iteration: iterationCount,
+            signal: progressSignal,
+            verdict: oversight.verdict,
+            reason: oversight.reason,
+            redirectAlreadyTried: _oversightRedirectIssued,
+            artifacts: turnArtifacts.length,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          const synthesized = await forceSynthesis(
+            session, provider, signal,
+            "A progress monitor determined this max-effort turn can no longer make progress. "
+            + "Using ONLY what has already been gathered and any files already produced this turn, deliver the most complete, useful result you can NOW, in the user's language. "
+            + "If a file was produced but is incomplete, say so plainly and give its path. Be explicit about what is done and what is not. Do NOT paste large code blocks.",
+          );
+          if (synthesized) {
+            const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+            persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+            if (opts.onChunk) opts.onChunk(finalResponse);
+            const performance = buildTurnPerformanceMetrics({
+              turnStartedAt, firstModelResponseMs, llmCalls, llmTimeMs, toolCallsRequested,
+              toolExecutionTimeMs, lastPromptMetrics, completionChars: finalResponse.length,
+              finishReason: "oversight_floor_synthesized", blocked: false, toolIterations: iterationCount,
+            });
+            return {
+              response: finalResponse, toolCallsExecuted: iterationCount,
+              guardrailEvents, usage: totalUsage, blocked: false,
+              swarmState: getTurnSwarmState(), performance,
+            };
+          }
+          // Synthesis came back empty — fall through and keep looping (never worse than today).
+        }
       }
     }
 
