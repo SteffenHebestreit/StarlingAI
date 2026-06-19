@@ -29,17 +29,10 @@ Sub-agents are sharded by **role**:
 
 | File | Role | Agents |
 |---|---|---|
-| `10-core-agents.jsonc` | Platform config | `mainAssistant`, `defaults`, `ephemeralGeneration`, `rateLimit` |
-| `21-orchestration.jsonc` | Orchestration & planning | `mission_coordinator`, `web_task_coordinator`, `devops_coordinator`, `project_planner`, `agent_factory` |
-| `22-research-analysis.jsonc` | Research & analysis | `researcher`, `evidence_analyst`, `data_analyst`, `research_librarian`, `document_intake`, `log_analyst`, `finance_analyst`, `distance_specialist` |
-| `23-authoring-content.jsonc` | Authoring & content | `content_writer`, `paper_author`, `meeting_briefing_agent`, `summarizer`, `translator`, `diagram_designer`, `chart_designer`, `image_creator`, `image_sourcer` |
-| `24-engineering.jsonc` | Engineering | `coder`, `code_analyst`, `test_generator`, `diff_reviewer`, `integration_builder`, `api_integrator`, `git_developer`, `sql_specialist` |
-| `25-infra-ops.jsonc` | Infrastructure & ops | `shell_agent`, `infrastructure_agent`, `ops_triage` |
-| `26-web-browser.jsonc` | Web & browser | `browser_agent`, `vision_browser_analyst`, `accessibility_tester`, `computer_use_agent` |
-| `27-quality-review.jsonc` | Quality & review | `qa_guard`, `quality_supervisor`, `source_verifier`, `policy_compliance_reviewer`, `contract_analyst` |
-| `28-comms-productivity.jsonc` | Communications & productivity | `notification_agent`, `mail_agent`, `calendar_agent`, `productivity_agent` |
-| `29-platform.jsonc` | Platform & self-improvement | `swarm_maintainer`, `tool_developer`, `prompt_optimizer`, `agent_architect` |
-| `30-subagents-pentest.jsonc` | Pentest (profile-gated) | `pentest_coordinator`, `recon_agent`, `web_auditor_agent`, `network_auditor_agent`, `exploit_agent`, `report_writer_agent` |
+| `00-platform.jsonc` | Platform config | `mainAssistant`, `defaults`, `ephemeralGeneration`, `rateLimit` |
+| `10-core-agents.jsonc` | Core specialists (16) | `mission_coordinator`, `web_task_coordinator`, `project_planner`, `researcher`, `evidence_analyst`, `summarizer`, `content_writer`, `coder`, `web_coder`, `backend_coder`, `code_analyst`, `git_developer`, `shell_agent`, `quality_supervisor`, `qa_guard`, `diff_reviewer` |
+| `20-primary-agents.jsonc` | Primary specialists (19) — pentest, browser/desktop, infra/ops, comms, self-improvement | `pentest_coordinator`, `recon_agent`, `web_auditor_agent`, `network_auditor_agent`, `exploit_agent`, `report_writer_agent`, `pentest_qa_validator`, `browser_agent`, `vision_browser_analyst`, `computer_use_agent`, `infrastructure_agent`, `ops_triage`, `devops_coordinator`, `mail_agent`, `calendar_agent`, `notification_agent`, `swarm_maintainer`, `tool_developer`, `prompt_optimizer` |
+| `30-secondary-agents.jsonc` | Secondary specialists (13) — analysis, authoring, visuals, integration, review | `data_analyst`, `log_analyst`, `document_intake`, `paper_author`, `meeting_briefing_agent`, `diagram_designer`, `chart_designer`, `image_creator`, `image_sourcer`, `api_integrator`, `sql_specialist`, `source_verifier`, `policy_compliance_reviewer` |
 
 To locate an agent's shard, grep its name across `agents/*.jsonc`.
 

@@ -48,10 +48,8 @@ describe("workspace catalog integrity", () => {
     const catalog = loadAgentCatalog();
 
     expect(catalog.subAgents["api_integrator"]?.description).toBeTruthy();
-    expect(catalog.subAgents["distance_specialist"]?.description).toBeTruthy();
     expect(catalog.subAgents["git_developer"]?.description).toBeTruthy();
     expect(catalog.subAgents["swarm_maintainer"]?.description).toBeTruthy();
-    expect(catalog.subAgents["translator"]?.description).toBeTruthy();
     expect(catalog.subAgents["project_planner"]?.description).toBeTruthy();
     expect(catalog.subAgents["notification_agent"]?.description).toBeTruthy();
     expect(catalog.subAgents["browser_agent"]?.description).toBeTruthy();

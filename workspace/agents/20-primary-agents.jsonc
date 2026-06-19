@@ -213,36 +213,6 @@
         "write_file"
       ]
     },
-    "accessibility_tester": {
-      "description": "Website accessibility testing specialist for WCAG 2.2 audits, semantic HTML review, keyboard-flow checks, form labeling, heading structure, alt text, and Playwright-driven browser evidence capture. Example queries: 'audit this site for WCAG 2.2 AA', 'check keyboard navigation on the checkout page', 'Barrierefreiheit prüfen für die Startseite', 'alt-Texte auf der Produktseite kontrollieren', 'review heading hierarchy and landmarks', 'sind alle Formularfelder korrekt beschriftet', 'accessibility audit for this dashboard'.",
-      "capabilities": ["accessibility testing", "wcag 2.2 audits", "semantic html review", "keyboard navigation review", "landmark and heading audit", "form labeling review", "alt text review", "browser automation", "focus visibility audit"],
-      "tags": ["accessibility", "a11y", "wcag", "playwright", "html", "audit", "qa", "keyboard", "screen-reader", "alt-text", "landmark", "headings"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
-      },
-      "maxIterations": 14,
-      "systemPrompt": "You perform grounded website accessibility audits using the available Playwright browser tools plus two automated auditors: browser_axe_audit for WCAG violations (runs axe-core inside the current browser session) and lighthouse_audit for Lighthouse scores via Google PageSpeed Insights. Default target standard is WCAG 2.2 AA. Always start with browser_axe_audit against the page under test — it produces the most reliable WCAG violation inventory. Then run lighthouse_audit for the accessibility category to cross-check the score and surface any category-level issues axe doesn't catch. Only after the automated passes, walk the page manually to cover behaviors that pure static analysis misses: keyboard reachability, skip links, modal/menu behavior, focus visibility, form error handling, screen-reader-relevant live-region updates. Use browser_snapshot before every click or typing step. If the page state is unchanged after an action, do not repeat the same action. After two materially identical snapshots, stop the loop and report the blocker instead of clicking again. Prefer exact evidence over vague judgments: cite axe rule IDs, Lighthouse audit IDs, visible text, control names, and affected DOM selectors. Never invent numeric contrast ratios or screen-reader output. If the site requires login, use site_fill_credentials rather than typing secrets manually. Publish reusable findings via share_finding with PASS / FAIL / UNSURE plus URL and evidence. When asked for a deliverable, write a structured audit report with issue, evidence, WCAG tag, reproduction steps, and remediation guidance.",
-      "tools": [
-        "get_site_credentials",
-        "site_fill_credentials",
-        "browser_navigate",
-        "browser_click",
-        "browser_type",
-        "browser_snapshot",
-        "browser_screenshot",
-        "browser_select_option",
-        "browser_wait_for",
-        "browser_axe_audit",
-        "lighthouse_audit",
-        "web_fetch",
-        "read_shared_facts",
-        "share_finding",
-        "write_file"
-      ]
-    },
     "computer_use_agent": {
       "description": "Desktop automation specialist. Connects to the user's local or remote PC (by IP address or hostname) via VNC/RDP and controls it with keyboard, mouse, and screen analysis. Can check running applications like LM Studio, VS Code, OBS, or any desktop software. Starts and manages computer sessions, lists open windows, takes screenshots, and interacts with any visible UI element. Example queries: 'check which model LM Studio has loaded on the remote PC', 'welches Modell läuft aktuell in LM Studio auf dem Server?', 'take a screenshot of VS Code on my laptop', 'öffne Copilot Chat und stelle eine Frage', 'list running applications on 192.168.1.10', 'Fenster und Anwendungen auf dem Remote-Desktop auflisten', 'click the OBS start streaming button', 'sende einen Text an das Chat-Fenster auf dem PC'.",
       "domain": "desktop",
@@ -568,44 +538,5 @@
         "write_file"
       ]
     },
-    "agent_architect": {
-      "description": "Designs threshold-triggered ephemeral agents with the right prompt, tools, and model. Produces valid JSON agent specifications for one-off specialized tasks. Example queries: 'design a narrow agent for parsing receipts', 'entwirf einen Agenten für Börsenkurse', 'create an ephemeral agent for meeting-note extraction', 'Ad-hoc-Agent für die Übersetzung medizinischer Texte entwerfen', 'spec a specialist agent for CVE triage'.",
-      "capabilities": ["agent design", "prompt writing", "model selection", "ephemeral agents", "tool-set selection"],
-      "tags": ["meta", "agents", "architecture", "design", "ephemeral", "adhoc"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 4096
-      },
-      "maxIterations": 8,
-      "container": { "disabled": true }, // pure read-only meta tools — in-process is safe
-      "systemPrompt": "You design narrowly scoped agents for a single task. Return valid JSON only. Choose a concise role description, a grounded system prompt, a minimal tool set, and the most appropriate model override only when needed. Default all ephemeral agents to lmstudio/qwen/qwen3.6-35b-a3b. Only override downward to a smaller model when the task is trivially simple and token budget is a concern. Set enableThinking=true only when the agent must reconcile dense evidence or make difficult multi-step judgments; otherwise prefer enableThinking=false for faster tool execution. Never add tools that are not necessary for the task.",
-      "tools": [
-        "list_agents",
-        "search_agents",
-        "read_shared_facts"
-      ]
-    },
-    "agent_factory": {
-      "description": "Creates purpose-built ephemeral agents at runtime when the static catalog is not enough for the current task. Prefers delegating to existing agents before minting new ones. Example queries: 'spin up an ephemeral agent for translating legal PDFs', 'kein Standardagent passt, erstelle einen Spezialisten für IoT-Logs', 'create a specialist agent for this unusual dataset', 'Ad-hoc-Agent bauen für Musiknoten-Analyse'.",
-      "capabilities": ["meta orchestration", "ephemeral agents", "dynamic agent creation", "capability-gap resolution"],
-      "tags": ["meta", "agents", "factory", "ephemeral", "adhoc", "dynamic"],
-      "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "enableThinking": true,
-        "temperature": 0.2,
-        "maxTokens": 4096
-      },
-      "maxIterations": 10,
-      "container": { "disabled": true }, // pure orchestration — no exec, network, or write tools
-      "systemPrompt": "You create purpose-built ephemeral agents when the existing catalog cannot handle a task. First call list_agents to check whether a suitable agent already exists — prefer delegation over creation. When creating, design the narrowest possible agent: a concise system prompt, the minimal required tool set, appropriate model and temperature, and a clear stopping condition. Never duplicate an existing agent's role.",
-      "tools": [
-        "list_agents",
-        "delegate_to_agent",
-        "create_ephemeral_agent",
-        "read_shared_facts"
-      ]
-    }
   }
 }

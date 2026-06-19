@@ -27,9 +27,11 @@
       }
     },
     "ephemeralGeneration": {
-      "enabled": true,
-      "skillMatchThreshold": 0.75,
-      "architectAgentName": "agent_architect"
+      // Auto-architect fallback disabled: its architect agent (agent_architect) was
+      // removed in the agent-roster cleanup. Coordinators can still build ephemerals
+      // directly via the create_ephemeral_agent tool.
+      "enabled": false,
+      "skillMatchThreshold": 0.75
     },
     "rateLimit": {
       "requestsPerMinute": 60,
