@@ -80,14 +80,30 @@ function clampStringList(value: unknown, max: number): string[] {
  */
 function unwrapPlanEnvelope(raw: Record<string, unknown>): Record<string, unknown> {
   if (!raw || typeof raw !== "object") return raw ?? {};
-  if ("objective" in raw || "steps" in raw || "acceptanceCriteria" in raw) return raw;
+  if ("objective" in raw || "steps" in raw || "acceptanceCriteria" in raw || "acceptance_criteria" in raw) return raw;
   for (const key of ["plan", "args", "input"]) {
     const inner = raw[key];
     if (inner && typeof inner === "object" && !Array.isArray(inner)) {
       return inner as Record<string, unknown>;
     }
+    // Some models pass the ENTIRE plan as a free-text string under `plan` (audit
+    // session e5754140 turn 2: `{ plan: "Objective: …\nStep 1 …" }`). That read as
+    // an empty plan and failed with "needs an objective or one step", cascading
+    // into a warden stop. Coerce the string into the objective so the turn records
+    // a minimal plan and proceeds. Sibling keys (e.g. riskTier) are preserved.
+    if (typeof inner === "string" && inner.trim()) {
+      return { ...raw, objective: inner.replace(/^\s*objective\s*[:\-]\s*/i, "").trim() };
+    }
   }
   return raw;
+}
+
+/** Read the first present key from a set of aliases (camelCase + snake_case). */
+function pickRaw(raw: Record<string, unknown>, keys: string[]): unknown {
+  for (const k of keys) {
+    if (raw[k] !== undefined && raw[k] !== null) return raw[k];
+  }
+  return undefined;
 }
 
 /**
@@ -105,28 +121,33 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     const obj = s as Record<string, unknown>;
     const description = clampString(obj["description"] ?? obj["task"] ?? obj["title"]);
     if (!description) continue;
-    const kindRaw = clampString(obj["kind"]).toLowerCase();
+    const kindRaw = clampString(obj["kind"] ?? obj["tag"]).toLowerCase();
     const kind: TurnPlanStepKind = kindRaw === "reuse" || kindRaw === "direct" ? kindRaw : "delegate";
     const step: TurnPlanStep = {
       id: clampString(obj["id"]) || `s${steps.length + 1}`,
       description,
       kind,
     };
-    const agent = clampString(obj["agent"] ?? obj["agentName"]);
+    const agent = clampString(obj["agent"] ?? obj["agentName"] ?? obj["agent_name"]);
     if (agent) step.agent = agent;
-    const group = obj["parallelGroup"];
+    const group = obj["parallelGroup"] ?? obj["parallel_group"];
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
-    const deps = clampStringList(obj["dependsOn"], MAX_STEPS);
+    const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);
     if (deps.length > 0) step.dependsOn = deps;
     steps.push(step);
   }
 
-  const riskRaw = clampString(raw["riskTier"]).toLowerCase();
+  // Accept snake_case aliases for the multi-word keys. Local models routinely emit
+  // `acceptance_criteria` / `stop_conditions` / `risk_tier` (audit e5754140 turn 1:
+  // a 9-item acceptance_criteria array recorded as acceptanceCriteria:0), which
+  // silently disabled BOTH the riskGatedQA gate and the qaDeliveryLoop because both
+  // are gated on acceptanceCriteria.length. Structural alias, not topic/keyword.
+  const riskRaw = clampString(pickRaw(raw, ["riskTier", "risk_tier"])).toLowerCase();
   return {
     objective: clampString(raw["objective"]),
     steps,
-    acceptanceCriteria: clampStringList(raw["acceptanceCriteria"], MAX_CRITERIA),
-    stopConditions: clampStringList(raw["stopConditions"], MAX_CRITERIA),
+    acceptanceCriteria: clampStringList(pickRaw(raw, ["acceptanceCriteria", "acceptance_criteria"]), MAX_CRITERIA),
+    stopConditions: clampStringList(pickRaw(raw, ["stopConditions", "stop_conditions"]), MAX_CRITERIA),
     riskTier: riskRaw === "high" ? "high" : "low",
     wide: raw["wide"] === true || countParallelWidth(steps) > 2,
     createdAt: new Date().toISOString(),

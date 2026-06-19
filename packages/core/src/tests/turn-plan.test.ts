@@ -57,6 +57,36 @@ describe("turn plan — normalization", () => {
     expect(plan.acceptanceCriteria).toEqual(["all sections present"]);
   });
 
+  it("reads snake_case aliases for acceptance_criteria / stop_conditions / risk_tier (audit e5754140: recorded acceptanceCriteria:0)", () => {
+    // The local model emits snake_case keys; reading only camelCase silently
+    // dropped the criteria, which gated OUT both riskGatedQA and qaDeliveryLoop.
+    const plan = normalizeTurnPlan({
+      objective: "Design the device.",
+      steps: [
+        { description: "core design", tag: "reuse", agent_name: "mission_coordinator", parallel_group: 1 },
+        { description: "case design", tag: "delegate", agent_name: "mission_coordinator", parallel_group: 1 },
+      ],
+      acceptance_criteria: ["part numbers cited", "wiring diagram included", "power budget given"],
+      stop_conditions: ["all components specified"],
+      risk_tier: "high",
+    });
+    expect(plan.acceptanceCriteria).toEqual(["part numbers cited", "wiring diagram included", "power budget given"]);
+    expect(plan.stopConditions).toEqual(["all components specified"]);
+    expect(plan.riskTier).toBe("high");
+    expect(plan.steps[0]).toMatchObject({ kind: "reuse", agent: "mission_coordinator", parallelGroup: 1 }); // `tag` alias read
+    expect(plan.steps[1]!.kind).toBe("delegate");
+  });
+
+  it("coerces a free-text STRING plan into the objective so it records (audit e5754140 turn 2: string plan → empty → warden stop)", () => {
+    const plan = normalizeTurnPlan({
+      plan: "Objective: Create a tutorial website.\nStep 1: delegate to content_writer.\nStop conditions: file written.",
+      riskTier: "low",
+    });
+    expect(plan.objective).toContain("Create a tutorial website.");
+    expect(plan.objective).not.toMatch(/^objective\s*:/i); // leading label stripped
+    expect(plan.riskTier).toBe("low"); // sibling key preserved
+  });
+
   it("does NOT unwrap when the real fields are already top-level (a flat call is untouched)", () => {
     const plan = normalizeTurnPlan({
       objective: "Top-level objective",
