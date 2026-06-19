@@ -9,7 +9,7 @@ import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
-import { runQaDeliveryLoop, type QaVerdict } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -7481,15 +7481,7 @@ async function runQaDeliveryGate(
     const abort = new AbortController();
     try {
       const resp = await verdictProvider.complete(messages, [], abort.signal);
-      const text = (resp.content ?? "").trim();
-      const upper = text.toUpperCase();
-      const failIdx = upper.indexOf("FAIL");
-      if (failIdx === -1 && /\bPASS\b/.test(upper)) return { pass: true };
-      if (failIdx !== -1) {
-        const flaws = text.slice(failIdx).replace(/^FAIL[:\s-]*/i, "").trim();
-        return { pass: false, flaws: flaws || "One or more acceptance criteria are unmet." };
-      }
-      return { pass: true }; // unparseable verdict → fail open (don't block on reviewer noise)
+      return parseQaVerdict(resp.content ?? "");
     } finally {
       abort.abort();
     }

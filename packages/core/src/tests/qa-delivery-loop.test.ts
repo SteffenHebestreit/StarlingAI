@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runQaDeliveryLoop, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
 
@@ -65,5 +65,34 @@ describe("runQaDeliveryLoop", () => {
     }));
     expect(r.answer).toBe("v0");
     expect(r.passed).toBe(false);
+  });
+});
+
+describe("parseQaVerdict (runtime verdict parser)", () => {
+  it("passes on a clean PASS", () => {
+    expect(parseQaVerdict("PASS")).toEqual({ pass: true });
+    expect(parseQaVerdict("  pass — all criteria met  ")).toEqual({ pass: true });
+  });
+
+  it("fails and extracts the flaws after FAIL:", () => {
+    expect(parseQaVerdict("FAIL: missing sources; no winner named")).toEqual({
+      pass: false,
+      flaws: "missing sources; no winner named",
+    });
+  });
+
+  it("fails even when FAIL appears mid-line, capturing from FAIL onward", () => {
+    const v = parseQaVerdict("Verdict - FAIL: criterion 2 unmet");
+    expect(v.pass).toBe(false);
+    expect(v.flaws).toBe("criterion 2 unmet");
+  });
+
+  it("fails with a default flaw message when FAIL has no detail", () => {
+    expect(parseQaVerdict("FAIL")).toEqual({ pass: false, flaws: "One or more acceptance criteria are unmet." });
+  });
+
+  it("fails OPEN (passes) on empty or unparseable reviewer noise", () => {
+    expect(parseQaVerdict("")).toEqual({ pass: true });
+    expect(parseQaVerdict("hmm, hard to say")).toEqual({ pass: true });
   });
 });
