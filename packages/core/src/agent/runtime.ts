@@ -3351,6 +3351,13 @@ export function buildModelVisibleToolResult(
   }
 
   if (toolName === "run_workflow") {
+    // No saved workflow matched (a routing miss, not a completed run and not a failure):
+    // relay the tool's routing guidance verbatim instead of the "Workflow completed.
+    // Executed steps" framing, so the model delegates rather than treating it as
+    // executed evidence (audit bd3d60dc).
+    if (metadata?.["workflowNotFound"] === true) {
+      return resultText.trim() || "No saved workflow matched this request. Delegate to mission_coordinator or answer the user directly.";
+    }
     const workflowName = typeof metadata?.["workflowName"] === "string" ? String(metadata["workflowName"]) : "workflow";
     const workflowType = typeof metadata?.["workflowType"] === "string" ? String(metadata["workflowType"]) : "workflow";
     const blocked = metadata?.["blocked"] === true;

@@ -1434,17 +1434,20 @@ registerTool({
       }
 
       const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
-      // Recovery guidance: the model invented a workflow name. Steer it AWAY from
-      // either looping on another guessed name OR grabbing an irrelevant "closest"
-      // match — if none clearly fit, delegate instead of forcing a workflow.
-      const recoveryHint = " Do NOT invent another workflow name or pick one of these unless it CLEARLY matches the request — if none fit, delegate to mission_coordinator (or answer directly) instead of calling run_workflow again.";
+      // GRACEFUL, NOT AN ERROR (user directive: "not finding a workflow should not lead
+      // to an error"). A missing workflow is a routing miss, not a system failure —
+      // returning success:false tripped the whole failure cascade (tool_call_failed, the
+      // stop/new-session intervention, [DELEGATION FAILED], warden failure count) and on
+      // the slow local model that pushed it to fabricate a full answer instead of routing
+      // on (audit bd3d60dc). Return SUCCESS with routing guidance so the model simply
+      // delegates; the runtime keys on workflowNotFound to skip the "completed" framing.
+      const closest = workflowMatches.length > 0
+        ? ` Closest saved workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
+        : "";
       return {
-        success: false,
-        output: "",
-        error: workflowMatches.length > 0
-          ? `Workflow not found: ${name}. Closest workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.${recoveryHint}`
-          : `Workflow not found: ${name}.${recoveryHint}`,
-        metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
+        success: true,
+        output: `No saved workflow matches "${name}" — this is NOT an error, there is simply no reusable workflow for this request.${closest} Do NOT invent another workflow name or call run_workflow again. If one of the listed workflows CLEARLY matches the request, run that exact name; otherwise delegate to mission_coordinator (or answer the user directly).`,
+        metadata: { workflowNotFound: true, ...(workflowMatches.length > 0 ? { workflowMatches } : {}) },
       };
     }
 

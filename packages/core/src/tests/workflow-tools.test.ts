@@ -228,7 +228,7 @@ describe("workflow catalog tools", () => {
     }
   });
 
-  it("run_workflow returns closest workflow matches for unknown aliases", async () => {
+  it("run_workflow degrades gracefully (success + routing guidance, NOT an error) for unknown aliases", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
         defaults: {
@@ -282,9 +282,15 @@ describe("workflow catalog tools", () => {
         },
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Workflow not found: paper_writer");
-      expect(result.error).toContain("Closest workflows:");
+      // Not an error — a missing workflow is a routing miss, so it returns success
+      // with guidance to delegate (user directive: "not finding a workflow should not
+      // lead to an error"). The closest matches still ride in the output + metadata.
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+      expect(result.metadata?.["workflowNotFound"]).toBe(true);
+      expect(result.output).toContain("paper_writer");
+      expect(result.output).toContain("Closest saved workflows:");
+      expect(result.output.toLowerCase()).toContain("delegate to mission_coordinator");
       expect(result.metadata?.["workflowMatches"]).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: "protocol_comparison_paper", workflowType: "scene" }),
         expect.objectContaining({ name: "source_backed_paper", workflowType: "scene" }),
