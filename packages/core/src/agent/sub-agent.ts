@@ -32,9 +32,11 @@ import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
 import {
   longRunningGenerationManager,
+  longRunningActionForTier,
   DEFAULT_SOFT_THRESHOLD_MS,
   DEFAULT_SOFT_THRESHOLD_TOKENS,
 } from "./long-running-generation.js";
+import { currentEffortTier } from "../runtime/effort-context.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -2701,6 +2703,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // this so the next loop iteration goes straight to attemptTimeoutSynthesis
     // instead of making another LLM call.
     let lrgOperatorStop = false;
+    // The effort-tier long-running policy (low→stop / high→continue) is auto-applied
+    // ONCE per run; this latches so it doesn't re-audit every subsequent iteration.
+    let lrgAutoHandled = false;
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
     const toolNames: string[] = [];
@@ -3780,16 +3785,52 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           (Date.now() - runStartedAt) > lrgWallThresholdMs
           || usage.completionTokens > lrgTokenThreshold
         ) {
-          // Idempotent per run: only the first crossing surfaces a dock entry.
-          longRunningGenerationManager.notifyLongRunning({
-            agentName: opts.agentName,
-            runSessionId: subSessionId,
-            ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
-            reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
-            elapsedMs: Date.now() - runStartedAt,
-            completionTokens: usage.completionTokens,
-            iterations,
-          });
+          // Effort-tier policy answers "this run is taking a while — keep going?"
+          // automatically so the operator isn't pinged on every crossing:
+          //   low  → stop now (wind down + synthesise from what's collected)
+          //   high → continue WITHOUT a dock prompt (bounded by the tier's 20-min cap)
+          //   medium / max → surface to the operator dock as before
+          // (max's true silent-unbounded is deferred until the verify-progress agent
+          //  the user paired it with exists — until then it keeps the stoppable dock.)
+          const lrgAction = longRunningActionForTier(currentEffortTier());
+          if (lrgAction === "stop" && !lrgAutoHandled) {
+            lrgAutoHandled = true;
+            lrgOperatorStop = true;
+            turnTimeoutReached = true;
+            logAudit("long_running_generation_auto_resolved", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              tier: "low",
+              action: "stop",
+              elapsedMs: Date.now() - runStartedAt,
+              completionTokens: usage.completionTokens,
+            }, { sessionId: opts.parentSessionId, severity: "info" });
+          } else if (lrgAction === "continue") {
+            if (!lrgAutoHandled) {
+              lrgAutoHandled = true;
+              logAudit("long_running_generation_auto_resolved", {
+                agentName: opts.agentName,
+                runSessionId: subSessionId,
+                tier: "high",
+                action: "continue",
+                elapsedMs: Date.now() - runStartedAt,
+                completionTokens: usage.completionTokens,
+              }, { sessionId: opts.parentSessionId, severity: "info" });
+            }
+            // No dock prompt and no stop — the run keeps going, bounded by the tier's
+            // own turnTimeoutMs (the real cap stays in force via turnTimeoutReached).
+          } else if (lrgAction === "ask") {
+            // Idempotent per run: only the first crossing surfaces a dock entry.
+            longRunningGenerationManager.notifyLongRunning({
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+              reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
+              elapsedMs: Date.now() - runStartedAt,
+              completionTokens: usage.completionTokens,
+              iterations,
+            });
+          }
         }
       }
 

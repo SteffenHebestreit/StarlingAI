@@ -59,6 +59,27 @@ export type LongRunningRequestId = string;
 export type LongRunningOutcome = "continue" | "unbounded" | "stop" | "timeout";
 export type LongRunningState = "pending" | "resolved" | "stopped";
 
+/**
+ * Effort-tier policy for the long-running handoff. The per-session effort dial
+ * answers the "this run is taking a while — keep going?" decision automatically so
+ * the operator isn't pinged for every crossing:
+ *   - low  → "stop": wind down now and synthesise from what's collected (paired with
+ *            the low-effort prompt addendum that pushes the least-work path).
+ *   - high → "continue": keep going WITHOUT a dock prompt, bounded by the tier's own
+ *            turn budget (the 20-min high cap stays the real bound).
+ *   - max  → "ask" for now (INTERIM): true silent-unbounded is unsafe without the
+ *            verify-progress agent the user paired it with — until that ships, max
+ *            keeps the advisory dock so a runaway unbounded run can still be stopped.
+ *   - medium / undefined → "ask": current behaviour (surface to the operator dock).
+ * Pure + unit-tested so the policy is verifiable without a running turn.
+ */
+export type LongRunningTierAction = "ask" | "continue" | "stop";
+export function longRunningActionForTier(tier: import("../config/schema.js").EffortTier | undefined): LongRunningTierAction {
+  if (tier === "low") return "stop";
+  if (tier === "high") return "continue";
+  return "ask"; // medium + max (interim, pending verify-progress agent) + undefined
+}
+
 export interface LongRunningRequest {
   id: LongRunningRequestId;
   /** Sub-agent name (content_writer, researcher, …). */

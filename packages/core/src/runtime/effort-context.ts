@@ -49,6 +49,14 @@ const MAX_ADDENDUM =
   + " There is no latency pressure on this turn: prefer the most rigorous path even if it "
   + "is slow, and keep refining and expanding until the deliverable is genuinely complete.";
 
+/** Pushes the model toward the least-work path that still fully answers the request —
+ *  paired with the long-running policy's low→"stop" so a low-effort turn winds down fast. */
+const LOW_ADDENDUM =
+  "LOW-EFFORT MODE: reach the user's goal with the LEAST work that still fully answers it. "
+  + "Strongly prefer a direct answer or a single specialist over multi-step orchestration; "
+  + "do not fan out, deep-research, or add sections the request did not explicitly ask for. "
+  + "Be concise and stop as soon as the answer is complete — favor speed over exhaustiveness.";
+
 /**
  * Built-in per-tier defaults. `medium` is intentionally empty (identity). These are
  * overlaid by config.effort.profiles[tier]. See docs/architecture.md for the rationale
@@ -64,6 +72,7 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
     reasoningEffort: "low",
     enableThinking: false,
     toolCapMultiplier: 0.5,
+    promptAddendum: LOW_ADDENDUM,
   },
   medium: {},
   high: {

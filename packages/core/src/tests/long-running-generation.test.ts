@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   longRunningGenerationManager,
+  longRunningActionForTier,
   DEFAULT_SOFT_THRESHOLD_MS,
 } from "../agent/long-running-generation.js";
 
@@ -220,5 +221,23 @@ describe("longRunningGenerationManager.notifyLongRunning — non-blocking surfac
     expect(longRunningGenerationManager.listPending()).toHaveLength(1);
     longRunningGenerationManager.stop(run, "run_ended");
     expect(longRunningGenerationManager.listPending()).toHaveLength(0);
+  });
+});
+
+describe("longRunningActionForTier (effort-driven auto-resolution)", () => {
+  it("low → stop (finish now)", () => {
+    expect(longRunningActionForTier("low")).toBe("stop");
+  });
+  it("high → continue (keep going, no dock prompt)", () => {
+    expect(longRunningActionForTier("high")).toBe("continue");
+  });
+  it("medium → ask (surface to the operator dock, current behaviour)", () => {
+    expect(longRunningActionForTier("medium")).toBe("ask");
+  });
+  it("max → ask for now (interim until the verify-progress agent ships)", () => {
+    expect(longRunningActionForTier("max")).toBe("ask");
+  });
+  it("undefined tier → ask (safe default = unchanged behaviour)", () => {
+    expect(longRunningActionForTier(undefined)).toBe("ask");
   });
 });

@@ -108,6 +108,7 @@ export type CoreAuditEventType =
   | "long_running_generation_timeout"
   | "long_running_generation_stopped"
   | "long_running_generation_auto_stopped"
+  | "long_running_generation_auto_resolved"
   // Mid-turn user steering — fold user guidance into a running turn
   | "turn_steering_enqueued"
   | "turn_steering_injected"
