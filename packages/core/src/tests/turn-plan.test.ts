@@ -97,6 +97,33 @@ describe("turn plan — normalization", () => {
     expect(plan.acceptanceCriteria).toHaveLength(2);
   });
 
+  it("coerces a bulleted-STRING `steps` into steps (audit df65c23a turn 2: steps as a string → stepCount:0)", () => {
+    // The local model emitted `steps` as one newline-bulleted string instead of an
+    // array, so a lone delegate step was dropped (stepCount:0), gating out plan QA.
+    const plan = normalizeTurnPlan({
+      objective: "Tutorial-Website erstellen",
+      steps:
+        "- delegate_to_agent(agentName='content_writer', task='Erstelle die Tutorial-Website')\n"
+        + "- delegate_to_agent(agentName='quality_supervisor', task='Review')",
+      acceptanceCriteria: ["site has all sections"],
+      riskTier: "low",
+    });
+    expect(plan.steps).toHaveLength(2); // not 0 — the string is split into steps
+    expect(plan.steps[0]).toMatchObject({ kind: "delegate", agent: "content_writer" });
+    expect(plan.steps[1]).toMatchObject({ kind: "delegate", agent: "quality_supervisor" });
+    expect(plan.acceptanceCriteria).toEqual(["site has all sections"]);
+  });
+
+  it("coerces a single-line STRING `steps` with no list marker into one step", () => {
+    const plan = normalizeTurnPlan({
+      objective: "Build it",
+      steps: "delegate to coder to build the thing",
+    });
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.steps[0]!.kind).toBe("delegate");
+    expect(plan.steps[0]!.description).toContain("build the thing");
+  });
+
   it("coerces a free-text STRING plan into the objective so it records (audit e5754140 turn 2: string plan → empty → warden stop)", () => {
     const plan = normalizeTurnPlan({
       plan: "Objective: Create a tutorial website.\nStep 1: delegate to content_writer.\nStop conditions: file written.",

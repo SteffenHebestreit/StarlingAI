@@ -107,13 +107,40 @@ function pickRaw(raw: Record<string, unknown>, keys: string[]): unknown {
 }
 
 /**
+ * Coerce the `steps` argument into an array of step-shaped objects. Local models
+ * sometimes emit `steps` as a single newline-bulleted STRING instead of an array
+ * (audit df65c23a turn 2: `steps: "- delegate_to_agent(agentName='content_writer', …)"`
+ * recorded stepCount:0 because a string is not an array — the lone delegate step was
+ * dropped, gating OUT the plan-aware QA / request-coverage checks). Split the string
+ * into lines, strip leading list markers, and turn each non-empty line into a
+ * `{ description }` step, pulling an `agentName='X'` mention into `agent` when present.
+ * Structural coercion, not topic/keyword matching.
+ */
+function coerceStepsValue(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const step: Record<string, unknown> = { description: line };
+        const m = line.match(/agent(?:Name|_name)?\s*[=:]\s*['"]?([A-Za-z0-9_]+)/);
+        if (m) step.agent = m[1];
+        return step;
+      });
+  }
+  return [];
+}
+
+/**
  * Coerce loosely-typed tool arguments (from the record_plan tool) into a
  * validated TurnPlan. Never throws — clamps sizes and drops malformed steps so
  * a sloppy model call still yields a usable plan.
  */
 export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
   const raw = unwrapPlanEnvelope(rawInput);
-  const rawSteps = Array.isArray(raw["steps"]) ? raw["steps"] : [];
+  const rawSteps = coerceStepsValue(raw["steps"]);
   const steps: TurnPlanStep[] = [];
   for (let i = 0; i < rawSteps.length && steps.length < MAX_STEPS; i += 1) {
     const s = rawSteps[i];
