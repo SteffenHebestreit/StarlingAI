@@ -77,9 +77,19 @@ prompt.
   (default 2). Only fires when a plan with acceptance criteria exists, so
   chat / plan-less turns pay nothing. Gate: `pass^k` on a high-stakes
   acceptance-criteria case — quality lift vs. the extra per-round latency.
-- **S4 — parallel discovery prefetch on escalation.** On receptionist escalate,
-  prefetch agent/workflow candidates in parallel and inject a compact candidate
-  capsule so the coordinator plans in fewer round-trips.
+- **S4 — parallel discovery prefetch on escalation.** *(landed, default-off —
+  `pass^k` pending.)* On a receptionist escalate (the fast-lane declined the
+  turn), run agent discovery (`resolveAgentRouting`) and workflow discovery
+  (`searchWorkflowCandidates`) **concurrently** up-front and inject a compact,
+  droppable `[CAPABILITY CANDIDATES]` capsule into the coordinator's first call,
+  so it plans without spending separate slow `search_agents` / `search_workflows`
+  tool rounds. Pure capsule formatter in
+  [discovery-prefetch.ts](../packages/core/src/agent/discovery-prefetch.ts)
+  (unit-tested); the capsule is a **soft head start, not a hard gate** — the model
+  may still search for something more specific. Flag `orchestration.discoveryPrefetch`
+  (default off). Costs one up-front embedding round-trip + a few hundred prompt
+  tokens per escalated turn (droppable under prompt budget). Gate: `pass^k` —
+  a net win only if it actually removes a slower discovery round.
 
 ## Guardrails (non-negotiable)
 

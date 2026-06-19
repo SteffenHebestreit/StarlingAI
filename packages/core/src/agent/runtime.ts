@@ -10,6 +10,7 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, typ
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
+import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -4438,6 +4439,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // knowledge answer skips it entirely (DIRECT ANSWER FIRST still holds).
         : "PLAN FIRST: if this needs any tool, delegation, retrieval, or multi-step work, call record_plan ONCE with a SHORT plan before acting — objective; the step(s) (each tagged reuse | delegate | direct, with agentName for delegate steps); the acceptance criteria the final answer must meet; and stop conditions. A one-line objective with one or two acceptance criteria is enough for a simple single-step task — keep it lightweight. Set riskTier 'high' only when the task makes current/sourced factual claims, takes an external/destructive/credential action, or is otherwise consequential. If the request is fully answerable directly from your own knowledge in one reply, SKIP the plan and just answer. Then execute the plan in the same turn.";
     }
+    // Discovery prefetch (staged orchestration S4): on the FIRST iteration of an
+    // escalated turn, discover candidate agents + workflows concurrently up-front and
+    // inject a compact capsule so the coordinator can plan without first spending slow
+    // search_agents / search_workflows tool rounds. Soft head start (not a gate),
+    // compact + droppable; flag-gated default-off. Best-effort — never blocks the turn.
+    let discoveryCapsule = "";
+    if (iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch) {
+      try {
+        discoveryCapsule = await prefetchCapabilityCandidates(userMessage);
+        if (discoveryCapsule) {
+          logAudit("discovery_prefetch", { capsuleChars: discoveryCapsule.length }, { sessionId: session.id });
+        }
+      } catch { /* prefetch is best-effort; the model can still discover on demand */ }
+    }
     const collapsedHistory = session.getCollapsedHistory();
 
     const buildSystemMessages = (): LLMMessage[] => [
@@ -4449,6 +4464,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
       ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
       ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),
+      ...(discoveryCapsule ? [{ role: "system" as const, content: discoveryCapsule }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
@@ -4542,6 +4558,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         if (lastPromptMetrics.systemPromptChars > promptBudget && flowGuidance) {
           droppedSections.push({ name: "flowGuidance", chars: flowGuidance.length });
           flowGuidance = "";
+          systemMessages = buildSystemMessages();
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+        }
+        // Priority 3b: discovery prefetch capsule (a planning head start — the model
+        // can still discover on demand, so it yields before the plan-first nudge).
+        if (lastPromptMetrics.systemPromptChars > promptBudget && discoveryCapsule) {
+          droppedSections.push({ name: "discoveryCapsule", chars: discoveryCapsule.length });
+          discoveryCapsule = "";
           systemMessages = buildSystemMessages();
           lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
         }

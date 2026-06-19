@@ -1166,6 +1166,57 @@ async function runJobInline(
   }
 }
 
+export interface WorkflowCandidateSummary {
+  name: string;
+  workflowType: "scene" | "job";
+  description: string;
+  score: number;
+  matchedTerms: string[];
+}
+
+/**
+ * Rank workflow catalog entries against a query — the engine behind the
+ * `search_workflows` tool, exported so the staged-orchestration discovery prefetch
+ * can surface candidate workflows up-front (in parallel with agent discovery)
+ * without spending a separate slow tool round. Returns [] when nothing clears the
+ * relevance floor. Never throws on an empty/garbage query (returns []).
+ */
+export async function searchWorkflowCandidates(
+  query: string,
+  opts?: { workflowType?: "scene" | "job" | "any"; limit?: number },
+): Promise<WorkflowCandidateSummary[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const workflowType = opts?.workflowType === "scene" || opts?.workflowType === "job" ? opts.workflowType : "any";
+  const limit = Math.max(1, Math.min(8, Math.floor(opts?.limit ?? 5) || 5));
+  const entries = buildWorkflowCatalogEntries().filter((entry) => workflowType === "any" || entry.workflowType === workflowType);
+  if (entries.length === 0) return [];
+  const semanticScores = await computeSemanticWorkflowScores(q, entries);
+  const semanticAvailable = semanticScores.size > 0;
+  return entries
+    .map((entry) => {
+      const keyword = scoreWorkflowKeywordMatch(q, entry);
+      const semanticScore = semanticScores.get(entry.key) ?? 0;
+      return {
+        entry,
+        keywordScore: keyword.score,
+        semanticScore,
+        combinedScore: combineWorkflowScores(keyword.score, semanticScore, semanticAvailable),
+        matchedTerms: keyword.matchedTerms,
+      } satisfies WorkflowSearchCandidate;
+    })
+    .filter((candidate) => candidate.combinedScore >= 0.18)
+    .sort(sortWorkflowSearchCandidates)
+    .slice(0, limit)
+    .map((candidate) => ({
+      name: candidate.entry.name,
+      workflowType: candidate.entry.workflowType,
+      description: candidate.entry.description,
+      score: candidate.combinedScore,
+      matchedTerms: candidate.matchedTerms,
+    }));
+}
+
 registerTool({
   name: "search_workflows",
   description: "Search reusable workflow catalog entries across scenes and jobs. Use this before ad hoc coordinator planning when the request may match a recurring workflow such as a research packet, paper, browser inspection, review, or broadcast.",

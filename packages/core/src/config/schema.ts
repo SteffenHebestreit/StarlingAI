@@ -1438,6 +1438,17 @@ export const OrchestrationSchema = z.object({
   /** Max improvement rounds for the QA delivery loop (each round = one check + one
    *  improve call). Bounded low because every round is extra slow-model latency. */
   qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
+  /** Discovery prefetch (staged orchestration S4 — docs/staged-orchestration.md):
+   *  when true, an escalated turn (one the receptionist fast-lane declined) runs
+   *  agent discovery + workflow discovery CONCURRENTLY up-front and injects a compact,
+   *  droppable "[CAPABILITY CANDIDATES]" capsule into the coordinator's first call —
+   *  so it can plan without first spending one or more slow orchestrator search_agents
+   *  / search_workflows tool rounds. The capsule is a soft head start, not a hard gate
+   *  (the model may still search for something more specific). Costs one up-front
+   *  embedding round-trip + a few hundred prompt tokens per escalated turn, so it only
+   *  pays off when it actually removes a slower discovery round. Default OFF until
+   *  pass^k confirms a net latency/quality win. */
+  discoveryPrefetch: z.boolean().default(false),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes
