@@ -77,6 +77,26 @@ describe("turn plan — normalization", () => {
     expect(plan.steps[1]!.kind).toBe("delegate");
   });
 
+  it("reads a step's `desc` alias inside a {plan:{…}} envelope (audit 8d480f5d turn 1: 3-step plan recorded as stepCount:0)", () => {
+    // The model wrapped the plan AND keyed each step's text as `desc` (not
+    // `description`); the envelope unwrapped fine but every step read an empty
+    // description and was dropped → stepCount:0, losing the planned fan-out.
+    const plan = normalizeTurnPlan({
+      plan: {
+        objective: "Design a portable audio recorder.",
+        steps: [
+          { tag: "delegate", agentName: "mission_coordinator", parallelGroup: "A", desc: "Research MEMS mics + power" },
+          { tag: "delegate", agentName: "mission_coordinator", parallelGroup: "B", desc: "Research SD/OTA + waterproofing" },
+          { tag: "delegate", agentName: "mission_coordinator", parallelGroup: "C", desc: "Synthesise BOM + schematic" },
+        ],
+        acceptance_criteria: ["BOM with part numbers", "circuit diagram"],
+      },
+    });
+    expect(plan.steps).toHaveLength(3); // not 0 — `desc` is now read
+    expect(plan.steps[0]).toMatchObject({ kind: "delegate", agent: "mission_coordinator", description: "Research MEMS mics + power" });
+    expect(plan.acceptanceCriteria).toHaveLength(2);
+  });
+
   it("coerces a free-text STRING plan into the objective so it records (audit e5754140 turn 2: string plan → empty → warden stop)", () => {
     const plan = normalizeTurnPlan({
       plan: "Objective: Create a tutorial website.\nStep 1: delegate to content_writer.\nStop conditions: file written.",

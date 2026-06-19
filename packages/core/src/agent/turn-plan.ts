@@ -119,7 +119,11 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     const s = rawSteps[i];
     if (!s || typeof s !== "object") continue;
     const obj = s as Record<string, unknown>;
-    const description = clampString(obj["description"] ?? obj["task"] ?? obj["title"]);
+    // `desc`/`summary` aliases: local models routinely key a step's text as `desc`
+    // (audit 8d480f5d turn 1: a 3-step plan with `desc`+`tag` keys recorded as
+    // stepCount:0 because the step description read empty and the step was dropped,
+    // even though the {plan:{…}} envelope unwrapped fine). Structural alias, not topic.
+    const description = clampString(obj["description"] ?? obj["desc"] ?? obj["summary"] ?? obj["task"] ?? obj["title"]);
     if (!description) continue;
     const kindRaw = clampString(obj["kind"] ?? obj["tag"]).toLowerCase();
     const kind: TurnPlanStepKind = kindRaw === "reuse" || kindRaw === "direct" ? kindRaw : "delegate";
