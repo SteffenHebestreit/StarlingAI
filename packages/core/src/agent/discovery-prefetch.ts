@@ -43,7 +43,7 @@ export function formatDiscoveryCapsule(
   }
   if (workflows.length > 0) {
     if (lines.length > 0) lines.push("");
-    lines.push("Reusable workflows that may fit (run via run_workflow instead of planning from scratch — no need to call search_workflows to re-discover these):");
+    lines.push("Reusable workflow(s) whose purpose closely matches this request — consider run_workflow ONLY if the workflow's deliverable is actually what the user asked for; otherwise plan normally:");
     for (const w of workflows) {
       const desc = oneLine(w.description, 120);
       lines.push(`- ${w.name} (${w.workflowType})${desc ? ` — ${desc}` : ""}`);
@@ -77,7 +77,10 @@ export async function prefetchCapabilityCandidates(
       allowKeywordFallback: false,
       ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
     }).catch(() => null),
-    searchWorkflowCandidates(q, { limit: maxWorkflows }).catch(() => []),
+    // semanticOutlier: only surface a workflow when its embedding score is a clear
+    // standout from the ~0.5 baseline — never steer the model into a deliverable-shape
+    // workflow the request did not clearly call for (audit 7839e153). Pure semantic.
+    searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
   ]);
 
   const agents = (agentRes?.results ?? []).slice(0, maxAgents).map((candidate) => ({

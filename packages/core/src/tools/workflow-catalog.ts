@@ -1171,7 +1171,46 @@ export interface WorkflowCandidateSummary {
   workflowType: "scene" | "job";
   description: string;
   score: number;
+  semanticScore: number;
   matchedTerms: string[];
+}
+
+/**
+ * Select genuine SEMANTIC standouts from a list ranked by semantic score (desc).
+ *
+ * The embedding similarity baseline is ~0.5 for *every* workflow against a free-form
+ * request (audit session 7839e153: an audio-hardware request scored meeting_briefing,
+ * onboarding, incident_response etc. all at 0.50–0.56), so a fixed floor cannot tell
+ * a real match from the noise floor. A workflow only genuinely fits when its score is
+ * a clear OUTLIER — well above the baseline AND clearly ahead of the runner-up. The
+ * gap between #1 and #2 is the robust, pool-size-independent signal:
+ *   - audio request (no shape asked): top 0.556, #2 0.548 → gap 0.008 → NO standout
+ *   - explicit "make a sourced presentation": top 0.631, #2 0.566 → gap 0.065 → standout
+ * Purely semantic — no keywords, no regex, no author-declared trigger patterns.
+ */
+export function selectStandoutSemanticMatches<T extends { semanticScore: number }>(
+  rankedDesc: readonly T[],
+  opts?: { absFloor?: number; gapMargin?: number },
+): T[] {
+  const absFloor = opts?.absFloor ?? 0.55;
+  const gapMargin = opts?.gapMargin ?? 0.04;
+  const top = rankedDesc[0];
+  if (!top || top.semanticScore < absFloor) return [];
+  // Walk down from the top accumulating the high cluster until the score drops by the
+  // gap margin — that drop is the natural break between genuine matches and the ~0.5
+  // baseline. (This admits a small cluster of equally-strong matches, not just #1.)
+  const cluster: T[] = [top];
+  let brokeAway = false;
+  for (let i = 1; i < rankedDesc.length; i += 1) {
+    if (rankedDesc[i - 1]!.semanticScore - rankedDesc[i]!.semanticScore >= gapMargin) {
+      brokeAway = true;
+      break;
+    }
+    cluster.push(rankedDesc[i]!);
+  }
+  // No break anywhere → the whole list is one flat band (no workflow stands out from
+  // the baseline) → surface nothing. A break must exist below the cluster.
+  return brokeAway ? cluster : [];
 }
 
 /**
@@ -1180,10 +1219,18 @@ export interface WorkflowCandidateSummary {
  * can surface candidate workflows up-front (in parallel with agent discovery)
  * without spending a separate slow tool round. Returns [] when nothing clears the
  * relevance floor. Never throws on an empty/garbage query (returns []).
+ *
+ * `semanticOutlier` mode (used by the auto-injected discovery capsule) ignores the
+ * keyword score entirely and surfaces a workflow ONLY when its semantic score is a
+ * clear standout (see selectStandoutSemanticMatches) — so the capsule never steers
+ * the model toward a deliverable-shape workflow the request did not clearly call for
+ * (audit 7839e153: a hardware-design request was wrongly routed into a slide-deck
+ * job). It requires semantic search to be available and never falls back to keywords.
+ * The plain `search_workflows` tool keeps broad keyword+semantic recall.
  */
 export async function searchWorkflowCandidates(
   query: string,
-  opts?: { workflowType?: "scene" | "job" | "any"; limit?: number },
+  opts?: { workflowType?: "scene" | "job" | "any"; limit?: number; semanticOutlier?: boolean },
 ): Promise<WorkflowCandidateSummary[]> {
   const q = query.trim();
   if (!q) return [];
@@ -1193,28 +1240,41 @@ export async function searchWorkflowCandidates(
   if (entries.length === 0) return [];
   const semanticScores = await computeSemanticWorkflowScores(q, entries);
   const semanticAvailable = semanticScores.size > 0;
-  return entries
-    .map((entry) => {
-      const keyword = scoreWorkflowKeywordMatch(q, entry);
-      const semanticScore = semanticScores.get(entry.key) ?? 0;
-      return {
-        entry,
-        keywordScore: keyword.score,
-        semanticScore,
-        combinedScore: combineWorkflowScores(keyword.score, semanticScore, semanticAvailable),
-        matchedTerms: keyword.matchedTerms,
-      } satisfies WorkflowSearchCandidate;
-    })
-    .filter((candidate) => candidate.combinedScore >= 0.18)
-    .sort(sortWorkflowSearchCandidates)
-    .slice(0, limit)
-    .map((candidate) => ({
-      name: candidate.entry.name,
-      workflowType: candidate.entry.workflowType,
-      description: candidate.entry.description,
-      score: candidate.combinedScore,
-      matchedTerms: candidate.matchedTerms,
-    }));
+
+  const scored = entries.map((entry) => {
+    const keyword = scoreWorkflowKeywordMatch(q, entry);
+    const semanticScore = semanticScores.get(entry.key) ?? 0;
+    return {
+      entry,
+      keywordScore: keyword.score,
+      semanticScore,
+      combinedScore: combineWorkflowScores(keyword.score, semanticScore, semanticAvailable),
+      matchedTerms: keyword.matchedTerms,
+    } satisfies WorkflowSearchCandidate;
+  });
+
+  let selected: WorkflowSearchCandidate[];
+  if (opts?.semanticOutlier) {
+    // Direction-setting capsule: pure semantic, no keyword fallback. If embeddings
+    // are unavailable, surface nothing rather than guessing.
+    if (!semanticAvailable) return [];
+    const bySemantic = [...scored].sort((a, b) => b.semanticScore - a.semanticScore);
+    selected = selectStandoutSemanticMatches(bySemantic).slice(0, limit);
+  } else {
+    selected = scored
+      .filter((candidate) => candidate.combinedScore >= 0.18)
+      .sort(sortWorkflowSearchCandidates)
+      .slice(0, limit);
+  }
+
+  return selected.map((candidate) => ({
+    name: candidate.entry.name,
+    workflowType: candidate.entry.workflowType,
+    description: candidate.entry.description,
+    score: candidate.combinedScore,
+    semanticScore: candidate.semanticScore,
+    matchedTerms: candidate.matchedTerms,
+  }));
 }
 
 registerTool({
