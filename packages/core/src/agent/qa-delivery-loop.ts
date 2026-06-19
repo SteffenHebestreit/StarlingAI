@@ -4,8 +4,9 @@
  * After the orchestrator produces an answer, a QA check verifies it against the
  * turn plan's acceptance criteria. If it fails, the flaws are handed back for an
  * improvement pass, and the loop repeats — up to `maxRounds` — until the check
- * passes or the budget is exhausted (then the best answer so far ships; the gate
- * never blocks delivery). This generalises the existing one-shot riskGatedQA
+ * passes or the budget is exhausted (then the last improvement ships unverified;
+ * the gate never blocks delivery and never spends a check call it can't act on).
+ * This generalises the existing one-shot riskGatedQA
  * verify-and-repair into the bounded "until the QA agent says it's fine" loop.
  *
  * The core is a pure function with injectable `check` / `improve` so it is fully
@@ -98,12 +99,10 @@ export async function runQaDeliveryLoop(
     current = improved;
   }
 
-  // Budget exhausted — one final verdict on the last improvement (best-effort).
-  let finalPass = false;
-  try {
-    finalPass = (await deps.check(current, criteria)).pass;
-  } catch {
-    finalPass = true; // fail open
-  }
+  // Budget exhausted: ship the last improvement. We deliberately do NOT spend an
+  // extra check call to verify it — the answer ships either way, so a final verdict
+  // would only refine an audit-only boolean at the cost of one whole slow-model call
+  // per turn. Report passed=false (we never got a confirming PASS within budget).
+  const finalPass = false;
   return { answer: current, rounds: maxRounds, passed: finalPass };
 }

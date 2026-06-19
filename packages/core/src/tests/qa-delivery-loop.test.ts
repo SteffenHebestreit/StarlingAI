@@ -51,6 +51,13 @@ describe("runQaDeliveryLoop", () => {
     expect(r.answer).toBe("v0++"); // two improvement passes applied
   });
 
+  it("does NOT spend an extra check call on the exhausted budget (check runs exactly maxRounds times)", async () => {
+    const check = vi.fn(async () => ({ pass: false, flaws: "still wrong" }));
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({ check, improve: async (a) => a + "+", maxRounds: 2 }));
+    expect(check).toHaveBeenCalledTimes(2); // one per round, no wasted post-loop verification call
+    expect(r.passed).toBe(false); // never got a confirming PASS within budget
+  });
+
   it("fails OPEN: a thrown check ships the current answer (never blocks delivery)", async () => {
     const r = await runQaDeliveryLoop("answer", CRITERIA, deps({ check: async () => { throw new Error("model down"); } }));
     expect(r.passed).toBe(true);
