@@ -976,6 +976,20 @@ export function ephemeralAgentSpecLacksWebTools(args: Record<string, unknown>): 
 /** Builder roles whose delegated task is a BUILD SPEC worth preserving (role-based, no message keywords). */
 const BUILDER_AGENT_ROLE_RE = /^(?:content_writer|web_coder|backend_coder)$/i;
 
+/**
+ * A parallel-slice / task-graph node whose target agent BUILDS or COORDINATES must keep its
+ * OWN instruction in a source-sensitive turn. Rewriting it into the "use web_search/web_fetch
+ * and STOP and report" research frame means a builder (which has no web tools) never produces
+ * the artifact, and a coordinator can't decompose+build — audit 0602f246: a content_writer
+ * BUILD slice in a research+build parallel_delegate was flattened to a research task and the
+ * app was never built. The research is the sibling research slice's job. Keyed on the agent
+ * the LLM chose (role), not on matching keywords in the user's message — same accepted signal
+ * as the single-delegate coordinator exemption below.
+ */
+function sourceSensitiveSliceKeepsOwnTask(agentName: string): boolean {
+  return BUILDER_AGENT_ROLE_RE.test(agentName) || /(?:coordinator|planner)/i.test(agentName);
+}
+
 export function enforceSourceSensitiveOriginalRequestOnToolCall(
   toolCall: LLMResponse["tool_calls"][number],
   userMessage: string,
@@ -1042,17 +1056,25 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
     if (rawTasks.length > 0) {
       nextArgs = {
         ...originalArgs,
-        tasks: rawTasks.map((taskSpec, index) => withDefaultResearchFallbackAgents(
-          stripUntrustedDelegationContext({
-            ...taskSpec,
-            task: buildSourceSensitiveOriginalRequestTask(
-              userMessage,
-              `SLICE ${index + 1}/${rawTasks.length}`,
-              deriveSourceSensitiveDelegationFocus(typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "", userMessage),
-            ),
-          }),
-          guidance,
-        )),
+        tasks: rawTasks.map((taskSpec, index) => {
+          const sliceAgent = typeof taskSpec["agentName"] === "string" ? String(taskSpec["agentName"]) : "";
+          // Builder/coordinator slice: keep its own BUILD/decompose instruction — the
+          // research is the sibling research slice's job (audit 0602f246).
+          if (sourceSensitiveSliceKeepsOwnTask(sliceAgent)) {
+            return stripUntrustedDelegationContext({ ...taskSpec });
+          }
+          return withDefaultResearchFallbackAgents(
+            stripUntrustedDelegationContext({
+              ...taskSpec,
+              task: buildSourceSensitiveOriginalRequestTask(
+                userMessage,
+                `SLICE ${index + 1}/${rawTasks.length}`,
+                deriveSourceSensitiveDelegationFocus(typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "", userMessage),
+              ),
+            }),
+            guidance,
+          );
+        }),
       };
     }
   } else if (toolCall.name === "run_task_graph") {
@@ -1063,17 +1085,24 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
       nextArgs = {
         ...originalArgs,
         objective: userMessage,
-        nodes: rawNodes.map((node, index) => withDefaultResearchFallbackAgents(
-          stripUntrustedDelegationContext({
-            ...node,
-            task: buildSourceSensitiveOriginalRequestTask(
-              userMessage,
-              `GRAPH NODE ${index + 1}/${rawNodes.length}`,
-              deriveSourceSensitiveDelegationFocus(typeof node["task"] === "string" ? String(node["task"]) : "", userMessage),
-            ),
-          }),
-          guidance,
-        )),
+        nodes: rawNodes.map((node, index) => {
+          const nodeAgent = typeof node["agentName"] === "string" ? String(node["agentName"]) : "";
+          // Builder/coordinator node: keep its own BUILD/decompose instruction (audit 0602f246).
+          if (sourceSensitiveSliceKeepsOwnTask(nodeAgent)) {
+            return stripUntrustedDelegationContext({ ...node });
+          }
+          return withDefaultResearchFallbackAgents(
+            stripUntrustedDelegationContext({
+              ...node,
+              task: buildSourceSensitiveOriginalRequestTask(
+                userMessage,
+                `GRAPH NODE ${index + 1}/${rawNodes.length}`,
+                deriveSourceSensitiveDelegationFocus(typeof node["task"] === "string" ? String(node["task"]) : "", userMessage),
+              ),
+            }),
+            guidance,
+          );
+        }),
       };
     }
   }

@@ -76,3 +76,60 @@ describe("enforceSourceSensitiveOriginalRequestOnToolCall — ephemeral writer",
     expect(events).toHaveLength(0);
   });
 });
+
+/**
+ * Audit 0602f246: a source-sensitive "research a question catalog THEN build a WebApp"
+ * turn fanned out as a parallel_delegate with a researcher slice AND a content_writer
+ * build slice — and BOTH slices were rewritten into the "WEB RESEARCH TASK — use
+ * web_search/web_fetch and STOP" frame. content_writer has no web tools, so the app was
+ * never built. A builder/coordinator slice must KEEP its own instruction; the research is
+ * the sibling research slice's job.
+ */
+const parallel = (tasks: Array<Record<string, unknown>>): ToolCall => ({
+  id: "p",
+  type: "function",
+  name: "parallel_delegate",
+  arguments: { tasks },
+} as ToolCall);
+
+const BUILD_TASK = "Erstelle eine vollständige Lern-WebApp als index.html mit Fragenkatalog und Timer.";
+
+describe("enforceSourceSensitiveOriginalRequestOnToolCall — parallel build slice", () => {
+  it("keeps a content_writer build slice intact while rewriting the researcher slice", () => {
+    const call = parallel([
+      { agentName: "researcher", task: "Recherchiere den Fragekatalog." },
+      { agentName: "content_writer", task: BUILD_TASK },
+    ]);
+    const events: Array<{ type: string; details: string }> = [];
+    enforceSourceSensitiveOriginalRequestOnToolCall(call, "Recherchiere X und baue dann eine WebApp.", SOURCE_SENSITIVE, "sess", events);
+    const tasks = (call.arguments as Record<string, unknown>)["tasks"] as Array<Record<string, unknown>>;
+    // researcher slice → rewritten to the research frame
+    expect(String(tasks[0]!["task"])).toContain("SOURCE-SENSITIVE DELEGATION");
+    // content_writer slice → KEEPS its build instruction (no research frame)
+    expect(tasks[1]!["task"]).toBe(BUILD_TASK);
+    expect(String(tasks[1]!["task"])).not.toContain("web_search");
+    expect(events.length).toBeGreaterThan(0); // the researcher slice did change
+  });
+
+  it("keeps a coordinator slice intact (it must decompose, not just research)", () => {
+    const call = parallel([{ agentName: "mission_coordinator", task: "Plane und baue die WebApp." }]);
+    const events: Array<{ type: string; details: string }> = [];
+    enforceSourceSensitiveOriginalRequestOnToolCall(call, "Recherchiere und baue.", SOURCE_SENSITIVE, "sess", events);
+    const tasks = (call.arguments as Record<string, unknown>)["tasks"] as Array<Record<string, unknown>>;
+    expect(tasks[0]!["task"]).toBe("Plane und baue die WebApp.");
+    expect(events).toHaveLength(0); // nothing changed → no-op
+  });
+
+  it("still rewrites an all-researcher fan-out (no regression)", () => {
+    const call = parallel([
+      { agentName: "researcher", task: "Teil 1" },
+      { agentName: "researcher", task: "Teil 2" },
+    ]);
+    const events: Array<{ type: string; details: string }> = [];
+    enforceSourceSensitiveOriginalRequestOnToolCall(call, "Recherchiere X.", SOURCE_SENSITIVE, "sess", events);
+    const tasks = (call.arguments as Record<string, unknown>)["tasks"] as Array<Record<string, unknown>>;
+    expect(String(tasks[0]!["task"])).toContain("SOURCE-SENSITIVE DELEGATION");
+    expect(String(tasks[1]!["task"])).toContain("SLICE 2/2");
+    expect(events.length).toBeGreaterThan(0);
+  });
+});
