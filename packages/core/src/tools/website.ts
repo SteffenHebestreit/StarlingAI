@@ -670,17 +670,29 @@ function normalizePages(value: unknown): { ok: true; pages: PageSpec[] } | { ok:
       return { ok: false, error: `pages[${i}] must be an object` };
     }
     const r = raw as Record<string, unknown>;
-    const path = String(r["path"] ?? "").trim();
+    const rawPath = String(r["path"] ?? "").trim();
     const title = String(r["title"] ?? "").trim();
     const content = String(r["content"] ?? "");
-    if (!path) return { ok: false, error: `pages[${i}].path is required` };
+    if (!rawPath) return { ok: false, error: `pages[${i}].path is required` };
     if (!title) return { ok: false, error: `pages[${i}].title is required` };
     if (!content) return { ok: false, error: `pages[${i}].content is required` };
-    if (path.includes("..") || path.startsWith("/") || path.startsWith("\\")) {
+    if (rawPath.includes("..") || rawPath.startsWith("/") || rawPath.startsWith("\\")) {
       return { ok: false, error: `pages[${i}].path must be a relative path without '..'` };
     }
-    const ext = extname(path).toLowerCase();
-    if (ext !== ".html") return { ok: false, error: `pages[${i}].path must end in .html (got ${path})` };
+    // Each page's markdown `content` is assembled into an HTML file, so `path` names the
+    // OUTPUT html. Agents (instructed to author Markdown) routinely pass a `.md` or
+    // extensionless path — audit 3ccd8015: a whole tutorial-site build failed 3× / 16 min
+    // because content_writer named pages "index.md". Normalize .md/.markdown/no-extension
+    // → .html instead of rejecting the build; only a foreign extension is an error.
+    const ext = extname(rawPath).toLowerCase();
+    let path: string;
+    if (ext === ".html") {
+      path = rawPath;
+    } else if (ext === ".md" || ext === ".markdown" || ext === "") {
+      path = rawPath.replace(/\.(md|markdown)$/i, "") + ".html";
+    } else {
+      return { ok: false, error: `pages[${i}].path must end in .html or .md (got ${rawPath})` };
+    }
     if (seen.has(path)) return { ok: false, error: `pages[${i}].path is duplicated: ${path}` };
     seen.add(path);
 
