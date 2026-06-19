@@ -1414,6 +1414,14 @@ export const OrchestrationSchema = z.object({
    *  The cross-check is deterministic; the extra synthesis call only fires on the
    *  unanchored-answer path, so clean turns are unaffected. Default ON. */
   qaEvidenceAnchoring: z.boolean().default(true),
+  /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
+   *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
+   *  cannot route or delegate) uses a compact synthesis-only system prompt
+   *  (identity + language + format + grounding/full-coverage/no-truncation rules)
+   *  instead of the full ~24.7K orchestrator prompt, cutting that call's prefill on
+   *  slow local models. Default OFF until pass^k confirms synthesis quality is
+   *  unchanged; flip per-session via effort or globally once validated. */
+  leanSynthesisPrompt: z.boolean().default(false),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes

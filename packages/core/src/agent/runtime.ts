@@ -7323,6 +7323,29 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
  * Used when the turn hits max iterations or is cancelled mid-flight.
  * Returns null if the synthesis call itself fails or is aborted.
  */
+/**
+ * Compact system prompt for a TERMINAL synthesis call (forceSynthesis, no tools).
+ * Such a call cannot route or delegate, so the full ~24.7K orchestrator prompt
+ * (routing, swarm rules, tool discipline, agent/tool discovery, orchestration
+ * strategy, memory mechanics) is pure prefill weight on a slow local model. This
+ * keeps only what shaping the FINAL answer needs: identity/voice, language
+ * mirroring, output format, and the grounding / full-coverage / no-truncation
+ * rules that stop the synthesis from hallucinating or dropping sourced facts
+ * (the spirit of the base prompt's Core Principles + full-coverage-synthesis
+ * rules). S1 of staged orchestration (docs/staged-orchestration.md); gated by
+ * orchestration.leanSynthesisPrompt (default off; pass^k before default-on).
+ */
+export function buildLeanSynthesisPrompt(opts: { assistantName?: string } = {}): string {
+  return [
+    "You are the main assistant inside StarlingAI. The orchestration for this turn is done — you are now writing the FINAL answer for the user from the evidence already gathered in this conversation (tool results and shared findings). You have no tools in this step: do not plan, route, delegate, or describe next actions; just deliver the answer.",
+    opts.assistantName ? `Be direct, accurate, and concise. If asked your name, you are "${opts.assistantName}".` : "Be direct, accurate, and concise.",
+    "Reply in the user's language. Format in Markdown — use headings, lists, tables, and fenced code blocks with language tags where they add clarity.",
+    "GROUNDING: copy exact facts, names, numbers, values, statuses, and URLs from the tool-result evidence; never substitute values from your own knowledge. If a claim is not supported by the evidence in this conversation, omit it or mark it unverified.",
+    "FULL COVERAGE: when the evidence is a list, table, or multi-source set, include EVERY item and EVERY source — do not keep only the first, drop the second half, or replace items with 'and others'.",
+    "Never claim the evidence is 'truncated', 'cut off', 'abgeschnitten', or 'not visible' — the full results are in your context; relay every item, number, and URL, and do not append markers like '(truncated)'.",
+  ].join("\n\n");
+}
+
 async function forceSynthesis(
   session: AgentSession,
   provider: ChatProvider,
@@ -7334,9 +7357,23 @@ async function forceSynthesis(
     if (signal.aborted && session.getHistory().length < 3) return null;
     const sharedFindingsPrompt = await formatSharedFactsForFinalSynthesis(session.id);
 
+    // S1 (staged orchestration): a forced-synthesis call runs with NO tools — it
+    // cannot route or delegate — so the full ~24.7K orchestrator system prompt is
+    // dead prefill weight. When orchestration.leanSynthesisPrompt is on, swap in a
+    // compact synthesis-only prompt. Default off until pass^k-validated.
+    let synthSystemPrompt = session.getSystemPrompt();
+    if (getConfig().orchestration?.leanSynthesisPrompt) {
+      let assistantName: string | undefined;
+      try {
+        const { loadMainAssistantPersonality } = await import("../personality/service.js");
+        assistantName = loadMainAssistantPersonality().identity?.name || undefined;
+      } catch { /* unnamed → omit */ }
+      synthSystemPrompt = buildLeanSynthesisPrompt({ assistantName });
+    }
+
     // Inject a synthesize-now user message (not stored in permanent history)
     const messages: LLMMessage[] = [
-      { role: "system", content: session.getSystemPrompt() },
+      { role: "system", content: synthSystemPrompt },
       { role: "system", content: buildTemporalContextPrompt() },
       ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
       ...session.getCollapsedHistory(),
