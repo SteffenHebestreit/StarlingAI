@@ -106,18 +106,6 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
-  geocode_location: {
-    tier: ToolTier.ZERO_READ_ONLY,
-    description: "Resolve a place name or address to geographic coordinates via OpenStreetMap",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  route_distance_time: {
-    tier: ToolTier.ZERO_READ_ONLY,
-    description: "Calculate route distance and travel time between two coordinates",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
   extract_file_content: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Convert a workspace file into Markdown using the configured file-conversion service",
@@ -786,12 +774,6 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
-  translate_text: {
-    tier: ToolTier.ZERO_READ_ONLY,
-    description: "Translate a short string to a target language using the configured LLM",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
   ask_user: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "Pause execution and ask the human user a question with optional choices",
@@ -958,42 +940,6 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Stop and remove a cron job",
     requiresPerCallApproval: true,
-    requiresSandbox: false,
-  },
-  reminder_create: {
-    tier: ToolTier.ONE_WRITE,
-    description: "Create a one-time in-memory reminder notification",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  reminder_list: {
-    tier: ToolTier.ZERO_READ_ONLY,
-    description: "List active reminders for the current session",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  reminder_remove: {
-    tier: ToolTier.ONE_WRITE,
-    description: "Remove a scheduled reminder",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  timer_start: {
-    tier: ToolTier.ONE_WRITE,
-    description: "Start a one-time in-memory timer notification",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  timer_list: {
-    tier: ToolTier.ZERO_READ_ONLY,
-    description: "List active timers for the current session",
-    requiresPerCallApproval: false,
-    requiresSandbox: false,
-  },
-  timer_cancel: {
-    tier: ToolTier.ONE_WRITE,
-    description: "Cancel an active timer",
-    requiresPerCallApproval: false,
     requiresSandbox: false,
   },
   git_clone: {

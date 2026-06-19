@@ -143,19 +143,6 @@ export const MAIL_TASK_PATTERNS = [
   /\b(lese|lies|zeige|fass zusammen|zusammenfassung|summary|summarize)\b[\s\S]{0,60}\b(e-?mail|emails?|mails?|inbox|posteingang)\b/,
 ];
 
-export const PRODUCTIVITY_HINT_TERMS = [
-  "remind", "reminder", "reminders", "timer", "timers", "alarm", "alarms",
-  "note", "notes", "notiz", "notizen", "todo", "todos", "follow-up", "follow up",
-  "remember this", "take a note", "merk dir", "erinnere mich",
-];
-
-export const PRODUCTIVITY_TASK_PATTERNS = [
-  /\b(remind me|set a reminder|set reminder|erinnere mich|erinnerung)\b/,
-  /\b(start|set|create)\b[\s\S]{0,40}\b(timer|alarm)\b/,
-  /\b(cancel|stop|remove|delete)\b[\s\S]{0,40}\b(timer|reminder)\b/,
-  /\b(note|notes|notiz|notizen|remember this|take a note|save this)\b/,
-];
-
 export const COMPUTER_ACCESS_HINT_TERMS = [
   "use my computer", "access my computer", "my computer", "my pc", "my machine",
   "remote windows pc", "remote pc", "remote desktop", "rdp", "vnc",
@@ -279,27 +266,6 @@ export const SWARM_MAINTENANCE_PATTERNS = [
   /\b(why|check why|investigate why)\b[\s\S]{0,120}\b(does not want to implement|won't implement|refuses to implement|cannot implement|can not implement)\b/,
   /\b(not asking you to use the system|asking you to improve the system|improve starlingai|update starlingai|maintain the swarm)\b/,
 ];
-
-export const NAVIGATION_HINT_TERMS = [
-  "distance", "travel time", "driving time", "walking time", "directions",
-  "fahrzeit", "reisezeit", "wegzeit", "strecke", "entfernung", "route", "anfahrt", "fußweg",
-];
-
-export const NAVIGATION_PATTERNS = [
-  /\b(how long|how far|distance|travel time|driving time|walking time|route)\b[\s\S]{0,80}\b(from|between|to)\b/,
-  /\b(von|zwischen)\b[\s\S]{0,80}\b(nach|bis)\b/,
-  /\b(wie lange|wie weit|fahrzeit|reisezeit|entfernung|route)\b[\s\S]{0,80}\b(von|zwischen)\b/,
-];
-
-export function isNavigationRoutingRequest(userMessage: string): boolean {
-  const normalized = userMessage.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const negatedNavigationMention = /\b(nothing to do with|not about|not related to|unrelated to|kein(?:e|en)?|nichts mit|hat nichts mit)\b[\s\S]{0,100}\b(distance|distances|travel time|route|routes|routing|navigation|entfernung|fahrzeit|reisezeit|route|routen?)\b/i.test(normalized);
-  if (negatedNavigationMention) return false;
-
-  return NAVIGATION_PATTERNS.some((pattern) => pattern.test(normalized));
-}
 
 export const WORKFLOW_HINT_TERMS = [
   "catalog", "catalogue", "chain", "job", "jobs", "playbook", "playbooks",
@@ -441,13 +407,11 @@ export interface DynamicTurnGuidance {
   sourceSensitive: boolean;
   freshnessSensitive: boolean;
   mailSensitive?: boolean;
-  productivitySensitive?: boolean;
   computerAccessSensitive?: boolean;
   serverAccessSensitive?: boolean;
   pentestSensitive?: boolean;
   pentestMethodologySensitive?: boolean;
   swarmMaintenanceSensitive?: boolean;
-  navigationSensitive?: boolean;
   artifactSensitive?: boolean;
   /** User pasted substantial technical content inline AND asked for
    *  explanation/analysis/tutorial — runtime should bias toward direct
@@ -515,8 +479,6 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const sourceSensitiveByTerm = sourceVerificationByTerm || webLookupByTerm || availabilityQuestion;
   const mailSensitive = MAIL_HINT_TERMS.some((term) => normalized.includes(term))
     || MAIL_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
-  const productivitySensitive = PRODUCTIVITY_HINT_TERMS.some((term) => normalized.includes(term))
-    || PRODUCTIVITY_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
   const localServerConfigEvidence = LOCAL_SERVER_CONFIG_PATTERNS.some((pattern) => pattern.test(normalized));
   const serverAccessSensitive = SERVER_ACCESS_HINT_TERMS.some((term) => normalized.includes(term))
     || SERVER_ACCESS_PATTERNS.some((pattern) => pattern.test(normalized))
@@ -530,7 +492,6 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     && PENTEST_METHODOLOGY_PATTERNS.some((pattern) => pattern.test(normalized));
   const swarmMaintenanceSensitive = SWARM_MAINTENANCE_HINT_TERMS.some((term) => normalized.includes(term))
     || SWARM_MAINTENANCE_PATTERNS.some((pattern) => pattern.test(normalized));
-  const navigationSensitive = isNavigationRoutingRequest(userMessage);
   const artifactSensitive = ARTIFACT_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(normalized));
   // A naming turn is durable-memory-sensitive only when a name is actually being
   // ASSIGNED (a command), not merely asked about. "wie heißt du?" matches the
@@ -577,19 +538,17 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const freshnessSensitive = (inlineReview || selfCapabilityQuestion) ? false : freshnessSensitiveByTerm;
   const sourceSensitive = (inlineReview || researchThenCreate) ? false : sourceSensitiveByTerm;
 
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, productivitySensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, navigationSensitive, artifactSensitive, inlineAnalyticalContent, durableMemorySensitive };
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, artifactSensitive, inlineAnalyticalContent, durableMemorySensitive };
   if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
   if (freshnessSensitive) reasons.push("freshness-sensitive");
   if (sourceSensitive) reasons.push("source-sensitive");
   if (mailSensitive) reasons.push("mail-task");
-  if (productivitySensitive) reasons.push("productivity-task");
   if (computerAccessSensitive && !pentestSensitive) reasons.push("owned-computer-access");
   if (serverAccessSensitive && !pentestSensitive) reasons.push("server-admin-access");
   if (pentestMethodologySensitive) reasons.push("pentest-methodology");
   if (swarmMaintenanceSensitive) reasons.push("swarm-maintenance");
-  if (navigationSensitive) reasons.push("navigation-routing");
   if (artifactSensitive) reasons.push("artifact-deliverable");
   if (inlineAnalyticalContent) reasons.push("inline-analytical-content");
   if (durableMemorySensitive) reasons.push("durable-memory");
@@ -664,31 +623,6 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
       "You MUST use the delegate_to_agent tool with agentName='mail_agent' for reading recent emails, searching inboxes, preparing drafts, and mailbox triage.",
       "If the user asks to send an email, route the task to mail_agent so it can prepare the draft first. Sending itself must go through mail_send_draft and requires explicit per-call approval; do not claim sending is impossible.",
       "If the target account is ambiguous, have mail_agent inspect the available mail accounts or ask one concise clarification question.",
-    );
-  }
-
-  if (productivitySensitive) {
-    promptParts.push(
-      "The user is asking for note-taking, reminders, timers, or lightweight follow-up tracking.",
-      "Do NOT answer that reminders or timers are unavailable if the productivity_agent is available. This system has a dedicated productivity_agent for those tasks.",
-      "You MUST use the delegate_to_agent tool with agentName='productivity_agent' for saving notes, creating reminders, starting timers, or reviewing and cancelling them.",
-      "Reminder scheduling should go through reminder_create and timer countdowns should go through timer_start inside productivity_agent; do not improvise unsupported scheduling behavior.",
-      "If the timing is ambiguous, have productivity_agent ask one concise clarification question rather than guessing.",
-    );
-  }
-
-  if (navigationSensitive) {
-    promptParts.push(
-      "The user is asking for route distance or travel time between places.",
-      delegateMode
-        ? "You MUST use the delegate_to_agent tool with agentName='distance_specialist' immediately when that agent exists. Pass the full origin/destination request as the task."
-        : "Prefer the dedicated navigation tools or the distance_specialist for route questions instead of answering from memory.",
-      delegateMode
-        ? "Do NOT stop at a generic estimate or a plan to look it up. Delegate the task and then synthesize the concrete result."
-        : "Resolve ambiguous places before answering and include the exact coordinates used.",
-      "If the locations are ambiguous, ask one concise clarification question instead of guessing.",
-      "For route answers, report the travel mode, route distance, estimated travel time, and the coordinates or resolved places used.",
-      "If the user did not specify a mode, prefer driving time by default and say so clearly.",
     );
   }
 
@@ -767,13 +701,11 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
     sourceSensitive,
     freshnessSensitive,
     mailSensitive,
-    productivitySensitive,
     computerAccessSensitive,
     serverAccessSensitive,
     pentestSensitive,
     pentestMethodologySensitive,
     swarmMaintenanceSensitive,
-    navigationSensitive,
     artifactSensitive,
     inlineAnalyticalContent,
     durableMemorySensitive,

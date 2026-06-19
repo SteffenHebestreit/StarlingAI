@@ -1330,14 +1330,14 @@ describe("swarm orchestration tools", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("integration_builder");
+    expect(result.output).toContain("coder");
 
     const tasks = Object.values(swarmState.tasks);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.attempts).toHaveLength(2);
     expect(tasks[0]?.attempts[0]?.agentName).toBe("swarm_maintainer");
     expect(tasks[0]?.attempts[0]?.status).toBe("failed");
-    expect(tasks[0]?.attempts[1]?.agentName).toBe("integration_builder");
+    expect(tasks[0]?.attempts[1]?.agentName).toBe("coder");
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 

@@ -97,7 +97,6 @@ const NEEDS_INTERNET = new Set([
   "api_integrator",
   "citation_researcher",
   "vision_browser_analyst",
-  "accessibility_tester",
   "web_task_coordinator",
 ]);
 

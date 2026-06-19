@@ -29,7 +29,6 @@ import { recordCapabilityGap } from "../agent/self-improve.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
 
 const log = childLogger("tool:sub-agent");
-import { isNavigationRoutingRequest } from "../agent/intent-classifier.js";
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
@@ -268,9 +267,6 @@ function resolveExplicitDelegationAgentOverride(request: DelegationRequest, ctx:
 }
 
 function getPinnedAgentForTask(task: string): string | null {
-  if (looksLikeDurableMemoryTask(task)) {
-    return "productivity_agent";
-  }
   const signals = analyzeHeuristicRoutingQuery(task);
   if (signals.looksServerAdmin) {
     return signals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent";
@@ -785,8 +781,6 @@ export async function resolveAgentRouting(
   // G32: Task-class keywords for outcome-weighted routing multiplier
   const queryKeywords = extractTaskKeywords(raw);
 
-  const positiveNavigationIntent = isNavigationRoutingRequest(raw);
-
   // Lexical-fallback discrimination: IDF over the agent corpus so rare query tokens
   // dominate when embeddings are degraded (without it, common tokens flatten the
   // ranking and routing collapses to ~equal scores — audit 9b5196ad). Semantic mode
@@ -817,7 +811,6 @@ export async function resolveAgentRouting(
       };
     })
     .filter((result) => result.combinedScore > 0)
-    .filter((result) => positiveNavigationIntent || !looksLikeNavigationSpecialist(result.cfg))
     .sort(compareRoutingResults)
     .slice(0, 5);
 
@@ -957,7 +950,6 @@ export async function resolveAgentRouting(
       ? (preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent")
       : null,
     vulnerabilityResearchIntent ? "security_researcher" : null,
-    positiveNavigationIntent ? "distance_specialist" : null,
     preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
     looksBrowserEvidenceTask && !preferMissionInSearch ? "browser_agent" : null,
     preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
@@ -1022,9 +1014,6 @@ export async function resolveAgentRouting(
   }
   if (vulnerabilityResearchIntent) {
     maybeAppendHeuristicCandidate("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
-  }
-  if (positiveNavigationIntent) {
-    maybeAppendHeuristicCandidate("distance_specialist", 0.82, ["navigation", "distance", "travel time"]);
   }
   if (preferenceSignals.looksComputerUse) {
     maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
@@ -2896,7 +2885,6 @@ function buildHeuristicRoutingCandidates(
   const heuristicCandidates: AgentRoutingCandidate[] = [];
   const heuristicBoosts = new Map<string, { score: number; matchedTerms: string[] }>();
   const signals = analyzeHeuristicRoutingQuery(normalized);
-  const positiveNavigationIntent = isNavigationRoutingRequest(query);
   const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(normalized);
   const looksNewsTask = /\b(news|updates?|nachrichten|neuigkeiten|meldungen|trends)\b/i.test(normalized);
   const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(normalized);
@@ -2922,10 +2910,6 @@ function buildHeuristicRoutingCandidates(
 
   if (vulnerabilityResearchIntent) {
     maybeAdd("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
-  }
-
-  if (positiveNavigationIntent) {
-    maybeAdd("distance_specialist", 0.82, ["navigation", "distance", "travel time"]);
   }
 
   if (looksBrowserEvidenceTask && !shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
@@ -5529,7 +5513,7 @@ registerTool({
     const rawFallbackAgents = explicitFallbackAgents?.length
       ? explicitFallbackAgents
       : agentName === "swarm_maintainer"
-        ? ["integration_builder", "coder", "prompt_optimizer"].filter((candidate) => !ctx.allowedAgents || ctx.allowedAgents.includes(candidate))
+        ? ["coder", "prompt_optimizer"].filter((candidate) => !ctx.allowedAgents || ctx.allowedAgents.includes(candidate))
         : undefined;
     const fallbackValidation = sanitizeDelegationAgentList(rawFallbackAgents, ctx);
     const fallbackAgents = fallbackValidation.valid.length > 0

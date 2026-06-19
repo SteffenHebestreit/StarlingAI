@@ -540,49 +540,6 @@ describe("search_agents tool", () => {
     }
   }, 15000);
 
-  it("finds distance_specialist for short German travel-time queries", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
-    const configPath = join(tempDir, "starlingai.json");
-
-    writeFileSync(configPath, JSON.stringify({
-      agents: {
-        defaults: {
-          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
-        },
-      },
-      subAgents: {
-        researcher: {
-          description: "Finds facts on the web and summarizes them.",
-          capabilities: ["web research", "documentation lookup"],
-          tags: ["research", "docs"],
-          tools: ["web_search", "web_fetch"],
-          maxIterations: 4,
-        },
-        distance_specialist: {
-          description: "Navigation specialist for calculating route distance and travel time between places.",
-          capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
-          tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
-          tools: ["geocode_location", "route_distance_time"],
-          maxIterations: 4,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const [{ resolveAgentRouting }] = await Promise.all([
-      import("../tools/sub-agent.js"),
-    ]);
-
-    try {
-      const resolution = await resolveAgentRouting("wie lange brauche ich von worbis nach dresden", { minConfidence: "medium" });
-      expect(resolution.results[0]?.name).toBe("distance_specialist");
-      expect(resolution.results.find((candidate) => candidate.name === "researcher")).toBeUndefined();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 15000);
 
   it("routes broad technical news queries to web research instead of navigation specialists", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
@@ -966,72 +923,6 @@ describe("search_agents tool", () => {
 
       expect(resolution.results[0]?.name).toBe("security_researcher");
       expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")?.confidence).not.toBe("medium");
-    } finally {
-      embeddingModule.resetEmbeddingSearchStateForTests();
-      vi.doUnmock("../providers/index.js");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 15000);
-
-  it("does not route agent-routing maintenance prompts to distance_specialist", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-search-"));
-    const configPath = join(tempDir, "starlingai.json");
-
-    const subAgents = {
-      prompt_optimizer: {
-        description: "Prompt and routing behavior specialist for improving StarlingAI agent selection, system prompts, and orchestration rules.",
-        capabilities: ["prompt analysis", "routing behavior fixes", "agent orchestration tuning"],
-        tags: ["prompt", "routing", "agents", "orchestration", "maintenance"],
-        tools: ["read_file", "workspace_search", "write_file"],
-        maxIterations: 6,
-      },
-      distance_specialist: {
-        description: "Navigation specialist for calculating route distance and travel time between places.",
-        capabilities: ["distance calculation", "travel time estimation", "fahrzeit", "entfernung", "route planning"],
-        tags: ["navigation", "distance", "travel", "fahrzeit", "reisezeit", "route"],
-        tools: ["geocode_location", "route_distance_time"],
-        maxIterations: 4,
-      },
-    };
-
-    writeFileSync(configPath, JSON.stringify({
-      agents: {
-        defaults: {
-          model: { primary: "lmstudio/qwen/qwen3.5-9b" },
-        },
-      },
-      subAgents,
-    }), "utf8");
-
-    const provider = {
-      embed: vi.fn(async (texts: string[]) => {
-        const text = texts[0] ?? "";
-        if (text.startsWith("Agent:")) {
-          return [text.includes("prompt_optimizer") ? new Float32Array([0, 1]) : new Float32Array([1, 0])];
-        }
-
-        return [new Float32Array([0, 1])];
-      }),
-    } as unknown as import("../providers/lmstudio.js").LMStudioProvider;
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.doMock("../providers/index.js", () => ({
-      getEmbeddingProvider: () => provider,
-    }));
-    vi.resetModules();
-
-    const [embeddingModule, { resolveAgentRouting }] = await Promise.all([
-      import("../providers/embeddings.js"),
-      import("../tools/sub-agent.js"),
-    ]);
-
-    try {
-      await embeddingModule.buildAgentIndex(subAgents, provider, "lmstudio/qwen-embed");
-
-      const resolution = await resolveAgentRouting("fix agent routing; it chose the wrong agent even though this has nothing to do with calculating distance", { minConfidence: "medium" });
-
-      expect(resolution.results[0]?.name).toBe("prompt_optimizer");
-      expect(resolution.results.find((candidate) => candidate.name === "distance_specialist")).toBeUndefined();
     } finally {
       embeddingModule.resetEmbeddingSearchStateForTests();
       vi.doUnmock("../providers/index.js");

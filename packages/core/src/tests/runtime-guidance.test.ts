@@ -411,35 +411,12 @@ describe("runtime turn guidance", () => {
     expect(guidance?.prompt).toContain("explicit per-call approval");
   });
 
-  it("routes reminders and timers to productivity_agent", () => {
-    const guidance = buildDynamicTurnGuidance("remind me in 10 minutes to call Alex and start a 2 minute timer now");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.productivitySensitive).toBe(true);
-    expect(guidance?.prompt).toContain("dedicated productivity_agent");
-    expect(guidance?.prompt).toContain("delegate_to_agent tool with agentName='productivity_agent'");
-    expect(guidance?.prompt).toContain("reminder_create");
-    expect(guidance?.prompt).toContain("timer_start");
-  });
-
-  it("routes travel distance questions to distance_specialist", () => {
-    const guidance = buildDynamicTurnGuidance("wie lange brauche ich von worbis nach dresden", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.navigationSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("distance_specialist");
-    expect(guidance?.prompt).toContain("route distance or travel time between places");
-    expect(guidance?.prompt).toContain("Do NOT stop at a generic estimate or a plan to look it up");
-  });
-
-  it("does not treat agent-routing maintenance language as route navigation", () => {
-    const guidance = buildDynamicTurnGuidance("fix the agent routing mismatch; it chose distance_specialist for a prompt that has nothing to do with calculating distance", "orchestration_only");
+  it("treats agent-routing maintenance language as swarm maintenance, not a route lookup", () => {
+    const guidance = buildDynamicTurnGuidance("fix the agent routing mismatch; it chose the wrong specialist for a prompt that has nothing to do with calculating distance", "orchestration_only");
 
     expect(guidance).not.toBeNull();
     expect(guidance?.swarmMaintenanceSensitive).toBe(true);
-    expect(guidance?.navigationSensitive).toBe(false);
     expect(guidance?.prompt).not.toContain("route distance or travel time between places");
-    expect(guidance?.prompt).not.toContain("agentName='distance_specialist'");
   });
 
   it("does not block pentest guidance when the user explicitly asks for a scan", () => {

@@ -342,8 +342,7 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
  * layer on top of the tier model; the tier's `primary` is still preserved.
  *
  * Current wiring:
- *   - "routing"   → consumed by translate_text and lightweight
- *                   classifier-style LLM tool calls
+ *   - "routing"   → consumed by lightweight classifier-style LLM tool calls
  *   - "synthesis" → consumed by runtime.forceSynthesis to run the final
  *                   user-facing rewrite on a lighter / faster model
  */

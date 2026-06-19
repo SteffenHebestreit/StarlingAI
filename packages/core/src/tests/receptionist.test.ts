@@ -37,8 +37,6 @@ const SMALLTALK = ["hi", "hello", "Guten Morgen", "wie geht's dir?", "danke dir!
 
 const NOT_SMALLTALK: Array<[string, string]> = [
   ["schreib eine E-Mail an den Chef", "task-intent"],
-  ["remind me tomorrow about the meeting", "task-intent"],
-  ["wie weit ist es von Berlin nach München", "task-intent"],
   [
     "ich wollte dir einfach mal ganz in Ruhe und ausführlich erzählen wie entspannt der lange gemütliche Spaziergang am kleinen Waldsee für mich gewesen ist",
     "not-short-conversational",

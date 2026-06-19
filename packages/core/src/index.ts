@@ -52,8 +52,6 @@ import "./personality/service.js";
 import { syncWebhookTools } from "./tools/webhooks.js";
 
 import { stopAllCronJobs } from "./runtime/scheduler.js";
-import { stopAllReminders } from "./runtime/reminders.js";
-import { stopAllTimers } from "./runtime/timers.js";
 import { PRODUCT } from "./product/index.js";
 
 const log = childLogger("main");
@@ -360,8 +358,6 @@ export async function main() {
     await closeGraphDb();
     await closeVectorStore();
     stopAllCronJobs();
-    stopAllReminders();
-    stopAllTimers();
     await flushAuditLog();
     await closeSessionRedis();
     await shutdownTracing();
