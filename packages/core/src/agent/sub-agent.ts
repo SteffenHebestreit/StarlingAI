@@ -1259,6 +1259,42 @@ export function mergeAgentModelOverride(
   return { ...defaults, ...defined };
 }
 
+/**
+ * Overlay the active effort profile onto a resolved model config. The effort dial RAISES
+ * budget/reasoning for a thorough turn, but it must respect an agent's EXPLICIT opt-outs:
+ *  - maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
+ *  - enableThinking / reasoningEffort are NOT forced ON for an agent that explicitly set
+ *    enableThinking:false. A builder whose job is to emit a large artifact via tool calls
+ *    disables thinking so its WHOLE completion budget goes to write_file calls, not a
+ *    reasoning monologue. At max effort the unconditional thinking:true overrode
+ *    content_writer's own enableThinking:false, so it burned its entire 32K-token budget
+ *    reasoning ("Let me plan… I'll chunk…") and never called write_file — 651s, zero
+ *    artifacts (audit 463d6192). Precedence: explicit agent opt-out > effort dial > default.
+ * Pure so the precedence is unit-testable without a running sub-agent.
+ */
+export function applyEffortModelOverlay(
+  baseModelConfig: import("../config/schema.js").ModelConfig,
+  effortProfile:
+    | { subAgentMaxTokens?: number; enableThinking?: boolean; reasoningEffort?: "low" | "medium" | "high" }
+    | null
+    | undefined,
+): import("../config/schema.js").ModelConfig {
+  if (!effortProfile) return baseModelConfig;
+  const agentDisabledThinking = baseModelConfig.enableThinking === false;
+  return {
+    ...baseModelConfig,
+    ...(effortProfile.subAgentMaxTokens !== undefined
+      ? { maxTokens: Math.max(baseModelConfig.maxTokens ?? 0, effortProfile.subAgentMaxTokens) }
+      : {}),
+    ...(effortProfile.enableThinking !== undefined && !agentDisabledThinking
+      ? { enableThinking: effortProfile.enableThinking }
+      : {}),
+    ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking
+      ? { reasoningEffort: effortProfile.reasoningEffort }
+      : {}),
+  };
+}
+
 function buildModelExecutionGuidance(modelId: string | undefined, enableThinking: boolean | undefined): string {
   if (!modelId || !modelId.toLowerCase().includes("gemma-4-e4b-it")) {
     return "";
@@ -2422,16 +2458,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // resolvedModelConfig) produce larger, more reasoned outputs at high/max effort.
     // maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
     const effortRunProfile = currentEffortProfile();
-    const modelConfig = effortRunProfile
-      ? {
-          ...baseModelConfig,
-          ...(effortRunProfile.subAgentMaxTokens !== undefined
-            ? { maxTokens: Math.max(baseModelConfig.maxTokens ?? 0, effortRunProfile.subAgentMaxTokens) }
-            : {}),
-          ...(effortRunProfile.enableThinking !== undefined ? { enableThinking: effortRunProfile.enableThinking } : {}),
-          ...(effortRunProfile.reasoningEffort !== undefined ? { reasoningEffort: effortRunProfile.reasoningEffort } : {}),
-        }
-      : baseModelConfig;
+    const modelConfig = applyEffortModelOverlay(baseModelConfig, effortRunProfile);
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
