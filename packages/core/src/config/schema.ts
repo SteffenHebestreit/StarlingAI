@@ -1448,6 +1448,16 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
+  /** When true, the one bounded corrective build RESUMES a partial deliverable instead
+   *  of regenerating it. If an earlier build attempt THIS turn left a file that genuinely
+   *  looks cut off mid-document (artifactFileLooksTruncated: HTML missing </html>, JSON that
+   *  won't parse), the corrective build is told to read that file and FINISH it in place via
+   *  write_file mode:"append" / edit_file — adding only the missing remainder — rather than
+   *  re-emitting the whole thing (which wastes the work already on disk and risks the same
+   *  cut-off). Trigger is structural file-incompleteness, not the deliverable's topic; a
+   *  complete-but-wrong file still gets a fresh rebuild. Default OFF until live eval confirms
+   *  the resume reliably terminates the document. Requires finalResponseQaGate. */
+  resumePartialOnCorrectiveBuild: z.boolean().default(false),
   /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
    *  research delegation for a source-sensitive turn came back partial / cancelled /
    *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact

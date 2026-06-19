@@ -45,6 +45,8 @@ import { formatUserModelGuidance } from "../user-model/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
+import { artifactFileLooksTruncated } from "./sub-agent.js";
+import { join } from "node:path";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { readAllFacts, beginFactTurn } from "../swarm/memory.js";
@@ -3933,7 +3935,37 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       contextChars: buildContext.length,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     opts.onStatus?.({ phase: "guardrail", message: "Der QA-Check verlangt das angeforderte Artefakt — ich lasse es jetzt vom passenden Spezialisten erstellen.", iteration: iterationCount });
-    const buildTask = builderAgent === "content_writer"
+    // Resume-over-regenerate: if an earlier attempt this turn left a partial deliverable
+    // that looks cut off mid-document, finish THAT file in place instead of re-emitting the
+    // whole thing — saves the tokens/latency of regeneration and avoids hitting the same
+    // cut-off (the user's write_file/resume idea). Gated + structural (file-incompleteness,
+    // not topic); a complete-but-wrong file probes null and falls through to a fresh build.
+    const resumeTarget = effectiveOrchestration().resumePartialOnCorrectiveBuild
+      ? selectCorrectiveResumeTarget(
+          collectTurnArtifactAttachments(session),
+          (rel) => {
+            const wsRoot = typeof toolContext.workspacePath === "string" ? toolContext.workspacePath : "";
+            return wsRoot ? artifactFileLooksTruncated({ path: join(wsRoot, rel), filename: rel }) : null;
+          },
+        )
+      : null;
+    if (resumeTarget) {
+      logAudit("guardrail_flagged", {
+        type: "final_qa_corrective_build_resume_partial",
+        builderAgent,
+        relativePath: resumeTarget.relativePath,
+        truncationReason: resumeTarget.truncationReason,
+      }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    }
+    const buildTask = resumeTarget
+      ? ("RESUME TASK — finish the partial deliverable that is ALREADY on disk; do NOT regenerate it. "
+        + `The file \`${resumeTarget.relativePath}\` was started by an earlier attempt this turn but is INCOMPLETE (${resumeTarget.truncationReason}). `
+        + `FIRST read_file \`${resumeTarget.relativePath}\` to see exactly how far it got, THEN continue it IN PLACE: append the missing remainder with write_file mode:"append" (same path) in SMALL bounded chunks until the document terminates correctly (close every open tag / make the JSON parse), or use edit_file to repair one specific broken region. `
+        + "Do NOT rewrite the file from the top, do NOT create a new file, and do NOT call generate_website/generate_presentation — regenerating discards the work already on disk and risks the same cut-off. "
+        + "Use ONLY facts present in the context or shared findings; do NOT re-research. "
+        + `NEVER paste the file's code into your reply — it is attached. Final reply = a SHORT summary plus the file path (${resumeTarget.relativePath}).\n\nOriginal request:\n`
+        + userMessage)
+      : builderAgent === "content_writer"
       ? ("BUILD TASK — produce the requested deliverable NOW from the verified findings/context. "
         + "Do NOT re-research. Use ONLY facts present in the context or shared findings; cite source URLs where relevant. "
         + "If it is an HTML page / reveal.js presentation, author compact content and let generate_presentation/generate_website assemble it, or build the file incrementally with write_file mode:\"append\" — never one giant write.\n\nOriginal request:\n"
@@ -7822,6 +7854,37 @@ export function buildTimeoutDeliveryMessage(
   }
   lines.push("", "To get the full result, re-send the request with a higher effort tier (e.g. medium or high) or a longer `--timeout`.");
   return { response: lines.join("\n"), recoveredAssistantText: false };
+}
+
+/**
+ * A partial deliverable from THIS turn that the one bounded corrective build should
+ * FINISH in place (read + append/edit) instead of regenerating — the user's "if files
+ * are produced we can finish unfinished files … not regenerate the whole file" path.
+ * `truncationProbe` returns a human reason when the file at the given workspace-relative
+ * path genuinely looks cut off mid-document, else null (the runtime passes the fs-backed
+ * artifactFileLooksTruncated; tests pass a stub). Keys off file-incompleteness, not the
+ * deliverable's topic: a complete-but-wrong file probes null → caller does a fresh build.
+ */
+export interface CorrectiveResumeTarget {
+  relativePath: string;
+  filename: string;
+  truncationReason: string;
+}
+export function selectCorrectiveResumeTarget(
+  attachments: Array<Record<string, unknown>>,
+  truncationProbe: (relativePath: string) => string | null,
+): CorrectiveResumeTarget | null {
+  for (const a of attachments) {
+    if (a["isDirectory"] === true) continue;
+    const relativePath = typeof a["relativePath"] === "string" ? a["relativePath"].trim() : "";
+    if (!relativePath) continue; // external-URL-only artifacts have no local file to resume
+    const reason = truncationProbe(relativePath);
+    if (reason) {
+      const filename = typeof a["filename"] === "string" && a["filename"] ? a["filename"].trim() : relativePath;
+      return { relativePath, filename, truncationReason: reason };
+    }
+  }
+  return null;
 }
 
 export function collectTurnArtifactAttachments(session: AgentSession): Array<Record<string, unknown>> {
