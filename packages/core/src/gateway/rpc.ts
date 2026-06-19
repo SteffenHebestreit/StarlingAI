@@ -15,13 +15,13 @@ import {
   listSessions,
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment } from "../agent/session.js";
-import { runTurn } from "../agent/runtime.js";
+import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
-import { subscribeToAudit } from "../audit/logger.js";
+import { subscribeToAudit, logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
@@ -685,15 +685,43 @@ export class RpcConnection {
           ac.abort();
           cleanupTurn();
           if (this.activeSessionId === session.id) this.activeSessionId = null;
+          // Never dead-end into an empty bubble (audit b6f8336e, 0dc158ad turn 2):
+          // the hard timeout aborts the runtime before synthesis, so recover the
+          // best-available content from the session and deliver THAT instead of a
+          // bare status:error. Persist it before archiving so the transcript isn't
+          // empty either. Fully defensive — any failure falls back to the error.
+          let delivery: { response: string; recoveredAssistantText: boolean } | null = null;
+          try {
+            delivery = buildTimeoutDeliveryMessage(session, { effortTier, timeoutMs: effectiveTurnTimeoutMs });
+          } catch (err) {
+            log.warn({ err, sessionId: session.id }, "Timeout best-available recovery failed");
+          }
+          if (delivery?.response) {
+            try { session.addMessage({ role: "assistant", content: delivery.response }); } catch { /* archive anyway */ }
+          }
           archiveSession(session.id);
-          this.sendEvent({
-            type: "status",
-            data: {
-              status: "error",
+          if (delivery?.response) {
+            logAudit("turn_timeout_recovered", {
               requestId,
-              error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
-            },
-          });
+              recoveredAssistantText: delivery.recoveredAssistantText,
+              chars: delivery.response.length,
+              timeoutMs: effectiveTurnTimeoutMs,
+              effortTier,
+            }, { sessionId: session.id, severity: "warn" });
+            this.sendEvent({
+              type: "status",
+              data: { status: "ok", requestId, response: delivery.response, finishReason: "timeout" },
+            });
+          } else {
+            this.sendEvent({
+              type: "status",
+              data: {
+                status: "error",
+                requestId,
+                error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
+              },
+            });
+          }
         };
 
         if (effectiveTurnTimeoutMs > 0) {

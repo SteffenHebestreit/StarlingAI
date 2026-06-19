@@ -38,6 +38,13 @@ describe("rpc timeout cleanup", () => {
 
     vi.doMock("../agent/runtime.js", () => ({
       runTurn: vi.fn(() => new Promise(() => {})),
+      // Fix B: on timeout the watchdog recovers best-available content instead of an
+      // empty error bubble. The recovery helper is exercised directly in
+      // timeout-delivery.test.ts; here we just confirm the watchdog DELIVERS it.
+      buildTimeoutDeliveryMessage: vi.fn(() => ({
+        response: "⏱️ This turn hit its time budget before producing a final answer. Re-send with a higher effort tier.",
+        recoveredAssistantText: false,
+      })),
     }));
 
     const sent: Array<Record<string, unknown>> = [];
@@ -77,13 +84,25 @@ describe("rpc timeout cleanup", () => {
       expect(session.getSession(active.id)).toBeUndefined();
       expect(session.getSessionRecord(active.id)?.isArchived()).toBe(true);
 
+      // The watchdog now ships the recovered answer (status:ok + finishReason:timeout),
+      // never a bare error bubble (audit b6f8336e / 0dc158ad turn 2).
       const timeoutEvent = sent.find((event) => {
         if (event["type"] !== "status") return false;
         const data = event["data"] as Record<string, unknown> | undefined;
-        return data?.["requestId"] === "turn-1" && String(data["error"] ?? "").includes("Session archived");
+        return data?.["requestId"] === "turn-1" && data["finishReason"] === "timeout";
       });
-
       expect(timeoutEvent).toBeTruthy();
+      const data = timeoutEvent!["data"] as Record<string, unknown>;
+      expect(data["status"]).toBe("ok");
+      expect(String(data["response"] ?? "")).toContain("time budget");
+
+      // ...and no bare error bubble was emitted for this turn.
+      const errorEvent = sent.find((event) => {
+        if (event["type"] !== "status") return false;
+        const d = event["data"] as Record<string, unknown> | undefined;
+        return d?.["requestId"] === "turn-1" && d?.["status"] === "error";
+      });
+      expect(errorEvent).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -7761,6 +7761,62 @@ function persistAssistantTurnState(session: AgentSession, content: string, swarm
  * attachments don't get duplicated when a single artifact bubbles through
  * multiple delegation hops.
  */
+/**
+ * Best-available delivery when the gateway turn watchdog fires (audit b6f8336e,
+ * 0dc158ad turn 2): the hard turn timeout aborts the runtime mid-flight, so the
+ * normal synthesis never runs and the gateway used to ship `status:error` with no
+ * text — the user saw an empty bubble. This recovers something useful from the
+ * session so the turn NEVER dead-ends into silence (the documented never-empty
+ * invariant the watchdog path bypassed):
+ *   - any assistant text already produced THIS turn → relay it with a stopped note;
+ *   - else → an honest notice that the turn hit its time budget (most often a slow
+ *     build/research step that needs more than the current effort tier allows),
+ *     listing any partial artifact saved, plus the actionable retry hint.
+ * Pure + synchronous so the watchdog can call it without awaiting anything.
+ */
+export function buildTimeoutDeliveryMessage(
+  session: AgentSession,
+  opts: { effortTier?: string; timeoutMs: number },
+): { response: string; recoveredAssistantText: boolean } {
+  const history = session.getHistory() as ReadonlyArray<{ role: string; content?: string | null }>;
+  let lastUserIdx = -1;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]!.role === "user") { lastUserIdx = i; break; }
+  }
+  // Substantial assistant text produced AFTER this turn's opening user message.
+  let turnAssistantText = "";
+  for (let i = history.length - 1; i > lastUserIdx; i -= 1) {
+    const m = history[i]!;
+    if (m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 80) {
+      turnAssistantText = m.content.trim();
+      break;
+    }
+  }
+  const artifacts = collectTurnArtifactAttachments(session);
+  const seconds = Math.round(opts.timeoutMs / 1000);
+  const budget = seconds >= 120 ? `${Math.round(seconds / 60)} min` : `${seconds}s`;
+  const tierNote = opts.effortTier && opts.effortTier !== "medium" ? ` (effort: ${opts.effortTier})` : "";
+
+  if (turnAssistantText) {
+    return {
+      response: `${turnAssistantText}\n\n> ⏱️ This turn was stopped at its ${budget} time budget${tierNote} before it could fully finish — the answer above is the best result gathered so far. Re-send with a higher effort tier or a longer \`--timeout\` for the complete version.`,
+      recoveredAssistantText: true,
+    };
+  }
+
+  const lines = [
+    `⏱️ This turn hit its ${budget} time budget${tierNote} before producing a final answer — usually a build or research step that needs more time than this effort tier allows. Nothing was lost.`,
+  ];
+  if (artifacts.length > 0) {
+    lines.push("", "A partial deliverable was saved this turn:");
+    for (const a of artifacts) {
+      lines.push(`- ${String(a["relativePath"] ?? a["filename"] ?? "artifact")}`);
+    }
+  }
+  lines.push("", "To get the full result, re-send the request with a higher effort tier (e.g. medium or high) or a longer `--timeout`.");
+  return { response: lines.join("\n"), recoveredAssistantText: false };
+}
+
 export function collectTurnArtifactAttachments(session: AgentSession): Array<Record<string, unknown>> {
   const history = session.getHistory();
   const attachments: Array<Record<string, unknown>> = [];
