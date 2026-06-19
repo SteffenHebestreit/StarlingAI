@@ -1783,6 +1783,22 @@ function resolveDelegationTaskTitle(args: Record<string, unknown>, task: string)
 }
 
 /**
+ * Read the delegation instruction. Local models sometimes key the brief as `title` or
+ * `taskTitle` and dump the full detail into `context`, leaving `task` empty — audit
+ * 027c9134: a content_writer delegation hard-failed "task is required" and cost a full
+ * round on a max-effort run that was already minutes deep. Fall back to those title
+ * fields so the delegation proceeds instead of dead-ending; a genuinely instruction-less
+ * call still returns "" and is rejected. Structural coercion, not topic/keyword matching.
+ */
+export function deriveDelegationTask(args: Record<string, unknown>): string {
+  const task = String(args["task"] ?? "").trim();
+  if (task) return task;
+  const title = typeof args["title"] === "string" ? String(args["title"]).trim() : "";
+  if (title) return title;
+  return typeof args["taskTitle"] === "string" ? String(args["taskTitle"]).trim() : "";
+}
+
+/**
  * Resolve the per-task soft budgets from config.
  * Returns 0 for any disabled limit. Kept inline so config changes are picked up
  * each call without restart.
@@ -5480,7 +5496,7 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     // agentName is now optional — omitting it triggers undirected swarm bidding
     const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
-    const task = String(args["task"] ?? "").trim();
+    const task = deriveDelegationTask(args);
     const context = args["context"] ? String(args["context"]) : undefined;
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
@@ -5579,7 +5595,7 @@ registerTool({
     required: ["task"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const task = String(args["task"] ?? "").trim();
+    const task = deriveDelegationTask(args);
     const context = args["context"] ? String(args["context"]) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
