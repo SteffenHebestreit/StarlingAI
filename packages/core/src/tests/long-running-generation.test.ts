@@ -234,10 +234,28 @@ describe("longRunningActionForTier (effort-driven auto-resolution)", () => {
   it("medium → ask (surface to the operator dock, current behaviour)", () => {
     expect(longRunningActionForTier("medium")).toBe("ask");
   });
-  it("max → ask for now (interim until the verify-progress agent ships)", () => {
-    expect(longRunningActionForTier("max")).toBe("ask");
+  it("max → unbounded (silent grant; verify-progress guard replaces the operator)", () => {
+    expect(longRunningActionForTier("max")).toBe("unbounded");
   });
   it("undefined tier → ask (safe default = unchanged behaviour)", () => {
     expect(longRunningActionForTier(undefined)).toBe("ask");
+  });
+});
+
+describe("longRunningGenerationManager.markUnbounded / requestStop (verify-progress primitives)", () => {
+  it("markUnbounded grants a run unbounded budget without an operator request", () => {
+    const run = "sub:test:content_writer:42";
+    expect(longRunningGenerationManager.isUnbounded(run)).toBe(false);
+    longRunningGenerationManager.markUnbounded(run);
+    expect(longRunningGenerationManager.isUnbounded(run)).toBe(true);
+  });
+  it("requestStop latches the turn so the run winds down on its next poll (idempotent)", () => {
+    const run = "sub:test:researcher:7";
+    expect(longRunningGenerationManager.isStopRequested(run)).toBe(false);
+    longRunningGenerationManager.requestStop(run, "progress_verifier:drifting");
+    expect(longRunningGenerationManager.isStopRequested(run)).toBe(true);
+    // second call is a no-op (no throw, latch stays set)
+    longRunningGenerationManager.requestStop(run, "progress_verifier:drifting");
+    expect(longRunningGenerationManager.isStopRequested(run)).toBe(true);
   });
 });

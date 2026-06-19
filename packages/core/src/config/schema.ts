@@ -1459,6 +1459,15 @@ export const OrchestrationSchema = z.object({
    *  at 60 s), guaranteeing the parent keeps `reserve` ms to finalize. Default 0 =
    *  identity (today's behavior); set e.g. 90000 to reserve a 90 s synthesis margin. */
   subAgentSynthesisReserveMs: z.number().int().min(0).max(600_000).default(0),
+  /** Opt-in semantic layer of the max-effort progress verifier. At max effort a
+   *  long-running sub-agent is granted unbounded budget silently (no operator dock);
+   *  a STRUCTURAL stall guard (no new tokens AND no new tool calls across windows)
+   *  always watches it. When this is true, an additional bounded LLM judge also reads
+   *  the objective + recent activity each window and winds the run down if it is
+   *  "drifting" (busy but working toward the wrong goal) — the part structure can't
+   *  see. Default false: the judge is an LLM-behavior change that contends for the
+   *  local GPU, so it stays gated until eval'd on a live stack (pass^k). */
+  progressVerifierSemantic: z.boolean().default(false),
   /** When true, a source-sensitive turn where the model refuses to delegate (answers
    *  tool-free from training data even after the delegation nudge) does NOT ship the
    *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes

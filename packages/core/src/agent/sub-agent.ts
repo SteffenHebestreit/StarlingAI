@@ -37,6 +37,14 @@ import {
   DEFAULT_SOFT_THRESHOLD_TOKENS,
 } from "./long-running-generation.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
+import {
+  isHardStall,
+  buildProgressJudgePrompt,
+  parseProgressVerdict,
+  PROGRESS_CHECK_INTERVAL_MS,
+  STALL_LIMIT,
+  type ProgressSample,
+} from "./progress-verifier.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -2706,6 +2714,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // The effort-tier long-running policy (low→stop / high→continue) is auto-applied
     // ONCE per run; this latches so it doesn't re-audit every subsequent iteration.
     let lrgAutoHandled = false;
+    // max-effort silent-unbounded + verify-progress guard state (see progress-verifier.ts).
+    let lrgUnboundedGranted = false;            // unbounded budget granted once, silently
+    let lrgLastProgressCheckAt = 0;             // throttle: one progress check per window
+    let lrgConsecutiveStalls = 0;               // structural hard-stalls in a row
+    let lrgLastSample: ProgressSample = { completionTokens: 0, toolCalls: 0 };
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
     const toolNames: string[] = [];
@@ -3789,9 +3802,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // automatically so the operator isn't pinged on every crossing:
           //   low  → stop now (wind down + synthesise from what's collected)
           //   high → continue WITHOUT a dock prompt (bounded by the tier's 20-min cap)
-          //   medium / max → surface to the operator dock as before
-          // (max's true silent-unbounded is deferred until the verify-progress agent
-          //  the user paired it with exists — until then it keeps the stoppable dock.)
+          //   max  → grant unbounded budget silently; the verify-progress guard
+          //          (structural stall + opt-in semantic judge) watches for a
+          //          runaway run instead of the operator
+          //   medium / undefined → surface to the operator dock as before
           const lrgAction = longRunningActionForTier(currentEffortTier());
           if (lrgAction === "stop" && !lrgAutoHandled) {
             lrgAutoHandled = true;
@@ -3819,6 +3833,77 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             }
             // No dock prompt and no stop — the run keeps going, bounded by the tier's
             // own turnTimeoutMs (the real cap stays in force via turnTimeoutReached).
+          } else if (lrgAction === "unbounded") {
+            // max effort: grant unbounded budget ONCE, silently (no operator dock).
+            // The run finishes naturally; the verify-progress guard below replaces
+            // the operator as the thing that stops a stalled or drifting run.
+            if (!lrgUnboundedGranted) {
+              lrgUnboundedGranted = true;
+              longRunningGenerationManager.markUnbounded(subSessionId);
+              logAudit("long_running_generation_auto_resolved", {
+                agentName: opts.agentName,
+                runSessionId: subSessionId,
+                tier: "max",
+                action: "unbounded",
+                elapsedMs: Date.now() - runStartedAt,
+                completionTokens: usage.completionTokens,
+              }, { sessionId: opts.parentSessionId, severity: "info" });
+            }
+            // Throttled progress check: at most one per window so the judge (when
+            // enabled) can't contend with every iteration of the run it watches.
+            if (Date.now() - lrgLastProgressCheckAt >= PROGRESS_CHECK_INTERVAL_MS) {
+              lrgLastProgressCheckAt = Date.now();
+              const sample: ProgressSample = { completionTokens: usage.completionTokens, toolCalls: toolCount };
+              // (1) STRUCTURAL stall guard — always on, deterministic, no LLM, no keywords.
+              lrgConsecutiveStalls = isHardStall(lrgLastSample, sample) ? lrgConsecutiveStalls + 1 : 0;
+              lrgLastSample = sample;
+              let intervention: { verdict: "stalled" | "drifting"; reason: string } | null = null;
+              if (lrgConsecutiveStalls >= STALL_LIMIT) {
+                intervention = {
+                  verdict: "stalled",
+                  reason: `no new completion tokens or tool calls across ${lrgConsecutiveStalls} ${Math.round(PROGRESS_CHECK_INTERVAL_MS / 1000)}s windows`,
+                };
+              } else if (getConfig().orchestration?.progressVerifierSemantic) {
+                // (2) SEMANTIC direction judge — opt-in, bounded, fail-open. A busy
+                // run can still be working toward the wrong goal; one small judge
+                // call reads the objective + recent activity and flags drift. Any
+                // error/timeout/parse-failure resolves to on_track (never dead-ends).
+                try {
+                  const lastAssistant = [...history].reverse().find(
+                    (m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0,
+                  );
+                  const recentActivity = [
+                    lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
+                    toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
+                  ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
+                  const judgeProvider = getChatProviderForTier("routing") ?? provider;
+                  const judgeResp = await judgeProvider.complete(
+                    buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
+                    [],
+                    signal,
+                  );
+                  const verdict = parseProgressVerdict(judgeResp.content);
+                  if (verdict.verdict === "drifting") intervention = { verdict: "drifting", reason: verdict.reason };
+                } catch {
+                  // fail-open: a judge failure must never stop a healthy run.
+                }
+              }
+              if (intervention) {
+                longRunningGenerationManager.requestStop(subSessionId, `progress_verifier:${intervention.verdict}`);
+                lrgOperatorStop = true;
+                turnTimeoutReached = true;
+                logAudit("progress_verifier_intervened", {
+                  agentName: opts.agentName,
+                  runSessionId: subSessionId,
+                  verdict: intervention.verdict,
+                  reason: intervention.reason,
+                  elapsedMs: Date.now() - runStartedAt,
+                  completionTokens: usage.completionTokens,
+                  toolCalls: toolCount,
+                  iterations,
+                }, { sessionId: opts.parentSessionId, severity: "warn" });
+              }
+            }
           } else if (lrgAction === "ask") {
             // Idempotent per run: only the first crossing surfaces a dock entry.
             longRunningGenerationManager.notifyLongRunning({

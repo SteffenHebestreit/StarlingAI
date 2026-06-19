@@ -67,17 +67,18 @@ export type LongRunningState = "pending" | "resolved" | "stopped";
  *            the low-effort prompt addendum that pushes the least-work path).
  *   - high → "continue": keep going WITHOUT a dock prompt, bounded by the tier's own
  *            turn budget (the 20-min high cap stays the real bound).
- *   - max  → "ask" for now (INTERIM): true silent-unbounded is unsafe without the
- *            verify-progress agent the user paired it with — until that ships, max
- *            keeps the advisory dock so a runaway unbounded run can still be stopped.
+ *   - max  → "unbounded": grant unbounded budget silently (no dock) so the run
+ *            finishes naturally; the verify-progress guard — not the operator —
+ *            stops a stalled or drifting run (see progress-verifier.ts).
  *   - medium / undefined → "ask": current behaviour (surface to the operator dock).
  * Pure + unit-tested so the policy is verifiable without a running turn.
  */
-export type LongRunningTierAction = "ask" | "continue" | "stop";
+export type LongRunningTierAction = "ask" | "continue" | "stop" | "unbounded";
 export function longRunningActionForTier(tier: import("../config/schema.js").EffortTier | undefined): LongRunningTierAction {
   if (tier === "low") return "stop";
   if (tier === "high") return "continue";
-  return "ask"; // medium + max (interim, pending verify-progress agent) + undefined
+  if (tier === "max") return "unbounded";
+  return "ask"; // medium + undefined → unchanged operator-dock behaviour
 }
 
 export interface LongRunningRequest {
@@ -443,6 +444,35 @@ class LongRunningGenerationManager extends EventEmitter {
    *  per-iteration check in the sub-agent loop before deciding to ask. */
   isUnbounded(runSessionId: string): boolean {
     return this._unboundedRuns.has(runSessionId);
+  }
+
+  /**
+   * Grant a run unbounded budget WITHOUT going through the operator dock. This is
+   * the `max`-effort path: the user opted into "auto-choose unbounded, don't ask
+   * me", so the run finishes naturally (the sub-agent loop's `isUnbounded` check
+   * suspends the hard turn-timeout kill). The verify-progress guard, not the
+   * operator, is what stops a runaway run in this mode. Idempotent.
+   */
+  markUnbounded(runSessionId: string): void {
+    this._unboundedRuns.add(runSessionId);
+  }
+
+  /**
+   * Ask a run to wind down from code (not the operator dock) — used by the
+   * progress verifier when a max-effort run stalls or drifts. Sets the same
+   * per-turn latch an operator `stop` would, so the sub-agent loop's existing
+   * `isStopRequested` poll synthesises the best-available result on its next
+   * iteration and hands it back to the orchestrator. Idempotent.
+   */
+  requestStop(runSessionId: string, reason = "progress_verifier"): void {
+    const root = rootOf(runSessionId);
+    if (this._stopRequestedRoots.has(root)) return;
+    this._stopRequestedRoots.add(root);
+    logAudit("long_running_generation_stopped", {
+      agentName: "progress_verifier",
+      runSessionId,
+      reason,
+    }, { severity: "info" });
   }
 
   /** Clear the per-turn `stop` latch for a root session. Called at the start of

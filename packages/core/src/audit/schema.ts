@@ -109,6 +109,8 @@ export type CoreAuditEventType =
   | "long_running_generation_stopped"
   | "long_running_generation_auto_stopped"
   | "long_running_generation_auto_resolved"
+  // Progress verifier — oversight for max-effort silent-unbounded runs
+  | "progress_verifier_intervened"
   // Mid-turn user steering — fold user guidance into a running turn
   | "turn_steering_enqueued"
   | "turn_steering_injected"
