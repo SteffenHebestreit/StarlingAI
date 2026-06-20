@@ -2802,6 +2802,10 @@ const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "synthesis_required_tool_call_rejected",
   "all_tool_calls_blocked",
   "max_tool_iterations",
+  // Warden hard-stop after two consecutive delegation failures: same contract — the
+  // runtime is giving up on orchestration, so surface the evidence already gathered
+  // (e.g. shared findings) instead of a generic synthesis (audit 0602f246).
+  "delegation_failures_terminal",
 ]);
 
 /**
@@ -7246,7 +7250,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       } else if (disposition === "failure") {
         _consecutiveDelegationFailures += 1;
         if (_consecutiveDelegationFailures >= 2) {
-          // D16: Warden escalation
+          // D16: Warden escalation. The system message alone relied on the model to obey
+          // "stop delegating" — a model that keeps delegating (or varies the delegation
+          // TOOL between the uncapped parallel_delegate / run_task_graph so neither the
+          // per-turn cap nor the identical-output / tool-set loop detectors trip) churns
+          // to the iteration cap. At max effort (turnTimeoutMs:0) that is a multi-minute
+          // run with sustained event-loop lag and no final answer (audit 0602f246). Make
+          // the warden's terminal intent REAL: break to the forceSynthesis path now, the
+          // same way the all-blocked-iterations guard does. Structural (keyed on the
+          // failure counter, which resets to 0 on any successful delegation — so this only
+          // fires when two delegations failed with no intervening progress), not on the
+          // message text, agent name, or language.
           _forcedSynthesisFired = true; // F29
           session.addMessage({
             role: "system",
@@ -7257,6 +7271,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               "If there is no usable evidence, tell the user honestly that the information could not be retrieved at this time and suggest what they could do next. " +
               "Do NOT call any more delegation tools in this turn.",
           });
+          terminalFinishReason = "delegation_failures_terminal";
+          terminalSynthesisInstruction =
+            "Two or more consecutive delegation attempts failed this turn, so no further delegation will be attempted. " +
+            "Using ONLY the evidence already gathered in this conversation (including any shared findings), write the best possible final answer NOW, in the user's language. " +
+            "If no usable evidence exists, tell the user honestly that the information could not be retrieved and suggest a concrete next step. " +
+            "Do NOT re-paste an earlier turn's answer as if new work was completed.";
+          break;
         } else {
           session.addMessage({
             role: "system",
@@ -7403,6 +7424,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     "all_tool_calls_blocked",
     "synthesis_required_tool_call_rejected",
     "max_tool_iterations",
+    "delegation_failures_terminal",
   ]);
   if (
     REGURGITATION_GUARD_REASONS.has(terminalFinishReason)

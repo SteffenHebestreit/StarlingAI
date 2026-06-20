@@ -863,6 +863,49 @@ describe("runtime delegated-loop regressions", () => {
     );
   });
 
+  it("breaks to forced synthesis after two consecutive delegation failures (warden stop is structural, not advisory)", async () => {
+    // The model keeps trying to delegate and every delegation fails. The warden's
+    // "[WARDEN STOP — FORCED SYNTHESIS]" message used to only ASK the model to stop —
+    // a model that ignores it (or varies the delegation tool so the loop detectors
+    // don't trip) churned to the iteration cap. At max effort (turnTimeoutMs:0) that was
+    // a multi-minute run with sustained event-loop lag and no answer (audit 0602f246).
+    // The warden now BREAKS to forceSynthesis after the 2nd consecutive failure.
+    streamMock.mockImplementation(() => createDelegateToolCallStream("call_fail", {
+      agentName: "researcher",
+      // Non-source-sensitive phrasing so the delegation isn't rewritten/rerouted.
+      task: "Summarize how StarlingAI can improve itself.",
+    }));
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Sub-agent produced no final response.",
+      metadata: {
+        agentName: "researcher",
+        attemptedAgents: ["researcher"],
+        delegationSucceeded: false,
+        delegationOutcome: "failure",
+      },
+    }));
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({ session, userMessage: "Summarize how StarlingAI can improve itself." });
+
+    expect(result.blocked).toBe(false);
+    expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
+    // Broke after the 2nd consecutive failure — did NOT churn to the iteration/per-turn cap.
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(2);
+  });
+
   it("forces synthesis when the model tries to delegate again after synthesis was already required", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
@@ -1271,7 +1314,10 @@ describe("runtime delegated-loop regressions", () => {
       expect(result.response).toContain("microphone array");
       // And it must be wrapped with a clear preamble explaining the situation.
       expect(result.response).toMatch(/Recherche.*unterbrochen|Dossier/i);
-      expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+      // Two consecutive failed delegations trip the warden hard-stop; the shared-facts
+      // evidence backstop still reformats the dump (delegation_failures_terminal is in
+      // EVIDENCE_BACKSTOP_GIVE_UP_REASONS).
+      expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
     } finally {
       await resetSharedMemoryForTests();
     }
@@ -1633,7 +1679,10 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.response).toContain("local retry queue");
     expect(result.response).not.toContain("No workflows matched");
     expect(result.response).not.toContain("No agents matched");
-    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    // Two consecutive partial/chatter delegations now trip the warden hard-stop
+    // (delegation_failures_terminal) one iteration before the synthesis-required path
+    // would have; the shared-facts evidence backstop still surfaces (see set above).
+    expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
     expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(streamMock.mock.calls.length).toBeLessThanOrEqual(3);
     expect(delegateExecuteMock.mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -1712,7 +1761,9 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.response).toContain("still need current-source verification");
     expect(result.response).not.toContain("SOURCE-SENSITIVE DELEGATION SLICE");
     expect(result.response).not.toContain("ich möchte ein sehr portables");
-    expect(result.performance?.finishReason).toBe("synthesis_required_tool_call_rejected");
+    // Warden hard-stop after the 2nd consecutive failed delegation (was the
+    // synthesis-required path one iteration later); shared findings still surface.
+    expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
     expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(streamMock.mock.calls.length).toBeLessThanOrEqual(3);
     expect(delegateExecuteMock.mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -5744,11 +5795,12 @@ describe("runtime delegated-loop regressions", () => {
 
     expect(result.blocked).toBe(false);
     expect(result.response).toBe("synthesized");
-    expect(streamMock).toHaveBeenCalledTimes(3);
+    // The warden hard-stop BREAKS the loop at the 2nd consecutive failure — it does NOT
+    // let the model make a 3rd (rejected) delegation attempt the way the old advisory
+    // message did. Exactly 2 stream calls + 2 delegations, then forced synthesis.
+    expect(streamMock).toHaveBeenCalledTimes(2);
     expect(delegateExecuteMock).toHaveBeenCalledTimes(2);
-    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "synthesis_required", details: "post_orchestration_tool_call_rejected" }),
-    ]));
+    expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(2);
