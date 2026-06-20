@@ -465,7 +465,15 @@ export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssi
   const sourceVerificationByTerm = SOURCE_HINT_TERMS.some((term) => normalized.includes(term))
     || PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))
     || RESEARCH_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
-  const webLookupByTerm = WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term));
+  // A URL in the request is a language-independent STRUCTURAL signal that external
+  // content must be FETCHED: the orchestrator (no direct web tools in this mode) must
+  // route to a web-capable specialist to read it, not dead-end with "I can't access
+  // websites" and ask the user to paste it (audit 021d67c3: "erstelle ein Preisangebot
+  // zu dieser Anzeige: <freelancermap URL>" matched ZERO keyword patterns → null guidance
+  // → direct refusal). Keyed on the URL's presence, not on any topic/intent lexicon. The
+  // inlineReview suppression below still applies when the user PASTED the content.
+  const containsActionableUrl = /\bhttps?:\/\/[^\s<>"'`)\]]+/i.test(userMessage);
+  const webLookupByTerm = WEB_LOOKUP_HINT_TERMS.some((term) => normalized.includes(term)) || containsActionableUrl;
   // Availability/release/regional-access questions need current external facts.
   // Suppressed when the subject is the assistant itself ("are you available",
   // "bist du verfügbar") so a meta/small-talk question is not forced into web

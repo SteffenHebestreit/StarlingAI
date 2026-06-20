@@ -104,6 +104,30 @@ describe("runtime turn guidance", () => {
     expect(guidance?.sourceSensitive ?? false).toBe(false);
   });
 
+  it("treats a URL in the request as source-sensitive so the orchestrator FETCHES it (audit 021d67c3)", () => {
+    // "erstelle ein Preisangebot zu dieser Anzeige: <URL>" matched zero keyword patterns,
+    // so the turn answered directly with a dead-end "I can't access websites" refusal and
+    // asked the user to paste the listing. A URL is a structural signal that external
+    // content must be fetched — it must force a web-capable delegation, not a refusal.
+    const guidance = buildDynamicTurnGuidance(
+      "erstelle mir zu dieser Anzeige ein Preisangebot:\nhttps://www.freelancermap.de/projekt/entwicklung-eines-ki-gestuetzten-whatsapp-assistenten-fuer-schulen-n8n-openai",
+      "orchestration_only",
+    );
+    expect(guidance).not.toBeNull();
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("treats a bare English 'summarize this page <URL>' as source-sensitive", () => {
+    const guidance = buildDynamicTurnGuidance("summarize this page for me https://example.com/some/article", "orchestration_only");
+    expect(guidance?.sourceSensitive).toBe(true);
+  });
+
+  it("does not flag a plain message without a URL or web hint", () => {
+    // Guard against over-firing: no URL, no web/source/artifact term → null guidance,
+    // so a plain chat turn still answers directly.
+    expect(buildDynamicTurnGuidance("write me a short haiku about the sea", "orchestration_only")?.sourceSensitive ?? false).toBe(false);
+  });
+
   it("treats downloadable HTML artifact requests as artifact deliverables", () => {
     const guidance = buildDynamicTurnGuidance("now generate a downloadable html page as a detailed how-to blog and generate artifacts we can see here", "orchestration_only");
 
