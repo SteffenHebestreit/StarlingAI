@@ -179,6 +179,8 @@ export type CoreAuditEventType =
   | "plan_approval_requested"
   | "plan_approval_resolved"
   | "unverified_source_sensitive_answer_caveated"
+  // Reuse-don't-re-research: nudged the orchestrator to refine from session evidence
+  | "session_evidence_reuse_nudged"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health

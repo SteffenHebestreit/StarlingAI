@@ -1482,6 +1482,19 @@ export const OrchestrationSchema = z.object({
    *  non-English delegation on the shared GPU, so it stays gated until live eval shows the
    *  routing/quality lift beats the latency. */
   normalizeDelegationToEnglish: z.boolean().default(false),
+  /** Reuse-don't-re-research (audit 17f53ed0): a follow-up that REFINES a deliverable
+   *  already produced this session ("make a proper offer", "tighten it up") otherwise
+   *  makes the orchestrator re-run the FULL research mission whose evidence is still
+   *  sitting in the conversation — a 15-minute web re-fetch in the audit. When true, a
+   *  turn that (a) already has substantial delegated evidence in this session's history
+   *  and (b) introduces no new URL to fetch gets a lean one-line nudge to reuse that
+   *  evidence and refine from it, delegating fresh research ONLY for facts the existing
+   *  evidence does not cover. Structural trigger (prior-evidence-exists + no-new-URL),
+   *  not a keyword regex; a soft nudge with an explicit escape clause, so the model still
+   *  researches when the request genuinely needs new external facts. Default OFF until
+   *  live eval confirms it cuts the redundant-research latency without starving
+   *  genuinely-new follow-ups. */
+  reuseSessionEvidenceOnRefinement: z.boolean().default(false),
   /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
    *  research delegation for a source-sensitive turn came back partial / cancelled /
    *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact

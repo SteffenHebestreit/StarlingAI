@@ -2777,6 +2777,44 @@ function buildPriorEvidenceFollowUpPrompt(evidence: { evidence: string; itemCoun
 }
 
 /**
+ * Reuse-don't-re-research nudge (audit 17f53ed0). The narrow
+ * `shouldReusePriorDelegateEvidenceForSourceFollowUp` only fires for source-sensitive
+ * follow-ups matching a contextual-decision regex, so a plain refinement like "Mache ein
+ * ordentliches Angebot" slipped through and the orchestrator re-ran a 15-minute research
+ * mission whose evidence was still in the conversation. This is the broader, purely
+ * STRUCTURAL gate: substantial delegated evidence already exists in this session AND the
+ * new message introduces no new URL to fetch. It does NOT try to detect "same subject"
+ * lexically — instead the injected nudge is conditional ("if it can be answered from the
+ * existing evidence"), so a genuinely-new follow-up (e.g. an unrelated question not
+ * covered by the prior evidence) still delegates fresh. A new URL is the one hard signal
+ * of new external work, so its presence disables the nudge.
+ */
+export function shouldNudgeSessionEvidenceReuse(input: {
+  enabled: boolean;
+  narrowReuseAlreadyFired: boolean;
+  priorEvidence: { evidence: string; itemCount: number } | null;
+  userMessage: string;
+}): boolean {
+  if (!input.enabled) return false;
+  // The narrow source-sensitive reuse path injects a stronger directive — don't double up.
+  if (input.narrowReuseAlreadyFired) return false;
+  // Need a real prior deliverable's worth of evidence, not a one-liner.
+  if (!input.priorEvidence || input.priorEvidence.evidence.length < 800) return false;
+  // A URL in the new message is a fresh fetch target = genuinely new external work.
+  if (/\bhttps?:\/\//i.test(input.userMessage)) return false;
+  return true;
+}
+
+export function buildSessionEvidenceReuseNudge(evidence: { evidence: string; itemCount: number }): string {
+  const approxKb = Math.max(1, Math.round(evidence.evidence.length / 1000));
+  return [
+    `[SESSION EVIDENCE] Earlier in THIS session you already gathered sourced research evidence (~${approxKb}KB, ${evidence.itemCount} item(s)) — it is still in the conversation above.`,
+    "If the latest request can be answered or REFINED from that evidence (e.g. re-pricing, restructuring, correcting, or extending the existing deliverable), reuse it and do NOT re-run the research.",
+    "Delegate fresh research ONLY for specific facts the existing evidence does not already cover.",
+  ].join(" ");
+}
+
+/**
  * Decide whether to skip the LLM synthesis call entirely and surface the
  * delegated evidence verbatim.  Fires when either the model has been
  * caught looping on rejected tool calls (`synthesis_required_tool_call_rejected`)
@@ -3866,6 +3904,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const priorEvidenceFollowUpPrompt = reusePriorDelegateEvidenceForFollowUp && priorDelegateEvidenceForFollowUp
     ? buildPriorEvidenceFollowUpPrompt(priorDelegateEvidenceForFollowUp)
     : "";
+  // Reuse-don't-re-research nudge (audit 17f53ed0): broader, structural sibling of the
+  // narrow source-sensitive reuse path above — keeps a refinement turn from re-running
+  // the full research mission whose evidence is already in this session's history.
+  const sessionEvidenceReuseNudge = shouldNudgeSessionEvidenceReuse({
+    enabled: effectiveOrchestration().reuseSessionEvidenceOnRefinement === true,
+    narrowReuseAlreadyFired: reusePriorDelegateEvidenceForFollowUp,
+    priorEvidence: priorDelegateEvidenceForFollowUp,
+    userMessage,
+  })
+    ? buildSessionEvidenceReuseNudge(priorDelegateEvidenceForFollowUp!)
+    : "";
+  if (sessionEvidenceReuseNudge && priorDelegateEvidenceForFollowUp) {
+    logAudit("session_evidence_reuse_nudged", {
+      evidenceChars: priorDelegateEvidenceForFollowUp.evidence.length,
+      evidenceItems: priorDelegateEvidenceForFollowUp.itemCount,
+    }, { sessionId: session.id });
+  }
   let allowedToolNames = getMainAssistantToolNames(effectiveToolMode);
   const suppressAgentCatalogTool = Boolean(
     (initialDynamicGuidance?.freshnessSensitive || initialDynamicGuidance?.sourceSensitive || initialDynamicGuidance?.artifactSensitive)
@@ -4703,6 +4758,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       { role: "system", content: temporalContext },
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
+      ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
       ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
