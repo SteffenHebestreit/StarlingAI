@@ -4,6 +4,7 @@ import * as engram from "../retrieval/engram.js";
 import {
   retrieveDocumentContext,
   formatDocumentContext,
+  buildInlineDocumentContext,
   activeScopeSources,
   resolveScopeSource,
   type RetrievedChunk,
@@ -137,5 +138,42 @@ describe("formatDocumentContext", () => {
     expect(out).toContain("Doc1");
     expect(out).not.toContain("Doc2"); // second block exceeds the cap
     spy.mockRestore();
+  });
+});
+
+describe("buildInlineDocumentContext (audit ef9bd480 — inline a small attached doc whole)", () => {
+  const offer = [{ title: "ANGEBOT.PDF", text: "Testing & QA 20 Std 1.900€\nZwischensumme 248 Std\nGesamtpreis 40.000€" }];
+
+  it("is null when the flag is off (default) — keeps today's semantic-excerpt path", () => {
+    expect(buildInlineDocumentContext(offer, { inlineSmallDocuments: false, inlineThresholdChars: 12000 })).toBeNull();
+  });
+
+  it("inlines the FULL text verbatim for a small doc when enabled", () => {
+    const out = buildInlineDocumentContext(offer, { inlineSmallDocuments: true, inlineThresholdChars: 12000 });
+    expect(out).not.toBeNull();
+    // The page-2 rows the model wrongly called 'missing' are present verbatim.
+    expect(out!).toContain("Testing & QA 20 Std 1.900€");
+    expect(out!).toContain("Gesamtpreis 40.000€");
+    expect(out!).toContain("[Doc: ANGEBOT.PDF — full text]");
+    expect(out!).toContain("COMPLETE text");
+    expect(out!).toMatch(/Do NOT claim .* is absent/);
+  });
+
+  it("falls back to retrieval (null) when the combined text exceeds the threshold", () => {
+    const big = [{ title: "BIG.PDF", text: "x".repeat(13000) }];
+    expect(buildInlineDocumentContext(big, { inlineSmallDocuments: true, inlineThresholdChars: 12000 })).toBeNull();
+  });
+
+  it("is null when nothing was attached this turn", () => {
+    expect(buildInlineDocumentContext([], { inlineSmallDocuments: true, inlineThresholdChars: 12000 })).toBeNull();
+  });
+
+  it("sums across multiple attached docs for the threshold", () => {
+    const two = [{ title: "A", text: "a".repeat(7000) }, { title: "B", text: "b".repeat(7000) }];
+    // 14000 > 12000 → fall back; both are this-turn docs and would otherwise be inlined together.
+    expect(buildInlineDocumentContext(two, { inlineSmallDocuments: true, inlineThresholdChars: 12000 })).toBeNull();
+    const out = buildInlineDocumentContext(two, { inlineSmallDocuments: true, inlineThresholdChars: 20000 });
+    expect(out!).toContain("[Doc: A — full text]");
+    expect(out!).toContain("[Doc: B — full text]");
   });
 });

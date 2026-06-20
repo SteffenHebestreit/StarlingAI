@@ -77,6 +77,9 @@ export interface IngestDocumentResult {
   scope: DocumentScope;
   source: string;
   title: string;
+  /** The full extracted text that was ingested. Surfaced so the runtime can inline a
+   *  small just-attached document in full instead of re-fetching top-k chunks. */
+  text: string;
 }
 
 export type IngestOutcome =
@@ -154,7 +157,7 @@ export async function ingestDocumentText(input: {
 
   return {
     ok: true,
-    result: { ...res, scope: input.scope, source, title: input.title },
+    result: { ...res, scope: input.scope, source, title: input.title, text: input.text },
   };
 }
 
@@ -236,6 +239,32 @@ export function formatDocumentContext(chunks: RetrievedChunk[]): string {
   );
 }
 
+/**
+ * Build a FULL-text inline context block for documents attached THIS turn, or null when
+ * inlining is disabled, there are no fresh docs, or their combined text exceeds the
+ * threshold (→ fall back to lean semantic retrieval). Inlining the whole small doc is what
+ * the user wants when they attach a short file and ask about it — the semantic top-k path
+ * silently drops sections and the model then reports present content as "missing" (audit
+ * ef9bd480). Pure + exported for testing.
+ */
+export function buildInlineDocumentContext(
+  docs: Array<{ title: string; text: string }>,
+  cfg: { inlineSmallDocuments: boolean; inlineThresholdChars: number },
+): string | null {
+  if (!cfg.inlineSmallDocuments || docs.length === 0) return null;
+  const totalChars = docs.reduce((n, d) => n + d.text.length, 0);
+  if (totalChars > cfg.inlineThresholdChars) return null;
+  const names = docs.map((d) => d.title.trim() || "document").join(", ");
+  const header =
+    `The user attached ${docs.length} document(s) this turn (${names}). ` +
+    `Their COMPLETE text is included below — treat it as the full, authoritative document(s) and answer directly from it. ` +
+    `Do NOT claim a section, line item, or figure is absent unless it is genuinely not in the text below.`;
+  const body = docs
+    .map((d) => `[Doc: ${d.title.trim() || "document"} — full text]\n${d.text.trim()}`)
+    .join("\n\n---\n\n");
+  return `${header}\n\n${body}`;
+}
+
 /** List the documents visible to this turn's scope. */
 export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[]> {
   if (!engramConfigured()) return [];
@@ -272,6 +301,8 @@ export async function augmentTurnWithDocuments(input: {
   let ingested = 0;
   let failed = 0;
   const ingestedNames: string[] = [];
+  // Full extracted text of docs attached THIS turn — used to inline small docs whole.
+  const ingestedDocs: Array<{ title: string; text: string }> = [];
 
   if (cfg.autoIngestAttachments && input.attachments?.length) {
     const [{ readFile }, { resolvePathWithinWorkspace }, { basename }] = await Promise.all([
@@ -296,6 +327,7 @@ export async function augmentTurnWithDocuments(input: {
         if (outcome.ok) {
           ingested += 1;
           ingestedNames.push(outcome.result.title);
+          ingestedDocs.push({ title: outcome.result.title, text: outcome.result.text });
         } else {
           failed += 1;
         }
@@ -308,17 +340,27 @@ export async function augmentTurnWithDocuments(input: {
 
   if (!cfg.injectContext) return { ingested, failed, contextBlock: "" };
 
+  // Reuse-the-whole-doc (audit ef9bd480): when the user just attached small document(s),
+  // inline their FULL text instead of a handful of semantic top-k excerpts that silently
+  // drop sections (the page-2 budget rows the model then wrongly called "missing"). Only
+  // THIS turn's freshly-attached docs under the threshold; large + prior-turn docs stay on
+  // the lean retrieval path below. Costs no extra engram/LLM call — the text is in hand.
+  const inlineBlock = buildInlineDocumentContext(ingestedDocs, cfg);
+  if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock };
+
   const chunks = await retrieveDocumentContext(input.query, input.ctx);
   let contextBlock = formatDocumentContext(chunks);
 
   // When documents were just attached, always note them (even if same-turn
   // retrieval surfaced little) so the assistant knows the content is indexed and
   // can pull more with search_documents — the prompt stays lean (a hint + the
-  // few most relevant excerpts) instead of carrying the whole document.
+  // few most relevant excerpts) instead of carrying the whole document. The excerpts
+  // are a PARTIAL sample, so the model must not treat them as exhaustive: declaring a
+  // section "missing" from a sample is exactly the false-negative seen in audit ef9bd480.
   if (ingestedNames.length > 0) {
     const hint =
       `The user attached ${ingestedNames.length} document(s) this turn (${ingestedNames.join(", ")}), now indexed in the document library. ` +
-      `Their full text is NOT inlined here — call search_documents to retrieve specific passages on demand. ` +
+      `The excerpts below are a PARTIAL semantic sample, NOT the full document — before stating that any section, line item, or figure is absent or missing, call search_documents to retrieve the relevant part (e.g. tables, totals, hours). ` +
       `Any directly relevant excerpts found for the current message are included below.`;
     contextBlock = contextBlock ? `${hint}\n\n${contextBlock}` : hint;
   }

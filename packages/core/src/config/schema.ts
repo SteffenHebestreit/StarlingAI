@@ -614,6 +614,18 @@ export const DocumentRagSchema = z.object({
   minRerankScore: z.number().min(0).max(1).default(0),
   /** Cap on the total characters of injected document context per turn. */
   maxContextChars: z.number().int().min(500).max(50000).default(6000),
+  /** Reuse-the-whole-doc fix (audit ef9bd480): when a file attached THIS turn is small
+   *  enough to fit a prompt, inline its FULL extracted text instead of a handful of
+   *  semantic top-k excerpts. The default RAG path reduced an ~11KB / 3-page offer PDF to
+   *  6 chunks (6000-char cap), dropped the page-2 budget rows, and the model then declared
+   *  present line-items "missing". Inlining the whole small doc is what the user actually
+   *  wants when they attach something and say "evaluate this". Default OFF until live eval
+   *  confirms it; only the just-attached doc is inlined (large docs + prior-turn docs stay
+   *  on the lean retrieval path). */
+  inlineSmallDocuments: z.boolean().default(false),
+  /** Max total extracted chars across THIS turn's freshly-attached docs to inline in full.
+   *  Above this the lean semantic-retrieval path is used instead. */
+  inlineThresholdChars: z.number().int().min(1000).max(50000).default(12000),
   /** Settings toggle: also search the current user's personal document corpus (`user:<id>`). */
   includeUserDocs: z.boolean().default(false),
   /** Settings toggle: also search the workspace-shared document corpus (`workspace:<name>`). */
