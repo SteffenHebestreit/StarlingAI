@@ -1460,6 +1460,22 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
+  /** Deliverable self-consistency gate (audit 17f53ed0). The acceptance-criteria QA gates
+   *  (riskGatedQA / qaDeliveryLoop) only run on plan-bearing turns and check GROUNDING +
+   *  criteria coverage — neither checks whether the deliverable's OWN figures and arithmetic
+   *  cohere. A single research delegation that synthesizes a deliverable records no plan, so
+   *  a self-contradictory answer ships unchecked (a price quote recommending 10k for ~10
+   *  weeks while itself stating a 90–120 €/h market rate ≈ 37 €/h — the user corrected it 3×).
+   *  When true, a substantive deliverable the acceptance-criteria gates did NOT cover gets one
+   *  bounded consistency check: do its own numbers/arithmetic agree, and do they contradict
+   *  any figure/constraint the user explicitly stated? Concrete contradictions → a bounded
+   *  fix-only repair. Structural trigger (length + no acceptance-criteria QA ran), not
+   *  topic/keywords; fails OPEN. Default OFF — it adds one synthesis-tier check call per
+   *  substantive plan-less turn on the slow local model, so it stays gated until pass^k. */
+  deliverableConsistencyQa: z.boolean().default(false),
+  /** Max consistency repair rounds (each = one check + one fix call). Low — a consistency
+   *  fix is usually one shot, and every round is extra slow-model latency. */
+  deliverableConsistencyQaMaxRounds: z.number().int().min(1).max(3).default(1),
   /** When true, the one bounded corrective build RESUMES a partial deliverable instead
    *  of regenerating it. If an earlier build attempt THIS turn left a file that genuinely
    *  looks cut off mid-document (artifactFileLooksTruncated: HTML missing </html>, JSON that

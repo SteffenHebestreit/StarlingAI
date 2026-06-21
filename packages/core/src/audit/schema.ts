@@ -181,6 +181,9 @@ export type CoreAuditEventType =
   | "unverified_source_sensitive_answer_caveated"
   // Reuse-don't-re-research: nudged the orchestrator to refine from session evidence
   | "session_evidence_reuse_nudged"
+  // Deliverable self-consistency gate (plan-less internal-consistency check before delivery)
+  | "deliverable_consistency_passed"
+  | "deliverable_consistency_repaired"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health

@@ -10,6 +10,13 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, typ
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
+import {
+  shouldCheckDeliverableConsistency,
+  collectUserStatements,
+  buildDeliverableConsistencyCheckMessages,
+  buildDeliverableConsistencyRepairInstruction,
+  DELIVERABLE_CONSISTENCY_CRITERION,
+} from "./deliverable-consistency.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
@@ -5999,6 +6006,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           : "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.\n\nI did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.";
       }
 
+      // Tracks whether an ACCEPTANCE-CRITERIA QA check actually ran this turn (the
+      // riskGatedQA criteria-verify or the qaDeliveryLoop) — those fold a consistency check
+      // in, so the plan-less deliverable-consistency gate below skips when one did, avoiding
+      // a redundant slow-model call. NOT set by the evidence-anchoring path (that checks
+      // grounding, not internal consistency), so source-sensitive plan-less turns still get
+      // the consistency gate.
+      let acceptanceCriteriaQaRan = false;
+
       // Risk-gated auto-verify QA gate: for high-stakes turns that recorded a
       // plan with acceptance criteria, check the answer against those criteria
       // and repair if it falls short. Source-sensitive turns were already
@@ -6054,6 +6069,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               }, { sessionId: session.id, severity: "info" });
             }
           } else if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
+            acceptanceCriteriaQaRan = true;
             const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
               + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
               + "\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
@@ -6091,6 +6107,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         const dlPlan = await loadTurnPlan(session.id);
         const criteria = dlPlan?.acceptanceCriteria ?? [];
         if (criteria.length > 0) {
+          acceptanceCriteriaQaRan = true;
           // Coordinator escalation (orchestration.qaDeliveryLoopEscalateToCoordinator):
           // when a cheap re-synthesis round has already failed the re-check, the gap
           // needs NEW work, not a rewrite — hand the flaws to the coordinator to make a
@@ -6160,6 +6177,46 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             acceptanceCriteria: criteria.length,
           }, { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
         }
+      }
+
+      // Deliverable self-consistency gate (audit 17f53ed0): plan-less deliverable turns get
+      // NO acceptance-criteria QA, so an internally inconsistent answer ships — a price quote
+      // recommending 10k for ~10 weeks while itself stating a 90–120 €/h market rate (≈37 €/h),
+      // which the user had to correct three times. For a substantive deliverable the
+      // acceptance-criteria gates did NOT cover, run one bounded check: do the answer's own
+      // figures/arithmetic cohere and contradict nothing the user explicitly stated? Concrete
+      // contradictions → a fix-only repair. Structural trigger (length + no acceptance-criteria
+      // QA), fails open, flag-gated default-off (one extra synthesis-tier call per plan-less
+      // deliverable on the slow local model). Runs BEFORE the downstream safety guards so the
+      // repaired text is re-scanned/re-validated by them.
+      if (
+        shouldCheckDeliverableConsistency({
+          enabled: effectiveOrchestration().deliverableConsistencyQa,
+          aborted: signal.aborted,
+          finalResponse,
+          acceptanceCriteriaQaRan,
+          delegationCount: _turnDelegationCount,
+        })
+      ) {
+        const userStatements = collectUserStatements(session.getHistory(), 2000);
+        const gate = await runDeliverableConsistencyGate(
+          session, provider, signal, finalResponse, userStatements,
+          effectiveOrchestration().deliverableConsistencyQaMaxRounds,
+        );
+        if (gate.changed) {
+          finalResponse = gate.answer;
+          // The precomputed outputScan only covered the original response — re-run the cheap
+          // deterministic secret scan on the corrected text before it ships.
+          const rescan = scanOutput(finalResponse);
+          if (!rescan.safe && rescan.redacted) {
+            finalResponse = rescan.redacted;
+            guardrailEvents.push({ type: "output_redacted", details: (rescan.detectedTypes ?? []).join(", ") });
+          }
+          guardrailEvents.push({ type: "guardrail_flagged", details: "deliverable_consistency_repaired" });
+        }
+        logAudit(gate.changed ? "deliverable_consistency_repaired" : "deliverable_consistency_passed",
+          { rounds: gate.rounds, passed: gate.passed, repaired: gate.changed },
+          { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
       }
 
       // Completion QA gate (normal-stop path): the user asked to BUILD an interactive/served
@@ -7909,6 +7966,58 @@ async function runQaDeliveryGate(
     rounds: result.rounds,
     passed: result.passed,
     escalated: result.escalated,
+  };
+}
+
+/**
+ * Deliverable self-consistency gate — the plan-less complement to runQaDeliveryGate. Reuses
+ * the same bounded check→improve loop, but the CHECK audits the answer for internal
+ * contradictions (its own figures/arithmetic) + contradictions of what the user explicitly
+ * stated, and the REPAIR fixes only those. See deliverable-consistency.ts (audit 17f53ed0).
+ * Fails open throughout.
+ */
+async function runDeliverableConsistencyGate(
+  session: AgentSession,
+  provider: ChatProvider,
+  signal: AbortSignal,
+  answer: string,
+  userStatements: string,
+  maxRounds: number,
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean }> {
+  const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
+
+  const check = async (current: string): Promise<QaVerdict> => {
+    if (signal.aborted) return { pass: true }; // fail open on abort
+    const messages = buildDeliverableConsistencyCheckMessages(current, userStatements);
+    const abort = new AbortController();
+    try {
+      const resp = await verdictProvider.complete(messages, [], abort.signal);
+      return parseQaVerdict(resp.content ?? "");
+    } finally {
+      abort.abort();
+    }
+  };
+
+  const improve = async (current: string, flaws: string): Promise<string | null> => {
+    if (signal.aborted) return null;
+    const improved = await forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws));
+    if (!improved) return null;
+    const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
+    // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
+    if (candidate.trim().length < Math.min(200, Math.floor(current.trim().length * 0.5))) return null;
+    return candidate;
+  };
+
+  const result = await runQaDeliveryLoop(answer, [DELIVERABLE_CONSISTENCY_CRITERION], {
+    check: (a) => check(a),
+    improve,
+    maxRounds,
+  });
+  return {
+    answer: result.answer,
+    changed: result.answer.trim() !== answer.trim(),
+    rounds: result.rounds,
+    passed: result.passed,
   };
 }
 
