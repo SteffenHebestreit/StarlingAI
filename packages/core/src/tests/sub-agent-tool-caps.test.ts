@@ -212,6 +212,80 @@ describe("sub-agent research tool caps", () => {
     }
   });
 
+  it("breaks a coordinator out of a failed-delegation dead-end instead of churning to the cap", async () => {
+    // A coordinator whose EVERY delegation fails (e.g. coordinator_recursion_blocked — every
+    // candidate is itself a coordinator, so no leaf runs) used to re-fire varying tasks until
+    // the iteration cap. The structural break (allDelegationsFailed via result metadata) must
+    // stop it after BLOCKED_TOOL_ITERATION_THRESHOLD (2) consecutive all-failed-delegation
+    // iterations — the sub-agent-loop equivalent of the main-orchestrator warden break.
+    const { tempDir, configPath } = writeTempConfig({
+      subAgents: {
+        mission_coordinator: {
+          description: "Coordinator recursion-block dead-end test agent",
+          systemPrompt: "Coordinate the work; delegate to specialists.",
+          tools: ["delegate_to_agent"],
+          maxIterations: 10,
+        },
+      },
+    });
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    // Fresh (non-identical) tasks each iteration so the identical-output cache is NOT what
+    // stops it — the new structural delegation-dead-end break is.
+    // Vary BOTH the agentName and task each iteration so neither the per-agent delegation
+    // cap nor the identical-output cache is what stops it — the new structural
+    // delegation-dead-end break (every executed delegation failed, by metadata) is.
+    const responses = [
+      buildToolCallResponse("d1", "delegate_to_agent", { agentName: "specialist_a", task: "Build part A" }),
+      buildToolCallResponse("d2", "delegate_to_agent", { agentName: "specialist_b", task: "Build part B" }),
+      buildToolCallResponse("d3", "delegate_to_agent", { agentName: "specialist_c", task: "Build part C" }),
+      buildToolCallResponse("d4", "delegate_to_agent", { agentName: "specialist_d", task: "Build part D" }),
+    ];
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "I could not complete the build — every delegation hit a coordinator dead-end.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const delegateTasks: string[] = [];
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        delegateTasks.push(String((args as Record<string, unknown>).task ?? ""));
+        return {
+          success: false,
+          output: "",
+          error: "Coordinator hierarchy dead-end: every routed candidate is itself a coordinator.",
+          metadata: { delegationSucceeded: false, delegationOutcome: "coordinator_recursion_blocked" },
+        };
+      },
+    });
+
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "mission_coordinator",
+        task: "Build the full app by delegating to specialists.",
+        parentSessionId: "parent-recursion-deadend",
+        workspacePath: "/workspace",
+      });
+      // Broke after the 2nd consecutive failed-delegation iteration — did NOT churn to 10.
+      expect(delegateTasks).toHaveLength(2);
+      // The run still terminated with an answer (synthesized after the tools were stripped),
+      // and signals exhaustion to the parent so it won't re-delegate the dead-end.
+      expect(result.output.length).toBeGreaterThan(0);
+      expect(result.stats.terminalState).toBe("max_iterations");
+    } finally {
+      unregisterTool("delegate_to_agent");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   // QUARANTINED (DEVPLAN P0): the partial-progress relay no longer lists the tool names used. Output is
   // now "Sub-agent 'mission_coordinator' produced…" without "delegate_to_agent"/"share_finding". Confirm the
   // intended partial-progress message format, then update the assertions or restore the tool-name listing.

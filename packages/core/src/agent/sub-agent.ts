@@ -4539,6 +4539,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
+      // Structural delegation-dead-end detection: a COORDINATOR sub-agent whose every
+      // delegation this iteration FAILED (e.g. coordinator_recursion_blocked — every
+      // candidate is itself a coordinator, so no leaf ran) re-fires varying tasks and
+      // churns to the iteration cap. The main-orchestrator warden break (a5e3208) does not
+      // reach here, and NO_PROGRESS_DELEGATION_FAILURE_RE only matches the per-agent-cap
+      // text, not the recursion-block dead-end. Count these via the result METADATA
+      // (delegationSucceeded === false), not an error-string regex, and feed the existing
+      // consecutiveBlockedToolIterations break.
+      let delegationCallsThisIteration = 0;
+      let failedDelegationCallsThisIteration = 0;
       // Tool calls whose truncated write_file args were salvaged this iteration —
       // their success result gets the continue-with-append coaching appended.
       const salvagedTruncatedWriteTails = new Map<string, string>();
@@ -4912,6 +4922,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const result = await executeTool(tc.name, tc.arguments, toolContext);
         executedToolThisIteration = true;
+        if (isDelegationToolName(tc.name)) {
+          delegationCallsThisIteration += 1;
+          // Structural failure signal (no error-string match): the delegate tool reports
+          // delegationSucceeded:false on a recursion-block / coordinator dead-end / all-
+          // candidates-failed outcome; a bare !success covers a hard tool error too.
+          if (result.metadata?.["delegationSucceeded"] === false || !result.success) {
+            failedDelegationCallsThisIteration += 1;
+          }
+        }
         if (!result.success) {
           // A failed call did no real work — most often the model can fix it by
           // re-emitting corrected arguments. Refund the per-tool (and per-path)
@@ -5251,22 +5270,30 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // (re-delegating to a capped agent). Both are loops to stop.
       const allResultsNoProgressDelegation = toolResults.length > 0
         && toolResults.every((tr) => NO_PROGRESS_DELEGATION_FAILURE_RE.test(typeof tr.content === "string" ? tr.content : ""));
+      // Every executed tool this iteration was a delegation, and all failed (structural,
+      // by result metadata) — a coordinator hitting the recursion-block / dead-end wall.
+      const allDelegationsFailedThisIteration = delegationCallsThisIteration > 0
+        && failedDelegationCallsThisIteration === delegationCallsThisIteration
+        && delegationCallsThisIteration === response.tool_calls.length;
       const noProgressIteration = response.tool_calls.length > 0 && toolResults.length > 0
-        && (!executedToolThisIteration || allResultsNoProgressDelegation);
+        && (!executedToolThisIteration || allResultsNoProgressDelegation || allDelegationsFailedThisIteration);
       if (noProgressIteration) {
         consecutiveBlockedToolIterations += 1;
         if (consecutiveBlockedToolIterations >= BLOCKED_TOOL_ITERATION_THRESHOLD) {
+          const delegationDeadEnd = allDelegationsFailedThisIteration;
           const lastTR = toolResults[toolResults.length - 1]!;
-          lastTR.content +=
-            "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
-            "No tools will be available on the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
+          lastTR.content += delegationDeadEnd
+            ? "\n\n[DELEGATION DEAD-END STOP] Every delegation in the last iterations failed (e.g. every candidate is itself a coordinator, so no leaf specialist ran). Re-delegating hits the same wall. " +
+              "No tools will be available on the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
+            : "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
+              "No tools will be available on the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
           tools = [];
           if (effectiveToolNames) effectiveToolNames = [];
           logAudit(
             "sub_agent_tool_loop_detected",
             {
               agentName: opts.agentName,
-              reason: "all_tool_calls_blocked",
+              reason: delegationDeadEnd ? "all_delegations_failed" : "all_tool_calls_blocked",
               consecutiveBlockedIterations: consecutiveBlockedToolIterations,
               iterations,
               toolNames: response.tool_calls.map((toolCall) => toolCall.name),
