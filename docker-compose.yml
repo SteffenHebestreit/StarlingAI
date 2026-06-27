@@ -193,12 +193,10 @@ services:
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
-      # Graph store backend (v0.2.0 added a Postgres alternative; we run Neo4j+GDS). Pin it
-      # explicitly so a future upstream default flip can't silently bypass our neo4j service.
-      - STORE_BACKEND=${ENGRAM_STORE_BACKEND:-neo4j}
-      - NEO4J_URI=bolt://engram-neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=${ENGRAM_NEO4J_PASSWORD:-engram}
+      # Embedded engram-db backend — in-process vector + BM25 + native-adjacency graph,
+      # no Neo4j server, fastest backend at every scale (f16 = lossless ranking, ½ memory).
+      - STORE_BACKEND=${ENGRAM_STORE_BACKEND:-engramdb}
+      - ENGRAMDB_QUANTIZATION=${ENGRAM_ENGRAMDB_QUANTIZATION:-f16}
       # Embeddings + extraction LLM run on LM Studio (loaded models). engram is on
       # the public bridge so it can reach the LM Studio endpoint. The default
       # MUST match the gateway's (SAI_LMSTUDIO_URL default = 10.10.0.2) — that is
@@ -206,8 +204,12 @@ services:
       # different, empty LM Studio.
       - EMBEDDING_API_BASE=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
       - EMBEDDING_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
-      - EMBEDDING_MODEL=${ENGRAM_EMBEDDING_MODEL:-text-embedding-bge-m3}
+      - EMBEDDING_MODEL=${ENGRAM_EMBEDDING_MODEL:-text-embedding-qwen3-embedding-0.6b}
       - EMBEDDING_DIM=${ENGRAM_EMBEDDING_DIM:-1024}
+      # Qwen3-Embedding is instruction-tuned: prepend a task instruct to QUERIES only
+      # (passages stay raw). Set before first ingest — the passage side is part of the
+      # schema signature. (Double-quoted so the \n becomes a real newline.)
+      - "QUERY_INSTRUCTION=Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
       - LLM_API_BASE=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
       - LLM_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
       - LLM_MODEL=${ENGRAM_LLM_MODEL:-qwen/qwen3.6-35b-a3b}
@@ -215,10 +217,14 @@ services:
       # accepts json_schema/text), so disable JSON mode — engram still parses the
       # JSON object out of the plain text reply.
       - LLM_JSON_MODE=${ENGRAM_LLM_JSON_MODE:-false}
-      # Cross-encoder reranker (TEI) — the same bge-reranker-v2-m3 the gateway uses.
-      - RERANKER_API_BASE=http://reranker:80
+      # Qwen3-Reranker-0.6B via a dedicated CPU sidecar (the measured +3.15/+3.84
+      # nDCG@10 upgrade). Qwen3-Reranker is a causal-LM reranker, so neither TEI's
+      # classifier endpoint nor LM Studio (no /rerank, only binary yes/no) can serve it
+      # — the sidecar does the proper logit-based scoring. The gateway keeps its own
+      # GPU bge-reranker so its hot-path reranking stays fast.
+      - RERANKER_API_BASE=http://engram-reranker:8091
       - RERANKER_API_KEY=
-      - RERANKER_MODEL=${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANKER_MODEL=${ENGRAM_RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
       - RERANKER_FORMAT=tei
       # Rerank shortlist size. Cheap on the GPU reranker, so use engram's default
       # (15) for good recall. Lower it (e.g. 6) only if the reranker runs on CPU.
@@ -230,9 +236,6 @@ services:
       - starlingai-public
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      engram-neo4j:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/health')"]
       interval: 15s
@@ -240,32 +243,32 @@ services:
       retries: 5
       start_period: 30s
 
-  engram-neo4j:
-    image: neo4j:5.26-community
+  # Qwen3-Reranker-0.6B sidecar for engram (engram's measured +3.15/+3.84 nDCG@10
+  # reranker upgrade). Causal-LM reranker served via sentence-transformers CrossEncoder
+  # in the /rerank (tei/jina) format engram needs — LM Studio can't serve a /rerank
+  # endpoint. CPU (fine for the 0.6B on small shortlists); pulls the model from
+  # HuggingFace on first request (public network + cache volume), loaded lazily.
+  engram-reranker:
+    build:
+      context: ./docker/reranker-qwen
+    image: starlingai/engram-reranker:dev
     restart: unless-stopped
     environment:
-      - NEO4J_AUTH=neo4j/${ENGRAM_NEO4J_PASSWORD:-engram}
-      # Allow engram's documented default password ("engram", 6 chars). Neo4j 5.26
-      # otherwise enforces an 8-char minimum and refuses to start.
-      - NEO4J_dbms_security_auth__minimum__password__length=4
-      - NEO4J_server_memory_heap_initial__size=${ENGRAM_NEO4J_HEAP:-1G}
-      - NEO4J_server_memory_heap_max__size=${ENGRAM_NEO4J_HEAP_MAX:-2G}
-      - NEO4J_server_memory_pagecache_size=${ENGRAM_NEO4J_PAGECACHE:-1G}
-      # Graph Data Science (community) backs engram's personalized-PageRank
-      # graph proximity. Downloaded on first start (needs the public network).
-      - NEO4J_PLUGINS=["graph-data-science"]
+      - MODEL_NAME=${ENGRAM_RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
+      - USE_FP16=false
+      - HF_HOME=/root/.cache/huggingface
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
     volumes:
-      - gc-engram-neo4j-data:/data
-      - gc-engram-neo4j-logs:/logs
+      - gc-engram-reranker-cache:/root/.cache/huggingface
     networks:
       - starlingai-internal
       - starlingai-public
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
-      interval: 10s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
+      interval: 15s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 5
+      start_period: 20s
 
   # Cross-encoder reranker (HuggingFace text-embeddings-inference) — serves
   # bge-reranker-v2-m3 over the TEI `/rerank` contract. This is the proper way to
@@ -589,9 +592,8 @@ volumes:
   gc-mail-data:
   gc-workspace:
   gc-qwen-model-cache:
-  gc-engram-neo4j-data:
-  gc-engram-neo4j-logs:
   gc-reranker-cache:
+  gc-engram-reranker-cache:
 
 networks:
   starlingai-internal:
