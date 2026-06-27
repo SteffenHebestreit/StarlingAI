@@ -1,8 +1,9 @@
-# Qwen3-Reranker sidecar for engram — vendored from upstream engram deploy/reranker
-# (github.com/SteffenHebestreit/engram, v0.5.0). Serves a causal-LM reranker
-# (Qwen3-Reranker-0.6B) in engram's reranker wire format (tei + jina), which TEI's
-# classifier endpoint can't do. CPU by default (fine for the 0.6B on small shortlists);
-# for the 4B/8B build FROM an nvidia/cuda + torch base and set USE_FP16=true.
+# Qwen3 model sidecar for engram — vendored from upstream engram deploy/reranker
+# (github.com/SteffenHebestreit/engram, v0.5.0) and extended with /v1/embeddings.
+# Serves a causal-LM reranker (Qwen3-Reranker-0.6B) in engram's reranker wire format
+# (tei + jina) — which TEI's classifier endpoint can't do — and, when EMBED_MODEL_NAME
+# is set, Qwen3-Embedding-0.6B at an OpenAI-compatible /v1/embeddings. docker-compose
+# runs it on the host GPU (USE_FP16=true); CPU also works for the 0.6B models.
 FROM python:3.12-slim
 
 WORKDIR /srv/reranker

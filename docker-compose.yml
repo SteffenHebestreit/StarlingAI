@@ -202,7 +202,10 @@ services:
       # MUST match the gateway's (SAI_LMSTUDIO_URL default = 10.10.0.2) — that is
       # the instance with the models loaded; host.docker.internal points at a
       # different, empty LM Studio.
-      - EMBEDDING_API_BASE=${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}
+      # To embed on the local GPU sidecar instead of LM Studio (e.g. external
+      # provider flaky), set ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 and
+      # RERANKER_EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B in .env (see the reranker svc).
+      - EMBEDDING_API_BASE=${ENGRAM_EMBEDDING_API_BASE:-${SAI_LMSTUDIO_URL:-http://10.10.0.2:1234/v1}}
       - EMBEDDING_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
       - EMBEDDING_MODEL=${ENGRAM_EMBEDDING_MODEL:-text-embedding-qwen3-embedding-0.6b}
       - EMBEDDING_DIM=${ENGRAM_EMBEDDING_DIM:-1024}
@@ -249,6 +252,13 @@ services:
   # port 80 so the gateway config is unchanged; pulls the model from HuggingFace on
   # first request (public network + cache volume). For a GPU-less host, drop the
   # deploy.resources block + set USE_FP16=false (CPU is fine for the 0.6B).
+  #
+  # OPTIONAL embeddings: the same sidecar can also serve Qwen3-Embedding-0.6B on the
+  # GPU at /v1/embeddings — handy if your external embedding provider (e.g. LM Studio)
+  # is flaky or unavailable. It's OFF by default (engram embeds via LM Studio). To
+  # enable: set RERANKER_EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B AND point engram at it
+  # with ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 (both in .env). ~1.2GB extra
+  # GPU; loads lazily on the first /v1/embeddings request.
   reranker:
     build:
       context: ./docker/reranker-qwen
@@ -257,6 +267,9 @@ services:
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80", "--workers", "1"]
     environment:
       - MODEL_NAME=${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
+      # Empty = embeddings endpoint disabled (pure reranker). Set to spin up the
+      # local GPU embedder as a fallback for an external embedding provider.
+      - EMBED_MODEL_NAME=${RERANKER_EMBED_MODEL:-}
       - USE_FP16=true
       - HF_HOME=/root/.cache/huggingface
       - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
