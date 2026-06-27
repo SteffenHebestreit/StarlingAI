@@ -7,13 +7,13 @@
       // in .env to point at an external instance instead (e.g. http://search.k2o).
       "timeoutMs": 15000
     },
-    // Cross-encoder reranker (the `reranker` TEI sidecar serving bge-reranker-v2-m3,
+    // Cross-encoder reranker (the `reranker` GPU sidecar serving Qwen3-Reranker-0.6B,
     // shared with engram). mode "tei" = POST /rerank {query,texts}.
     "reranker": {
       "enabled": true,
       "mode": "tei",
       "baseUrl": "http://reranker:80",
-      "model": "BAAI/bge-reranker-v2-m3",
+      "model": "Qwen/Qwen3-Reranker-0.6B",
       "timeoutMs": 15000,
       "topK": 6
     },

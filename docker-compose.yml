@@ -217,12 +217,9 @@ services:
       # accepts json_schema/text), so disable JSON mode — engram still parses the
       # JSON object out of the plain text reply.
       - LLM_JSON_MODE=${ENGRAM_LLM_JSON_MODE:-false}
-      # Qwen3-Reranker-0.6B via a dedicated CPU sidecar (the measured +3.15/+3.84
-      # nDCG@10 upgrade). Qwen3-Reranker is a causal-LM reranker, so neither TEI's
-      # classifier endpoint nor LM Studio (no /rerank, only binary yes/no) can serve it
-      # — the sidecar does the proper logit-based scoring. The gateway keeps its own
-      # GPU bge-reranker so its hot-path reranking stays fast.
-      - RERANKER_API_BASE=http://engram-reranker:8091
+      # Qwen3-Reranker-0.6B via the shared `reranker` GPU service (the measured
+      # +3.15/+3.84 nDCG@10 upgrade) — the same reranker the gateway uses.
+      - RERANKER_API_BASE=http://reranker:80
       - RERANKER_API_KEY=
       - RERANKER_MODEL=${ENGRAM_RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
       - RERANKER_FORMAT=tei
@@ -243,20 +240,23 @@ services:
       retries: 5
       start_period: 30s
 
-  # Qwen3-Reranker-0.6B sidecar for engram (engram's measured +3.15/+3.84 nDCG@10
-  # reranker upgrade). Causal-LM reranker served via sentence-transformers CrossEncoder
-  # in the /rerank (tei/jina) format engram needs — LM Studio can't serve a /rerank
-  # endpoint. CPU (fine for the 0.6B on small shortlists); pulls the model from
-  # HuggingFace on first request (public network + cache volume), loaded lazily.
-  engram-reranker:
+  # Qwen3-Reranker-0.6B — a causal-LM reranker served via sentence-transformers
+  # CrossEncoder in the TEI `/rerank` format (TEI's classifier endpoint can't serve a
+  # causal-LM reranker, and LM Studio exposes no /rerank at all — only a binary yes/no
+  # with no logprobs, so no continuous scores). Runs on the host GPU (RTX 4080, fp16,
+  # ~1.4GB). Used by BOTH the gateway (retrieval.reranker, mode "tei", http://reranker:80)
+  # and engram — the same +3.15/+3.84 nDCG@10 reranker for the whole stack. Serves on
+  # port 80 so the gateway config is unchanged; pulls the model from HuggingFace on
+  # first request (public network + cache volume). For a GPU-less host, drop the
+  # deploy.resources block + set USE_FP16=false (CPU is fine for the 0.6B).
+  reranker:
     build:
       context: ./docker/reranker-qwen
-    image: starlingai/engram-reranker:dev
+    image: starlingai/qwen-reranker:dev
     restart: unless-stopped
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80", "--workers", "1"]
     environment:
-      - MODEL_NAME=${ENGRAM_RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
-      # Run on the host GPU (RTX 4080, ~1.2GB for the 0.6B in fp16). torch in the
-      # image is the +cu130 build, so it uses CUDA whenever the device is reserved.
+      - MODEL_NAME=${RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
       - USE_FP16=true
       - HF_HOME=/root/.cache/huggingface
       - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
@@ -273,45 +273,11 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
-
-  # Cross-encoder reranker (HuggingFace text-embeddings-inference) — serves
-  # bge-reranker-v2-m3 over the TEI `/rerank` contract. This is the proper way to
-  # use a cross-encoder (LM Studio exposes the model only via /embeddings, and has
-  # no rerank endpoint). Runs on the host GPU (RTX 4080, Ada/sm_89 → the `89-*`
-  # TEI image): a cross-encoder rerank of long chunks is ~10× faster on GPU than
-  # CPU (~0.2s vs ~10s). Used by BOTH the gateway (retrieval.reranker, mode "tei")
-  # and engram. Pulls the model from HuggingFace on first start (public network +
-  # cache volume). For a host without a Docker-visible GPU, override RERANKER_IMAGE
-  # to ...:cpu-1.6 and drop the deploy.resources block.
-  reranker:
-    image: ${RERANKER_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:89-1.6}
-    restart: unless-stopped
-    command: ["--model-id", "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}", "--port", "80"]
-    environment:
-      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
-    volumes:
-      - gc-reranker-cache:/data
-    networks:
-      - starlingai-internal
-      - starlingai-public
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:80/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
 
   mail-service:
     build:
@@ -601,7 +567,6 @@ volumes:
   gc-mail-data:
   gc-workspace:
   gc-qwen-model-cache:
-  gc-reranker-cache:
   gc-engram-reranker-cache:
 
 networks:
