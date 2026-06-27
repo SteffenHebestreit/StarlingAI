@@ -10,6 +10,103 @@ interface MailboxInfo {
   delimiter: string;
 }
 
+/** Lightweight search result built from envelope + bodyStructure, NOT full RFC822. */
+export interface MailSearchSummary {
+  accountId: string;
+  mailbox: string;
+  uid: number;
+  messageId: string;
+  from: string;
+  to: string;
+  cc: string;
+  subject: string;
+  date: string;
+  attachmentCount: number;
+  textPreview: string;
+}
+
+interface BodyNode {
+  part?: string;
+  type?: string;
+  encoding?: string;
+  disposition?: string;
+  dispositionParameters?: Record<string, string> | null;
+  parameters?: Record<string, string> | null;
+  childNodes?: BodyNode[];
+}
+
+type EnvelopeAddress = { name?: string | null; address?: string | null };
+
+/** Format envelope addresses to match the existing display form: `"Name" <addr>`
+ *  (RFC-quoted display name), or just the bare address when there is no real name. */
+function formatEnvelopeAddresses(addresses?: EnvelopeAddress[] | null): string {
+  return (addresses ?? [])
+    .map((a) => {
+      const name = (a.name ?? "").trim();
+      const addr = (a.address ?? "").trim();
+      if (!addr) return "";
+      return name && name !== addr ? `"${name}" <${addr}>` : addr;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+/** Walk leaf parts of a bodyStructure tree (no childNodes). */
+function bodyLeaves(node?: BodyNode | null): BodyNode[] {
+  if (!node) return [];
+  if (Array.isArray(node.childNodes) && node.childNodes.length > 0) {
+    return node.childNodes.flatMap(bodyLeaves);
+  }
+  return [node];
+}
+
+/** First text/plain leaf, falling back to the first text/html leaf, for the preview. */
+function firstTextLeaf(node?: BodyNode | null): BodyNode | null {
+  const leaves = bodyLeaves(node);
+  return (
+    leaves.find((l) => (l.type ?? "").toLowerCase() === "text/plain") ??
+    leaves.find((l) => (l.type ?? "").toLowerCase() === "text/html") ??
+    null
+  );
+}
+
+/**
+ * Count attachments the way simpleParser did (verified against the live inbox):
+ * any leaf with disposition=attachment OR a filename, plus every non-text /
+ * non-multipart leaf (catches inline signature images AND a disposition=attachment
+ * .ics, while excluding the text body parts).
+ */
+function countAttachmentLeaves(node?: BodyNode | null): number {
+  let n = 0;
+  for (const leaf of bodyLeaves(node)) {
+    const type = (leaf.type ?? "").toLowerCase();
+    if (type.startsWith("multipart/")) continue;
+    const hasFilename = Boolean(leaf.dispositionParameters?.["filename"] ?? leaf.parameters?.["name"]);
+    if ((leaf.disposition ?? "").toLowerCase() === "attachment" || hasFilename) { n += 1; continue; }
+    if (type.startsWith("text/")) continue; // body part, not an attachment
+    n += 1; // image/pdf/application/etc — incl. inline images
+  }
+  return n;
+}
+
+/** Transfer-decode a fetched body part to text (base64 / quoted-printable / raw). */
+function decodeBodyPart(buf: Buffer, encoding?: string): string {
+  const enc = (encoding ?? "").toLowerCase();
+  if (enc === "base64") return Buffer.from(buf.toString("ascii"), "base64").toString("utf8");
+  if (enc === "quoted-printable") {
+    return buf.toString("utf8")
+      .replace(/=\r?\n/g, "")
+      .replace(/=([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+  }
+  return buf.toString("utf8");
+}
+
+/** Strip tags from an html-only preview so it reads as prose. */
+function previewText(raw: string, isHtml: boolean): string {
+  const text = isHtml ? raw.replace(/<[^>]+>/g, " ") : raw;
+  return text.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
 interface MoveResult {
   destination: string;
 }
@@ -75,6 +172,97 @@ export class MailAccountClient {
       return results.slice(0, limit);
     } finally {
       await this.disconnect();
+    }
+  }
+
+  /**
+   * Lightweight search for listings: fetch envelope + bodyStructure (+ only the
+   * first text part for a preview) instead of the full RFC822 source. A real
+   * inbox message can be MULTIPLE MEGABYTES of inline images/attachments; the
+   * previous path downloaded all of it just to keep envelope fields + a 240-char
+   * preview, which timed out the tool on heavy threads. envelope/bodyStructure are
+   * tiny, and the text body is tens of KB at most.
+   */
+  async searchSummaries(query: string, mailboxes: string[] = ["INBOX"], limit = 50): Promise<MailSearchSummary[]> {
+    await this.connect();
+    try {
+      const { imapQueries, mailboxHints } = GmailQueryParser.parse(query);
+      const resolvedHints = this.resolveMailboxHints(mailboxHints);
+      const allMailboxes = [...new Set([...mailboxes, ...resolvedHints])];
+      const results: MailSearchSummary[] = [];
+      const seen = new Set<string>();
+      for (const imapQuery of imapQueries) {
+        for (const mailbox of allMailboxes) {
+          for (const summary of await this.fetchSummariesFromMailbox(mailbox, imapQuery, limit)) {
+            const dedupeKey = summary.messageId || `${summary.mailbox}:${summary.uid}`;
+            if (seen.has(dedupeKey)) continue;
+            seen.add(dedupeKey);
+            results.push(summary);
+          }
+        }
+      }
+      results.sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime());
+      return results.slice(0, limit);
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  private async fetchSummariesFromMailbox(mailbox: string, imapQuery: Record<string, unknown>, limit = 50): Promise<MailSearchSummary[]> {
+    const lock = await this.client!.getMailboxLock(mailbox);
+    try {
+      const uids = await this.client!.search(imapQuery, { uid: true });
+      if (!uids || uids.length === 0) return [];
+      const recentUids = uids.length > limit ? uids.slice(-limit) : uids;
+
+      // Pass 1 — envelope + bodyStructure only (no source): from/to/cc/subject/date,
+      // attachment count, and which part holds the text body.
+      interface Meta { uid: number; envelope: Record<string, unknown> | undefined; attachmentCount: number; textPart?: string; textEncoding?: string; textIsHtml: boolean }
+      const metas: Meta[] = [];
+      for await (const message of this.client!.fetch(recentUids, { uid: true, envelope: true, bodyStructure: true }, { uid: true })) {
+        const leaf = firstTextLeaf(message.bodyStructure as unknown as BodyNode);
+        metas.push({
+          uid: message.uid,
+          envelope: message.envelope as unknown as Record<string, unknown> | undefined,
+          attachmentCount: countAttachmentLeaves(message.bodyStructure as unknown as BodyNode),
+          textPart: leaf?.part,
+          textEncoding: leaf?.encoding,
+          textIsHtml: (leaf?.type ?? "").toLowerCase() === "text/html",
+        });
+      }
+
+      // Pass 2 — fetch ONLY the (small) text parts for previews, in one batched
+      // fetch over the union of distinct part ids. Skips every attachment.
+      const distinctParts = [...new Set(metas.map((m) => m.textPart).filter((p): p is string => Boolean(p)))];
+      const previewByUid = new Map<number, string>();
+      if (distinctParts.length > 0) {
+        for await (const message of this.client!.fetch(recentUids, { uid: true, bodyParts: distinctParts }, { uid: true })) {
+          const meta = metas.find((m) => m.uid === message.uid);
+          if (!meta?.textPart) continue;
+          const buf = message.bodyParts?.get(meta.textPart);
+          if (buf) previewByUid.set(message.uid, previewText(decodeBodyPart(buf, meta.textEncoding), meta.textIsHtml));
+        }
+      }
+
+      return metas.map((meta): MailSearchSummary => {
+        const env = (meta.envelope ?? {}) as { subject?: string | null; date?: unknown; messageId?: string | null; from?: EnvelopeAddress[] | null; to?: EnvelopeAddress[] | null; cc?: EnvelopeAddress[] | null };
+        const date = env.date ? new Date(env.date as string) : new Date();
+        return {
+          accountId: this.account.id,
+          mailbox,
+          uid: meta.uid,
+          messageId: env.messageId ?? "",
+          from: formatEnvelopeAddresses(env.from) || "Unknown",
+          to: formatEnvelopeAddresses(env.to) || "Unknown",
+          cc: formatEnvelopeAddresses(env.cc),
+          subject: env.subject ?? "(No Subject)",
+          date: Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString(),
+          attachmentCount: meta.attachmentCount,
+          textPreview: previewByUid.get(meta.uid) ?? "",
+        };
+      });
+    } finally {
+      lock.release();
     }
   }
 

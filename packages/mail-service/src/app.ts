@@ -5,7 +5,7 @@ import { EmailParser } from "./email-parser.js";
 import { MailAccountClient } from "./imap-client.js";
 import { log } from "./logger.js";
 import { sendDraft } from "./smtp-client.js";
-import type { CategoryRecord, MailAccountConfig, MailSummary } from "./types.js";
+import type { MailAccountConfig, MailSummary } from "./types.js";
 import { DraftStore } from "./draft-store.js";
 import { calendarRoutes } from "./calendar-routes.js";
 import { contactsRoutes } from "./contacts-routes.js";
@@ -77,24 +77,6 @@ const CategorizeRequestSchema = z.object({
     note: z.string().optional(),
   })).min(1),
 });
-
-function buildSummary(parsed: Awaited<ReturnType<typeof EmailParser.parse>>, category: CategoryRecord | null): MailSummary {
-  return {
-    accountId: parsed.accountId,
-    mailbox: parsed.mailbox,
-    uid: parsed.uid,
-    messageId: parsed.messageId,
-    from: parsed.from,
-    to: parsed.to,
-    cc: parsed.cc,
-    subject: parsed.subject,
-    date: parsed.date,
-    attachmentCount: parsed.attachments.length,
-    categories: category ? [category.category] : [],
-    note: category?.note,
-    textPreview: parsed.textBody.slice(0, 240),
-  };
-}
 
 // Per-user account access (mail/calendar/contacts share accountAllowsUser +
 // getAccount from account-access.ts).
@@ -169,11 +151,11 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
     const summaries: MailSummary[] = [];
     for (const account of targetAccounts) {
       const client = new MailAccountClient(account);
-      const messages = await client.search(body.query, body.mailboxes ?? ["INBOX"], body.limit);
-      for (const message of messages) {
-        const parsed = await EmailParser.parse(message);
-        const category = await opts.store.getCategory({ accountId: parsed.accountId, mailbox: parsed.mailbox, uid: parsed.uid });
-        summaries.push(buildSummary(parsed, category));
+      // Envelope/bodyStructure-based listing — no full RFC822 download (B17).
+      const items = await client.searchSummaries(body.query, body.mailboxes ?? ["INBOX"], body.limit);
+      for (const item of items) {
+        const category = await opts.store.getCategory({ accountId: item.accountId, mailbox: item.mailbox, uid: item.uid });
+        summaries.push({ ...item, categories: category ? [category.category] : [], note: category?.note });
       }
     }
 
