@@ -628,21 +628,10 @@
    corner brackets on glass panels, and sharpened corners app-wide. Selectors
    carry [data-theme] specificity so they beat the raw utilities. */
 
-/* Hologram scanlines across the whole canvas (on top of the dot grid). */
-[data-theme="jarvis"] body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    0deg,
-    rgba(103, 232, 249, 0.024) 0px,
-    rgba(103, 232, 249, 0.024) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-}
+/* Hologram scanlines removed: the 1px-per-3px repeating-linear-gradient aliases
+   into visible horizontal banding at fractional display scaling (125/150%), which
+   reads as a line artifact rather than a subtle hologram texture. The rest of the
+   Jarvis HUD chrome (corner brackets, sharpened corners) stays. */
 
 /* HUD corner brackets on every glass panel. */
 [data-theme="jarvis"] .glass-card::after {
