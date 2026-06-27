@@ -1193,12 +1193,23 @@ function hashAgentDocument(doc: string): string {
 function isDegenerateCachedVector(b64: string): boolean {
   try {
     const v = base64ToFloat32(b64);
-    if (v.length === 0) return true;
-    for (const x of v) { if (x !== 0) return false; }
-    return true;
+    return isDegenerateVector(v);
   } catch {
     return true;
   }
+}
+
+/**
+ * A live embedding is degenerate if it is empty or all-zero — a transient broken
+ * embedding response. Such a vector must never be cached or returned: cosine
+ * similarity against it is ~0/NaN, which would silently flatten ALL semantic
+ * retrieval (tool rerank, memory recall, trajectory cache, RAG) for the full
+ * cache TTL. Treat it as a miss so the next call re-embeds.
+ */
+function isDegenerateVector(v: Float32Array | null | undefined): boolean {
+  if (!v || v.length === 0) return true;
+  for (const x of v) { if (x !== 0) return false; }
+  return true;
 }
 
 function float32ToBase64(v: Float32Array): string {
@@ -1592,10 +1603,10 @@ export async function computeTextEmbeddings(texts: string[]): Promise<Array<Floa
       const vectors = await _lastProvider.embed(toEmbed.map((t) => t.text), model);
       for (let k = 0; k < toEmbed.length; k++) {
         const vec = vectors[k];
-        if (!vec) continue;
+        if (isDegenerateVector(vec)) continue; // never cache/return a zero vector
         const { idx, cacheKey } = toEmbed[k]!;
-        results[idx] = vec;
-        _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec });
+        results[idx] = vec!;
+        _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec! });
       }
       while (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
         const oldestKey = _queryVectorCache.keys().next().value;
@@ -1618,7 +1629,7 @@ async function getOrComputeQueryEmbedding(
   if (!normalized) {
     try {
       const [vec] = await provider.embed([text], model);
-      return vec ?? null;
+      return isDegenerateVector(vec) ? null : vec!;
     } catch (err) {
       recordEmbeddingFailure(err);
       return null;
@@ -1635,14 +1646,13 @@ async function getOrComputeQueryEmbedding(
   const promise = (async () => {
     try {
       const [vec] = await provider.embed([text], model);
-      if (vec) {
-        _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec });
-        if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
-          const oldestKey = _queryVectorCache.keys().next().value;
-          if (oldestKey) _queryVectorCache.delete(oldestKey);
-        }
+      if (isDegenerateVector(vec)) return null; // miss, not a poisoned cache entry
+      _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec! });
+      if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
+        const oldestKey = _queryVectorCache.keys().next().value;
+        if (oldestKey) _queryVectorCache.delete(oldestKey);
       }
-      return vec ?? null;
+      return vec!;
     } catch (err) {
       recordEmbeddingFailure(err);
       return null;

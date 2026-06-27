@@ -67,6 +67,32 @@ const _gaps = new Map<string, CapabilityGap>();
 /** In-process embedding cache: gapId → embedding vector. */
 const _gapEmbeddings = new Map<string, Float32Array>();
 
+const TERMINAL_GAP_STATUSES = new Set(["deployed", "closed", "rejected"]);
+
+/**
+ * Bound the in-memory gap map. Evicts terminal-status gaps (deployed/closed/
+ * rejected) oldest-first, then the oldest remaining, so a long-running instance
+ * with the opt-in cohort enabled never accretes gaps unboundedly. Persisted
+ * entries are untouched (eviction is in-memory only).
+ */
+function enforceGapCap(): void {
+  const max = getConfig().selfImprovement?.maxTrackedGaps ?? 2000;
+  if (_gaps.size <= max) return;
+  const sorted = [..._gaps.values()].sort((a, b) => {
+    const at = TERMINAL_GAP_STATUSES.has(a.status) ? 0 : 1;
+    const bt = TERMINAL_GAP_STATUSES.has(b.status) ? 0 : 1;
+    if (at !== bt) return at - bt; // terminal first
+    return Date.parse(a.detectedAt) - Date.parse(b.detectedAt); // oldest first
+  });
+  let toEvict = _gaps.size - max;
+  for (const gap of sorted) {
+    if (toEvict <= 0) break;
+    _gaps.delete(gap.id);
+    _gapEmbeddings.delete(gap.id);
+    toEvict--;
+  }
+}
+
 // ── Gap Detection ───────────────────────────────────────────────────────────
 
 /**
@@ -124,6 +150,7 @@ export async function recordCapabilityGap(opts: {
 
   _gaps.set(gap.id, gap);
   persistGap(gap);
+  enforceGapCap();
 
   emitSwarmEvent("capability_gap_detected", {
     sessionId: opts.sessionId,
@@ -489,6 +516,7 @@ export async function loadPersistedGaps(): Promise<void> {
         // skip corrupt
       }
     }
+    enforceGapCap();
     log.info({ count: _gaps.size }, "Loaded persisted capability gaps");
   } catch (err) {
     log.warn({ err }, "Failed to load persisted capability gaps");

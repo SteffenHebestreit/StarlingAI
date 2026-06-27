@@ -255,6 +255,15 @@ export async function main() {
     startMemoryConsolidationDriver();
   }
 
+  // Start the capability-gap → tool-development driver. Detection (recordCapabilityGap)
+  // always runs, but the consumer that drives "proposed" gaps into ToolDevSessions was
+  // never started — a severed loop. It self-guards on selfImprovement.enabled and unref()s,
+  // so this is a no-op while the feature is off.
+  if (getConfig().selfImprovement.enabled) {
+    const { startSelfImprovementDriver } = await import("./agent/self-improve.js");
+    startSelfImprovementDriver();
+  }
+
   // Start transitive federation peer discovery (no-op when disabled)
   const { startPeerDiscovery } = await import("./federation/index.js");
   startPeerDiscovery();
@@ -288,7 +297,12 @@ export async function main() {
           }
         }
         if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {
-          await syncModelEndpointRuntimeStatus();
+          // Fire-and-forget: this probes every provider chain + embeddings/vision/
+          // reranker/guard with 10s timeouts under Promise.all, so awaiting it inside
+          // the reload handler stalls hot-reload up to 10s behind an unreachable
+          // endpoint. It only feeds the health dashboard (own markRuntimeComponent
+          // marks), so let it settle in the background. Boot call (above) stays awaited.
+          void syncModelEndpointRuntimeStatus().catch(() => undefined);
         }
         if (changedSections.includes("jobs") || changedSections.includes("scenes") || changedSections.includes("_initial")) {
           syncConfiguredJobTriggers(newConfig.gateway.turnTimeoutMs);

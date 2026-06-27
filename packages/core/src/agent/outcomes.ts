@@ -41,10 +41,19 @@ export interface OutcomeEntry {
 const OUTCOMES_FILE = `${PRODUCT.stateDirName}/agent_outcomes.ndjson`;
 const MAX_OUTCOMES_LINES = 50_000;
 
+// Short-TTL parsed-tail cache. readRecentOutcomes is hit ~30× per degraded route
+// (per-agent timeout/routing/cost-profile/circuit reads over the pool) and once per
+// fan-out slice — each a synchronous chunked tail read + JSON.parse of the same file.
+// Cache the parsed last-N entries per workspace and serve smaller asks from it.
+const OUTCOMES_CACHE_TTL_MS = 1500;
+const OUTCOMES_CACHE_LIMIT = 200;
+const _outcomesCache = new Map<string, { storedAt: number; entries: OutcomeEntry[] }>();
+
 export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void {
   try {
     const filePath = resolve(workspacePath, OUTCOMES_FILE);
     appendJsonLine(filePath, entry, { maxLines: MAX_OUTCOMES_LINES });
+    _outcomesCache.delete(filePath); // invalidate so the next read reflects the append
   } catch (err) {
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");
   }
@@ -53,7 +62,18 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
   const file = resolve(workspacePath, OUTCOMES_FILE);
   if (!existsSync(file)) return [];
-  return readLastRecords<OutcomeEntry>(file, limit);
+  // Asks beyond the cached window bypass the cache (rare).
+  if (limit > OUTCOMES_CACHE_LIMIT) return readLastRecords<OutcomeEntry>(file, limit);
+  const cached = _outcomesCache.get(file);
+  const entries = cached && Date.now() - cached.storedAt <= OUTCOMES_CACHE_TTL_MS
+    ? cached.entries
+    : (() => {
+        const fresh = readLastRecords<OutcomeEntry>(file, OUTCOMES_CACHE_LIMIT);
+        _outcomesCache.set(file, { storedAt: Date.now(), entries: fresh });
+        return fresh;
+      })();
+  // Return a fresh copy of the last `limit` so callers can't mutate the cache.
+  return limit >= entries.length ? entries.slice() : entries.slice(-limit);
 }
 
 export interface AgentCostProfile {

@@ -89,7 +89,20 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
     return true;
   }
 
-  const body = await readBody(req);
+  let body: string;
+  try {
+    body = await readBody(req, config.gateway.maxBodyBytes);
+  } catch (err) {
+    const tooLarge = err instanceof BodyTooLargeError;
+    logAudit("a2a_request_failed", { reason: tooLarge ? "body_too_large" : "body_read_error" }, { severity: "warn" });
+    res.writeHead(tooLarge ? 413 : 400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      jsonrpc: "2.0",
+      error: tooLarge ? { code: -32600, message: "Request body too large" } : A2A_ERROR.PARSE,
+      id: null,
+    }));
+    return true;
+  }
   let rpc: A2AJsonRpcRequest;
   try {
     rpc = JSON.parse(body) as A2AJsonRpcRequest;
@@ -324,11 +337,37 @@ function inferPublicUrl(req: IncomingMessage): string {
   return `${proto}://${host}`;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
-    let buf = "";
-    req.on("data", (chunk: Buffer) => { buf += chunk.toString("utf8"); });
-    req.on("end", () => resolve(buf));
+class BodyTooLargeError extends Error {
+  constructor(public readonly limit: number) {
+    super(`request body exceeds ${limit} bytes`);
+    this.name = "BodyTooLargeError";
+  }
+}
+
+/**
+ * Read a raw request body with a hard byte cap and error/abort handlers. The
+ * earlier version buffered the whole body unbounded with no 'error'/'aborted'
+ * listener, so a large body OOM'd the gateway and a mid-stream socket error left
+ * the Promise pending forever (this raw-http path bypasses Hono's body-limit
+ * middleware). Buffers reject the body before it is fully read; concat-then-decode
+ * also avoids per-chunk multi-byte mojibake.
+ */
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new BodyTooLargeError(maxBytes));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+    req.on("aborted", () => reject(new Error("request aborted before body completed")));
   });
 }
 

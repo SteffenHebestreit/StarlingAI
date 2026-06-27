@@ -242,7 +242,8 @@ export function getAllTools(): ToolHandler[] {
 export function getToolsAsLLMDefs(allowedTools?: string[]): LLMToolDef[] {
   let tools = [..._registry.values()];
   if (allowedTools) {
-    tools = tools.filter(t => allowedTools.includes(t.name));
+    const allowed = new Set(allowedTools); // O(N+M) instead of O(N×M) per turn
+    tools = tools.filter(t => allowed.has(t.name));
   }
   return tools.map(t => ({
     name: t.name,

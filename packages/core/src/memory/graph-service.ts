@@ -43,15 +43,6 @@ export const VECTOR_INDEX_NAME = "memory_embedding";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface GraphOutlier {
-  id: string;
-  content: string;
-  kind: string;
-  domain: string;
-  ageDays: number;
-  outlierType: "orphan" | "stale";
-  accessCount: number;
-}
 
 // ── Write-through upsert ──────────────────────────────────────────────────────
 
@@ -226,12 +217,32 @@ export async function graphL0Layer(
  *   −newerVersionCount — hard penalty when a SUPERSEDES edge exists pointing away
  *   −supersededCount  — soft penalty when the record itself supersedes old facts
  */
+// graphRerank sits on the turn-0 memory-injection critical path. Bound it with a
+// wall-clock timeout (slow/locked MemGraph degrades to text-only ranking, never
+// blocks the turn) and a short TTL cache keyed by the sorted candidate-id set
+// (score-preserving — same candidates → same graph scores within the window).
+const GRAPH_RERANK_TIMEOUT_MS = 200;
+const GRAPH_RERANK_CACHE_TTL_MS = 5 * 60_000;
+const GRAPH_RERANK_CACHE_MAX = 256;
+const _graphRerankCache = new Map<string, { storedAt: number; scores: Map<string, number> }>();
+let _graphRerankTimeouts = 0;
+const _GRAPH_RERANK_TIMEOUT = Symbol("graph-rerank-timeout");
+
+/** Number of graphRerank calls that hit the wall-clock timeout (degraded to text-only). */
+export function graphRerankTimeoutCount(): number { return _graphRerankTimeouts; }
+
 export async function graphRerank(candidateIds: string[]): Promise<Map<string, number>> {
   const scores = new Map<string, number>();
   if (!isGraphDbAvailable() || candidateIds.length === 0) return scores;
 
+  const cacheKey = candidateIds.slice().sort().join(",");
+  const cached = _graphRerankCache.get(cacheKey);
+  if (cached && Date.now() - cached.storedAt <= GRAPH_RERANK_CACHE_TTL_MS) {
+    return new Map(cached.scores);
+  }
+
   try {
-    const result = await runCypher(`
+    const queryPromise = runCypher(`
       MATCH (m:MemoryRecord) WHERE m.id IN $ids
       OPTIONAL MATCH (m)-[:SIMILAR_TO]-(peer:MemoryRecord)
       OPTIONAL MATCH (m)-[:SUPERSEDES]->(older:MemoryRecord)
@@ -246,8 +257,16 @@ export async function graphRerank(candidateIds: string[]): Promise<Map<string, n
         count(DISTINCT older)          AS supersededCount,
         count(DISTINCT newer)          AS newerVersionCount,
         count(DISTINCT ret)            AS usefulRetrievals
-    `, { ids: candidateIds });
+    `, { ids: candidateIds }).catch(() => null); // swallow a late rejection after timeout
+    const result = await Promise.race([
+      queryPromise,
+      new Promise<typeof _GRAPH_RERANK_TIMEOUT>((resolve) => {
+        const t = setTimeout(() => resolve(_GRAPH_RERANK_TIMEOUT), GRAPH_RERANK_TIMEOUT_MS);
+        t.unref?.();
+      }),
+    ]);
 
+    if (result === _GRAPH_RERANK_TIMEOUT) { _graphRerankTimeouts++; return scores; }
     if (!result) return scores;
 
     for (const row of toPlainRecords(result)) {
@@ -268,6 +287,12 @@ export async function graphRerank(candidateIds: string[]): Promise<Map<string, n
         - (supersededCount    > 0 ? 0.15 : 0);  // references older facts → mild penalty
 
       scores.set(id, clamp(raw));
+    }
+
+    _graphRerankCache.set(cacheKey, { storedAt: Date.now(), scores: new Map(scores) });
+    if (_graphRerankCache.size > GRAPH_RERANK_CACHE_MAX) {
+      const oldest = _graphRerankCache.keys().next().value;
+      if (oldest !== undefined) _graphRerankCache.delete(oldest);
     }
   } catch (err) {
     log.debug({ err }, "Graph rerank query failed");
@@ -380,73 +405,6 @@ export async function graphPromoteFact(
     }
   } catch (err) {
     log.warn({ err, key, agentName }, "FACT graph promotion failed");
-  }
-}
-
-// ── Outlier detection ─────────────────────────────────────────────────────────
-
-/**
- * Return memory candidates that look like outliers:
- *   orphan — no similarity links, no topic, low access, older than 7 days
- *   stale  — a newer SUPERSEDES version exists
- *
- * Results are returned for human review — this function never deletes anything.
- */
-export async function graphDetectOutliers(): Promise<GraphOutlier[]> {
-  if (!isGraphDbAvailable()) return [];
-
-  try {
-    const result = await runCypher(`
-      MATCH (m:MemoryRecord)
-      WHERE m.scope IN ['workspace', 'user']
-        AND (m.validTo IS NULL OR m.validTo > $now)
-      WITH m, duration.inDays(m.createdAt, $now).days AS ageDays
-      OPTIONAL MATCH (m)-[:SIMILAR_TO]-()
-      OPTIONAL MATCH (m)-[:ABOUT]->(:Topic)
-      OPTIONAL MATCH ()-[ret:RETRIEVED]->(m)
-        WHERE ret.ts > $cutoff
-      OPTIONAL MATCH (m)<-[:SUPERSEDES]-(:MemoryRecord)
-      WITH m, ageDays,
-        count(DISTINCT sim)          AS simLinks,
-        count(DISTINCT topicRel)     AS topicLinks,
-        count(DISTINCT ret)          AS recentRetrievals,
-        count(DISTINCT supersededBy) AS newerVersions
-      WHERE ageDays > 7
-        AND coalesce(m.accessCount, 0) < 3
-        AND simLinks = 0
-        AND topicLinks = 0
-        AND recentRetrievals = 0
-      RETURN
-        m.id                          AS id,
-        m.content                     AS content,
-        m.kind                        AS kind,
-        coalesce(m.domain, '')        AS domain,
-        ageDays,
-        newerVersions,
-        coalesce(m.accessCount, 0)    AS accessCount
-      ORDER BY ageDays DESC
-      LIMIT 50
-    `, {
-      now: new Date().toISOString(),
-      cutoff: new Date(Date.now() - 30 * 86_400_000).toISOString(),
-    });
-
-    if (!result) return [];
-
-    return toPlainRecords(result)
-      .map(row => ({
-        id:           String(row["id"] ?? ""),
-        content:      String(row["content"] ?? "").slice(0, 200),
-        kind:         String(row["kind"] ?? "note"),
-        domain:       String(row["domain"] ?? ""),
-        ageDays:      asInt(row["ageDays"], 0),
-        outlierType:  asInt(row["newerVersions"], 0) > 0 ? ("stale" as const) : ("orphan" as const),
-        accessCount:  asInt(row["accessCount"], 0),
-      }))
-      .filter(o => o.id !== "");
-  } catch (err) {
-    log.warn({ err }, "Outlier detection query failed");
-    return [];
   }
 }
 

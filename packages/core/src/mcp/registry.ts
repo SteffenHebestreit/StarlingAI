@@ -139,20 +139,31 @@ function _registerBridgedTool(
       description: `[MCP:${serverName}] ${description}`,
       parameters: inputSchema,
       async execute(args) {
-        // Re-fetch connection in case of reconnect
-        const live = _connections.get(serverName) ?? conn;
-        try {
-          const result = await live.client.callTool({
-            name: mcpToolName,
-            arguments: args,
-          });
-
+        const runCall = async (connection: McpClientConnection) => {
+          const result = await connection.client.callTool({ name: mcpToolName, arguments: args });
           const output = (result.content as Array<{ type: string; text?: string }>)
             .map(c => (c.type === "text" ? (c.text ?? "") : JSON.stringify(c)))
             .join("\n");
-
-          return { success: true, output, metadata: { mcpServer: serverName, mcpTool: mcpToolName } };
+          return { success: true as const, output, metadata: { mcpServer: serverName, mcpTool: mcpToolName } };
+        };
+        // Re-fetch connection in case of reconnect
+        const live = _connections.get(serverName) ?? conn;
+        try {
+          return await runCall(live);
         } catch (err) {
+          // One lazy reconnect + retry when the server dropped (config-gated, throttled),
+          // so a restarted MCP server self-heals instead of every call staying dead.
+          if (getConfig().mcp?.autoReconnect) {
+            const last = _reconnectThrottle.get(serverName) ?? 0;
+            if (Date.now() - last >= MCP_RECONNECT_THROTTLE_MS) {
+              _reconnectThrottle.set(serverName, Date.now());
+              const reconnected = await reconnectServer(serverName);
+              if (reconnected) {
+                try { return await runCall(reconnected); }
+                catch (retryErr) { return { success: false, output: "", error: `MCP call failed after reconnect: ${String(retryErr)}` }; }
+              }
+            }
+          }
           return { success: false, output: "", error: `MCP call failed: ${String(err)}` };
         }
       },
@@ -163,6 +174,26 @@ function _registerBridgedTool(
   }
 
   return safeName;
+}
+
+// Per-server reconnect throttle so a flapping server can't trigger a reconnect storm.
+const _reconnectThrottle = new Map<string, number>();
+const MCP_RECONNECT_THROTTLE_MS = 10_000;
+
+/** Reconnect a SINGLE bridged server (not the whole fleet) after a failed call. */
+async function reconnectServer(name: string): Promise<McpClientConnection | null> {
+  const cfg = getConfig().mcp?.servers?.[name];
+  if (!cfg) return null;
+  await teardownServer(name);
+  try {
+    const conn = await connectMcpServer(name, cfg);
+    _connections.set(name, conn);
+    log.info({ server: name }, "MCP server reconnected after a failed tool call");
+    return conn;
+  } catch (err) {
+    log.warn({ err, server: name }, "MCP server reconnect failed");
+    return null;
+  }
 }
 
 async function teardownServer(name: string): Promise<void> {

@@ -26,7 +26,12 @@ interface BindingState {
   circuitOpenUntil: number | null;
   lastError?: string;
   lastRecoveryAt?: number;
+  /** Consecutive successes seen while the circuit was open (flap-damping). */
+  recoverySuccesses?: number;
 }
+
+/** Consecutive successes required to clear an open circuit (damps flap-induced thrash). */
+const CIRCUIT_RECOVERY_SUCCESSES = 2;
 
 export interface FailoverEndpointRuntimeSnapshot {
   providerId: string;
@@ -273,7 +278,19 @@ export class FailoverChatProvider implements ChatProvider {
       const state = this.state.get(providerKey(binding.endpoint));
       return !state?.circuitOpenUntil || state.circuitOpenUntil <= now;
     });
-    return available.length > 0 ? available : this.bindings;
+    if (available.length > 0) return available;
+    // Total outage — every circuit is open. Rather than sweeping ALL known-dead
+    // endpoints (N full-cost trial requests), send a SINGLE half-open probe: the
+    // binding whose circuit reopens soonest, tie-broken by declaration order to
+    // keep the primary→fallback→cloud cost preference. "All providers failed"
+    // then degrades cleanly to synthesis.
+    let probe = this.bindings[0];
+    let best = Number.POSITIVE_INFINITY;
+    for (const binding of this.bindings) {
+      const openUntil = this.state.get(providerKey(binding.endpoint))?.circuitOpenUntil ?? 0;
+      if (openUntil < best) { best = openUntil; probe = binding; }
+    }
+    return probe ? [probe] : this.bindings;
   }
 
   private markFailure(binding: FailoverProviderBinding, error: unknown, transient: boolean): void {
@@ -304,14 +321,26 @@ export class FailoverChatProvider implements ChatProvider {
   private markSuccess(binding: FailoverProviderBinding, operation: "complete" | "stream"): void {
     const key = providerKey(binding.endpoint);
     const existing = this.state.get(key);
-    const hadFailures = (existing?.consecutiveFailures ?? 0) > 0 || Boolean(existing?.circuitOpenUntil);
     this.activeBindingKey = key;
 
+    // Flap damping: a single success on an OPEN circuit no longer instantly clears
+    // it (a fail→succeed→fail endpoint would never trip the breaker). Require
+    // CIRCUIT_RECOVERY_SUCCESSES consecutive successes before clearing.
+    if (existing?.circuitOpenUntil) {
+      const recoverySuccesses = (existing.recoverySuccesses ?? 0) + 1;
+      if (recoverySuccesses < CIRCUIT_RECOVERY_SUCCESSES) {
+        this.state.set(key, { ...existing, recoverySuccesses, lastError: undefined });
+        return; // still probationary — don't clear the circuit or emit recovery yet
+      }
+    }
+
+    const hadFailures = (existing?.consecutiveFailures ?? 0) > 0 || Boolean(existing?.circuitOpenUntil);
     this.state.set(key, {
       consecutiveFailures: 0,
       circuitOpenUntil: null,
       lastError: undefined,
       lastRecoveryAt: Date.now(),
+      recoverySuccesses: 0,
     });
 
     if (hadFailures) {

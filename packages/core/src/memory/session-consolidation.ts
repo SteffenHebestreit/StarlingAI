@@ -41,6 +41,31 @@ function normalize(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+/** Word/number tokens of a normalized string (word-boundary aware). */
+function tokenize(normalized: string): Set<string> {
+  return new Set(normalized.split(/[^a-z0-9]+/i).filter((t) => t.length > 0));
+}
+
+/**
+ * Near-duplicate test over token sets. Replaces an earlier bidirectional
+ * substring `includes()` check that silently DROPPED a distinct short fact
+ * whenever it happened to be a substring of an unrelated long record. Two facts
+ * are duplicates only when they genuinely overlap: high token Jaccard, or one is
+ * a near-subset of the other AND they are comparable in length (so a short
+ * distinct fact inside a long unrelated record is NOT a false drop).
+ */
+function isNearDuplicateTokens(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let inter = 0;
+  for (const t of small) if (large.has(t)) inter++;
+  const union = a.size + b.size - inter;
+  if (union > 0 && inter / union >= 0.85) return true; // high Jaccard
+  // Length-guarded containment: the smaller's tokens are almost all present in
+  // the larger AND the two are comparable in size.
+  return inter / small.size >= 0.9 && small.size / large.size >= 0.6;
+}
+
 /**
  * Promote durable-worthy shared-facts from an archived session into workspace
  * memory. Never throws — returns counts and logs best-effort.
@@ -66,10 +91,17 @@ export async function consolidateSessionMemory(opts: {
     const entries = Object.entries(facts);
     if (entries.length === 0) return result;
 
-    // Snapshot existing durable content once for dedup.
-    let existing = new Set<string>();
+    // Snapshot existing durable content once for dedup (tokenized once, not
+    // re-tokenized per candidate — the O(facts×records) hot loop).
+    const existingNorms = new Set<string>();
+    const existingTokens: Array<Set<string>> = [];
     try {
-      existing = new Set(listWorkspaceMemoryRecords(opts.workspacePath).map((r) => normalize(r.content)));
+      for (const r of listWorkspaceMemoryRecords(opts.workspacePath)) {
+        const n = normalize(r.content);
+        if (existingNorms.has(n)) continue;
+        existingNorms.add(n);
+        existingTokens.push(tokenize(n));
+      }
     } catch { /* best-effort */ }
 
     for (const [key, value] of entries) {
@@ -82,11 +114,12 @@ export async function consolidateSessionMemory(opts: {
       if (CREDENTIAL_RE.test(content)) { result.skipped++; continue; }
 
       const norm = normalize(content);
-      // Exact or containment dedup against existing durable memory.
-      let duplicate = existing.has(norm);
+      const normTokens = tokenize(norm);
+      // Exact or near-duplicate dedup against existing durable memory.
+      let duplicate = existingNorms.has(norm);
       if (!duplicate) {
-        for (const prior of existing) {
-          if (prior.includes(norm) || norm.includes(prior)) { duplicate = true; break; }
+        for (const priorTokens of existingTokens) {
+          if (isNearDuplicateTokens(normTokens, priorTokens)) { duplicate = true; break; }
         }
       }
       if (duplicate) { result.skipped++; continue; }
@@ -99,7 +132,8 @@ export async function consolidateSessionMemory(opts: {
           kind: "fact",
           tags: ["consolidated", "session-derived", `source-session:${opts.sessionId.slice(0, 8)}`],
         }, { sessionId: opts.sessionId });
-        existing.add(norm);
+        existingNorms.add(norm);
+        existingTokens.push(normTokens);
         result.promoted++;
       } catch (err) {
         log.debug({ err, key }, "Session fact promotion failed");

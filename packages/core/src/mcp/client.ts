@@ -285,6 +285,16 @@ class LegacyHttpJsonRpcClientTransport implements Transport {
 
       const bodyText = await response.text();
       if (!bodyText.trim()) {
+        // A compliant empty body is valid only for a JSON-RPC *notification* (a
+        // message with no id), which legitimately gets a 202/204 with no payload
+        // (e.g. notifications/initialized right after init). A non-2xx empty body,
+        // or an empty body for an id-bearing request, is still an error.
+        if (!response.ok) {
+          throw new Error(`Legacy MCP endpoint returned HTTP ${response.status} with an empty body`);
+        }
+        const sent = message as { method?: unknown; id?: unknown };
+        const isNotification = typeof sent.method === "string" && sent.id === undefined;
+        if (isNotification) return;
         throw new Error(`Legacy MCP endpoint returned an empty response with HTTP ${response.status}`);
       }
 

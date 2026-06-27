@@ -33,7 +33,7 @@ let _config: Config | null = null;
 const activeWatchedFiles = new Set<string>();
 const activeDirectoryWatchers: FSWatcher[] = [];
 
-export function loadConfig(): Config {
+export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
   if (_config) return _config;
 
   const raw = getEffectiveRawConfig();
@@ -64,7 +64,10 @@ export function loadConfig(): Config {
   }
 
   _config = result.data;
-  writeCompiledConfig(_config);
+  // The watch path skips this and writes only when a section actually changed (B21),
+  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
+  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
+  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
   return _config;
 }
 
@@ -85,12 +88,15 @@ export function watchConfig(onChange: (config: Config, changedSections: string[]
       const oldConfig = _config;
       _config = null;
       try {
-        const newConfig = loadConfig();
+        const newConfig = loadConfig({ skipCompiledWrite: true });
         const changed = diffConfigSections(oldConfig, newConfig);
         if (changed.length === 0) {
           logger.debug("Config changed but no meaningful differences detected — skipping notification");
           return;
         }
+        // A section actually changed — persist the compiled artifact (skipped above
+        // for the no-op case) so freshly-spawned sub-agent containers see the update.
+        writeCompiledConfig(newConfig);
         logger.info({ changedSections: changed }, "Config reloaded — notifying subscribers");
         onChange(newConfig, changed);
       } catch (err) {
@@ -315,17 +321,36 @@ function isPathContainedBy(rootPath: string, candidatePath: string): boolean {
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
+// Per-section serialized strings, cached per Config object. loadConfig returns a
+// fresh parse each reload, so the previous config (now `oldConfig`) was already
+// serialized on the prior diff — only the NEW config is serialized this time,
+// roughly halving the diff cost (the big subAgents/scenes/jobs blocks dominate).
+// WeakMap so GC'd configs never leak.
+const _sectionSerializeCache = new WeakMap<Config, Map<keyof Config, string>>();
+function serializeConfigSections(config: Config): Map<keyof Config, string> {
+  const cached = _sectionSerializeCache.get(config);
+  if (cached) return cached;
+  const map = new Map<keyof Config, string>();
+  for (const key of Object.keys(config) as (keyof Config)[]) {
+    map.set(key, JSON.stringify(config[key]));
+  }
+  _sectionSerializeCache.set(config, map);
+  return map;
+}
+
 /**
  * Compare two Config objects and return a list of top-level section names that differ.
  * Used to avoid unnecessary subscriber notifications when only whitespace/formatting changed.
  */
 function diffConfigSections(oldConfig: Config | null, newConfig: Config): string[] {
   if (!oldConfig) return ["_initial"];
+  const oldSections = serializeConfigSections(oldConfig);
+  const newSections = serializeConfigSections(newConfig);
   const changed: string[] = [];
-  const allKeys = new Set([...Object.keys(oldConfig), ...Object.keys(newConfig)]) as Set<keyof Config>;
+  const allKeys = new Set([...oldSections.keys(), ...newSections.keys()]);
   for (const key of allKeys) {
-    if (JSON.stringify(oldConfig[key]) !== JSON.stringify(newConfig[key])) {
-      changed.push(key);
+    if (oldSections.get(key) !== newSections.get(key)) {
+      changed.push(key as string);
     }
   }
   return changed;

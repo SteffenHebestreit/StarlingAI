@@ -126,6 +126,7 @@ export async function engramIngest(input: {
     }
     const body = await res.json() as { document_id?: string; chunk_count?: number; keywords?: string[] };
     if (!body.document_id) return null;
+    invalidateEngramDocListCache(); // a new document changed scope membership
     return {
       documentId: body.document_id,
       chunkCount: typeof body.chunk_count === "number" ? body.chunk_count : 0,
@@ -189,20 +190,36 @@ export async function engramSearch(input: {
 }
 
 /** List all ingested documents with their source references (GET /documents). */
+// retrieveDocumentContext fetches the full /documents list every RAG-augmented turn
+// just to build the in-scope id set. Cache it for a SHORT TTL: long enough to drop
+// the repeated serial round-trip within a turn/burst, short enough that cross-process
+// ingest/forget (via federation) can't leave a stale scope-membership view for long.
+// The TTL is the correctness floor; local mutations also bust it explicitly.
+const ENGRAM_DOC_LIST_TTL_MS = 3_000;
+let _docListCache: { storedAt: number; docs: EngramDocumentInfo[] } | null = null;
+
+/** Drop the cached document list (call after a local ingest/forget). */
+export function invalidateEngramDocListCache(): void { _docListCache = null; }
+
 export async function engramListDocuments(): Promise<EngramDocumentInfo[] | null> {
   if (!engramConfigured()) return null;
+  if (_docListCache && Date.now() - _docListCache.storedAt <= ENGRAM_DOC_LIST_TTL_MS) {
+    return _docListCache.docs;
+  }
   try {
     const res = await engramFetch("/documents", { method: "GET" }, 10000);
     if (!res.ok) return null;
     const body = await res.json() as Array<Record<string, unknown>>;
     if (!Array.isArray(body)) return null;
-    return body.map((d): EngramDocumentInfo => ({
+    const docs = body.map((d): EngramDocumentInfo => ({
       id: String(d["id"] ?? ""),
       title: typeof d["title"] === "string" ? d["title"] : undefined,
       sources: Array.isArray(d["sources"]) ? (d["sources"] as string[]) : [],
       createdAt: typeof d["created_at"] === "string" ? d["created_at"] : undefined,
       chunkCount: Number(d["chunk_count"] ?? 0),
     }));
+    _docListCache = { storedAt: Date.now(), docs };
+    return docs;
   } catch (err) {
     log.warn({ err }, "engram list documents error");
     return null;
@@ -219,6 +236,7 @@ export async function engramDeleteDocument(documentId: string, source?: string):
   const path = source ? `/documents/${encodeURIComponent(documentId)}?source=${encodeURIComponent(source)}` : `/documents/${encodeURIComponent(documentId)}`;
   try {
     const res = await engramFetch(path, { method: "DELETE" }, 15000);
+    if (res.ok) invalidateEngramDocListCache(); // scope membership changed
     return res.ok;
   } catch (err) {
     log.warn({ err, documentId }, "engram delete error");

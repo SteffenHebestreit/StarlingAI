@@ -249,6 +249,8 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
   options: {
     maxChunkChars?: number;
     requestChunk: (nextInput: TInput) => Promise<Response>;
+    /** Max chunks synthesized concurrently (default 2; 1 = the old sequential path). */
+    maxConcurrency?: number;
   },
 ): Promise<Response> {
   const chunks = splitTextForTts(input.text, options.maxChunkChars);
@@ -256,28 +258,43 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
     return options.requestChunk(input);
   }
 
-  const audioResponses: Uint8Array[] = [];
-  let contentType = "audio/wav";
+  // Chunks are independent and merge preserves index order, so synthesize with a
+  // bounded pool instead of strictly sequentially (long passages → sum/concurrency).
+  // Failure semantics are preserved: return the LOWEST-index failing chunk's response
+  // (or the 502 for non-WAV), and never merge when any chunk failed.
+  const concurrency = Math.max(1, Math.min(options.maxConcurrency ?? 2, chunks.length));
+  const results: Array<Uint8Array | null> = new Array(chunks.length).fill(null);
+  let failureIndex = Number.POSITIVE_INFINITY;
+  let failureResponse: Response | null = null;
+  let nextIndex = 0;
 
-  for (const chunk of chunks) {
-    const response = await options.requestChunk({ ...input, text: chunk } as TInput);
-    if (!response.ok) return response;
+  const recordFailure = (i: number, response: Response): void => {
+    if (i < failureIndex) { failureIndex = i; failureResponse = response; }
+  };
 
-    contentType = response.headers.get("content-type") ?? contentType;
-    if (!contentType.toLowerCase().includes("audio/wav")) {
-      return new Response(JSON.stringify({
-        error: `Chunked TTS merge requires WAV audio, but the backend returned '${contentType}'.`,
-      }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      });
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= chunks.length || i > failureIndex) return; // done, or a lower chunk already failed
+      const response = await options.requestChunk({ ...input, text: chunks[i]! } as TInput);
+      if (!response.ok) { recordFailure(i, response); return; }
+      const ct = response.headers.get("content-type") ?? "audio/wav";
+      if (!ct.toLowerCase().includes("audio/wav")) {
+        recordFailure(i, new Response(JSON.stringify({
+          error: `Chunked TTS merge requires WAV audio, but the backend returned '${ct}'.`,
+        }), { status: 502, headers: { "Content-Type": "application/json" } }));
+        return;
+      }
+      results[i] = new Uint8Array(await response.arrayBuffer());
     }
+  };
 
-    audioResponses.push(new Uint8Array(await response.arrayBuffer()));
-  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-  return new Response(mergeWavAudioChunks(audioResponses).buffer.slice(0) as ArrayBuffer, {
+  if (failureResponse) return failureResponse;
+
+  return new Response(mergeWavAudioChunks(results as Uint8Array[]).buffer.slice(0) as ArrayBuffer, {
     status: 200,
-    headers: { "Content-Type": contentType },
+    headers: { "Content-Type": "audio/wav" },
   });
 }

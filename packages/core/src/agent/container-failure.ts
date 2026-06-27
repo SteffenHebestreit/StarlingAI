@@ -100,3 +100,17 @@ export function looksLikeProviderErrorEcho(value: string): boolean {
 
   return false;
 }
+
+/**
+ * Detect a sub-agent/synthesis claim that some upstream evidence/output/workflow
+ * result was "truncated" / "cut off" / "not visible" — a common hallucination
+ * when the model invents a missing-context excuse instead of using what it has.
+ * Single source of truth: previously duplicated byte-for-byte in runtime.ts and
+ * sub-agent.ts (a drift hazard for a guard that feeds several call sites in both).
+ */
+export function looksLikeHallucinatedTruncationClaim(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b.{0,140}\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b/i.test(trimmed)
+    || /\b(?:truncated|cut\s+off|cuts\s+off|abgeschnitten|not\s+visible|nicht\s+sichtbar|cannot\s+see)\b.{0,140}\b(?:workflow|tool|delegat(?:ed|ion)|evidence|output|result|context|inhalt|ergebnis)\b/i.test(trimmed);
+}

@@ -1,10 +1,21 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import pg from "pg";
 import type { TurnPerformanceMetrics } from "./runtime.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
 
 const log = childLogger("agent:jobs");
+
+// In-process wake signal so a freshly-enqueued job is claimed immediately instead
+// of waiting up to the worker's poll interval. The poll timer stays as a backstop
+// (and covers a cross-process standalone worker). Disable via SAI_JOB_WAKE_DISABLED=1.
+const _jobQueuedEmitter = new EventEmitter();
+_jobQueuedEmitter.setMaxListeners(50);
+export function onJobQueued(listener: () => void): () => void {
+  _jobQueuedEmitter.on("queued", listener);
+  return () => { _jobQueuedEmitter.off("queued", listener); };
+}
 const { Pool } = pg;
 const STALE_JOB_MS = 120_000;
 
@@ -161,7 +172,11 @@ export async function shutdownSceneJobStore(): Promise<void> {
 }
 
 export async function createJob(input: CreateSceneJobInput): Promise<SceneJob> {
-  return (await getStore()).createJob(input);
+  const job = await (await getStore()).createJob(input);
+  if (process.env["SAI_JOB_WAKE_DISABLED"] !== "1") {
+    try { _jobQueuedEmitter.emit("queued"); } catch { /* a listener must never break enqueue */ }
+  }
+  return job;
 }
 
 export async function listJobs(opts?: { limit?: number; status?: JobStatus }): Promise<SceneJob[]> {

@@ -202,16 +202,28 @@ export function listSkills(
   return skills.sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt));
 }
 
+// Cache of parsed SKILL.md (frontmatter + body) keyed by file path, validated by
+// mtime. searchSkills/listSkills call getSkill on the per-turn and per-delegation
+// hot path; the previous version readFileSync + YAML-parsed every skill on every
+// call. The .meta.json (uses/successRate) is ALWAYS read fresh below because it
+// drives ranking and mutates on the same hot path — caching the whole folder
+// would serve stale ranking. A write to SKILL.md bumps its mtime → auto-invalidate.
+const _skillParseCache = new Map<string, { mtimeMs: number; parsed: ReturnType<typeof parseSkillFile> }>();
+
 export function getSkill(workspacePath: string, slug: string): Skill | null {
   const safe = slugifySkillName(slug);
   const skillFile = resolve(skillsDir(workspacePath), safe, "SKILL.md");
-  if (!existsSync(skillFile)) return null;
+  let mtimeMs: number;
+  try { mtimeMs = statSync(skillFile).mtimeMs; } catch { return null; } // missing → null
 
   try {
-    const raw = readFileSync(skillFile, "utf-8");
-    const { frontmatter, body } = parseSkillFile(raw, safe);
-    const meta = readSkillMeta(workspacePath, safe);
-    return { frontmatter, body, meta };
+    let entry = _skillParseCache.get(skillFile);
+    if (!entry || entry.mtimeMs !== mtimeMs) {
+      entry = { mtimeMs, parsed: parseSkillFile(readFileSync(skillFile, "utf-8"), safe) };
+      _skillParseCache.set(skillFile, entry);
+    }
+    const meta = readSkillMeta(workspacePath, safe); // fresh — ranking signal mutates
+    return { frontmatter: entry.parsed.frontmatter, body: entry.parsed.body, meta };
   } catch (err) {
     log.warn({ err, slug: safe }, "Failed to read skill");
     return null;

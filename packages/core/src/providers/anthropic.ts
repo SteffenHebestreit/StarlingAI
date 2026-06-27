@@ -550,12 +550,51 @@ export class AnthropicProvider implements ChatProvider {
     return { signal, headers: { Authorization: `Bearer ${token}` } };
   }
 
+  /** Parse a Retry-After header (integer seconds OR HTTP-date) into ms, or null. */
+  private parseRetryAfterMs(err: { headers?: unknown }): number | null {
+    const headers = err.headers;
+    let raw: string | undefined;
+    if (headers && typeof (headers as Headers).get === "function") {
+      raw = (headers as Headers).get("retry-after") ?? undefined; // Web Headers
+    } else if (headers && typeof headers === "object") {
+      const rec = headers as Record<string, string>;
+      raw = rec["retry-after"] ?? rec["Retry-After"];
+    }
+    raw = raw?.trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) return parseInt(raw, 10) * 1000;
+    const when = Date.parse(raw);
+    return Number.isNaN(when) ? null : Math.max(0, when - Date.now());
+  }
+
+  /**
+   * Backoff for a retryable provider error: honor server-directed Retry-After on
+   * 429/529, else exponential 2s·2^attempt — both clamped to [0, 60s] with ±20%
+   * jitter so concurrent sub-agents don't form a synchronized retry storm.
+   */
+  private retryDelayForError(err: unknown, attempt: number): number {
+    let baseMs = 2000 * Math.pow(2, attempt);
+    if (err instanceof Anthropic.APIError && (err.status === 429 || err.status === 529)) {
+      const ra = this.parseRetryAfterMs(err);
+      if (ra !== null) baseMs = ra;
+    }
+    baseMs = Math.min(Math.max(baseMs, 0), 60_000);
+    const jitter = baseMs * 0.2 * (Math.random() * 2 - 1);
+    return Math.max(0, Math.round(baseMs + jitter));
+  }
+
+  /** Terminal errors that must not be retried (hard timeout, non-429 4xx). */
+  private isRetryableProviderError(err: unknown): boolean {
+    if (err instanceof ProviderHardTimeoutError) return false;
+    if (err instanceof Anthropic.APIError && err.status !== undefined && err.status < 500 && err.status !== 429) return false;
+    return true;
+  }
+
   async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
     const { modelId, params } = this.buildRequestBase(messages, tools);
 
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
-    const retryDelay = 2000;
 
     while (attempt < maxAttempts) {
       const startedAt = Date.now();
@@ -613,6 +652,7 @@ export class AnthropicProvider implements ChatProvider {
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(`Anthropic request failed (model: ${modelId}): ${msg}`);
         }
+        const retryDelay = this.retryDelayForError(err, attempt - 1);
         log.warn({ err, attempt, retryDelay }, "Anthropic request failed — retrying");
         await new Promise((r) => setTimeout(r, retryDelay));
       }
@@ -692,9 +732,31 @@ export class AnthropicProvider implements ChatProvider {
       signal.addEventListener("abort", streamParentListener, { once: true });
     }
 
-    const stream = await this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, async (s) =>
+    // Open the stream with the same bounded retry/backoff as complete(). The 429
+    // (and 529) happens at open time, before any chunk; previously this threw with
+    // ZERO retry, so concurrent sub-agents hitting a rate limit all failed at once.
+    const openStream = () => this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, async (s) =>
       this.client.messages.create({ ...params, stream: true }, await this.requestOptions(s)),
     );
+    let stream: Awaited<ReturnType<typeof openStream>>;
+    {
+      let openAttempt = 0;
+      const maxOpenAttempts = this.configuredMaxRetries + 1;
+      for (;;) {
+        try {
+          stream = await openStream();
+          break;
+        } catch (err) {
+          openAttempt++;
+          if (signal?.aborted || streamAc.signal.aborted || openAttempt >= maxOpenAttempts || !this.isRetryableProviderError(err)) {
+            throw err;
+          }
+          const delay = this.retryDelayForError(err, openAttempt - 1);
+          log.warn({ err, attempt: openAttempt, delay, model: modelId }, "Anthropic stream open failed — retrying");
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
 
     // index → tool id mapping: Anthropic streams tool args per content-block index.
     const toolBlockIds = new Map<number, string>();

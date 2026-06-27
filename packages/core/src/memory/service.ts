@@ -197,17 +197,18 @@ export async function searchMemoryRecords(
     records.push(...readAgentMemoryRecords(workspacePath, opts.targetAgent));
   }
 
-  const filtered = records.filter((record) => {
-    if (allowedKinds && !allowedKinds.has(record.kind)) return false;
-    if (!normalizedQuery) return true;
-    return scoreRecord(record, normalizedQuery, tokens) > 0;
-  });
-
-  // Pre-score all candidates (token overlap + recency + decay)
-  const textScored = filtered.map((record) => ({
-    ...record,
-    score: scoreRecord(record, normalizedQuery, tokens),
-  }));
+  // Pre-score all candidates (token overlap + recency + decay) in a SINGLE pass.
+  // The previous filter+map computed scoreRecord twice per candidate; this folds
+  // the kind gate and the >0 drop into one scoring pass, output-identical:
+  //   - empty query  → keep every kind-allowed record (score = scoreRecord("") as before)
+  //   - real query   → drop score<=0 (matches the old `> 0` filter)
+  const textScored: Array<MemoryRecord & { score: number }> = [];
+  for (const record of records) {
+    if (allowedKinds && !allowedKinds.has(record.kind)) continue;
+    const score = scoreRecord(record, normalizedQuery, tokens);
+    if (normalizedQuery && score <= 0) continue;
+    textScored.push({ ...record, score });
+  }
 
   // Embedding blend: when the embedding provider is available, compute the
   // query embedding once and apply a cosine-similarity adjustment to scored
@@ -558,6 +559,11 @@ function storeDurableMemoryRecord(
     ...(embedding ? { embedding } : {}),
   };
 
+  // Snapshot the active records BEFORE the write + cache bump, while the cache is
+  // still warm from this turn's reads. Supersession iterates this in-memory list
+  // instead of re-reading + re-parsing the whole scope dir on every write.
+  const priorRecords = readDurableMemoryRecords(scope, workspacePath);
+
   writeFileSync(filePath, JSON.stringify(stored, null, 2), "utf-8");
   _bumpCacheVersion(cacheKey);
   const result = workspaceStoredToRecord(stored);
@@ -565,7 +571,7 @@ function storeDurableMemoryRecord(
   // Temporal supersession: a new fact about the same explicit subject (with
   // different content) supersedes prior records about that subject so stale
   // values stop resurfacing. Best-effort, gated, and never deletes the file.
-  supersedeOlderSubjectFacts(scope, dir, cacheKey, result, key, now);
+  supersedeOlderSubjectFacts(scope, dir, cacheKey, result, key, now, priorRecords);
 
   // Fire-and-forget embedding refresh when the indexable text changed and
   // embeddings are configured.  Writes back to the same file so future reads
@@ -621,24 +627,28 @@ function supersedeOlderSubjectFacts(
   fresh: MemoryRecord,
   freshKey: string,
   now: string,
+  priorRecords: MemoryRecord[],
 ): void {
   try {
     if (getConfig().memory.supersedeStaleFacts === false) return;
     const subjectKey = normalizeForMatch(fresh.subject);
     if (subjectKey.length < 4) return;
-    const freshFile = `${freshKey}.json`;
     let changed = false;
-    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json") && f !== freshFile)) {
-      const path = resolve(dir, file);
-      let stored: StoredWorkspaceMemoryRecord | null;
-      try { stored = parseStoredWorkspaceMemory(readFileSync(path, "utf-8")); } catch { continue; }
-      if (!stored || stored.supersededAt) continue;
-      const older = workspaceStoredToRecord(stored);
+    // Iterate the pre-write in-memory snapshot (active records only — the cache
+    // already excludes superseded ones). Only read + rewrite the FILES that match,
+    // which is usually 0–1, instead of scanning + parsing the whole dir.
+    for (const older of priorRecords) {
+      const olderKey = older.key;
+      if (!olderKey || olderKey === freshKey) continue;                     // the fresh record itself
       if (normalizeForMatch(older.subject) !== subjectKey) continue;        // different topic
       // Near-duplicates/paraphrases are for compaction to MERGE, not supersede —
       // reuse compaction's exact predicate so the two mechanisms never collide.
       // Only a genuinely different value for the same subject is superseded.
       if (areNearDuplicateRecords(older, fresh)) continue;
+      const path = resolve(dir, `${olderKey}.json`);
+      let stored: StoredWorkspaceMemoryRecord | null;
+      try { stored = parseStoredWorkspaceMemory(readFileSync(path, "utf-8")); } catch { continue; }
+      if (!stored || stored.supersededAt) continue;
       writeFileSync(path, JSON.stringify({ ...stored, supersededAt: now }, null, 2), "utf-8");
       changed = true;
       logAudit("memory_fact_superseded", {
@@ -1013,20 +1023,67 @@ function mergeWorkspaceRecords(left: MemoryRecord, right: MemoryRecord): MemoryR
   };
 }
 
-function groupSimilarWorkspaceRecords(records: MemoryRecord[]): MemoryRecord[][] {
-  const groups: MemoryRecord[][] = [];
-  const sorted = records.slice().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+/** Pre-tokenized dedup keys for a record, computed ONCE for the O(n²) grouping. */
+interface RecordDedupKeys {
+  id: string;
+  fp: string;
+  subjNorm: string;
+  contentNorm: string;
+  subjTokens: Set<string>;
+  contentTokens: Set<string>;
+  summaryLike: boolean;
+}
 
+function computeDedupKeys(r: MemoryRecord): RecordDedupKeys {
+  return {
+    id: r.id,
+    fp: duplicateFingerprint(r),
+    subjNorm: normalizeForCompare(r.subject),
+    contentNorm: normalizeForCompare(r.content),
+    subjTokens: tokenSet(r.subject),
+    contentTokens: tokenSet(r.content),
+    summaryLike: isSummaryLike(r),
+  };
+}
+
+/** Same predicate as areNearDuplicateRecords, over precomputed keys (no re-tokenizing). */
+function areNearDuplicatePre(a: RecordDedupKeys, b: RecordDedupKeys): boolean {
+  if (a.id === b.id) return true;
+  if (a.fp === b.fp) return true;
+  if (a.contentNorm === b.contentNorm) return true;
+  if (a.subjNorm === b.subjNorm && (a.contentNorm.includes(b.contentNorm) || b.contentNorm.includes(a.contentNorm))) {
+    return true;
+  }
+  const subjectOverlap = overlapCoefficient(a.subjTokens, b.subjTokens);
+  const contentOverlap = overlapCoefficient(a.contentTokens, b.contentTokens);
+  const summaryPair = a.summaryLike || b.summaryLike;
+  if (a.subjNorm === b.subjNorm && contentOverlap >= 0.45) return true;
+  if (subjectOverlap >= 0.75 && contentOverlap >= 0.62) return true;
+  if (subjectOverlap >= 0.75 && summaryPair && contentOverlap >= 0.38) return true;
+  return false;
+}
+
+function groupSimilarWorkspaceRecords(records: MemoryRecord[]): MemoryRecord[][] {
+  const sorted = records.slice().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  // Tokenize/fingerprint each record ONCE up front; the previous version
+  // re-tokenized both subjects AND both contents on every pairwise comparison
+  // (O(n²) re-tokenizing — a multi-hundred-ms stall at the 500-record trigger).
+  const keys = new Map<string, RecordDedupKeys>();
+  for (const r of sorted) keys.set(r.id, computeDedupKeys(r));
+
+  const groups: Array<{ records: MemoryRecord[]; keys: RecordDedupKeys[] }> = [];
   for (const record of sorted) {
-    const group = groups.find((candidate) => candidate.some((existing) => areNearDuplicateRecords(existing, record)));
+    const rk = keys.get(record.id)!;
+    const group = groups.find((candidate) => candidate.keys.some((existing) => areNearDuplicatePre(existing, rk)));
     if (group) {
-      group.push(record);
+      group.records.push(record);
+      group.keys.push(rk);
       continue;
     }
-    groups.push([record]);
+    groups.push({ records: [record], keys: [rk] });
   }
 
-  return groups;
+  return groups.map((g) => g.records);
 }
 
 function selectCanonicalRecord(records: MemoryRecord[]): MemoryRecord {

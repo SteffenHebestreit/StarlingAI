@@ -12,6 +12,7 @@ import {
   heartbeatJob,
   initSceneJobStore,
   markJobCancelled,
+  onJobQueued,
   recoverStaleSceneJobs,
   updateJobProgress,
   type ClaimedSceneJob,
@@ -36,6 +37,7 @@ const workerId = `scene-worker-${process.pid}-${randomUUID().slice(0, 8)}`;
 const activeJobs = new Map<string, ActiveSceneJob>();
 let pumpTimer: ReturnType<typeof setInterval> | null = null;
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
+let unsubJobQueued: (() => void) | null = null;
 let pumping = false;
 
 export async function startSceneJobWorker(): Promise<void> {
@@ -48,6 +50,11 @@ export async function startSceneJobWorker(): Promise<void> {
   }, POLL_INTERVAL_MS);
   pumpTimer.unref();
 
+  // Claim a freshly-enqueued job immediately instead of waiting for the next tick.
+  // pumpQueue is re-entrant-safe (the `pumping` guard + FOR UPDATE SKIP LOCKED),
+  // so a spurious wake is harmless.
+  unsubJobQueued = onJobQueued(() => { void pumpQueue(); });
+
   monitorTimer = setInterval(() => {
     void monitorActiveJobs();
   }, MONITOR_INTERVAL_MS);
@@ -58,6 +65,7 @@ export async function startSceneJobWorker(): Promise<void> {
 }
 
 export async function stopSceneJobWorker(): Promise<void> {
+  if (unsubJobQueued) { unsubJobQueued(); unsubJobQueued = null; }
   if (pumpTimer) {
     clearInterval(pumpTimer);
     pumpTimer = null;

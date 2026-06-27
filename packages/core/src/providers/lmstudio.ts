@@ -1005,8 +1005,32 @@ export class LMStudioProvider {
     // the SDK into all-zero vectors — silently breaking every semantic feature
     // (agent routing, skill/memory retrieval, RAG). Requesting plain floats
     // returns the real vectors.
-    const response = await this.client.embeddings.create({ model: modelId, input: texts, encoding_format: "float" });
-    return response.data.map(d => new Float32Array(d.embedding));
+    //
+    // Guard with the same hard timeout + bounded retry as chat calls: the SDK
+    // timeout is unreliable on a held-open connection, so a stalled embedding
+    // server would otherwise hang the agent-index build and every live query
+    // embed indefinitely. ProviderHardTimeoutError is terminal (the caller
+    // schedules its own retry) so we never retry a hung provider.
+    const EMBED_HARD_TIMEOUT_MS = 45_000;
+    const EMBED_RETRY_DELAY_MS = 1_000;
+    let attempt = 0;
+    const maxAttempts = this.configuredMaxRetries + 1;
+    for (;;) {
+      try {
+        const response = await this.withHardTimeout(undefined, EMBED_HARD_TIMEOUT_MS, (s) =>
+          this.client.embeddings.create(
+            { model: modelId, input: texts, encoding_format: "float" },
+            { signal: s },
+          ),
+        );
+        return response.data.map(d => new Float32Array(d.embedding));
+      } catch (err) {
+        if (err instanceof ProviderHardTimeoutError) throw err;
+        attempt++;
+        if (attempt >= maxAttempts) throw err;
+        await new Promise((r) => setTimeout(r, EMBED_RETRY_DELAY_MS));
+      }
+    }
   }
 
   isHealthy(): boolean {

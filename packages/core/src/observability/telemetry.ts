@@ -44,9 +44,10 @@ export function startTimeseriesTelemetry(): void {
   log.info("Time-series telemetry started — mirroring metrics to QuestDB");
 }
 
-/** Stop and detach the audit subscription. */
+/** Stop and detach the audit subscription. Flushes any buffered lines first. */
 export function stopTimeseriesTelemetry(): void {
   if (_unsub) { _unsub(); _unsub = null; }
+  flushTelemetry();
 }
 
 // ── Emission ───────────────────────────────────────────────────────────────────
@@ -72,9 +73,32 @@ function handleEvent(event: AuditEvent): void {
   }
 }
 
-function emit(line: string): void {
+// A busy multi-agent turn emits dozens of metric lines; firing one POST per line
+// opens dozens of racing connections and wastes QuestDB's newline-batch ingest.
+// Buffer and flush on a short timer (or at MAX_BATCH), so a turn's metrics ship in
+// ~1 write. ≤1s of crash-window loss is acceptable for disposable telemetry.
+const TELEMETRY_FLUSH_MS = 1000;
+const TELEMETRY_MAX_BATCH = 100;
+let _buf: string[] = [];
+let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Flush buffered telemetry lines to QuestDB in one batched write. Exported for tests + shutdown. */
+export function flushTelemetry(): void {
+  if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null; }
+  if (_buf.length === 0) return;
+  const lines = _buf;
+  _buf = [];
   // Fire-and-forget: a QuestDB write must never disturb a turn.
-  void questWrite(line).catch(() => {});
+  void questWrite(lines).catch(() => {});
+}
+
+function emit(line: string): void {
+  _buf.push(line);
+  if (_buf.length >= TELEMETRY_MAX_BATCH) { flushTelemetry(); return; }
+  if (!_flushTimer) {
+    _flushTimer = setTimeout(flushTelemetry, TELEMETRY_FLUSH_MS);
+    _flushTimer.unref?.();
+  }
 }
 
 function emitLlmUsage(event: AuditEvent, agentName: string): void {

@@ -22,6 +22,14 @@ vi.mock("../db/questdb.js", () => ({
   escapeLineTag: (s: string) => s.replace(/[ ,=]/g, "_"),
 }));
 
+/** Telemetry now batches lines into one questWrite(string[]); flatten all calls. */
+function emittedLines(): string[] {
+  return questWriteMock.mock.calls.flatMap((c) => {
+    const arg = c[0];
+    return Array.isArray(arg) ? arg.map(String) : [String(arg)];
+  });
+}
+
 function writeConfig(): string {
   const dir = mkdtempSync(join(tmpdir(), "starlingai-telemetry-"));
   writeFileSync(
@@ -74,7 +82,8 @@ describe("time-series telemetry", () => {
       { sessionId: "sess-1" },
     );
 
-    const lines = questWriteMock.mock.calls.map((c) => String(c[0]));
+    telemetry.flushTelemetry();
+    const lines = emittedLines();
     const usageLine = lines.find((l) => l.startsWith("llm_usage,"));
     const runLine = lines.find((l) => l.startsWith("sub_agent_run,"));
 
@@ -107,9 +116,8 @@ describe("time-series telemetry", () => {
       { sessionId: "sess-2" },
     );
 
-    const usageLine = questWriteMock.mock.calls
-      .map((c) => String(c[0]))
-      .find((l) => l.startsWith("llm_usage,"));
+    telemetry.flushTelemetry();
+    const usageLine = emittedLines().find((l) => l.startsWith("llm_usage,"));
     expect(usageLine).toContain("agent=orchestrator");
     expect(usageLine).toContain("cost_usd=0.0");
   });
@@ -122,7 +130,8 @@ describe("time-series telemetry", () => {
     logAudit("tool_call_completed", { tool: "web_search", success: true, durationMs: 220, outputChars: 4096 }, { sessionId: "s" });
     logAudit("tool_call_completed", { tool: "web_search", success: true, durationMs: 0, outputChars: 10, cachedResult: true }, { sessionId: "s" });
 
-    const toolLines = questWriteMock.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("tool_latency,"));
+    telemetry.flushTelemetry();
+    const toolLines = emittedLines().filter((l) => l.startsWith("tool_latency,"));
     expect(toolLines).toHaveLength(1);
     expect(toolLines[0]).toContain("tool=web_search");
     expect(toolLines[0]).toContain("ok=true");

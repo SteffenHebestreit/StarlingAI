@@ -738,6 +738,12 @@ export const McpConfigSchema = z.object({
   servers: z.record(McpServerConfigSchema).default({}),
   /** Expose StarlingAI itself as an MCP server (Stage 12 / Open Interop). */
   expose: McpServerExposeSchema.default({}),
+  /**
+   * Lazily reconnect a bridged MCP server (once, throttled) when a tool call
+   * fails, so a crashed/restarted server self-heals instead of staying dead
+   * until the next manual sync or gateway restart. Default off.
+   */
+  autoReconnect: z.boolean().default(false),
 });
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
@@ -1282,6 +1288,12 @@ export const SelfImprovementSchema = z.object({
    * Kept separate from promotionMinCalls, which governs promotion eligibility.
    */
   gapClosureConfirmationCount: z.number().int().min(1).max(500).default(5),
+  /**
+   * Upper bound on capability gaps held in memory. Past this the oldest
+   * terminal-status gaps (deployed/closed/rejected) are evicted first, then the
+   * oldest remaining — so a long-running instance never accretes them unboundedly.
+   */
+  maxTrackedGaps: z.number().int().min(100).max(50_000).default(2000),
 });
 
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;

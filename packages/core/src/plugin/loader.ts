@@ -200,7 +200,7 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
     const resolvedSource = resolvePluginEntry(dir, entry);
     if (!resolvedSource) continue;
     try {
-      const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label);
+      const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label, resolvedSource.id);
       if (result.ok) loaded += 1;
       else rejected += 1;
     } catch (err) {
@@ -214,23 +214,27 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
   return { loaded, rejected };
 }
 
-interface ResolvedPluginEntry { entryPath: string; label: string }
+interface ResolvedPluginEntry { entryPath: string; label: string; id: string }
 
 function resolvePluginEntry(dir: string, entry: string): ResolvedPluginEntry | null {
   const fullPath = join(dir, entry);
   let stats;
   try { stats = statSync(fullPath); } catch { return null; }
 
+  // Canonical id = the directory/file basename, matching the key resyncPlugins
+  // builds its on-disk set from. The plugin's `name` must equal this.
+  const id = entry.replace(/\.(js|mjs)$/, "").toLowerCase();
+
   if (stats.isDirectory()) {
     const candidates = ["index.js", "index.mjs", "plugin.js"];
     for (const candidate of candidates) {
       const path = join(fullPath, candidate);
-      if (existsSync(path)) return { entryPath: path, label: `${entry}/${candidate}` };
+      if (existsSync(path)) return { entryPath: path, label: `${entry}/${candidate}`, id };
     }
     return null;
   }
   if (stats.isFile() && (entry.endsWith(".js") || entry.endsWith(".mjs"))) {
-    return { entryPath: fullPath, label: entry };
+    return { entryPath: fullPath, label: entry, id };
   }
   return null;
 }
@@ -254,7 +258,7 @@ export function resetPluginImporter(): void {
   _pluginImporter = defaultPluginImporter;
 }
 
-async function loadOnePlugin(entryPath: string, label: string): Promise<LoadResult> {
+async function loadOnePlugin(entryPath: string, label: string, expectedId: string): Promise<LoadResult> {
   const mod = await _pluginImporter(entryPath);
   const plugin = mod?.default;
 
@@ -264,7 +268,7 @@ async function loadOnePlugin(entryPath: string, label: string): Promise<LoadResu
     return { ok: false };
   }
 
-  const validation = validatePlugin(plugin);
+  const validation = validatePlugin(plugin, expectedId);
   if (!validation.ok) {
     log.warn({ label, reason: validation.reason }, "Plugin failed validation");
     logAudit("plugin_tool_rejected", { source: label, plugin: plugin.name, reason: validation.reason }, { severity: "warn" });
@@ -347,9 +351,16 @@ async function loadOnePlugin(entryPath: string, label: string): Promise<LoadResu
 
 interface ValidationResult { ok: boolean; reason?: string }
 
-function validatePlugin(plugin: Plugin): ValidationResult {
+function validatePlugin(plugin: Plugin, expectedId: string): ValidationResult {
   if (!plugin.name || typeof plugin.name !== "string") return { ok: false, reason: "name is required" };
   if (!PLUGIN_NAME_PATTERN.test(plugin.name)) return { ok: false, reason: `name must match ${PLUGIN_NAME_PATTERN}` };
+  // Enforce name === directory/file basename (parity with the extension loader). The
+  // on-disk reconcile keys by basename while _loadedPlugins keys by plugin.name; when
+  // they differ every watcher event spuriously unloads + reloads a still-present plugin.
+  // Making the invariant true-by-construction keeps resync's onDisk comparison valid.
+  if (plugin.name !== expectedId) {
+    return { ok: false, reason: `name "${plugin.name}" must equal its directory/file basename "${expectedId}"` };
+  }
   if (!plugin.version || typeof plugin.version !== "string") return { ok: false, reason: "version is required" };
   if (!Array.isArray(plugin.tools) || plugin.tools.length === 0) return { ok: false, reason: "tools array must be non-empty" };
   return { ok: true };

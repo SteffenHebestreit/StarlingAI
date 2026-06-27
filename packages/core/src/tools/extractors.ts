@@ -12,6 +12,7 @@ import JSON5 from "json5";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { assertFileSizeWithin, truncateOutput } from "./io-limits.js";
 
 const log = childLogger("tool:extractors");
 
@@ -73,6 +74,7 @@ registerTool({
 
     let raw: string;
     try {
+      await assertFileSizeWithin(resolved);
       raw = await readFile(resolved, "utf8");
     } catch (err) {
       return fail(`Failed to read notebook: ${String(err)}`);
@@ -122,7 +124,7 @@ registerTool({
     const markdown = out.join("\n\n").trim() + "\n";
     return {
       success: true,
-      output: markdown,
+      output: truncateOutput(markdown, undefined, "Notebook"),
       metadata: {
         path,
         cellCount: cells.length,
@@ -216,6 +218,7 @@ registerTool({
 
     let raw: string;
     try {
+      await assertFileSizeWithin(resolved);
       raw = await readFile(resolved, "utf8");
     } catch (err) {
       return fail(`Failed to read email: ${String(err)}`);
@@ -253,7 +256,7 @@ registerTool({
 
     return {
       success: true,
-      output: sections.join("\n\n"),
+      output: truncateOutput(sections.join("\n\n"), undefined, "Email"),
       metadata: {
         path,
         from: parsed.headers["from"]?.[0],
@@ -519,6 +522,7 @@ registerTool({
 
     let raw: string;
     try {
+      await assertFileSizeWithin(resolved);
       raw = await readFile(resolved, "utf8");
     } catch (err) {
       return fail(`Failed to read .ics file: ${String(err)}`);
@@ -536,7 +540,7 @@ registerTool({
 
     return {
       success: true,
-      output: JSON.stringify(filtered, null, 2),
+      output: truncateOutput(JSON.stringify(filtered, null, 2), undefined, "Calendar"),
       metadata: {
         path,
         eventCount: filtered.length,

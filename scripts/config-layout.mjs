@@ -4,6 +4,7 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { PRODUCT } from "./product.mjs";
+import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultSourceFile = join(repoRoot, PRODUCT.configFileName);
@@ -83,7 +84,7 @@ function buildTwoZone() {
       merged = deepMerge(merged, shardRaw);
     }
     if (existsSync(defaultWorkspaceDir) && isDir(defaultWorkspaceDir)) {
-      for (const shardPath of collectShardPaths(defaultWorkspaceDir)) {
+      for (const shardPath of collectShardPaths(defaultWorkspaceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES })) {
         const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
         merged = deepMerge(merged, shardRaw);
       }
@@ -91,7 +92,7 @@ function buildTwoZone() {
   } else if (existsSync(legacySourceDir) && isDir(legacySourceDir)) {
     // Legacy single-directory layout
     console.warn("[config-layout] WARNING: Using legacy starling_config/ — migrate to config/ + workspace/ layout");
-    for (const shardPath of collectShardPaths(legacySourceDir)) {
+    for (const shardPath of collectShardPaths(legacySourceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES })) {
       const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
       merged = deepMerge(merged, shardRaw);
     }
@@ -202,15 +203,21 @@ function writeShard(targetDir, relativePath, payload) {
   writeFileSync(fullPath, `${JSON.stringify(cleaned, null, 2)}\n`, "utf8");
 }
 
-function collectShardPaths(sourceDir) {
+function collectShardPaths(sourceDir, { excludeZones = [] } = {}) {
   if (!existsSync(sourceDir)) return [];
   const shardPaths = [];
+  const skipZones = new Set(excludeZones);
 
-  const visit = (currentDir) => {
+  const visit = (currentDir, depth) => {
     for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
       const nextPath = join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        visit(nextPath);
+        // SECURITY: skip depth-0 working zones (generated/, uploads/, tools/) so
+        // an agent-written or uploaded data.json with a top-level "agents" key
+        // cannot merge into the compiled config. Mirrors the runtime loader's
+        // NON_CONFIG_WORKSPACE_ZONES guard, closing the build-vs-loader gap.
+        if (depth === 0 && skipZones.has(entry.name)) continue;
+        visit(nextPath, depth + 1);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -221,7 +228,7 @@ function collectShardPaths(sourceDir) {
     }
   };
 
-  visit(sourceDir);
+  visit(sourceDir, 0);
   return shardPaths.sort((left, right) => relative(sourceDir, left).localeCompare(relative(sourceDir, right)));
 }
 

@@ -270,73 +270,44 @@ registerTool({
     }
 
     try {
-      // Lightweight HEAD to determine content type before committing to a strategy
+      // Single GET; route by the RESPONSE content-type. A separate upfront HEAD
+      // probe was removed — it cost an extra round-trip on every fetch to derive a
+      // content-type the first GET already returns (and many servers reject HEAD).
       let contentType = "";
-      try {
-        const headRes = await fetchWithTimeout(url, 8000, {
-          method: "HEAD",
-          headers: { "User-Agent": "StarlingAI/0.1 (research assistant)" },
-        });
-        contentType = headRes.headers.get("content-type") ?? "";
-      } catch {
-        // HEAD failed (some servers reject it) — fall through to full request
-      }
-
-      // PDF documents (datasheets, specs, papers) → extract text via the multimodal
-      // service rather than returning raw %PDF bytes (audit 97085c6b).
-      if (isPdfContentType(contentType)) {
-        return await fetchAndExtractPdf(url, maxLength, shareSuffix);
-      }
-
-      const isJsonApi = /\bjson\b/i.test(contentType);
-
-      // JSON / API responses → native fetch (no browser needed)
-      if (isJsonApi) {
-        const res = await fetchWithTimeout(url, 15000, {
-          headers: {
-            "User-Agent": "StarlingAI/0.1 (research assistant)",
-            "Accept": "application/json,text/plain,*/*",
-          },
-        });
-
-        if (!res.ok) {
-          return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
-        }
-
-        let text = await res.text();
-        if (text.length > maxLength) {
-          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
-        }
-        return {
-          success: true,
-          output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
-          metadata: { url, contentLength: text.length, contentType, fetchMethod: "native" },
-        };
-      }
-
-      // HTML / other content.
-      // Strategy: native fetch + HTML strip first (gives clean prose text for
-      // most static documentation/article pages). Only fall back to Playwright
-      // when native returns too little content (JS-rendered pages) or fails.
-      // This avoids the YAML accessibility-tree noise that browser_snapshot
-      // produces, which inflates context and causes LLM synthesis timeouts.
-
       let nativeFetchText: string | null = null;
       try {
         const res = await fetchWithTimeout(url, 12000, {
           headers: {
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
-            "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
+            "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
           },
         });
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
+          contentType = ct;
           let raw = await res.text();
-          // PDF that HEAD did not flag (no content-type, or PDF served as octet-stream):
-          // detect by content-type or the %PDF magic header and re-route to extraction.
+          // PDF documents (datasheets/specs/papers), incl. octet-stream / %PDF magic →
+          // extract text via the multimodal service rather than returning raw %PDF bytes.
           if (isPdfContentType(ct) || raw.trimStart().startsWith("%PDF")) {
             return await fetchAndExtractPdf(url, maxLength, shareSuffix);
           }
+          // JSON / API → return verbatim (no HTML strip, no min-length floor: small
+          // valid JSON must not be rejected and re-fetched down the fallback path).
+          if (/\bjson\b/i.test(ct)) {
+            let text = raw;
+            if (text.length > maxLength) {
+              text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+            }
+            return {
+              success: true,
+              output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
+              metadata: { url, contentLength: text.length, contentType: ct, fetchMethod: "native" },
+            };
+          }
+          // HTML / other content: strip markup first (clean prose for static pages),
+          // and keep it only if it has real content — JS-rendered pages return little,
+          // so they fall through to Playwright below. This avoids the YAML
+          // accessibility-tree noise that browser_snapshot produces.
           if (ct.includes("text/html")) raw = stripHtml(raw);
           if (raw.trim().length > 200) {
             nativeFetchText = raw.trim();

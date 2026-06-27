@@ -94,8 +94,10 @@ export const AVAILABILITY_QUESTION_PATTERNS = [
 export const PRODUCT_RECOMMENDATION_PATTERNS = [
   /\b(product suggestions?|component suggestions?|part suggestions?|module suggestions?|product recommendations?|component recommendations?)\b/,
   /\b(produkt(?:e|vorschl[äa]ge|empfehlungen)|bauteil(?:e|vorschl[äa]ge|empfehlungen)|modul(?:e|vorschl[äa]ge|empfehlungen))\b/,
-  /\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b[\s\S]{0,120}\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b/,
-  /\b(module|modules|sensor|sensors|microphone|microphones|mic|mics|mcu|esp32|lipo|usb-c|charging|charger|laderegler|spannungsregler|mikrofon|mikrofone|bauteil|bauteile)\b[\s\S]{0,120}\b(best|beste|recommend|recommended|recommendation|suggest|suggestions?|empfehl(?:e|ung|ungen)|vorschl[äa]ge?)\b/,
+  // The two hardcoded component-noun ordering patterns (esp32/lipo/mikrofon/…) were
+  // removed: they overfit to a single hardware-BOM build and are bilingual keyword
+  // bags. The generic "suggestions/recommendations" shape above carries routing recall
+  // without enumerating parts (see runtime-guidance.test.ts).
 ];
 
 // Noun shared between the two ordering patterns. Includes English and German
@@ -439,11 +441,21 @@ export interface DynamicTurnGuidance {
  * matches "aktuellen", "neueste" matches "neuesten"). Multi-word phrases are
  * matched verbatim.
  */
-function includesTermAtWordStart(normalized: string, terms: readonly string[]): boolean {
-  return terms.some((term) => {
+// Compile each term's word-start RegExp once (the term lists are constant), instead
+// of rebuilding it on every call across the 5+ callers of includesTermAtWordStart.
+const _termRegexCache = new Map<string, RegExp>();
+function termStartRegex(term: string): RegExp {
+  let re = _termRegexCache.get(term);
+  if (!re) {
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}`, "u").test(normalized);
-  });
+    re = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}`, "u");
+    _termRegexCache.set(term, re);
+  }
+  return re;
+}
+
+function includesTermAtWordStart(normalized: string, terms: readonly string[]): boolean {
+  return terms.some((term) => termStartRegex(term).test(normalized));
 }
 
 export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssistantToolMode = getConfig().agents.mainAssistant.toolMode): DynamicTurnGuidance | null {
