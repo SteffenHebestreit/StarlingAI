@@ -1,0 +1,28 @@
+{
+  // TEST ENABLEMENT — staged orchestration (docs/staged-orchestration.md).
+  // Turns the staged-pipeline stages ON for THIS deployment so you can validate
+  // latency + answer quality on real turns before flipping the schema defaults.
+  // Safe + reversible: delete this file (then `sai config build`, or just the next
+  // `sai start --build`) to revert every stage to its default (off). All three are
+  // soft / fail-open and cannot block delivery.
+  "orchestration": {
+    // S1 — the terminal forced-synthesis call uses a compact ~1K synthesis-only
+    // prompt instead of the ~24.7K orchestrator monolith. Cannot route/delegate.
+    "leanSynthesisPrompt": true,
+
+    // S3 — final QA delivery gate: after the existing correctness gates, the answer
+    // is verdicted against the plan's acceptance criteria; on a FAIL the flaws go
+    // back for an improvement pass, looping until it passes or maxRounds is reached.
+    // Only fires when a plan with acceptance criteria exists. Watch the audit stream
+    // for flow_verification_passed{reason:"qa_delivery_loop"}.
+    "qaDeliveryLoop": true,
+    "qaDeliveryLoopMaxRounds": 2,
+
+    // S4 — parallel discovery prefetch: on an escalated turn, agent + workflow
+    // discovery run concurrently up-front and inject a compact [CAPABILITY CANDIDATES]
+    // capsule so the coordinator plans without separate search_agents/search_workflows
+    // tool rounds. Watch the audit stream for the discovery_prefetch event (fires
+    // early, on iteration 0 — the cheapest stage to confirm is live).
+    "discoveryPrefetch": true
+  }
+}
