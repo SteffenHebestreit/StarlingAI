@@ -5299,7 +5299,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // dead-end (session 8a0c2be3, 2026-05-28: tool_loop_detected fired
           // at 7 s, sub_agent_completed at 103 s — 96 s of pure waste). The
           // post-loop synthesis pass below still gets one shot at producing
-          // a final answer from history.
+          // a final answer from history — so this iteration's tool results
+          // (including the loop-stop nudge just appended above and any cached
+          // failed-result annotation) MUST land in history before we break,
+          // exactly as the normal end-of-iteration push at the bottom of the
+          // loop would do. Skipping it discards the last failed tool output
+          // (and its annotation) the synthesis pass is supposed to work from.
+          history.push(...toolResults);
           break;
         }
       } else {

@@ -3772,7 +3772,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "ok, thx...we will go with the recommended modules and keep the endpoint centralized because reliability is what it is all about. We will use the explicit sync mode and keep UI responsibilities separated.",
+      userMessage: "ok, thx...we will go with the component recommendations and keep the endpoint centralized because reliability is what it is all about. We will use the explicit sync mode and keep UI responsibilities separated.",
     });
 
     expect(result.blocked).toBe(false);

@@ -154,13 +154,18 @@ describe("normalizeMessagesForModel", () => {
 
     await provider.embed(["hello"], "lmstudio/text-embedding-qwen3-embedding-0.6b");
 
-    expect(create).toHaveBeenCalledWith({
-      model: "text-embedding-qwen3-embedding-0.6b",
-      input: ["hello"],
-      // Forced to avoid the OpenAI SDK's base64 default, which LM Studio
-      // mis-decodes into all-zero vectors.
-      encoding_format: "float",
-    });
+    expect(create).toHaveBeenCalledWith(
+      {
+        model: "text-embedding-qwen3-embedding-0.6b",
+        input: ["hello"],
+        // Forced to avoid the OpenAI SDK's base64 default, which LM Studio
+        // mis-decodes into all-zero vectors.
+        encoding_format: "float",
+      },
+      // Embeds are wrapped in the same hard-timeout AbortController as chat
+      // calls, so the SDK receives a real AbortSignal as the second argument.
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("passes enable_thinking through for Gemma models without forcing Qwen sampling defaults", async () => {

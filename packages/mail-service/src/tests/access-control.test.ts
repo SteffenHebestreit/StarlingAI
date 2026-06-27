@@ -8,7 +8,7 @@ vi.mock("../imap-client.js", () => ({
   MailAccountClient: class {
     async listMailboxes() { return listMailboxesMock(); }
     async createMailbox(path: string) { return createMailboxMock(path); }
-    async search(query: string, mailboxes?: string[], limit?: number) { return searchMock(query, mailboxes, limit); }
+    async searchSummaries(query: string, mailboxes?: string[], limit?: number) { return searchMock(query, mailboxes, limit); }
     async readMessage() { return null; }
     async moveMessage() { return { destination: "x" }; }
     async deleteMessage() { return { movedToTrash: true }; }

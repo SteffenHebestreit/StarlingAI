@@ -723,7 +723,15 @@ function persistSkill(
 ): void {
   const dir = resolve(skillsDir(workspacePath), frontmatter.slug);
   mkdirSync(dir, { recursive: true });
-  atomicWriteTextSync(resolve(dir, "SKILL.md"), serializeSkillFile(frontmatter, body));
+  const skillFile = resolve(dir, "SKILL.md");
+  atomicWriteTextSync(skillFile, serializeSkillFile(frontmatter, body));
+  // Bust the parse cache for this file. The cache is validated by mtimeMs, but
+  // filesystem mtime granularity is coarse (often whole-millisecond on Windows),
+  // so a write that lands in the same tick as the cached entry would otherwise
+  // serve a stale parse to the very next getSkill in a write→read sequence
+  // (e.g. patchSkill / rollbackSkillHistory). Invalidate on every write so the
+  // next read re-parses the fresh content regardless of mtime resolution.
+  _skillParseCache.delete(skillFile);
   persistSkillMeta(workspacePath, meta);
 }
 
