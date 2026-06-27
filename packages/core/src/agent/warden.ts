@@ -520,11 +520,26 @@ export function startWarden(): void {
 
           _sloBreaches.set(event.sessionId, { turnDurationMs, firstTokenMs, sloBudgetMs: sloMs });
 
+          // Attribute the breach to the slowest stage(s) (A1 phaseTimingsMs +
+          // untrackedMs residual) so a breach reads "X stage was slow" instead of
+          // requiring manual log spelunking.
+          const phaseTimings = (event.data["phaseTimingsMs"] ?? {}) as Record<string, number>;
+          const untrackedMs = Number(event.data["untrackedMs"] ?? 0);
+          const llmTimeMs = Number(event.data["llmTimeMs"] ?? 0);
+          const toolTimeMs = Number(event.data["toolExecutionTimeMs"] ?? 0);
+          const breakdown: Array<[string, number]> = [
+            ...Object.entries(phaseTimings),
+            ...(untrackedMs > 0 ? [["untracked", untrackedMs] as [string, number]] : []),
+            ...(llmTimeMs > 0 ? [["llm", llmTimeMs] as [string, number]] : []),
+            ...(toolTimeMs > 0 ? [["tools", toolTimeMs] as [string, number]] : []),
+          ].sort((a, b) => b[1] - a[1]);
+          const dominant = breakdown.slice(0, 2).map(([k, v]) => `${k} ${Math.round(v)}ms`).join(", ");
+
           const alert = makeAlert(
             "turn_slo_breach",
             "warn",
             event.sessionId,
-            `${isSubAgent ? "Sub-agent" : "Orchestrator"} session ${event.sessionId.slice(0, 20)} exceeded ${breachType} SLO: ${breachMs}ms > ${sloUsed}ms budget`,
+            `${isSubAgent ? "Sub-agent" : "Orchestrator"} session ${event.sessionId.slice(0, 20)} exceeded ${breachType} SLO: ${breachMs}ms > ${sloUsed}ms budget${dominant ? ` (dominant: ${dominant})` : ""}`,
             "logged",
           );
           emitAlert(alert);

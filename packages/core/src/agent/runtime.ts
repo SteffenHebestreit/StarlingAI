@@ -62,6 +62,7 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
 import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { readAllFacts, beginFactTurn } from "../swarm/memory.js";
@@ -133,6 +134,23 @@ export {
 } from "./runtime-evidence-dump.js";
 
 const log = childLogger("agent:runtime");
+
+// Turn-scoped accumulator for per-stage wall-clock (A1). A turn runs inside one
+// runTurn() invocation, but the gateway runs turns concurrently — so this MUST be
+// AsyncLocalStorage (a module-level singleton would cross-contaminate turns), not a
+// shared mutable. timedPhase() records the elapsed ms of a stage into the active
+// turn's store; buildTurnPerformanceMetrics() reads it and computes untrackedMs.
+const _phaseTimingsStore = new AsyncLocalStorage<Record<string, number>>();
+async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
+  const store = _phaseTimingsStore.getStore();
+  if (!store) return fn();
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    store[phase] = (store[phase] ?? 0) + (Date.now() - start);
+  }
+}
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
@@ -229,6 +247,14 @@ export interface TurnPerformanceMetrics {
    *  high/max-effort turn doesn't trip a spurious SLO-breach alert — without the
    *  Warden having to import the session store (avoids a module cycle). */
   effortSloBudgetMs?: number;
+  /** Per-stage wall-clock (ms) for work that runs OUTSIDE llmTimeMs/toolExecutionTimeMs —
+   *  e.g. discoveryPrefetch, documentRag, qaDeliveryLoop, receptionistFastLane. Lets the
+   *  Warden + eval attribute turn latency to a stage instead of treating turnDurationMs as
+   *  a black box. */
+  phaseTimingsMs?: Record<string, number>;
+  /** turnDurationMs minus llmTimeMs, toolExecutionTimeMs, and all tracked phase timings —
+   *  the residual that surfaces the next unmeasured cost. */
+  untrackedMs?: number;
 }
 
 export function getPerTurnToolCallLimit(toolName: string): number | undefined {
@@ -3424,6 +3450,12 @@ export function buildTemporalContextPrompt(now: Date = new Date()): string {
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
+  // Establish a fresh per-turn phase-timing store, then run the turn inside it so
+  // timedPhase() calls anywhere in the turn record into THIS turn's map.
+  return _phaseTimingsStore.run(Object.create(null) as Record<string, number>, () => runTurnImpl(opts));
+}
+
+async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
   // (0 = unlimited), then config, then default 15 min. An explicit override of 0
@@ -3686,7 +3718,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
   // their files are always ingested + injected below.
   if (detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled) {
-    const fastLane = await tryReceptionistFastLane(userMessage, signal).catch(() => null);
+    const fastLane = await timedPhase("receptionistFastLane", () => tryReceptionistFastLane(userMessage, signal).catch(() => null));
     if (fastLane) {
       session.addMessage({ role: "assistant", content: fastLane.response });
       opts.onChunk?.(fastLane.response);
@@ -3728,12 +3760,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // No-op when documentRag is disabled / engram is unreachable. Never fatal.
   try {
     const { augmentTurnWithDocuments } = await import("../retrieval/document-rag.js");
-    const aug = await augmentTurnWithDocuments({
+    const aug = await timedPhase("documentRag", () => augmentTurnWithDocuments({
       ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}) },
       workspacePath: session.getWorkspacePath(),
       query: userMessage,
       attachments: opts.userAttachments,
-    });
+    }));
     if (aug.ingested > 0 || aug.failed > 0) {
       logAudit("document_rag_ingest", { ingested: aug.ingested, failed: aug.failed }, { sessionId: session.id });
     }
@@ -4631,7 +4663,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     let discoveryCapsule = "";
     if (iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch) {
       try {
-        discoveryCapsule = await prefetchCapabilityCandidates(userMessage);
+        discoveryCapsule = await timedPhase("discoveryPrefetch", () => prefetchCapabilityCandidates(userMessage));
         if (discoveryCapsule) {
           logAudit("discovery_prefetch", { capsuleChars: discoveryCapsule.length }, { sessionId: session.id });
         }
@@ -6031,11 +6063,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
                 }
               }
             : undefined;
-          const gate = await runQaDeliveryGate(
+          const gate = await timedPhase("qaDeliveryLoop", () => runQaDeliveryGate(
             session, provider, signal, finalResponse, criteria,
             effectiveOrchestration().qaDeliveryLoopMaxRounds,
             qaEscalate,
-          );
+          ));
           if (gate.changed) {
             finalResponse = gate.answer;
             // The precomputed outputScan only covered the original raw response — re-run
@@ -8416,8 +8448,16 @@ function buildTurnPerformanceMetrics(input: {
   blocked: boolean;
   toolIterations: number;
 }): TurnPerformanceMetrics {
+  const turnDurationMs = Date.now() - input.turnStartedAt;
+  // Per-stage timings recorded by timedPhase() during this turn (empty when no
+  // tracked stage ran). untrackedMs is the residual after LLM + tool + tracked
+  // stages — it surfaces the next unmeasured cost.
+  const phaseStore = _phaseTimingsStore.getStore();
+  const phaseTimingsMs = phaseStore && Object.keys(phaseStore).length > 0 ? { ...phaseStore } : undefined;
+  const trackedPhaseMs = phaseTimingsMs ? Object.values(phaseTimingsMs).reduce((a, b) => a + b, 0) : 0;
+  const untrackedMs = Math.max(0, turnDurationMs - input.llmTimeMs - input.toolExecutionTimeMs - trackedPhaseMs);
   return {
-    turnDurationMs: Date.now() - input.turnStartedAt,
+    turnDurationMs,
     firstModelResponseMs: input.firstModelResponseMs,
     llmCalls: input.llmCalls,
     llmTimeMs: input.llmTimeMs,
@@ -8433,5 +8473,7 @@ function buildTurnPerformanceMetrics(input: {
     blocked: input.blocked,
     // Resolved within the turn's effort context (or config default outside one).
     effortSloBudgetMs: effectiveOrchestratorTurnSloMs(),
+    ...(phaseTimingsMs ? { phaseTimingsMs } : {}),
+    untrackedMs,
   };
 }
