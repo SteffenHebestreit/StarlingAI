@@ -4,7 +4,12 @@
 FROM python:3.12-slim AS base
 
 ARG ENGRAM_REPO=https://github.com/SteffenHebestreit/engram.git
-ARG ENGRAM_REF=main
+# Pinned to a release tag (not the moving `main`) so the build is reproducible AND so a
+# bump actually re-clones — Docker caches the `git clone` layer, so tracking `main` would
+# silently freeze on whatever version first built. To update engram: bump this to the new
+# tag (or pass --build-arg ENGRAM_REF=…). v0.2.0 is API+env compatible with our client
+# (POST /documents, POST /search tuning.final_top_k, GET/DELETE /documents, source scoping).
+ARG ENGRAM_REF=v0.2.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

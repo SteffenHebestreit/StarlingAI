@@ -186,9 +186,16 @@ services:
     build:
       context: .
       dockerfile: docker/engram/Dockerfile
+      # Engram version to clone+build. Override to bump (e.g. ENGRAM_REF=v0.3.0 in .env);
+      # changing it re-clones (the git layer is otherwise cached). Default = the pinned tag.
+      args:
+        ENGRAM_REF: ${ENGRAM_REF:-v0.2.0}
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
+      # Graph store backend (v0.2.0 added a Postgres alternative; we run Neo4j+GDS). Pin it
+      # explicitly so a future upstream default flip can't silently bypass our neo4j service.
+      - STORE_BACKEND=${ENGRAM_STORE_BACKEND:-neo4j}
       - NEO4J_URI=bolt://engram-neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${ENGRAM_NEO4J_PASSWORD:-engram}
