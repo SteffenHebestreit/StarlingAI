@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inspectSecrets } from "../observability/secret-hygiene.js";
+import { inspectSecrets, logSecretHygiene } from "../observability/secret-hygiene.js";
 
 const STRONG_KEY = "QzXzDcSb3fvg1TZKFWxNfEuG-vjHONcDTodrdk-35IZ0JLDvDl0_7vAuYjc7dA4";
 const STRONG_JWT = "1KE6nVm-bWsyVR8hAhHxUTsI6hGYGUQtYlS3TJITtLI_CB3cQEOuEFLzypneiuSS";
@@ -56,5 +56,14 @@ describe("inspectSecrets", () => {
   it("trims whitespace before evaluating length and emptiness", () => {
     expect(inspectSecrets({ SAI_MASTER_KEY: "   ", SAI_JWT_SECRET: STRONG_JWT }))
       .toEqual([expect.objectContaining({ envVar: "SAI_MASTER_KEY", severity: "missing" })]);
+  });
+});
+
+describe("logSecretHygiene", () => {
+  it("warns on weak secrets and is a no-op when all are strong (never throws)", () => {
+    // Pure warning path — must not throw regardless of findings, so a
+    // half-configured dev box can still boot.
+    expect(() => logSecretHygiene({ SAI_MASTER_KEY: "", SAI_JWT_SECRET: "short" })).not.toThrow();
+    expect(() => logSecretHygiene({ SAI_MASTER_KEY: STRONG_KEY, SAI_JWT_SECRET: STRONG_JWT })).not.toThrow();
   });
 });

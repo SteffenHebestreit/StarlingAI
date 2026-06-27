@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canAccessResource, filterAccessibleResources } from "../guardrails/resource-access.js";
+import { canAccessResource, filterAccessibleResources, resourceDeniedMessage } from "../guardrails/resource-access.js";
 
 /**
  * Per-user resource ownership guard. Backwards-compatible: shared resources and
@@ -36,5 +36,17 @@ describe("canAccessResource", () => {
     ];
     expect(filterAccessibleResources("alice", accounts).map((a) => a.id)).toEqual(["shared", "alice-only"]);
     expect(filterAccessibleResources(undefined, accounts).map((a) => a.id)).toEqual(["shared", "alice-only", "bob-only"]);
+  });
+});
+
+describe("resourceDeniedMessage", () => {
+  it("names the kind + id without leaking whether the resource exists", () => {
+    const msg = resourceDeniedMessage("mail account", "alice-only");
+    expect(msg).toContain("mail account");
+    expect(msg).toContain("alice-only");
+    expect(msg).toContain("restricted to specific users");
+    // Must not hint at existence beyond the id the caller already supplied.
+    expect(msg.toLowerCase()).not.toContain("does not exist");
+    expect(msg.toLowerCase()).not.toContain("not found");
   });
 });
