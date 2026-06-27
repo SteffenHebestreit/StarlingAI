@@ -255,7 +255,9 @@ services:
     restart: unless-stopped
     environment:
       - MODEL_NAME=${ENGRAM_RERANKER_MODEL:-Qwen/Qwen3-Reranker-0.6B}
-      - USE_FP16=false
+      # Run on the host GPU (RTX 4080, ~1.2GB for the 0.6B in fp16). torch in the
+      # image is the +cu130 build, so it uses CUDA whenever the device is reserved.
+      - USE_FP16=true
       - HF_HOME=/root/.cache/huggingface
       - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
     volumes:
@@ -263,6 +265,13 @@ services:
     networks:
       - starlingai-internal
       - starlingai-public
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
       interval: 15s
