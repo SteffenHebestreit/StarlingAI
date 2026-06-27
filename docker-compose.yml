@@ -39,8 +39,17 @@ services:
       - MEMGRAPH_USER=memgraph
       - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD:-}
       - QUESTDB_URL=http://questdb:9000
-      - SAI_AUDIT_LOG=/data/audit.jsonl
-      - SAI_CRED_STORE=/data/credentials.enc
+      # Credential store + audit log live on the HOST bind mount (./.starlingai,
+      # reached via the .:/workspace mount below), NOT the gc-data named volume — so a
+      # clean wipe (`sai start --fresh` / `sai stop --volumes` => `docker compose down
+      # -v`, which only removes NAMED volumes) PRESERVES them, matching the "Preserved:
+      # credentials ... audit log" promise in scripts/sai.mjs. This is why the connected
+      # Claude subscription token (credentials.enc, key anthropic_oauth) used to vanish
+      # on every clean-wipe rebuild: it sat in gc-data. SAI_MASTER_KEY/SAI_JWT_SECRET are
+      # already host .env so they survive too. (A clean wipe still resets the runtime
+      # overlay /data/starlingai.runtime.json, so re-select Local<->Claude — but no re-auth.)
+      - SAI_AUDIT_LOG=/workspace/.starlingai/audit.jsonl
+      - SAI_CRED_STORE=/workspace/.starlingai/credentials.enc
       - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
