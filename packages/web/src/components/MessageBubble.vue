@@ -339,7 +339,15 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
-import mermaid from "mermaid";
+// mermaid (hundreds of KB) is dynamically imported so it is NOT in the landing
+// chat chunk — it loads only when a message actually contains a diagram. Rollup
+// auto-splits the dynamic import into its own chunk.
+type MermaidModule = (typeof import("mermaid"))["default"];
+let mermaidModule: MermaidModule | null = null;
+async function loadMermaid(): Promise<MermaidModule> {
+  if (!mermaidModule) mermaidModule = (await import("mermaid")).default;
+  return mermaidModule;
+}
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -868,14 +876,17 @@ function isPreviewable(attachment: ChatAttachment): boolean {
     && ["html", "pdf", "text", "markdown", "json", "audio", "image", "mermaid", "website"].includes(attachment.previewMode ?? "download");
 }
 
-function ensureMermaidInitialized(): void {
-  if (mermaidInitialized) return;
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: "strict",
-    theme: "neutral",
-  });
-  mermaidInitialized = true;
+async function ensureMermaidInitialized(): Promise<MermaidModule> {
+  const mermaid = await loadMermaid();
+  if (!mermaidInitialized) {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "neutral",
+    });
+    mermaidInitialized = true;
+  }
+  return mermaid;
 }
 
 /**
@@ -963,7 +974,7 @@ async function inlineWebsiteAssets(
 }
 
 async function renderMermaidSvg(source: string, suffix: string): Promise<string> {
-  ensureMermaidInitialized();
+  const mermaid = await ensureMermaidInitialized();
   const normalizedSource = normalizeMermaidSource(source);
   const id = `mermaid-${++mermaidRenderCounter}-${suffix.replace(/[^a-z0-9_-]/gi, "-")}`;
   const rendered = await mermaid.render(id, normalizedSource);
@@ -1325,10 +1336,31 @@ function renderStreamingMarkdown(raw: string): string {
   return renderMarkdown(stabilizePartialMarkdown(raw));
 }
 
+// Bounded FIFO cache of finalized (non-streaming) rendered markdown. Expanding a
+// long transcript remounts every MessageBubble, which would otherwise re-run
+// marked.parse + DOMPurify over each message again. Keyed by message id + content
+// length (a finalized message's content is immutable). The streaming bubble is
+// never cached (id === "streaming", content changes every token).
+const _renderedMarkdownCache = new Map<string, string>();
+const RENDERED_MARKDOWN_CACHE_MAX = 500;
+function memoizedRenderMarkdown(id: string, raw: string): string {
+  if (id === "streaming") return renderMarkdown(raw);
+  const key = `${id}:${raw.length}`;
+  const cached = _renderedMarkdownCache.get(key);
+  if (cached !== undefined) return cached;
+  const html = renderMarkdown(raw);
+  _renderedMarkdownCache.set(key, html);
+  if (_renderedMarkdownCache.size > RENDERED_MARKDOWN_CACHE_MAX) {
+    const oldest = _renderedMarkdownCache.keys().next().value;
+    if (oldest !== undefined) _renderedMarkdownCache.delete(oldest);
+  }
+  return html;
+}
+
 const renderedContent = computed(() => {
   const raw = mainContent.value;
   if (!raw) return "";
-  return renderMarkdown(raw);
+  return memoizedRenderMarkdown(props.message.id, raw);
 });
 
 const renderedStreamingContent = computed(() => {

@@ -724,6 +724,33 @@ export const useGatewayStore = defineStore("gateway", () => {
   const syntheticSwarmState = ref<SwarmState | null>(null);
   const selectedSwarmRunId = ref<string | null>(null);
   const isStreaming = ref(false);   // true while text chunks are arriving
+
+  // B7: coalesce per-token streaming appends into ONE reactive write per animation
+  // frame. The message bubble re-parses + sanitizes the entire buffer on every
+  // streamingText change (O(n) per token → O(n²) per reply); batching makes it
+  // O(n) per frame. The rAF callback discards stale buffered text if the turn was
+  // reset (isStreaming false); flushStreamTextNow() applies the residual eagerly
+  // before the final message is built so the rendered text stays exact.
+  let _pendingStreamText = "";
+  let _streamRaf: number | null = null;
+  function flushPendingStreamText(): void {
+    _streamRaf = null;
+    if (_pendingStreamText && isStreaming.value) streamingText.value += _pendingStreamText;
+    _pendingStreamText = "";
+  }
+  function appendStreamText(text: string): void {
+    if (!text) return;
+    _pendingStreamText += text;
+    if (_streamRaf !== null) return;
+    if (typeof requestAnimationFrame === "function") _streamRaf = requestAnimationFrame(flushPendingStreamText);
+    else flushPendingStreamText();
+  }
+  function flushStreamTextNow(): void {
+    if (_streamRaf !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(_streamRaf);
+    _streamRaf = null;
+    if (_pendingStreamText) { streamingText.value += _pendingStreamText; _pendingStreamText = ""; }
+  }
+
   const isError = ref(false);       // true when last turn ended in an error
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
@@ -1954,7 +1981,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (data["requestId"] === pendingRequestId.value) {
         notePendingTurnActivity();
         isStreaming.value = true;
-        streamingText.value += String(data["text"] ?? "");
+        appendStreamText(String(data["text"] ?? ""));
       }
       return;
     }
@@ -2139,6 +2166,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       }
 
       if (status === "ok" || status === "blocked") {
+        flushStreamTextNow(); // apply any buffered streamed text before snapshotting it
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");
         const isBlocked = status === "blocked";
