@@ -7,9 +7,12 @@ ARG ENGRAM_REPO=https://github.com/SteffenHebestreit/engram.git
 # Pinned to a release tag (not the moving `main`) so the build is reproducible AND so a
 # bump actually re-clones — Docker caches the `git clone` layer, so tracking `main` would
 # silently freeze on whatever version first built. To update engram: bump this to the new
-# tag (or pass --build-arg ENGRAM_REF=…). v0.2.0 is API+env compatible with our client
-# (POST /documents, POST /search tuning.final_top_k, GET/DELETE /documents, source scoping).
-ARG ENGRAM_REF=v0.2.0
+# tag (or pass --build-arg ENGRAM_REF=…). v0.5.0 is API+env compatible with our client
+# (POST /documents, POST /search tuning.final_top_k, GET/DELETE /documents, source scoping);
+# v0.3.0–v0.5.0 are additive + opt-in (memory boost, engramdb backend, tenancy, contextual
+# retrieval, recency — all off by default), and GRAPH_PROXIMITY_MODE now defaults to the
+# faster `decay` (PPR is opt-in, quality-equivalent per upstream benchmarks).
+ARG ENGRAM_REF=v0.5.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

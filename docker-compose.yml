@@ -186,10 +186,10 @@ services:
     build:
       context: .
       dockerfile: docker/engram/Dockerfile
-      # Engram version to clone+build. Override to bump (e.g. ENGRAM_REF=v0.3.0 in .env);
+      # Engram version to clone+build. Override to bump (e.g. ENGRAM_REF=v0.6.0 in .env);
       # changing it re-clones (the git layer is otherwise cached). Default = the pinned tag.
       args:
-        ENGRAM_REF: ${ENGRAM_REF:-v0.2.0}
+        ENGRAM_REF: ${ENGRAM_REF:-v0.5.0}
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
