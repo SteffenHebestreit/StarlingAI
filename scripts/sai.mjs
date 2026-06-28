@@ -85,6 +85,7 @@ async function cmdStart() {
       fresh:             { type: "boolean", default: false },
       pentest:           { type: "boolean", default: false },
       "computer-desktop":{ type: "boolean", default: false },
+      rag:               { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
     strict: false,
@@ -95,6 +96,7 @@ async function cmdStart() {
   const wipeVolumes = values.fresh;
   const pentest     = values.pentest || values.all;
   const desktop     = values["computer-desktop"] || values.all;
+  const ragFlag     = values.rag || values.all;
 
   hdr(`${PRODUCT.name} — Starting up`);
 
@@ -134,9 +136,27 @@ async function cmdStart() {
   // Compose file stack
   const composeFiles = ["-f", "docker-compose.yml"];
 
+  // Document-RAG stack (engram + reranker) is behind the `rag` profile, OFF by
+  // default so a plain start works on any machine (the reranker reserves an NVIDIA
+  // GPU). Opt in with `sai start --rag` or persist SAI_ENABLE_RAG=1 in .env.
+  const wantRag = ragFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_RAG || "");
   const profileArgs = [];
   if (pentest) profileArgs.push("--profile", "pentest");
   if (desktop) profileArgs.push("--profile", "computer-desktop");
+  if (wantRag) {
+    profileArgs.push("--profile", "rag");
+    // The reranker only gets the GPU when a host NVIDIA GPU is present (or forced
+    // via SAI_GPU=1). Otherwise it runs on CPU. SAI_GPU=0 forces CPU.
+    const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
+    const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
+    const useGpu = gpuForced || (!gpuOff && hasNvidiaGpu());
+    if (useGpu) {
+      composeFiles.push("-f", "docker-compose.gpu.yml");
+      ok("RAG enabled (engram + reranker) — GPU detected, reranker on GPU");
+    } else {
+      ok("RAG enabled (engram + reranker) — no GPU, reranker on CPU");
+    }
+  }
 
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
 
@@ -289,7 +309,7 @@ async function cmdStop() {
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop"];
+  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag"];
 
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
@@ -469,6 +489,9 @@ ${BOLD}Commands:${RESET}
     --build                            Force rebuild images
     --no-cache                         Rebuild without Docker cache
     --fresh                            Wipe volumes + rebuild (clean slate)
+    --rag                              Include document-RAG stack (engram + reranker);
+                                       uses the GPU when one is present, else CPU.
+                                       Persist with SAI_ENABLE_RAG=1 in .env
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
@@ -504,6 +527,15 @@ function ensureDockerDaemon() {
     fail("Docker daemon is not reachable — start Docker Desktop, wait until the engine shows 'running', then retry.");
     process.exit(1);
   }
+}
+
+// Best-effort host NVIDIA-GPU probe so `sai start --rag` only adds the GPU overlay
+// (docker-compose.gpu.yml) when a GPU is actually present — otherwise the reranker's
+// device reservation would abort the whole `up` on a GPU-less machine. nvidia-smi
+// exists wherever the NVIDIA driver is installed (Linux + Windows/Docker Desktop).
+function hasNvidiaGpu() {
+  try { execSync("nvidia-smi -L", { stdio: "ignore" }); return true; }
+  catch { return false; }
 }
 
 function loadDotEnv() {

@@ -192,6 +192,9 @@ services:
   # cross-encoder reranking is served by the `reranker` (TEI) sidecar, which is
   # also what the gateway's retrieval.reranker uses.
   engram:
+    # Document-RAG backend — behind the `rag` profile (off by default) together with
+    # the reranker. The gateway degrades gracefully when it is absent (no depends_on).
+    profiles: ["rag"]
     build:
       context: .
       dockerfile: docker/engram/Dockerfile
@@ -259,8 +262,14 @@ services:
   # ~1.4GB). Used by BOTH the gateway (retrieval.reranker, mode "tei", http://reranker:80)
   # and engram — the same +3.15/+3.84 nDCG@10 reranker for the whole stack. Serves on
   # port 80 so the gateway config is unchanged; pulls the model from HuggingFace on
-  # first request (public network + cache volume). For a GPU-less host, drop the
-  # deploy.resources block + set USE_FP16=false (CPU is fine for the 0.6B).
+  # first request (public network + cache volume).
+  #
+  # Behind the `rag` profile (OFF by default) so a plain `docker compose up` on a
+  # GPU-less machine (any ordinary laptop, all Macs) never aborts on the nvidia
+  # reservation. Enable the RAG stack (engram + reranker) with `sai start --rag`
+  # (or `--profile rag`). The GPU reservation lives in docker-compose.gpu.yml,
+  # auto-added by `sai start` when a GPU is detected; without it the reranker runs
+  # on CPU (fine for the 0.6B on small shortlists — USE_FP16 is a no-op without CUDA).
   #
   # OPTIONAL embeddings: the same sidecar can also serve Qwen3-Embedding-0.6B on the
   # GPU at /v1/embeddings — handy if your external embedding provider (e.g. LM Studio)
@@ -269,6 +278,7 @@ services:
   # with ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 (both in .env). ~1.2GB extra
   # GPU; loads lazily on the first /v1/embeddings request.
   reranker:
+    profiles: ["rag"]
     build:
       context: ./docker/reranker-qwen
     image: starlingai/qwen-reranker:dev
@@ -287,13 +297,8 @@ services:
     networks:
       - starlingai-internal
       - starlingai-public
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # GPU reservation is in docker-compose.gpu.yml (auto-added by `sai start` when a
+    # GPU is present). On CPU the reranker still works, just slower.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"]
       interval: 15s

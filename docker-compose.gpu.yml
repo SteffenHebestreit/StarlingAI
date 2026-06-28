@@ -1,0 +1,17 @@
+# GPU overlay — adds the host-GPU reservation to GPU-capable services.
+#
+# `sai start` auto-includes this (`-f docker-compose.gpu.yml`) when it detects an
+# NVIDIA GPU AND the `rag` profile is active, so the reranker runs in fp16 on the
+# GPU. Without it (GPU-less host, or the profile off) the reranker runs on CPU.
+#
+# Compose merges this onto the base service definitions; it only ADDS the deploy
+# reservation, nothing else.
+services:
+  reranker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
