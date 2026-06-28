@@ -80,6 +80,14 @@ services:
       - starlingai-public
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Access LM Studio on host
+    # The gateway waits on its datastores (Postgres + Redis + the graph/telemetry
+    # DBs it may touch early). The feature sidecars (file-convert, mail,
+    # computer-remote) are reached over HTTP only at tool-call time, never at boot —
+    # so they are NOT boot dependencies and were removed from this gate. That is
+    # what kept first-run boot gated on ~7 sidecars all going healthy (mail pins
+    # external DNS; computer-remote + fastapi-mcp have 20-30s start_periods); a flap
+    # there no longer blocks the gateway. They still start in parallel and their
+    # tools work once ready.
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,12 +96,6 @@ services:
       memgraph:
         condition: service_healthy
       questdb:
-        condition: service_healthy
-      fastapi-mcp-template:
-        condition: service_healthy
-      mail-service:
-        condition: service_healthy
-      computer-remote:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8765/healthz"]
