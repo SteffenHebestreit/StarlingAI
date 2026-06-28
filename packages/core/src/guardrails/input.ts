@@ -22,7 +22,7 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp; severity: "low"
   { name: "system_prompt_leak", pattern: /(print|show|reveal|output|display)\b.{0,20}(system\s+prompt|initial\s+instructions?|original\s+prompt|full\s+prompt)/i, severity: "high" },
   { name: "act_as_override", pattern: /act\s+as\s+(if\s+you\s+(have\s+no|don'?t\s+have)\s+(restrictions?|limits?|rules?|guidelines?))/i, severity: "high" },
   { name: "assistant_prefix_injection", pattern: /^\s*assistant\s*:/i, severity: "medium" },
-  { name: "inject_role_tag", pattern: /<\s*(system|assistant|human|user)\s*>/i, severity: "high" },
+  { name: "inject_role_tag", pattern: /<\s*(system|assistant|human|user)(\s[^>]*)?\/?>/i, severity: "high" },
   // Invisible/zero-width characters (Unicode steganography)
   { name: "zero_width_chars", pattern: /[\u200B-\u200D\u2060\uFEFF\u00AD]/, severity: "medium" },
   { name: "invisible_unicode", pattern: /[\u202A-\u202E\u2066-\u2069]/, severity: "medium" }, // bidirectional overrides
@@ -33,10 +33,10 @@ const INJECTION_PATTERNS: Array<{ name: string; pattern: RegExp; severity: "low"
   // Tool misuse attempts
   { name: "call_blocked_tool", pattern: /(call|invoke|run|execute)\s+(host_shell|docker_socket|gateway_reconfigure|skills_install)/i, severity: "high" },
   // Fake tool results
-  { name: "inject_tool_result", pattern: /<\s*tool_result\s*>/i, severity: "high" },
+  { name: "inject_tool_result", pattern: /<\s*\/?\s*tool_result[^>]*>/i, severity: "high" },
   { name: "inject_function_result", pattern: /\[function_results?\]/i, severity: "medium" },
   // Role tag injection — HIGH severity (attacker-controlled content)
-  { name: "inject_system_tag", pattern: /<\s*(system|assistant|human|user)\s*>[\s\S]{0,200}<\/\s*(system|assistant|human|user)\s*>/i, severity: "high" },
+  { name: "inject_system_tag", pattern: /<\s*(system|assistant|human|user)(\s[^>]*)?\/?>[\s\S]{0,200}<\/\s*(system|assistant|human|user)(\s[^>]*)?>/i, severity: "high" },
 ];
 
 const SUSPICIOUS_REPETITION_THRESHOLD = 50; // same char repeated > N times
@@ -181,9 +181,12 @@ function checkInputBuiltins(input: string, opts?: { trusted?: boolean }): Guardr
  * "ignore previous instructions" which commonly appear in scraped web content.
  */
 const TOOL_OUTPUT_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
-  { name: "inject_role_tag", pattern: /<\s*(system|assistant|human|user)\s*>/i },
-  { name: "inject_system_tag", pattern: /<\s*(system|assistant|human|user)\s*>[\s\S]{0,200}<\/\s*(system|assistant|human|user)\s*>/i },
-  { name: "inject_tool_result", pattern: /<\s*tool_result\s*>/i },
+  // [^>]*/`\/?` after the tag name close the attribute (<system foo>) and self-close (<system/>)
+  // bypass an earlier `\s*>`-only pattern allowed. `(\s[^>]*)?` requires whitespace before any
+  // attributes so <systemic> is not a false positive.
+  { name: "inject_role_tag", pattern: /<\s*(system|assistant|human|user)(\s[^>]*)?\/?>/i },
+  { name: "inject_system_tag", pattern: /<\s*(system|assistant|human|user)(\s[^>]*)?\/?>[\s\S]{0,200}<\/\s*(system|assistant|human|user)(\s[^>]*)?>/i },
+  { name: "inject_tool_result", pattern: /<\s*\/?\s*tool_result[^>]*>/i },
   { name: "inject_function_result", pattern: /\[function_results?\]/i },
   { name: "assistant_prefix_injection", pattern: /^\s*assistant\s*:/i },
 ];
