@@ -4663,7 +4663,24 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     let discoveryCapsule = "";
     if (iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch) {
       try {
-        discoveryCapsule = await timedPhase("discoveryPrefetch", () => prefetchCapabilityCandidates(userMessage));
+        // HARD latency cap: the capsule is a soft head-start, but the embedding
+        // round-trip behind it can stall on a cold/queued embed backend (observed
+        // ~15s on a busy LM Studio) and that await blocks first-token. Bound it so a
+        // slow prefetch is abandoned (empty capsule) rather than delaying EVERY
+        // escalated turn — including ones that end in a direct answer with zero
+        // delegations. If it times out the model just discovers on demand.
+        const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
+        discoveryCapsule = await timedPhase("discoveryPrefetch", async () => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            return await Promise.race([
+              prefetchCapabilityCandidates(userMessage),
+              new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
+            ]);
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+        });
         if (discoveryCapsule) {
           logAudit("discovery_prefetch", { capsuleChars: discoveryCapsule.length }, { sessionId: session.id });
         }
