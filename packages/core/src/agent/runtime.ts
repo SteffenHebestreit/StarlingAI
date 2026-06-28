@@ -4688,6 +4688,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
     const collapsedHistory = session.getCollapsedHistory();
 
+    // Freshness-honesty guard (orchestration.freshnessHonestyGuard, default-off,
+    // eval-gated): a short, language-independent directive that stops the orchestrator
+    // dressing a parametric-memory answer up as freshly-sourced data — the "answered
+    // directly with 0 tool calls but opened 'based on current market data…'" failure.
+    const freshnessHonestyPrompt = getConfig().orchestration?.freshnessHonestyGuard
+      ? "HONESTY ON CURRENCY: Do NOT claim or imply your answer is based on current, live, recent, latest, or external data (market data, news, prices, current events, 'as of today/this year') unless you actually retrieved it via a tool THIS turn. If the answer materially depends on such data, route it to a research-capable specialist and validate it — never assert it from memory, and never frame a from-memory answer as if it were freshly sourced."
+      : "";
+
     const buildSystemMessages = (): LLMMessage[] => [
       { role: "system", content: systemPrompt },
       { role: "system", content: temporalContext },
@@ -4695,6 +4703,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
+      ...(freshnessHonestyPrompt ? [{ role: "system" as const, content: freshnessHonestyPrompt }] : []),
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
       ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
       ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),

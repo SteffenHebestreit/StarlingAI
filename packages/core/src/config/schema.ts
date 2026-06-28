@@ -1438,6 +1438,16 @@ export const OrchestrationSchema = z.object({
    *  The cross-check is deterministic; the extra synthesis call only fires on the
    *  unanchored-answer path, so clean turns are unaffected. Default ON. */
   qaEvidenceAnchoring: z.boolean().default(true),
+  /** When true, the orchestrator's system prompt gains a short HONESTY directive:
+   *  never claim the answer is based on CURRENT / LIVE / RECENT / EXTERNAL data unless
+   *  it was actually retrieved via a tool THIS turn — if currency materially matters,
+   *  route to a research specialist instead of asserting from parametric memory. Targets
+   *  the "direct answer dressed up as fresh-data grounding" failure (a freshness-sensitive
+   *  question answered with 0 tool calls that still opens "based on current market
+   *  data…"). General + language-independent (no topic keywords). Default OFF — it's a
+   *  tuned-prompt behavioural nudge, so it stays gated until a pass^k eval confirms it
+   *  doesn't suppress legitimate direct answers. */
+  freshnessHonestyGuard: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt
