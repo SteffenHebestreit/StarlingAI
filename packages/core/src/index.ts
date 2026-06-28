@@ -28,6 +28,7 @@ import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js
 import { initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
 import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
+import { rehydrateScheduledTasks } from "./runtime/scheduled-task-runner.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
@@ -211,6 +212,9 @@ export async function main() {
   await gateway.start();
 
   syncConfiguredJobTriggers(config.gateway.turnTimeoutMs);
+  // Re-activate runtime-created standing-agent schedules persisted to disk so they
+  // survive a restart (boot-only — config reload re-syncs config triggers, not these).
+  rehydrateScheduledTasks();
 
   // Start the scene-job worker after the API is ready unless an external worker is managing the queue.
   if (embeddedSceneWorkerEnabled) {

@@ -942,6 +942,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  schedule_task: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Schedule a recurring task that runs as a real autonomous turn (standing agent)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  schedule_list: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List persistent scheduled tasks",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  schedule_remove: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Remove a persistent scheduled task",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
   git_clone: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Clone a remote repository (HTTPS only, network access required)",

@@ -52,6 +52,7 @@ import "./pentest.js";
 import "./computer-use.js";
 import "./telegram.js";
 import "./cron.js";
+import "./schedule.js";
 import "./http-request.js";
 import "./git.js";
 import "./messaging.js";
