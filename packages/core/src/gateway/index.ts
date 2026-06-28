@@ -19,7 +19,7 @@ import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { getEventLoopLagSnapshot } from "../observability/event-loop-monitor.js";
-import { getProviderActivitySnapshot } from "../observability/provider-activity-monitor.js";
+import { getLastProviderActivitySnapshot } from "../observability/provider-activity-monitor.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -1336,12 +1336,23 @@ export function createGateway() {
     // whether the main thread is stalling without hitting the authed deep checks.
     const eventLoopLag = getEventLoopLagSnapshot();
     // In-flight provider activity (is the remote LLM producing / prefilling / stalled).
-    const providerActivity = getProviderActivitySnapshot();
+    // Use the READ-ONLY snapshot (the background sampler keeps it fresh) so polling
+    // /readyz can't drive monitor-state mutation, and REDACT the in-flight model id —
+    // /readyz is unauthenticated, so it must not let anyone enumerate which model the
+    // org runs. Expose only the aggregate readiness signal (count + worst state/age).
+    const activity = getLastProviderActivitySnapshot();
+    const providerActivity = activity
+      ? {
+          sampledAt: activity.sampledAt,
+          inFlight: activity.inFlight,
+          worst: activity.worst ? { state: activity.worst.state, elapsedMs: activity.worst.elapsedMs } : null,
+        }
+      : null;
     return c.json({
       status: "ready",
       sessions,
       ...(eventLoopLag ? { eventLoopLag } : {}),
-      providerActivity,
+      ...(providerActivity ? { providerActivity } : {}),
     });
   });
 
