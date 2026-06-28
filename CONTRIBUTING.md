@@ -44,6 +44,11 @@ SAI_CONFIG_PATH=<repo>/starlingai.json \  # else it loads a STALE packages/core/
 SAI_LMSTUDIO_API_KEY=<key from .env> \    # the generated config carries only the "lm-studio" default
   pnpm exec tsx src/agent/evaluation-cli.ts plan.jsonc out.json --baseline base.json --repeat 5
 ```
+If your model server runs on a DIFFERENT host than the eval (e.g. the gateway/model live on a
+homelab box and you run the CLI from a dev machine), also set `SAI_LMSTUDIO_URL=http://<host>:1234/v1`
+— the baked config default is `host.docker.internal:1234`, which from the CLI means *this* machine,
+so without the override the run dials the wrong host and every case crashes with `Sub-agent error:`
+(the pre-flight check now catches this and aborts with a clear message instead).
 The harness registers the full tool surface (via `tools/register-builtins.js`), so evaluated agents can actually call `write_file`/`generate_document`/etc. The latency-regression check uses the **median** run, so a single cold-start outlier on a small sample is not flagged.
 
 For **file-writing builders** (content_writer, coders), `expectIncludes` only sees the returned summary — add **`expectArtifact`** (`{ path, includes?, minBytes? }`; `path` may be a file or directory) to gate on the PRODUCED files' completeness (catches a dropped/stubbed section a summary would hide). In-process eval only — a `--via-gateway` run writes inside the gateway container, out of the harness's reach. To evaluate web/computer/docker/coordinator agents in their real runtime, use `--via-gateway` (the agent runs through the gateway; output is its returned text, so prefer `expectIncludes`, not `expectArtifact`).
