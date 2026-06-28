@@ -142,9 +142,9 @@ async function main() {
     const backendChoice = NON_INTERACTIVE
       ? ({ "byo-openai": 0, "byo-anthropic": 1, ollama: 2 }[process.env.SAI_SETUP_BACKEND ?? "byo-openai"] ?? 0)
       : await choose("How should the swarm reach a language model?", [
-          "Connect to an OpenAI-compatible endpoint I run (LM Studio, vLLM, llama.cpp, OpenAI…)",
+          "Connect to an OpenAI-compatible provider (LM Studio, Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, OpenAI…)",
           "Use Anthropic (Claude) with my API key",
-          "Run a local model with Ollama — no API key, pulled for me",
+          "Run a local model with Ollama — no API key, pulled + managed for me",
         ]);
 
     // Reset prior backend wiring so re-running cleanly switches backends.
@@ -178,12 +178,12 @@ async function main() {
       env.SAI_PRIMARY_MODEL = `lmstudio/${tag}`;
       ok(`Model backend: local Ollama (${tag}) — the launcher adds docker-compose.ollama.yml`);
     } else {
-      // OpenAI-compatible (LM Studio / vLLM / llama.cpp / OpenAI).
-      // host.docker.internal reaches a server on the host from the gateway container.
+      // Primary provider — ANY OpenAI-compatible server. host.docker.internal reaches one on
+      // THIS Docker host; a remote/homelab box needs its IP; hosted aggregators use their URL.
       const url = NON_INTERACTIVE ? (process.env.SAI_SETUP_URL ?? "http://host.docker.internal:1234/v1")
-        : await ask("OpenAI-compatible base URL", "http://host.docker.internal:1234/v1");
+        : await ask("Primary provider /v1 URL  (LM Studio/vLLM on host -> :1234/v1 · Ollama -> :11434/v1 · OpenRouter -> https://openrouter.ai/api/v1 · remote box -> http://<ip>:1234/v1)", "http://host.docker.internal:1234/v1");
       const key = NON_INTERACTIVE ? (process.env.SAI_SETUP_API_KEY ?? "lm-studio")
-        : await ask("API key (any value if your server ignores it)", "lm-studio");
+        : await ask("API key  (LM Studio: any value · OpenRouter: your real sk-or-... key · Ollama: anything)", "lm-studio");
 
       // Probe the endpoint and offer the LOADED models so the user picks a real
       // id — your Qwen3 (3.5 / 3.6) models show up here automatically. Q4 quant
