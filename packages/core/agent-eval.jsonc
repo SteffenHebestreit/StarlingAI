@@ -18,7 +18,10 @@
       "task": "Find the LM Studio documentation for function calling and summarize the main requirements.",
       "expectIncludes": ["LM Studio", "function"],
       "expectExcludes": ["Sub-agent error:"],
-      "maxDurationMs": 120000
+      // Deep multi-step web research (search + fetch loop) legitimately runs several
+      // minutes on a local model; observed ~280s via-gateway. Generous ceiling — the
+      // baseline-vs-candidate median latency check still flags real regressions.
+      "maxDurationMs": 360000
     },
     {
       "name": "retrieval-workspace",
