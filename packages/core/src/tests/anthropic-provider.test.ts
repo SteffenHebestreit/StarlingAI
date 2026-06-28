@@ -60,6 +60,19 @@ describe("anthropic endpoint resolution", () => {
     const endpoint = resolveProviderEndpointForModel("anthropic/claude-sonnet-4-6", {}, config);
     expect(endpoint.apiKey).toBe("sk-ant-oat01-from-env");
   });
+
+  it("resolves the provider-neutral primary// and local/ model prefixes to the lmstudio slot", () => {
+    const config = makeConfig({
+      providers: { lmstudio: { baseUrl: "http://my-primary:1234/v1", apiKey: "k" } },
+    });
+    for (const modelId of ["primary/some-model", "local/some-model", "lmstudio/some-model"]) {
+      const endpoint = resolveProviderEndpointForModel(modelId, {}, config);
+      expect(endpoint.providerId).toBe("lmstudio");
+      expect(endpoint.baseUrl).toBe("http://my-primary:1234/v1");
+    }
+    // A genuinely-different provider id (e.g. an openaiCompatible entry) is NOT remapped.
+    expect(resolveProviderEndpointForModel("anthropic/claude-sonnet-4-6", {}, config).providerId).toBe("anthropic");
+  });
 });
 
 describe("model presets (Local ⇄ Claude switch)", () => {

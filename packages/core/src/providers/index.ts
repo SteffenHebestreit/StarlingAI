@@ -51,7 +51,14 @@ export interface ProviderRuntimeStatusSnapshot {
 function getProviderId(modelName: string | undefined): string {
   if (!modelName) return "lmstudio";
   const [providerId] = modelName.split("/");
-  return providerId?.trim() || "lmstudio";
+  const id = providerId?.trim() || "lmstudio";
+  // Provider-neutral aliases for the PRIMARY OpenAI-compatible slot. It is keyed "lmstudio"
+  // internally (so existing lmstudio/<model> ids keep resolving) but can point at any
+  // OpenAI-compatible server — Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, … — so a config
+  // or model id can read primary/<model> or local/<model> instead of leaking "lmstudio".
+  // parseModelId() strips the first segment regardless of its name, so the API still gets
+  // the bare model id.
+  return id === "primary" || id === "local" ? "lmstudio" : id;
 }
 
 function getNamedOpenAICompatibleProvider(providerId: string, config: Config) {
