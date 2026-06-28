@@ -8,12 +8,12 @@
  * subset covering headings, paragraphs, lists, code blocks, blockquotes,
  * horizontal rules, links, images, emphasis, inline code, and GFM tables.
  */
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { dirname, extname, join, posix } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { pathExists, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { inlineLocalImagesInHtml } from "./inline-images.js";
 
 const log = childLogger("tool:website");
@@ -152,14 +152,9 @@ registerTool({
       return fail(`Failed to create outputDir: ${String(err)}`);
     }
 
-    if (!overwrite) {
-      const existingIndex = join(resolvedDir.resolved, "index.html");
-      try {
-        await stat(existingIndex);
-        return fail(`Refusing to overwrite existing site at ${resolvedDir.relativePath}/index.html`);
-      } catch {
-        // ok, not present
-      }
+    const existingIndex = join(resolvedDir.resolved, "index.html");
+    if (!overwrite && await pathExists(existingIndex)) {
+      return fail(`Refusing to overwrite existing site at ${resolvedDir.relativePath}/index.html`);
     }
 
     const navItems = pages.pages
@@ -368,13 +363,8 @@ registerTool({
     }
 
     const indexPath = join(resolvedDir.resolved, "index.html");
-    if (!overwrite) {
-      try {
-        await stat(indexPath);
-        return fail(`Refusing to overwrite existing deck at ${resolvedDir.relativePath}/index.html`);
-      } catch {
-        // ok, not present
-      }
+    if (!overwrite && await pathExists(indexPath)) {
+      return fail(`Refusing to overwrite existing deck at ${resolvedDir.relativePath}/index.html`);
     }
 
     const rawHtml = renderRevealDeck({ title, slides: slides.slides, theme, revealVersion, transition });

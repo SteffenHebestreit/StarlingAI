@@ -13,7 +13,7 @@ import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { overwriteGuard, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:bundle-zip");
 
@@ -181,14 +181,8 @@ registerTool({
       return fail("output_file must resolve inside the workspace");
     }
 
-    if (!overwrite) {
-      try {
-        await stat(resolvedOutput.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
-      } catch {
-        // ok
-      }
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     type Plan = { kind: "file"; absolutePath: string; archivePath: string }
               | { kind: "buffer"; bytes: Buffer; archivePath: string };

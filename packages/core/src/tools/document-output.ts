@@ -1,9 +1,9 @@
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { PDFDocument, StandardFonts, type PDFFont, rgb } from "pdf-lib";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolveWorkspaceWritePath } from "./workspace-path.js";
+import { overwriteGuard, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { inlineLocalImagesInHtml, inlineLocalImagesInMarkdown } from "./inline-images.js";
 
 const log = childLogger("tool:document-output");
@@ -83,14 +83,8 @@ registerTool({
     });
     if (!resolvedOutput.success) return fail(resolvedOutput.error);
 
-    try {
-      if (!overwrite) {
-        await stat(resolvedOutput.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
-      }
-    } catch {
-      // File does not exist yet.
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     const rendered = renderDocument({ title, content, format });
     // Inline co-located local images as data URIs so an illustrated paper/report
@@ -179,14 +173,8 @@ registerTool({
     });
     if (!resolvedOutput.success) return fail(resolvedOutput.error);
 
-    try {
-      if (!overwrite) {
-        await stat(resolvedOutput.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
-      }
-    } catch {
-      // File does not exist yet.
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     let bytes: Uint8Array;
     try {
@@ -267,14 +255,8 @@ registerTool({
     });
     if (!resolvedOutput.success) return fail(resolvedOutput.error);
 
-    try {
-      if (!overwrite) {
-        await stat(resolvedOutput.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
-      }
-    } catch {
-      // File does not exist yet.
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     const rendered = renderMermaidSource({ title, diagram, theme });
 
@@ -393,14 +375,8 @@ registerTool({
     });
     if (!resolvedOutput.success) return fail(resolvedOutput.error);
 
-    try {
-      if (!overwrite) {
-        await stat(resolvedOutput.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolvedOutput.relativePath}`);
-      }
-    } catch {
-      // File does not exist yet.
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     const rendered = renderChartHtml({ title, summary, chartType, labels, series, sources });
 

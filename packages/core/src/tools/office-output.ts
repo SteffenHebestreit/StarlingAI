@@ -6,7 +6,7 @@
  * generate_pptx — emit a PowerPoint .pptx from a structured slide list. Uses
  *                 the `pptxgenjs` package.
  */
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { dirname, extname } from "node:path";
 import {
@@ -40,7 +40,7 @@ const PptxGenJS = require("pptxgenjs") as new () => {
 };
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { overwriteGuard, resolvePathWithinWorkspace } from "./workspace-path.js";
 import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("tool:office-output");
@@ -79,15 +79,6 @@ async function resolveOutputFile(
   }
 }
 
-async function refuseIfExists(resolvedPath: string, relativePath: string, overwrite: boolean): Promise<string | null> {
-  if (overwrite) return null;
-  try {
-    await stat(resolvedPath);
-    return `Refusing to overwrite existing file: ${relativePath}`;
-  } catch {
-    return null;
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // generate_docx
@@ -157,7 +148,7 @@ registerTool({
     const resolvedRes = await resolveOutputFile(args, ctx, ".docx", title || "document");
     if (!resolvedRes.ok) return fail(resolvedRes.error);
 
-    const refusal = await refuseIfExists(resolvedRes.resolved, resolvedRes.relativePath, overwrite);
+    const refusal = await overwriteGuard(resolvedRes.resolved, resolvedRes.relativePath, overwrite);
     if (refusal) return fail(refusal);
 
     const renderableBlocks = blocks.length > 0
@@ -435,7 +426,7 @@ registerTool({
     const resolvedRes = await resolveOutputFile(args, ctx, ".pptx", title || "deck");
     if (!resolvedRes.ok) return fail(resolvedRes.error);
 
-    const refusal = await refuseIfExists(resolvedRes.resolved, resolvedRes.relativePath, overwrite);
+    const refusal = await overwriteGuard(resolvedRes.resolved, resolvedRes.relativePath, overwrite);
     if (refusal) return fail(refusal);
 
     const pptx = new PptxGenJS();

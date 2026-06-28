@@ -12,7 +12,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolResult } from "./registry.js";
-import { resolveWorkspaceWritePath } from "./workspace-path.js";
+import { overwriteGuard, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:artifact-emitters");
 
@@ -98,15 +98,8 @@ registerTool({
       return fail("output_file must resolve inside the workspace");
     }
 
-    if (!overwrite) {
-      try {
-        const { stat } = await import("node:fs/promises");
-        await stat(resolved.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolved.relativePath}`);
-      } catch {
-        // ok
-      }
-    }
+    const overwriteError = await overwriteGuard(resolved.resolved, resolved.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     try {
       await mkdir(dirname(resolved.resolved), { recursive: true });
@@ -215,15 +208,8 @@ registerTool({
       return fail("output_file must resolve inside the workspace");
     }
 
-    if (!overwrite) {
-      try {
-        const { stat } = await import("node:fs/promises");
-        await stat(resolved.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolved.relativePath}`);
-      } catch {
-        // ok
-      }
-    }
+    const overwriteError = await overwriteGuard(resolved.resolved, resolved.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     try {
       await mkdir(dirname(resolved.resolved), { recursive: true });
@@ -341,15 +327,8 @@ registerTool({
       return fail(`Failed to build .ics: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    if (!overwrite) {
-      try {
-        const { stat } = await import("node:fs/promises");
-        await stat(resolved.resolved);
-        return fail(`Refusing to overwrite existing file: ${resolved.relativePath}`);
-      } catch {
-        // ok
-      }
-    }
+    const overwriteError = await overwriteGuard(resolved.resolved, resolved.relativePath, overwrite);
+    if (overwriteError) return fail(overwriteError);
 
     try {
       await mkdir(dirname(resolved.resolved), { recursive: true });

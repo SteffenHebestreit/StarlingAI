@@ -1,5 +1,32 @@
+import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
+
+/** True when a filesystem path exists (stat succeeds), false otherwise. */
+export async function pathExists(target: string): Promise<boolean> {
+  try {
+    await stat(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Shared overwrite guard for file-emitting tools. Returns a refusal MESSAGE when the
+ * target already exists and `overwrite` is false, otherwise null. Replaces ~a dozen
+ * copy-pasted `if (!overwrite) { try { await stat(p); return fail(...) } catch {} }`
+ * blocks so the existence-check semantics live in one place. Call sites with a bespoke
+ * message (e.g. "existing site at …/index.html") use pathExists() directly instead.
+ */
+export async function overwriteGuard(
+  resolvedPath: string,
+  relativePath: string,
+  overwrite: boolean,
+): Promise<string | null> {
+  if (overwrite) return null;
+  return (await pathExists(resolvedPath)) ? `Refusing to overwrite existing file: ${relativePath}` : null;
+}
 
 /**
  * Dedicated subfolder for agent-generated files/projects, kept one layer below

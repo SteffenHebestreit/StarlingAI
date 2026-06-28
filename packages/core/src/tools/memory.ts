@@ -8,7 +8,7 @@
  * memory_search — full-text substring search across keys, content, and tags
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -38,7 +38,7 @@ import {
   updateMainAssistantPersonality,
   type MainAssistantPersonalityUpdate,
 } from "../personality/service.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { overwriteGuard, resolvePathWithinWorkspace } from "./workspace-path.js";
 // Register the memory-vault tools (memory_export / memory_import) alongside the
 // core memory tools — they share the durable-memory store and ship together.
 import "./memory-vault.js";
@@ -1328,14 +1328,8 @@ registerTool({
       return { success: false, output: "", error: String(err instanceof Error ? err.message : err) };
     }
 
-    try {
-      if (!overwrite) {
-        await stat(resolvedOutput.resolved);
-        return { success: false, output: "", error: `Refusing to overwrite existing file: ${resolvedOutput.relativePath}` };
-      }
-    } catch {
-      // File does not exist yet.
-    }
+    const overwriteError = await overwriteGuard(resolvedOutput.resolved, resolvedOutput.relativePath, overwrite);
+    if (overwriteError) return { success: false, output: "", error: overwriteError };
 
     const content = renderEvidenceLedger(entries, format, title);
 
