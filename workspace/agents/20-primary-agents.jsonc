@@ -6,7 +6,6 @@
       "capabilities": ["pentest coordination", "engagement planning", "methodology maintenance", "prompt tuning", "tool selection governance", "report writing"],
       "tags": ["pentest", "security", "offensive"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -31,7 +30,6 @@
       "capabilities": ["network reconnaissance", "port scanning", "service enumeration", "OS fingerprinting", "CVE lookup"],
       "tags": ["pentest", "recon", "nmap", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -52,7 +50,6 @@
       "capabilities": ["web vulnerability scanning", "directory brute-force", "SQL injection", "web reconnaissance"],
       "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -75,7 +72,6 @@
       "capabilities": ["network auditing", "service exploitation", "credential testing", "NSE scripting"],
       "tags": ["pentest", "network", "nmap", "hydra", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -97,7 +93,6 @@
       "capabilities": ["exploit execution", "metasploit", "payload delivery", "post-exploitation"],
       "tags": ["pentest", "exploit", "metasploit", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.05,
         "maxTokens": 8192
@@ -118,7 +113,6 @@
       "capabilities": ["report writing", "finding aggregation", "risk rating", "remediation guidance", "executive summaries"],
       "tags": ["pentest", "reporting", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -139,7 +133,6 @@
       "capabilities": ["finding validation", "false positive detection", "CVSS review", "evidence quality audit", "coverage gap analysis"],
       "tags": ["pentest", "qa", "validation", "security"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -164,7 +157,6 @@
       "tags": ["browser", "playwright", "screenshot", "snapshot", "form", "click", "navigation", "automation", "login"],
       "container": { "disabled": true }, // uses Playwright MCP tools that require in-process gateway connection
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -197,7 +189,6 @@
       "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction", "screenshot reading", "snapshot reading", "table extraction from images"],
       "tags": ["browser", "vision", "analysis", "screenshot", "snapshot", "image", "ocr", "extraction"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.5-9b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -220,7 +211,6 @@
       "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows", "mouse", "keyboard"],
       "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -259,7 +249,6 @@
       "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "kubernetes inspection", "kubectl read-only", "helm release inventory", "kubernetes deployments", "prometheus queries", "alertmanager silences", "grafana dashboards", "grafana alert rules", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
       "tags": ["infrastructure", "ops", "devops", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "cluster", "pods", "deployments", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "monitoring", "ssh", "scp", "docker", "proxmox", "readiness", "provisioning", "deployment"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -307,7 +296,6 @@
       "capabilities": ["service triage", "runtime incident triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis", "SSH diagnostics", "provider troubleshooting", "gateway diagnosis", "config drift detection", "invalid model id detection", "root cause analysis"],
       "tags": ["ops", "triage", "logs", "containers", "reliability", "ssh", "server", "incident", "provider", "gateway", "debugging", "health", "rootcause", "config"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -342,7 +330,6 @@
       "capabilities": ["ci/cd orchestration", "deployment coordination", "rollback planning", "environment promotion", "pipeline diagnosis", "container lifecycle", "deployment health", "release management", "canary deployment"],
       "tags": ["devops", "cicd", "ci-cd", "deployment", "pipeline", "rollback", "container", "release", "promote", "environment", "staging", "production", "canary"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 6144
@@ -372,7 +359,6 @@
       "capabilities": ["mail triage", "mail search", "mail drafting", "email drafting", "reply composition", "follow-up sequences", "professional writing", "tone adaptation", "subject line generation", "mail categorization", "multi-account mailbox operations", "folder management"],
       "tags": ["mail", "email", "e-mail", "inbox", "mailbox", "drafts", "triage", "reply", "follow-up", "communications", "compose"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.15,
         "maxTokens": 4096
@@ -411,7 +397,6 @@
       "capabilities": ["calendar management", "event creation", "event scheduling", "meeting management", "contacts management", "address book", "CalDAV", "CardDAV", "conflict detection", "recurring events"],
       "tags": ["calendar", "contacts", "meetings", "appointments", "scheduling", "address-book", "caldav", "carddav", "nextcloud", "fastmail", "icloud", "events", "invite"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 2048
@@ -446,7 +431,6 @@
       "capabilities": ["telegram messaging", "slack messaging", "discord messaging", "email sending", "multi-channel notifications", "alert routing", "status broadcasts", "platform formatting"],
       "tags": ["notifications", "messaging", "telegram", "slack", "discord", "email", "e-mail", "alerts", "broadcast", "channels"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -468,7 +452,6 @@
       "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement", "scene creation", "job creation", "workflow catalog editing"],
       "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace", "workflow", "scene", "job", "create", "catalog", "selfimprovement"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -496,7 +479,6 @@
       "capabilities": ["tool development", "tool testing", "self-improvement", "dynamic tool creation", "sandbox execution", "typescript tool authoring"],
       "tags": ["selfimprovement", "tools", "development", "testing", "sandbox", "typescript"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192
@@ -521,7 +503,6 @@
       "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review", "grounding improvement", "stopping-condition tuning"],
       "tags": ["prompts", "prompt", "quality", "agents", "optimization", "convergence", "tuning"],
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 4096
