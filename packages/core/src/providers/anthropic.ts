@@ -81,6 +81,19 @@ interface AnthropicProviderOptions {
    * even after the constructor's snapshot has expired.
    */
   tokenProvider?: () => Promise<string | null>;
+  /**
+   * Anthropic prompt caching: place a `cache_control: ephemeral` breakpoint on
+   * the (stable, large) system prompt and tool catalog so the API reuses a
+   * cached prefill instead of re-billing/re-prefilling it on every tool-call
+   * round-trip. Within a single agentic turn the system+tools prefix is
+   * identical across every inner LLM call, so the first call writes the cache
+   * (1.25× input) and each subsequent call reads it (0.1× input) — a large
+   * cost and latency win on multi-step turns. Defaults ON (Anthropic always
+   * supports caching and prefixes below the cache minimum are silently
+   * uncached, so there's no downside); the construction site disables it only
+   * when the model config sets `promptCache: false`.
+   */
+  promptCaching?: boolean;
 }
 
 function parseModelId(providerModel: string): string {
@@ -345,6 +358,7 @@ export class AnthropicProvider implements ChatProvider {
   private baseUrl: string;
   private oauthMode: boolean;
   private tokenProvider?: () => Promise<string | null>;
+  private promptCaching: boolean;
   private healthy = false;
   private lastHealthCheck = 0;
   private configuredMaxRetries: number;
@@ -369,6 +383,7 @@ export class AnthropicProvider implements ChatProvider {
     // OAuth mode if the credential is an oat token OR a refresher is attached
     // (managed mode, where the snapshot may briefly be empty before first fetch).
     this.oauthMode = isAnthropicOAuthCredential(credential) || Boolean(options.tokenProvider);
+    this.promptCaching = options.promptCaching ?? true;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
     this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs ?? 120_000);
     // Pass the unused credential slot as null so the SDK does not pick up a
@@ -509,11 +524,26 @@ export class AnthropicProvider implements ChatProvider {
   private buildRequestBase(messages: LLMMessage[], tools: LLMToolDef[], toolChoice?: "auto" | "required" | "none") {
     const modelId = parseModelId(this.modelConfig.primary);
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
-    const anthropicTools = toAnthropicTools(tools);
+    let anthropicTools = toAnthropicTools(tools);
+
+    const cacheBreakpoint = { type: "ephemeral" as const };
+
+    // Cache the (large, stable) tool catalog: a breakpoint on the last tool
+    // caches all tool definitions. Kept as its own segment — separate from the
+    // system breakpoint below — so the catalog still hits even when the system
+    // prompt carries per-turn content that would invalidate a combined prefix.
+    if (this.promptCaching && anthropicTools.length > 0) {
+      const lastIdx = anthropicTools.length - 1;
+      anthropicTools = anthropicTools.map((tool, i) =>
+        i === lastIdx ? { ...tool, cache_control: cacheBreakpoint } : tool,
+      );
+    }
 
     // In OAuth (subscription) mode the Messages API requires the request to
     // present as Claude Code: first system block is the identity, the agent's
-    // real system prompt follows. In API-key mode the plain string is sent.
+    // real system prompt follows. In API-key mode the plain string is sent
+    // (promoted to a one-element block array when caching, to carry the
+    // breakpoint).
     let systemParam: string | Anthropic.Messages.TextBlockParam[] | undefined;
     if (this.oauthMode) {
       systemParam = [
@@ -521,7 +551,16 @@ export class AnthropicProvider implements ChatProvider {
         ...(system ? [{ type: "text", text: system } as Anthropic.Messages.TextBlockParam] : []),
       ];
     } else if (system) {
-      systemParam = system;
+      systemParam = this.promptCaching ? [{ type: "text", text: system }] : system;
+    }
+
+    // Cache the system prompt: a breakpoint on the last system block caches the
+    // whole prefill up to it (tools + system, in Anthropic's canonical order).
+    if (this.promptCaching && Array.isArray(systemParam) && systemParam.length > 0) {
+      const lastIdx = systemParam.length - 1;
+      systemParam = systemParam.map((block, i) =>
+        i === lastIdx ? { ...block, cache_control: cacheBreakpoint } : block,
+      );
     }
 
     return {

@@ -70,6 +70,9 @@ function createSingleProvider(modelConfig: ModelConfig, endpoint: ResolvedProvid
     return new AnthropicProvider(endpoint.baseUrl, endpoint.apiKey, modelConfig, {
       timeoutMs: endpoint.timeoutMs,
       maxRetries: endpoint.maxRetries,
+      // Anthropic prompt caching is on by default (robust intra-turn win, no
+      // downside); the model config opts out only with an explicit promptCache:false.
+      promptCaching: modelConfig.promptCache !== false,
       ...(managedOAuth ? { tokenProvider: getValidAccessToken } : {}),
     });
   }

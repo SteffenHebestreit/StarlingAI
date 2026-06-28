@@ -99,14 +99,19 @@ export const ModelConfigSchema = z.object({
    *    `enableThinking`; this field is ignored there. Undefined → model/GUI default;
    *    falls back to enableThinking (false→low, true→high) for gpt-oss when unset. */
   reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
-  /** Reuse the provider's KV/prefix cache across calls (sends
-   *  `extra_body.cache_prompt: true`). The ~22KB base system prompt is the
-   *  stable first message on every call, so on llama.cpp / LM Studio this skips
-   *  re-prefilling it each iteration/turn — a large latency win on a slow local
-   *  GPU. OPT-IN (off when unset) because non-llama.cpp backends (some vLLM
-   *  builds) reject unknown `extra_body` keys; enable it only for a provider you
-   *  know supports prompt caching. Optional so inline ModelConfig literals
-   *  don't all have to set it. */
+  /** Reuse the provider's KV/prefix cache across calls. The ~22KB base system
+   *  prompt + tool catalog is the stable first part of every call, so reusing a
+   *  cached prefill skips re-prefilling it each iteration/turn — a large latency
+   *  (and, on Anthropic, cost) win.
+   *   - OpenAI-compatible (llama.cpp / LM Studio): sends `extra_body.cache_prompt:
+   *     true`. OPT-IN (off when unset) because non-llama.cpp backends (some vLLM
+   *     builds) reject unknown `extra_body` keys; enable it only for a provider
+   *     you know supports prompt caching.
+   *   - Anthropic: places `cache_control: ephemeral` breakpoints on the tool
+   *     catalog and system prompt. ON by default there (caching is always
+   *     supported and sub-minimum prefixes are silently uncached); set
+   *     `promptCache: false` to disable.
+   *  Optional so inline ModelConfig literals don't all have to set it. */
   promptCache: z.boolean().optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:

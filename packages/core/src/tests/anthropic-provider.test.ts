@@ -7,7 +7,7 @@ import {
   listModelPresets,
   resolveProviderEndpointForModel,
 } from "../providers/index.js";
-import type { LLMMessage } from "../providers/lmstudio.js";
+import type { LLMMessage, LLMToolDef } from "../providers/lmstudio.js";
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return ConfigSchema.parse(overrides);
@@ -269,6 +269,69 @@ describe("toAnthropicMessages", () => {
     expect(blocks[0]!.is_error).toBe(true);
     // The synthesis instruction survives, after the synthesized results turn.
     expect(out[3]).toEqual({ role: "user", content: "[FINAL ANSWER REQUIRED] Synthesize now." });
+  });
+});
+
+describe("anthropic prompt caching (cache_control breakpoints)", () => {
+  const modelConfig = ModelConfigSchema.parse({ primary: "anthropic/claude-sonnet-4-6" });
+  const messages: LLMMessage[] = [
+    { role: "system", content: "You are StarlingAI." },
+    { role: "user", content: "hi" },
+  ];
+  const tools: LLMToolDef[] = [
+    { name: "t1", description: "d1", parameters: { type: "object", properties: {} } },
+    { name: "t2", description: "d2", parameters: { type: "object", properties: {} } },
+  ];
+
+  // Swap in a client stub that captures the request params (TS `private` is not
+  // enforced at runtime) and returns a minimal valid Messages response.
+  function captureParams(provider: AnthropicProvider): { get: () => Record<string, unknown> } {
+    let captured: Record<string, unknown> = {};
+    (provider as unknown as { client: unknown }).client = {
+      messages: {
+        create: async (params: Record<string, unknown>) => {
+          captured = params;
+          return { content: [{ type: "text", text: "ok" }], usage: { input_tokens: 5, output_tokens: 2 }, stop_reason: "end_turn" };
+        },
+      },
+    };
+    return { get: () => captured };
+  }
+
+  it("places a breakpoint on the last tool and the system block by default (API-key mode)", async () => {
+    const p = new AnthropicProvider("https://api.anthropic.com", "sk-ant-api03-key", modelConfig);
+    const cap = captureParams(p);
+    await p.complete(messages, tools);
+    const params = cap.get();
+
+    const system = params["system"] as Array<{ cache_control?: unknown }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system[system.length - 1]!.cache_control).toEqual({ type: "ephemeral" });
+
+    const reqTools = params["tools"] as Array<{ cache_control?: unknown }>;
+    expect(reqTools[reqTools.length - 1]!.cache_control).toEqual({ type: "ephemeral" });
+    expect(reqTools[0]!.cache_control).toBeUndefined(); // only the last tool carries it
+  });
+
+  it("emits no breakpoints when promptCaching is disabled (system stays a plain string)", async () => {
+    const p = new AnthropicProvider("https://api.anthropic.com", "sk-ant-api03-key", modelConfig, { promptCaching: false });
+    const cap = captureParams(p);
+    await p.complete(messages, tools);
+    const params = cap.get();
+
+    expect(typeof params["system"]).toBe("string");
+    const reqTools = params["tools"] as Array<{ cache_control?: unknown }>;
+    expect(reqTools.every((t) => t.cache_control === undefined)).toBe(true);
+  });
+
+  it("breakpoints the real system block, not the Claude Code identity, in OAuth mode", async () => {
+    const p = new AnthropicProvider("https://api.anthropic.com", "sk-ant-oat01-token", modelConfig);
+    const cap = captureParams(p);
+    await p.complete(messages, tools);
+    const system = cap.get()["system"] as Array<{ text: string; cache_control?: unknown }>;
+    expect(system).toHaveLength(2); // [identity, real system prompt]
+    expect(system[0]!.cache_control).toBeUndefined();
+    expect(system[1]!.cache_control).toEqual({ type: "ephemeral" });
   });
 });
 
