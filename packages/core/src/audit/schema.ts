@@ -128,6 +128,9 @@ export type CoreAuditEventType =
   | "config_proposal_created"
   | "config_proposal_applied"
   | "config_proposal_rejected"
+  // Swarm self-authoring: a durable agent/scene/job shard written + applied live
+  | "swarm_shard_authored"
+  | "swarm_shard_author_rejected"
   | "self_improvement_applied"
   // Tool development & self-improvement
   | "tool_dev_session_started"

@@ -67,6 +67,7 @@ import "./contacts.js";
 import "./agent-datastore.js";
 import "./tool-develop.js";
 import "./self-improve-tools.js";
+import "./swarm-authoring-tools.js";
 import "./graph.js";
 import "./timeseries.js";
 import "./research-scratch.js";

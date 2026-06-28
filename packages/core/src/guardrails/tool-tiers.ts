@@ -390,6 +390,26 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  // Durable swarm self-authoring (P2): write a validated agent/scene/job shard + apply it live.
+  // Config-zone mutations that re-wire the swarm → approval-gated; no sandbox (must reach workspace).
+  swarm_define_agent: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Durably author a new sub-agent shard and apply it live (validated, approval-gated)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  swarm_save_scene: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Durably author a new scene shard and apply it live (validated, approval-gated)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
+  swarm_save_job: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Durably author a new job/workflow shard and apply it live (validated, approval-gated)",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
 
   // ─── Tier 0: Real-time data feeds (free public APIs) ────────────────────
   get_weather: {
