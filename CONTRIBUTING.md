@@ -33,7 +33,9 @@ Tests that are environment-coupled or pending a behavior decision are marked `it
 
 ### Reliability eval (`pass^k`) before trusting a prompt/agent change
 
-`pnpm agents:evaluate <plan.jsonc> [--baseline base.json] [--repeat k]` runs each case against the live model. Use `--repeat k` (or `repeat` in the plan) to run each case **k times** and report **pass^k** — a case counts only if *every* run passes; one that passes some runs is flagged **flaky**. This is the gate for changes to tuned prompts/routing (e.g. trimming an agent's system prompt): pass@1 hides run-to-run variance, so a single green run is not evidence the change is safe — `pass^k` against a baseline is.
+`pnpm agents:evaluate <plan.jsonc> [--baseline base.json] [--repeat k] [--concurrency n]` runs each case against the live model. Use `--repeat k` (or `repeat` in the plan) to run each case **k times** and report **pass^k** — a case counts only if *every* run passes; one that passes some runs is flagged **flaky**. This is the gate for changes to tuned prompts/routing (e.g. trimming an agent's system prompt): pass@1 hides run-to-run variance, so a single green run is not evidence the change is safe — `pass^k` against a baseline is.
+
+`--concurrency n` (or `concurrency` in the plan, or `SAI_EVAL_CONCURRENCY`) runs a case's k attempts **n at a time**, cutting pass^k wall-clock by up to ~k× if your model backend can serve concurrent requests. Only artifact-free cases are parallelized — a case with `expectArtifact` stays sequential so its per-attempt clear→write→check can't race on the shared workspace. Because concurrent attempts contend for the backend, per-attempt wall-clock is unreliable, so **latency regressions are not flagged** when either run used concurrency>1 (pass^k and token findings are unaffected) — keep `--concurrency 1` for the run whose latencies you want to compare.
 
 Running it from a checkout needs two env vars (the gateway gets them from `env_file`; the CLI does not):
 ```bash

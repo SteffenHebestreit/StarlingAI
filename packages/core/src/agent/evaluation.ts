@@ -46,6 +46,13 @@ export interface AgentEvaluationPlan {
   /** Default number of runs per case (reliability sampling). 1 = legacy pass@1.
    *  With k>1 the report adds pass^k (all k runs pass) and pass@k (any run passes). */
   repeat?: number;
+  /** Max concurrent attempts WITHIN a case (A18 — parallelize the pass^k gate). 1 =
+   *  sequential (legacy). Only the k repeats of a case are parallelized, and only when
+   *  the case writes no artifacts (artifact cases stay sequential so each attempt's
+   *  clear→write→check can't race on the shared workspace). Cuts pass^k wall-clock by
+   *  up to ~k×. Under concurrency per-attempt wall-clock is contended, so the latency-
+   *  regression signal is suppressed (see compareEvaluationReports). */
+  concurrency?: number;
   cases: AgentEvaluationCase[];
 }
 
@@ -85,6 +92,9 @@ export interface AgentEvaluationReport {
   reliableCases?: number;
   /** Cases that passed at least once but not every time (0 < passCount < attempts). */
   flakyCases?: number;
+  /** Effective max concurrent attempts used for this run (A18). >1 means per-attempt
+   *  durations are contended, so latency regressions are not flagged against this run. */
+  concurrency?: number;
   workspacePath: string;
   results: AgentEvaluationCaseResult[];
 }
@@ -177,6 +187,45 @@ function collectFailures(resultText: string, durationMs: number, testCase: Agent
   return failures;
 }
 
+/** Run one pass^k attempt for a case: clear its artifacts, run the agent, time it,
+ *  and collect failures. Pure per-attempt unit so attempts can be ordered or pooled. */
+async function runEvalAttempt(
+  testCase: AgentEvaluationCase,
+  workspacePath: string,
+  runner: AgentEvaluationRunner,
+): Promise<{ durationMs: number; failures: string[]; isError: boolean; result: SubAgentRunResult }> {
+  // Start each attempt from a clean slate so artifact checks reflect THIS run. (No-op
+  // for non-artifact cases, which is what makes their attempts safe to run concurrently.)
+  clearArtifacts(testCase.workspacePath ?? workspacePath, testCase);
+  const startedAt = Date.now();
+  const result = await runner({
+    agentName: testCase.agentName,
+    task: testCase.task,
+    context: testCase.context,
+    parentSessionId: `eval:${randomUUID()}`,
+    workspacePath: testCase.workspacePath ?? workspacePath,
+  });
+  const durationMs = Date.now() - startedAt;
+  const failures = collectFailures(result.output, durationMs, testCase, testCase.workspacePath ?? workspacePath);
+  return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result };
+}
+
+/** Run `fn` over indices [0, count) with at most `limit` in flight, preserving result
+ *  order by index. limit=1 ⇒ strictly sequential (identical to the legacy loop). */
+async function mapWithConcurrency<R>(count: number, limit: number, fn: (index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(count);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= count) return;
+      results[i] = await fn(i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, count)) }, () => worker()));
+  return results;
+}
+
 export async function evaluateAgentPlan(
   plan: AgentEvaluationPlan,
   runner: AgentEvaluationRunner = runSubAgentWithStats,
@@ -184,37 +233,28 @@ export async function evaluateAgentPlan(
   const config = getConfig();
   const workspacePath = plan.workspacePath ?? config.workspacePath;
   const planRepeat = Math.max(1, Math.floor(plan.repeat ?? 1));
+  const planConcurrency = Math.max(1, Math.floor(plan.concurrency ?? 1));
   const results: AgentEvaluationCaseResult[] = [];
 
   for (const testCase of plan.cases) {
     const attempts = Math.max(1, Math.floor(testCase.repeat ?? planRepeat));
-    const runDurationsMs: number[] = [];
+    // Parallelize the k attempts only for artifact-free cases — an artifact case's
+    // clear→write→check would race on the shared workspace, so it stays sequential.
+    const attemptLimit = planConcurrency > 1 && testCase.expectArtifact === undefined ? planConcurrency : 1;
+    const attemptResults = await mapWithConcurrency(attempts, attemptLimit, () =>
+      runEvalAttempt(testCase, workspacePath, runner),
+    );
+
+    const runDurationsMs = attemptResults.map((a) => a.durationMs);
     let passCount = 0;
     let firstFailures: string[] = [];
     let sawError = false;
-    let lastResult: SubAgentRunResult | undefined;
-
-    // Run the case k times so we can report pass^k (reliability), not just pass@1.
-    // Each attempt gets a fresh session so runs are independent.
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      // Start each attempt from a clean slate so artifact checks reflect THIS run.
-      clearArtifacts(testCase.workspacePath ?? workspacePath, testCase);
-      const startedAt = Date.now();
-      const result = await runner({
-        agentName: testCase.agentName,
-        task: testCase.task,
-        context: testCase.context,
-        parentSessionId: `eval:${randomUUID()}`,
-        workspacePath: testCase.workspacePath ?? workspacePath,
-      });
-      const durationMs = Date.now() - startedAt;
-      runDurationsMs.push(durationMs);
-      lastResult = result;
-      const failures = collectFailures(result.output, durationMs, testCase, testCase.workspacePath ?? workspacePath);
-      if (result.output.startsWith("Sub-agent error:")) sawError = true;
-      if (failures.length === 0) passCount++;
-      else if (firstFailures.length === 0) firstFailures = failures;
+    for (const a of attemptResults) {
+      if (a.isError) sawError = true;
+      if (a.failures.length === 0) passCount++;
+      else if (firstFailures.length === 0) firstFailures = a.failures; // lowest-index failure (order preserved)
     }
+    const lastResult: SubAgentRunResult | undefined = attemptResults[attemptResults.length - 1]?.result;
 
     const passCaretK = passCount === attempts;
     const passAtK = passCount > 0;
@@ -251,6 +291,7 @@ export async function evaluateAgentPlan(
     repeat: planRepeat,
     reliableCases: results.filter((result) => result.passCaretK).length,
     flakyCases: results.filter((result) => result.passAtK && !result.passCaretK).length,
+    concurrency: planConcurrency,
     workspacePath,
     results,
   };
@@ -305,6 +346,11 @@ export function compareEvaluationReports(
   const findings: RegressionFinding[] = [];
   const baselineByName = new Map(baseline.results.map(r => [r.name, r]));
 
+  // Per-attempt wall-clock is unreliable when attempts ran concurrently (A18) — the runs
+  // contend for the model backend — so a latency comparison is only meaningful when BOTH
+  // reports ran sequentially. Correctness (pass^k) and token findings are unaffected.
+  const latencyComparable = (baseline.concurrency ?? 1) <= 1 && (current.concurrency ?? 1) <= 1;
+
   for (const curr of current.results) {
     const base = baselineByName.get(curr.name);
     if (!base) continue; // new case — not a regression
@@ -322,7 +368,7 @@ export function compareEvaluationReports(
 
     const baseLatency = medianDurationMs(base);
     const currLatency = medianDurationMs(curr);
-    if (curr.passed && baseLatency > 0 && currLatency > baseLatency * LATENCY_REGRESSION_FACTOR) {
+    if (latencyComparable && curr.passed && baseLatency > 0 && currLatency > baseLatency * LATENCY_REGRESSION_FACTOR) {
       findings.push({
         caseName: curr.name,
         agentName: curr.agentName,

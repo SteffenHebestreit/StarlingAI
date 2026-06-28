@@ -114,6 +114,38 @@ describe("agent evaluation harness", () => {
     expect(formatEvaluationSummary(report)).toContain("pass^k=2/4");
   });
 
+  function concurrencyProbe() {
+    let inFlight = 0, maxInFlight = 0;
+    const runner = async (opts: { agentName: string; task: string }) => {
+      inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 10)); // hold so concurrent attempts overlap
+      inFlight -= 1;
+      return { output: "OK", stats: statsFor(opts.agentName, opts.task) };
+    };
+    return { runner, getMax: () => maxInFlight };
+  }
+
+  it("A18: runs a case's k attempts CONCURRENTLY when concurrency>1, keeping pass^k intact", async () => {
+    const probe = concurrencyProbe();
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace", repeat: 4, concurrency: 4,
+      cases: [{ name: "stable", agentName: "researcher", task: "t", expectIncludes: ["OK"] }],
+    }, probe.runner);
+    expect(probe.getMax()).toBeGreaterThan(1); // attempts overlapped
+    expect(report.concurrency).toBe(4);
+    expect(report.results[0]?.passCount).toBe(4); // aggregation across concurrent attempts is correct
+    expect(report.results[0]?.passCaretK).toBe(true);
+  });
+
+  it("A18: runs attempts SEQUENTIALLY by default (concurrency unset = 1)", async () => {
+    const probe = concurrencyProbe();
+    await evaluateAgentPlan({
+      workspacePath: "/workspace", repeat: 4,
+      cases: [{ name: "s", agentName: "researcher", task: "t", expectIncludes: ["OK"] }],
+    }, probe.runner);
+    expect(probe.getMax()).toBe(1);
+  });
+
   it("a per-case repeat overrides the plan default; repeat=1 stays legacy pass@1", async () => {
     const report = await evaluateAgentPlan({
       workspacePath: "/workspace",
@@ -221,6 +253,28 @@ describe("agent evaluation harness", () => {
     expect(formatRegressionSummary(regressions)).toBe("No regressions detected.");
   });
 
+  it("A18: suppresses latency-spike findings when either run used concurrency>1", () => {
+    const stats = {
+      agentName: "researcher", sessionId: "s1", promptChars: 100, userContentChars: 20,
+      toolCount: 1, toolNames: ["web_search"], iterations: 1,
+      usage: { promptTokens: 50, completionTokens: 50, totalTokens: 100 },
+      maxIterations: 5, model: "test", capabilities: [] as string[],
+    };
+    const base: AgentEvaluationReport = {
+      runId: "b", generatedAt: new Date().toISOString(), totalCases: 1, passedCases: 1, failedCases: 0,
+      concurrency: 1, workspacePath: "/workspace",
+      results: [{ name: "a", agentName: "researcher", passed: true, durationMs: 1000, status: "passed", failures: [], outputPreview: "ok", stats, runDurationsMs: [1000] }],
+    };
+    const current: AgentEvaluationReport = {
+      runId: "c", generatedAt: new Date().toISOString(), totalCases: 1, passedCases: 1, failedCases: 0,
+      concurrency: 4, workspacePath: "/workspace",
+      results: [{ name: "a", agentName: "researcher", passed: true, durationMs: 5000, status: "passed", failures: [], outputPreview: "ok", stats, runDurationsMs: [5000] }],
+    };
+    // 5× slower, but the concurrent run's per-attempt wall-clock is contended → not a regression.
+    const reg = compareEvaluationReports(base, current);
+    expect(reg.findings.some((f) => f.kind === "latency_spike")).toBe(false);
+  });
+
   it("writes the evaluation report to disk", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-eval-"));
     const outputPath = join(tempDir, "report.json");
@@ -323,6 +377,27 @@ describe("agent evaluation harness — artifact inspection (expectArtifact)", ()
       });
       expect(r.results[0]?.passed).toBe(false);
       expect(r.results[0]?.failures.join(" ")).toMatch(/likely truncated\/stub/);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("keeps artifact cases SEQUENTIAL even under concurrency (no workspace race) (A18)", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-artifact-"));
+    try {
+      let inFlight = 0, maxInFlight = 0;
+      const runner = async (opts: { agentName: string; task: string }) => {
+        inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+        mkdirSync(join(ws, "generated"), { recursive: true });
+        writeFileSync(join(ws, "generated/doc.md"), "## Introduction\nbody", "utf8");
+        await new Promise((r) => setTimeout(r, 10));
+        inFlight -= 1;
+        return { output: "done", stats: (await benignRunner(opts)).stats };
+      };
+      const r = await evaluateAgentPlan({
+        workspacePath: ws, repeat: 3, concurrency: 4,
+        cases: [{ name: "build", agentName: "content_writer", task: "t", expectArtifact: { path: "generated/doc.md", includes: ["Introduction"] } }],
+      }, runner);
+      expect(maxInFlight).toBe(1); // artifact case forced sequential despite concurrency:4
+      expect(r.results[0]?.passCaretK).toBe(true);
     } finally { rmSync(ws, { recursive: true, force: true }); }
   });
 
