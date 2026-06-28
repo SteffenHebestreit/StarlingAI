@@ -210,7 +210,36 @@ export class FailoverChatProvider implements ChatProvider {
   }
 
   async embed(texts: string[], model: string): Promise<Float32Array[]> {
-    return this.bindings[0]!.provider.embed(texts, model);
+    // Mirror complete()/stream(): embeddings must use the failover chain too, or a
+    // dead primary embed endpoint hard-fails ALL embedding (memory recall, document
+    // RAG, tool-rerank, supersession) even when a healthy fallback exists.
+    const candidates = this.availableBindings();
+    const attempts: string[] = [];
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const binding = candidates[index]!;
+      try {
+        const vectors = await binding.provider.embed(texts, model);
+        this.markSuccess(binding, "embed");
+        return vectors;
+      } catch (error) {
+        const transient = isTransientProviderError(error);
+        attempts.push(`${binding.endpoint.priority}:${binding.endpoint.baseUrl} => ${errorText(error)}`);
+        this.markFailure(binding, error, transient);
+
+        if (!transient || index === candidates.length - 1) {
+          throw error instanceof Error
+            ? error
+            : new Error(`Provider embed failed: ${String(error)}`);
+        }
+
+        const next = candidates[index + 1]!;
+        this.logFailover(binding, next, error, "embed");
+        await new Promise(r => setTimeout(r, FAILOVER_BACKOFF_BASE_MS * Math.pow(2, index)));
+      }
+    }
+
+    throw new Error(`All configured embed providers failed: ${attempts.join(" | ")}`);
   }
 
   isHealthy(): boolean {
@@ -318,7 +347,7 @@ export class FailoverChatProvider implements ChatProvider {
     }, "Provider endpoint failed");
   }
 
-  private markSuccess(binding: FailoverProviderBinding, operation: "complete" | "stream"): void {
+  private markSuccess(binding: FailoverProviderBinding, operation: "complete" | "stream" | "embed"): void {
     const key = providerKey(binding.endpoint);
     const existing = this.state.get(key);
     this.activeBindingKey = key;
@@ -358,7 +387,7 @@ export class FailoverChatProvider implements ChatProvider {
     from: FailoverProviderBinding,
     to: FailoverProviderBinding,
     error: unknown,
-    operation: "complete" | "stream",
+    operation: "complete" | "stream" | "embed",
   ): void {
     logAudit("provider_failover", {
       operation,

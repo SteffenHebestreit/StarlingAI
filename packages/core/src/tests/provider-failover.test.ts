@@ -72,6 +72,25 @@ describe("FailoverChatProvider", () => {
     expect(vi.mocked(logAudit).mock.calls.some(([type, data]) => type === "provider_failover" && data["operation"] === "complete")).toBe(true);
   });
 
+  it("falls back on transient embed errors (embeddings use the failover chain too)", async () => {
+    const primaryEmbed = vi.fn(async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:1234");
+    });
+    const fallbackEmbed = vi.fn(async () => [new Float32Array([1, 2, 3])]);
+
+    const provider = new FailoverChatProvider([
+      createBinding("primary", "http://primary/v1", createProvider({ embed: primaryEmbed })),
+      createBinding("fallback", "http://fallback/v1", createProvider({ embed: fallbackEmbed })),
+    ]);
+
+    const vectors = await provider.embed(["hello"], "embed-model");
+
+    expect(vectors).toHaveLength(1);
+    expect(primaryEmbed).toHaveBeenCalledTimes(1);
+    expect(fallbackEmbed).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logAudit).mock.calls.some(([type, data]) => type === "provider_failover" && data["operation"] === "embed")).toBe(true);
+  });
+
   it("does not fall back on hard completion errors", async () => {
     const primaryComplete = vi.fn(async () => {
       throw new Error("HTTP 401 unauthorized");
