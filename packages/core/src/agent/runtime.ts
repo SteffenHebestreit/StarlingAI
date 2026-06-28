@@ -4584,7 +4584,32 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // -LLM-call. (formatFlowMemoryGuidance above is synchronous — it stays out of the
     // batch.) Skills surface reusable approaches the swarm distilled; guidance only.
     const skillRetrievalEnabled = injectTurnContext && getConfig().skillLibrary.enabled;
-    const [memoryGuidanceText, skillRetrieved] = await Promise.all([
+    // Discovery prefetch (staged orchestration S4): start it HERE so its embedding
+    // round-trip OVERLAPS the memory+skill embeddings below instead of running serially
+    // after them — all three independent retrievals fire concurrently, shaving an
+    // embedding round-trip off time-to-first-LLM-call on escalated turns. Soft head
+    // start (not a gate), compact + droppable, flag-gated default-off; best-effort —
+    // never blocks the turn (errors and the timeout both resolve to an empty capsule).
+    const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
+    const discoveryPrefetchPromise: Promise<string> =
+      iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch
+        ? timedPhase("discoveryPrefetch", async () => {
+            // HARD latency cap: the embedding round-trip behind the capsule can stall on
+            // a cold/queued embed backend (observed ~15s on a busy LM Studio). Bound it
+            // so a slow prefetch is abandoned (empty capsule) rather than delaying the
+            // turn; the model then discovers on demand.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                prefetchCapabilityCandidates(userMessage),
+                new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
+              ]);
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          }).catch(() => "")
+        : Promise.resolve("");
+    const [memoryGuidanceText, skillRetrieved, prefetchedDiscoveryCapsule] = await Promise.all([
       injectTurnContext
         ? formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
             sessionId: session.id,
@@ -4598,6 +4623,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
           })
         : Promise.resolve(null),
+      discoveryPrefetchPromise,
     ]);
     let memoryGuidance = memoryGuidanceText;
     let skillGuidance = "";
@@ -4655,36 +4681,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // knowledge answer skips it entirely (DIRECT ANSWER FIRST still holds).
         : "PLAN FIRST: if this needs any tool, delegation, retrieval, or multi-step work, call record_plan ONCE with a SHORT plan before acting — objective; the step(s) (each tagged reuse | delegate | direct, with agentName for delegate steps); the acceptance criteria the final answer must meet; and stop conditions. A one-line objective with one or two acceptance criteria is enough for a simple single-step task — keep it lightweight. Set riskTier 'high' only when the task makes current/sourced factual claims, takes an external/destructive/credential action, or is otherwise consequential. If the request is fully answerable directly from your own knowledge in one reply, SKIP the plan and just answer. Then execute the plan in the same turn.";
     }
-    // Discovery prefetch (staged orchestration S4): on the FIRST iteration of an
-    // escalated turn, discover candidate agents + workflows concurrently up-front and
-    // inject a compact capsule so the coordinator can plan without first spending slow
-    // search_agents / search_workflows tool rounds. Soft head start (not a gate),
-    // compact + droppable; flag-gated default-off. Best-effort — never blocks the turn.
-    let discoveryCapsule = "";
-    if (iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch) {
-      try {
-        // HARD latency cap: the capsule is a soft head-start, but the embedding
-        // round-trip behind it can stall on a cold/queued embed backend (observed
-        // ~15s on a busy LM Studio) and that await blocks first-token. Bound it so a
-        // slow prefetch is abandoned (empty capsule) rather than delaying EVERY
-        // escalated turn — including ones that end in a direct answer with zero
-        // delegations. If it times out the model just discovers on demand.
-        const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
-        discoveryCapsule = await timedPhase("discoveryPrefetch", async () => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          try {
-            return await Promise.race([
-              prefetchCapabilityCandidates(userMessage),
-              new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
-            ]);
-          } finally {
-            if (timer) clearTimeout(timer);
-          }
-        });
-        if (discoveryCapsule) {
-          logAudit("discovery_prefetch", { capsuleChars: discoveryCapsule.length }, { sessionId: session.id });
-        }
-      } catch { /* prefetch is best-effort; the model can still discover on demand */ }
+    // discoveryCapsule (staged orchestration S4) was prefetched CONCURRENTLY with the
+    // memory+skill embeddings above (discoveryPrefetchPromise) so it no longer adds a
+    // serial round-trip to first-token. It injects a compact agent+workflow capsule so
+    // the coordinator can plan without first spending slow search_agents/search_workflows
+    // rounds. Kept as `let` so the prompt-budget trimmer below can drop it; audited here
+    // where the rest of the turn-context capsules are assembled.
+    let discoveryCapsule = prefetchedDiscoveryCapsule;
+    if (discoveryCapsule) {
+      logAudit("discovery_prefetch", { capsuleChars: discoveryCapsule.length }, { sessionId: session.id });
     }
     const collapsedHistory = session.getCollapsedHistory();
 

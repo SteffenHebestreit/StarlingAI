@@ -458,7 +458,32 @@ function includesTermAtWordStart(normalized: string, terms: readonly string[]): 
   return terms.some((term) => termStartRegex(term).test(normalized));
 }
 
+const _dynamicGuidanceCache = new Map<string, DynamicTurnGuidance | null>();
+const DYNAMIC_GUIDANCE_CACHE_MAX = 256;
+
+/**
+ * Memoized by (toolMode, message). The result is a pure function of those two —
+ * everything else the body reads is module-level constants, and `toolMode` already
+ * captures the only getConfig()-derived input. runtime.ts calls this TWICE per turn
+ * (once with the default toolMode, once with effectiveToolMode), so the second call
+ * reuses the first whenever the modes match — skipping a full regex-matching pass over
+ * the message. Bounded FIFO so the cache can't grow unbounded across turns; a config
+ * reload that changes toolMode produces a fresh key, so there is no staleness.
+ */
 export function buildDynamicTurnGuidance(userMessage: string, toolMode: MainAssistantToolMode = getConfig().agents.mainAssistant.toolMode): DynamicTurnGuidance | null {
+  const cacheKey = `${toolMode} ${userMessage}`;
+  const cached = _dynamicGuidanceCache.get(cacheKey);
+  if (cached !== undefined) return cached; // distinguishes a cached `null` from a miss
+  const result = computeDynamicTurnGuidance(userMessage, toolMode);
+  if (_dynamicGuidanceCache.size >= DYNAMIC_GUIDANCE_CACHE_MAX) {
+    const oldest = _dynamicGuidanceCache.keys().next().value;
+    if (oldest !== undefined) _dynamicGuidanceCache.delete(oldest);
+  }
+  _dynamicGuidanceCache.set(cacheKey, result);
+  return result;
+}
+
+function computeDynamicTurnGuidance(userMessage: string, toolMode: MainAssistantToolMode): DynamicTurnGuidance | null {
   const normalized = userMessage.trim().toLowerCase();
   if (!normalized) return null;
 
