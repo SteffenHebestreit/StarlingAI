@@ -68,6 +68,13 @@ packages/core/packages/
 # Stray test/scratch output
 test-output.txt
 
+# Eval run reports (pnpm agents:evaluate / scenes:evaluate output) — run artifacts,
+# not source. Keep eval PLANS (agent-eval.jsonc) tracked; ignore the generated reports.
+packages/core/baseline.json
+packages/core/candidate.json
+packages/core/out.json
+packages/core/*.eval.json
+
 # npm lockfiles — this is a pnpm workspace (packageManager: pnpm). A stray
 # package-lock.json causes install drift and forces CI to --no-frozen-lockfile.
 package-lock.json

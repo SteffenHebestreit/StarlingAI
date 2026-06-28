@@ -275,6 +275,51 @@ describe("agent evaluation harness", () => {
     expect(reg.findings.some((f) => f.kind === "latency_spike")).toBe(false);
   });
 
+  it("flags an environment-suspect run (many agents CRASHED) as UNRELIABLE in the summary", async () => {
+    // 3 of 4 cases crash (the runner returns a Sub-agent error) → environment-suspect.
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      cases: [
+        { name: "ok", agentName: "researcher", task: "t", expectIncludes: ["OK"] },
+        { name: "crash1", agentName: "coder", task: "t", expectIncludes: ["X"] },
+        { name: "crash2", agentName: "shell_agent", task: "t", expectIncludes: ["X"] },
+        { name: "crash3", agentName: "git_agent", task: "t", expectIncludes: ["X"] },
+      ],
+    }, async (opts) => ({
+      output: opts.agentName === "researcher" ? "OK" : "Sub-agent error: model backend unreachable",
+      stats: statsFor(opts.agentName, opts.task),
+    }));
+
+    expect(report.erroredCases).toBe(3);
+    const summary = formatEvaluationSummary(report);
+    expect(summary).toContain("UNRELIABLE RUN");
+    expect(summary).toContain("--via-gateway");
+  });
+
+  it("warns that a clean regression verdict against an UNRELIABLE baseline is not validation", () => {
+    const stats = {
+      agentName: "researcher", sessionId: "s", promptChars: 0, userContentChars: 0, toolCount: 0, toolNames: [] as string[],
+      iterations: 0, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, maxIterations: 0, model: "test", capabilities: [] as string[],
+    };
+    const errored = (name: string): AgentEvaluationReport["results"][number] =>
+      ({ name, agentName: "a", passed: false, durationMs: 1, status: "error", failures: ["agent returned an execution error"], outputPreview: "Sub-agent error:", stats });
+    // Baseline: 3/4 errored (env-suspect), 1 passed.
+    const baseline: AgentEvaluationReport = {
+      runId: "b", generatedAt: new Date().toISOString(), totalCases: 4, passedCases: 1, failedCases: 3,
+      reliableCases: 1, erroredCases: 3, workspacePath: "/ws",
+      results: [
+        { name: "ok", agentName: "a", passed: true, durationMs: 1, status: "passed", failures: [], outputPreview: "ok", stats },
+        errored("c1"), errored("c2"), errored("c3"),
+      ],
+    };
+    const reg = compareEvaluationReports(baseline, baseline); // identical → no real regressions
+    expect(reg.hasRegressions).toBe(false);
+    expect(reg.warnings?.some((w) => w.includes("UNRELIABLE"))).toBe(true);
+    const summary = formatRegressionSummary(reg);
+    expect(summary).toContain("UNRELIABLE");
+    expect(summary).toContain("No regressions detected"); // still shown, but caveated
+  });
+
   it("writes the evaluation report to disk", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agent-eval-"));
     const outputPath = join(tempDir, "report.json");

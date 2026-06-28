@@ -92,11 +92,29 @@ export interface AgentEvaluationReport {
   reliableCases?: number;
   /** Cases that passed at least once but not every time (0 < passCount < attempts). */
   flakyCases?: number;
+  /** Cases whose agent CRASHED (status "error") rather than running and failing an
+   *  assertion. A high share signals a broken eval environment (model backend down, or
+   *  agents that need the full runtime via --via-gateway), not a meaningful pass/fail. */
+  erroredCases?: number;
   /** Effective max concurrent attempts used for this run (A18). >1 means per-attempt
    *  durations are contended, so latency regressions are not flagged against this run. */
   concurrency?: number;
   workspacePath: string;
   results: AgentEvaluationCaseResult[];
+}
+
+/** Fraction of cases that crashed (status "error") at/above which a run is treated as
+ *  environment-suspect — the model backend is likely unreachable or the agents need the
+ *  full runtime — so its pass/fail and any baseline comparison are NOT a valid gate. */
+const EVAL_ENV_SUSPECT_ERROR_RATIO = 0.25;
+
+function erroredCount(report: AgentEvaluationReport): number {
+  return report.erroredCases ?? report.results.filter((r) => r.status === "error").length;
+}
+
+/** True when enough cases crashed that the run can't be trusted as a gate. */
+export function isEvaluationEnvironmentSuspect(report: AgentEvaluationReport): boolean {
+  return report.totalCases > 0 && erroredCount(report) / report.totalCases >= EVAL_ENV_SUSPECT_ERROR_RATIO;
 }
 
 export type AgentEvaluationRunner = (opts: SubAgentRunOptions) => Promise<SubAgentRunResult>;
@@ -291,6 +309,7 @@ export async function evaluateAgentPlan(
     repeat: planRepeat,
     reliableCases: results.filter((result) => result.passCaretK).length,
     flakyCases: results.filter((result) => result.passAtK && !result.passCaretK).length,
+    erroredCases: results.filter((result) => result.status === "error").length,
     concurrency: planConcurrency,
     workspacePath,
     results,
@@ -318,6 +337,9 @@ export interface RegressionFinding {
 export interface RegressionReport {
   hasRegressions: boolean;
   findings: RegressionFinding[];
+  /** Non-regression health warnings — chiefly when the BASELINE is untrustworthy (many
+   *  errored cases / few reliable cases), which makes "no regressions" near-meaningless. */
+  warnings?: string[];
 }
 
 const LATENCY_REGRESSION_FACTOR = 1.5; // >50% increase
@@ -393,12 +415,32 @@ export function compareEvaluationReports(
     }
   }
 
-  return { hasRegressions: findings.length > 0, findings };
+  // Baseline-trust warnings: a "no regressions" verdict is only as meaningful as the
+  // baseline it compares against. If the baseline was environment-suspect (agents crashed)
+  // or passed very few cases, surface that so a vacuous clean verdict isn't mistaken for
+  // validation (the trap: a change A/B'd against a mostly-broken baseline).
+  const warnings: string[] = [];
+  const baseErrored = erroredCount(baseline);
+  if (isEvaluationEnvironmentSuspect(baseline)) {
+    warnings.push(`Baseline is UNRELIABLE: ${baseErrored}/${baseline.totalCases} cases errored (agents crashed). A clean verdict here is NOT validation — fix the eval env (model up? --via-gateway?) and re-baseline.`);
+  } else {
+    const reliable = baseline.reliableCases ?? baseline.passedCases;
+    if (baseline.totalCases > 0 && reliable / baseline.totalCases < 0.5) {
+      warnings.push(`Low-power comparison: the baseline passed only ${reliable}/${baseline.totalCases} cases, so this can only catch regressions among those — not evidence the change is broadly safe.`);
+    }
+  }
+
+  return { hasRegressions: findings.length > 0, findings, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 export function formatRegressionSummary(report: RegressionReport): string {
-  if (!report.hasRegressions) return "No regressions detected.";
-  const lines = [`${report.findings.length} regression(s) detected:`, ""];
+  const warnLines = (report.warnings ?? []).map((w) => `!! ${w}`);
+  if (!report.hasRegressions) {
+    return warnLines.length > 0 ? [...warnLines, "", "No regressions detected (but see warnings above)."].join("\n") : "No regressions detected.";
+  }
+  const lines: string[] = [];
+  if (warnLines.length > 0) lines.push(...warnLines, "");
+  lines.push(`${report.findings.length} regression(s) detected:`, "");
   for (const f of report.findings) {
     lines.push(`- [${f.kind}] ${f.caseName} (${f.agentName}): ${f.detail}`);
   }
@@ -406,14 +448,25 @@ export function formatRegressionSummary(report: RegressionReport): string {
 }
 
 export function formatEvaluationSummary(report: AgentEvaluationReport): string {
-  const lines = [
+  const errored = erroredCount(report);
+  const lines: string[] = [];
+  if (isEvaluationEnvironmentSuspect(report)) {
+    lines.push(
+      `!! UNRELIABLE RUN — ${errored}/${report.totalCases} cases ERRORED (the agent crashed, not just`,
+      `   a failed assertion). The model backend is likely unreachable, or these agents need the`,
+      `   full runtime — re-run with --via-gateway (stack up). Do NOT trust this as a gate: a clean`,
+      `   regression verdict against a broken baseline only means it wasn't made worse.`,
+      "",
+    );
+  }
+  lines.push(
     `Agent evaluation run ${report.runId}`,
     `Workspace: ${report.workspacePath}`,
     (report.repeat ?? 1) > 1
       ? `Reliable (pass^${report.repeat}) ${report.reliableCases ?? report.passedCases}/${report.totalCases} · flaky ${report.flakyCases ?? 0} · repeat=${report.repeat}`
       : `Passed ${report.passedCases}/${report.totalCases} cases`,
     "",
-  ];
+  );
 
   for (const result of report.results) {
     const kSuffix = (result.attempts ?? 1) > 1 ? ` pass^k=${result.passCount}/${result.attempts}` : "";
