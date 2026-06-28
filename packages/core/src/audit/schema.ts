@@ -28,6 +28,7 @@ export type CoreAuditEventType =
   | "tool_call_failed"
   | "tool_call_recovered"
   | "tool_output_blocked"
+  | "tool_output_framing_neutralized"
   | "guardrail_blocked"
   | "guardrail_flagged"
   | "output_redacted"

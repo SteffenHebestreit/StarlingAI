@@ -18,6 +18,7 @@ import { currentEffortProfile, effectiveOrchestration } from "../runtime/effort-
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
+import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { withSpan } from "../observability/tracing.js";
@@ -4982,6 +4983,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           logAudit(
             "output_redacted",
             { surface: "tool_output", agentName: opts.agentName, tool: tc.name, detectedTypes: toolOutputScan.detectedTypes },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+        }
+
+        // Defang framework-mimicking framing markers ([function_results], <tool_result>) in this
+        // tool's output before it re-enters the sub-agent's context — the primary indirect prompt-
+        // injection vector (researcher/document_intake fetch arbitrary external content). Neutralize
+        // (content preserved), NOT block, so legitimate content that merely mentions these tokens is
+        // never dropped. The orchestrator's harder checkToolOutput block covers its controlled tools.
+        const beforeFraming = resultContent;
+        resultContent = neutralizeToolResultFraming(resultContent);
+        if (resultContent !== beforeFraming) {
+          logAudit(
+            "tool_output_framing_neutralized",
+            { surface: "tool_output", agentName: opts.agentName, tool: tc.name },
             { sessionId: subSessionId, severity: "warn" },
           );
         }

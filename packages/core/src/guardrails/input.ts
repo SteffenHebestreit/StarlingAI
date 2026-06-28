@@ -208,6 +208,29 @@ export function checkToolOutput(output: string): GuardrailResult {
   return { allowed: true };
 }
 
+/**
+ * Defang framework-mimicking framing markers in UNTRUSTED tool output before a sub-agent
+ * re-reads it, so injected content can't pose as a real tool/function-result boundary.
+ *
+ * Unlike checkToolOutput (which BLOCKS — appropriate for the orchestrator's controlled tools)
+ * this NEUTRALIZES: the content is fully preserved, only the exact framework tokens are
+ * rewritten, so a sub-agent fetching ARBITRARY web/file/email content that merely contains
+ * these tokens is never dropped (no false-positive that would break research). Scoped to the
+ * two markers that have no legitimate reason to appear verbatim in fetched content; role tags
+ * (`<system>` / `assistant:`) are intentionally left untouched — they DO appear in legitimate
+ * research content, and the structured message role already neutralizes them.
+ */
+export function neutralizeToolResultFraming(text: string): string {
+  if (!text) return text;
+  return text
+    // <tool_result …> / </tool_result …> → escape the brackets so it reads as inert text, not a
+    // tag. [^>]* consumes ANY attributes or a trailing self-close slash (<tool_result attr="x"/>),
+    // closing the self-closing/attribute bypass an earlier `\s*>`-only pattern allowed.
+    .replace(/<\s*\/?\s*tool_result[^>]*>/gi, (m) => m.replace(/</g, "&lt;").replace(/>/g, "&gt;"))
+    // [function_results] / [function_result] → break the exact framework token.
+    .replace(/\[\s*function_results?\s*\]/gi, (m) => `[external:${m.slice(1, -1).trim()}]`);
+}
+
 function longestRun(str: string): number {
   let max = 0, current = 0;
   let last = "";
