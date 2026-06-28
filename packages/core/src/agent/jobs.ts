@@ -966,8 +966,26 @@ function normalizePayload(value: unknown): SceneJobPayload {
       ? Object.fromEntries(Object.entries(payload.params as Record<string, unknown>).map(([key, entry]) => [key, String(entry)]))
       : undefined,
     turnTimeoutMs: typeof payload.turnTimeoutMs === "number" && Number.isFinite(payload.turnTimeoutMs) ? payload.turnTimeoutMs : 900_000,
+    // B31 resumable-workflow checkpoint: MUST round-trip through the Postgres jsonb read
+    // path or resume silently never happens (the field is written by saveWorkflowCheckpoint
+    // but would otherwise be stripped here). Keep only entries with the TurnOutput shape
+    // mergeWorkflowOutputs depends on, so a malformed row can't crash the resumed merge.
+    completedStepResults: Array.isArray(payload.completedStepResults)
+      ? payload.completedStepResults.filter((entry): entry is TurnOutput => {
+          if (!entry || typeof entry !== "object") return false;
+          const o = entry as Record<string, unknown>;
+          return typeof o.response === "string"
+            && typeof o.blocked === "boolean"
+            && typeof o.toolCallsExecuted === "number"
+            && Array.isArray(o.guardrailEvents)
+            && typeof o.usage === "object" && o.usage !== null;
+        })
+      : undefined,
   };
 }
+
+/** Test-only: exercise the Postgres jsonb read path (rowToStoredJob → normalizePayload). */
+export const _normalizePayloadForTests = normalizePayload;
 
 function defaultProgress(status: JobStatus, message?: string): SceneJobProgress {
   const lastEventAt = nowIso();
