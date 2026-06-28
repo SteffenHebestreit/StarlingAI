@@ -14,6 +14,7 @@ import {
   markJobCancelled,
   onJobQueued,
   recoverStaleSceneJobs,
+  saveWorkflowCheckpoint,
   updateJobProgress,
   type ClaimedSceneJob,
   type SceneJobProgress,
@@ -274,9 +275,34 @@ async function runWorkflowJob(
   counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
 ): Promise<TurnOutput> {
   const steps = job.payload.steps ?? [];
-  const outputs: TurnOutput[] = [];
+
+  // Resumable workflow (B31): if a prior worker died mid-run, its completed-step outputs
+  // were checkpointed onto the payload (which recoverStaleJobs preserves). Restore them
+  // and resume at the next step instead of re-running from step 0 — re-running already-
+  // executed steps would duplicate their side effects. A step is ONLY skipped because its
+  // result is present here, i.e. it ran to completion (incl. any approval), so skipping an
+  // approval/humanInLoop step is safe by construction.
+  const restored = job.payload.completedStepResults ?? [];
+  const resumeFrom = Math.min(restored.length, steps.length);
+  const outputs: TurnOutput[] = restored.slice(0, resumeFrom);
+
+  if (resumeFrom > 0) {
+    await safeProgressUpdate(job.id, {
+      stage: "step",
+      message: `Resuming workflow at step ${Math.min(resumeFrom + 1, steps.length)}/${steps.length} (${resumeFrom} already completed)`,
+      totalSteps: steps.length,
+      completedSteps: resumeFrom,
+      percent: Math.max(5, Math.min(95, Math.round((resumeFrom / Math.max(1, steps.length)) * 100))),
+      lastEventAt: new Date().toISOString(),
+      lastEventType: "job_resumed",
+    });
+    // If a restored step was blocked, the original run had already stopped there — preserve
+    // that early stop rather than continuing past a block on resume.
+    if (outputs.some((o) => o.blocked)) return mergeWorkflowOutputs(outputs, steps);
+  }
 
   for (const [index, step] of steps.entries()) {
+    if (index < resumeFrom) continue; // already completed + persisted → skip (no re-run)
     if (controller.signal.aborted) break;
 
     await safeProgressUpdate(job.id, {
@@ -305,6 +331,12 @@ async function runWorkflowJob(
     });
 
     outputs.push(output);
+
+    // Checkpoint the completed step BEFORE announcing completion so a crash after this
+    // point resumes PAST this step rather than re-running it (and its side effects). The
+    // unavoidable at-least-once window is a single in-flight step (a crash between the
+    // step's side effect and this persist re-runs that one step).
+    await saveWorkflowCheckpoint(job.id, outputs);
 
     // Drain this step's coalesced tool-progress before the step-boundary write so the
     // direct "step completed" update is not reordered behind a trailing batched flush.

@@ -116,6 +116,64 @@ describe("scene job worker", () => {
     }
   });
 
+  it("resumes a workflow from its checkpoint instead of re-running completed steps (B31)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-resume-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "s".repeat(32), turnTimeoutMs: 30_000 },
+      workspacePath: tempDir,
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    // Record every step task runTurn is actually invoked for, so we can prove the
+    // already-completed step is NOT re-executed (and its approval not re-prompted).
+    const ranTasks: string[] = [];
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        ranTasks.push(String(opts["userMessage"] ?? ""));
+        return { response: `did:${opts["userMessage"]}`, toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const [{ createJob, getJob, saveWorkflowCheckpoint }, { runSceneJobWorkerTick }] = await Promise.all([
+        import("../agent/jobs.js"),
+        import("../agent/scene-worker.js"),
+      ]);
+
+      const job = await createJob({
+        sceneName: "wf",
+        userId: "scene:wf",
+        turnTimeoutMs: 30_000,
+        steps: [
+          // Step A is an APPROVAL step that already fully completed in a prior (crashed) run.
+          { sceneName: "wf", label: "Step A", task: "alpha", humanInLoopSteps: ["approve"] },
+          { sceneName: "wf", label: "Step B", task: "beta" },
+        ],
+      });
+
+      // Simulate the prior worker: step A ran to completion (approval granted + executed)
+      // and was checkpointed onto the payload before the worker died.
+      await saveWorkflowCheckpoint(job.id, [
+        { response: "did:alpha", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false },
+      ]);
+
+      const started = await runSceneJobWorkerTick();
+      expect(started).toBe(true);
+
+      await waitForJobStatus(getJob, job.id, "completed");
+      const full = await getJob(job.id);
+
+      // Step A (the approval step) was skipped — only step B executed on resume.
+      expect(ranTasks).toEqual(["beta"]);
+      // The final response merged the RESTORED step A with the newly-run step B.
+      expect(full?.response).toContain("did:alpha");
+      expect(full?.response).toContain("did:beta");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("queues jobs via the gateway and supports cancellation", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-cancel-"));
     const port = 23000 + Math.floor(Math.random() * 1000);

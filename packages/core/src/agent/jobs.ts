@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import pg from "pg";
-import type { TurnPerformanceMetrics } from "./runtime.js";
+import type { TurnOutput, TurnPerformanceMetrics } from "./runtime.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
 
@@ -78,6 +78,16 @@ export interface SceneJobPayload {
   approvalTimeoutMs?: number;
   params?: Record<string, string>;
   turnTimeoutMs: number;
+  /**
+   * Resumable-workflow checkpoint (B31): the outputs of steps that have FULLY completed,
+   * persisted after each step. On worker recovery the workflow restores these and resumes
+   * at the next step instead of re-running from step 0 (which duplicates side effects). A
+   * persisted entry is the completion marker that makes skipping a step — including an
+   * approval/humanInLoop step — safe: a step is only ever skipped because its result is
+   * here, i.e. it already ran to completion (approval granted + executed). Lives on the
+   * payload (which recoverStaleJobs preserves) so the UI-facing progress stays lean.
+   */
+  completedStepResults?: TurnOutput[];
 }
 
 export interface CreateSceneJobInput {
@@ -108,6 +118,8 @@ interface SceneJobStore {
   getJob(id: string): Promise<SceneJob | undefined>;
   claimNextJob(workerId: string): Promise<ClaimedSceneJob | undefined>;
   updateProgress(id: string, patch: Partial<SceneJobProgress>): Promise<void>;
+  /** Persist the resumable-workflow checkpoint (completed step outputs) onto the payload. */
+  saveWorkflowCheckpoint(id: string, completedStepResults: TurnOutput[]): Promise<void>;
   heartbeatJob(id: string, workerId: string): Promise<void>;
   cancelJob(id: string): Promise<SceneJob | undefined>;
   markCancelled(id: string, reason: string): Promise<void>;
@@ -193,6 +205,10 @@ export async function claimNextJob(workerId: string): Promise<ClaimedSceneJob | 
 
 export async function updateJobProgress(id: string, patch: Partial<SceneJobProgress>): Promise<void> {
   await (await getStore()).updateProgress(id, patch);
+}
+
+export async function saveWorkflowCheckpoint(id: string, completedStepResults: TurnOutput[]): Promise<void> {
+  await (await getStore()).saveWorkflowCheckpoint(id, completedStepResults);
 }
 
 export async function heartbeatJob(id: string, workerId: string): Promise<void> {
@@ -389,6 +405,12 @@ class InMemorySceneJobStore implements SceneJobStore {
     const job = this.jobs.get(id);
     if (!job) return;
     job.progress = mergeProgress(job.progress, patch, job.status);
+  }
+
+  async saveWorkflowCheckpoint(id: string, completedStepResults: TurnOutput[]): Promise<void> {
+    const job = this.jobs.get(id);
+    if (!job) return;
+    job.payload = { ...job.payload, completedStepResults };
   }
 
   async heartbeatJob(id: string, workerId: string): Promise<void> {
@@ -675,6 +697,18 @@ class PostgresSceneJobStore implements SceneJobStore {
        SET progress = $2::jsonb
        WHERE id = $1`,
       [id, JSON.stringify(progress)]
+    );
+  }
+
+  async saveWorkflowCheckpoint(id: string, completedStepResults: TurnOutput[]): Promise<void> {
+    const job = await this.getStoredJob(id);
+    if (!job) return;
+    const payload = { ...job.payload, completedStepResults };
+    await this.pool.query(
+      `UPDATE scene_jobs
+       SET payload = $2::jsonb
+       WHERE id = $1`,
+      [id, JSON.stringify(payload)]
     );
   }
 
