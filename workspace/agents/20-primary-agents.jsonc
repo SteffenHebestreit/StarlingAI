@@ -471,6 +471,7 @@
         "swarm_define_agent",
         "swarm_save_scene",
         "swarm_save_job",
+        "record_skill",
         "git_status",
         "git_diff",
         "read_shared_facts",

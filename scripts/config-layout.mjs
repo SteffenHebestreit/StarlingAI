@@ -36,12 +36,14 @@ const SCENE_CATEGORY_FILES = {
   "20-content-media.jsonc": ["content_creation", "release_notes_draft", "onboarding_packet", "meeting_briefing_packet", "deck_research", "deck_images", "deck_build", "validate_image"],
   "30-engineering-data.jsonc": ["code_review", "data_pipeline_review"],
   "40-ops-comms.jsonc": ["incident_response", "multi_channel_broadcast", "apply_jobs"],
+  "40-capability-codev.jsonc": ["capture_capability"],
 };
 const JOB_CATEGORY_FILES = {
   "10-research.jsonc": ["deep_research_packet", "source_grounded_paper_packet", "research_visual_digest", "competitive_snapshot", "morning_briefing", "weekly_security_digest"],
   "20-content-media.jsonc": ["sourced_presentation", "content_pipeline", "onboarding_delivery"],
   "30-engineering-data.jsonc": ["scheduled_code_review", "data_quality_report", "database_analysis"],
   "40-ops-comms.jsonc": ["daily_ops_brief", "release_broadcast", "incident_postmortem"],
+  "40-capability-codev.jsonc": ["co_develop_capability"],
 };
 
 // Shard a flat {name: def} map into category files under `subdir`, with a `wrapper` top-level

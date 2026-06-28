@@ -1,0 +1,52 @@
+{
+  // Guided capability co-development (roadmap P5 capstone). Composes the existing reviewed_deliverable
+  // build/verify scene (P0 connector reframe + P1 render check live in the agent prompts) twice, then
+  // the capture_capability scene (P2 authoring tools). Resumability comes for free from the multi-step
+  // job worker + B31 checkpoint/resume — a crash or a next-session resume picks up at the next stage,
+  // which is the "resumable multi-stage project" without a separate Project store. General: works for
+  // any capability (maps, weather, dashboards), nothing here is domain-specific.
+  "jobs": {
+    "co_develop_capability": {
+      "description": "Guided, multi-stage co-development of a NEW full-stack capability: build + verify a backend, build + verify a frontend that consumes it, then capture the result as reusable agents/scenes/jobs/skills. Resumable across stages. Example triggers: 'build me a reusable capability that shows POIs near a place on a map', 'entwickle eine wiederverwendbare Funktion: Wetter für einen Ort als Web-App', 'co-develop and save a dashboard capability end to end'.",
+      "params": {
+        "capability": {
+          "description": "The capability to build — what it should do, end result",
+          "default": "the capability described in the conversation"
+        },
+        "backendSpec": {
+          "description": "What the backend must do (data sources, endpoints)",
+          "default": "expose the JSON API(s) the capability needs; if it wraps an external HTTP service, build it as a served backend with real network egress"
+        },
+        "frontendSpec": {
+          "description": "What the frontend must do (UI)",
+          "default": "a clean web UI that consumes the backend and presents the result"
+        }
+      },
+      "steps": [
+        {
+          "scene": "reviewed_deliverable",
+          "label": "Build + verify the backend",
+          "params": {
+            "request": "The BACKEND for the capability '{{capability}}': {{backendSpec}}. Build it as a SERVED Node/Express backend (backend_coder + serve_app — full network egress + npm install), exposing the JSON API(s) the frontend will consume. An external-API connector MUST run here as a served backend, NOT as a sandboxed self-dev tool. verify_app must PASS on the real API routes before this stage is done. Publish the live /api/app/<id>/ URL and the exact routes + response shapes via share_finding so the next stage can consume them.",
+            "reviewDimensions": "correctness, completeness, safety"
+          }
+        },
+        {
+          "scene": "reviewed_deliverable",
+          "label": "Build + verify the frontend",
+          "params": {
+            "request": "The FRONTEND for the capability '{{capability}}': {{frontendSpec}}. Read shared facts for the backend's live URL, routes, and response shapes from the previous stage and consume them with RELATIVE fetches (./api/...). Build with web_coder/backend_coder + serve_app. For a map/canvas/SPA a server PASS is not enough — confirm via a browser DOM check that it ACTUALLY rendered (tiles/markers/rows present, no console errors) before this stage is done.",
+            "reviewDimensions": "correctness, completeness, safety"
+          }
+        },
+        {
+          "scene": "capture_capability",
+          "label": "Capture as reusable machinery",
+          "params": {
+            "capability": "{{capability}}"
+          }
+        }
+      ]
+    }
+  }
+}

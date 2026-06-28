@@ -1,0 +1,18 @@
+{
+  // Capability co-development (roadmap P5). The capstone scene that turns a freshly built +
+  // verified capability into DURABLE, REUSABLE swarm machinery via the P2 authoring tools.
+  // General: the bundle COMPOSITION is decided from what was actually built (not a fixed quadruple).
+  "scenes": {
+    "capture_capability": {
+      "description": "Capture a capability the swarm just co-developed (a built + verified backend and/or frontend) as DURABLE, REUSABLE machinery so future turns can use it without rebuilding. Persists, as fits what was built, a sub-agent, a scene, optionally a job, and a skill via the swarm authoring tools. Example queries: 'save this as a reusable capability', 'capture the map feature we just built so I can reuse it', 'mach das eben Gebaute dauerhaft wiederverwendbar'.",
+      "task": "Use swarm_maintainer to capture the capability '{{capability}}' that was just built and verified in this session as reusable machinery.\n\n1) UNDERSTAND WHAT EXISTS: read_shared_facts first to see exactly what was produced — the served backend's live URL + routes + response shapes, the frontend, the connector approach, any verified behavior. Capture ONLY what was actually built and verified; never invent endpoints, routes, or data.\n\n2) DECIDE THE BUNDLE COMPOSITION from what exists — do NOT force a fixed set:\n- If a reusable specialist makes sense, swarm_define_agent a sub-agent (snake_case) whose description routes future requests to this capability and whose tools match what it needs (e.g. serve_app/verify_app for a served app, http_request for an API).\n- swarm_save_scene a scene that is the reusable entry-point: a clear task, the right allowedAgents, and {{params}} for the variable parts (e.g. a place, a query, a date range).\n- Only if the capability is a multi-step pipeline worth re-running end to end, swarm_save_job a job over the scene(s).\n- record_skill a short procedural recipe capturing how this capability is built and used so the lesson is reusable next time.\n\n3) ORDER MATTERS: author agents BEFORE scenes that reference them, and scenes BEFORE jobs that reference them, so every cross-reference resolves (each authoring tool runs swarm_validate and reverts on any error — fix and retry rather than reporting a failed write as done).\n\n4) REPORT exactly what was captured (each name + kind) and how to invoke it next time (e.g. 'ask: POIs near <place>' routes to the new scene/agent). If nothing durable is warranted (the build was a throwaway experiment), say so plainly instead of authoring noise.",
+      "allowedAgents": ["swarm_maintainer"],
+      "params": {
+        "capability": {
+          "description": "Short name/description of the capability that was built (e.g. 'show POIs near a place on an OSM map')",
+          "default": "the capability built in this session"
+        }
+      }
+    }
+  }
+}
