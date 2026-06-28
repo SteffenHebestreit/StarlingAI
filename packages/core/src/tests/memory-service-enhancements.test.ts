@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -118,7 +118,35 @@ describe("memory service — LRU + decay + embedding", () => {
       }),
       "productivity_agent",
       "session-memory-graph-1",
+      // A4: the single shared embedding (in-flight promise) is handed to the graph
+      // write-through so it does not embed the record a second time.
+      expect.any(Promise),
     );
+  });
+
+  it("computes the durable embedding once and fans the SAME vector out to flat-file + graph (A4)", async () => {
+    const ws = mkWorkspace();
+    storeWorkspaceMemoryRecord(ws, {
+      key: "latency_note",
+      subject: "Latency",
+      content: "Latency and performance budget for specialist calls.",
+      kind: "note",
+    });
+    await flushEmbeddingWrite();
+
+    // The graph write-through received the shared embedding promise as its 4th arg.
+    const call = upsertMemoryToGraphMock.mock.calls.at(-1) as unknown[] | undefined;
+    expect(call).toBeDefined();
+    const shared = await (call![3] as Promise<Float32Array | null>);
+    expect(shared).toBeInstanceOf(Float32Array);
+
+    // …and it is byte-for-byte the vector persisted to the flat file — i.e. one embed,
+    // reused, not two independent computations.
+    const memDir = join(ws, `${PRODUCT.stateDirName}/memory`);
+    const fileName = readdirSync(memDir).find((f) => f.startsWith("latency_note"));
+    expect(fileName).toBeDefined();
+    const stored = JSON.parse(readFileSync(join(memDir, fileName!), "utf-8")) as { embedding?: number[] };
+    expect(stored.embedding).toEqual(Array.from(shared!));
   });
 
   it("applies kind-based decay: 180-day half-life decisions outrank 14-day notes of same age", async () => {

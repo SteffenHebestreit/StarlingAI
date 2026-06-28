@@ -573,16 +573,27 @@ function storeDurableMemoryRecord(
   // values stop resurfacing. Best-effort, gated, and never deletes the file.
   supersedeOlderSubjectFacts(scope, dir, cacheKey, result, key, now, priorRecords);
 
-  // Fire-and-forget embedding refresh when the indexable text changed and
-  // embeddings are configured.  Writes back to the same file so future reads
-  // pick it up.
+  // Embedding (A4): compute ONCE per write and fan the SAME vector out to both the
+  // flat-file search vector AND the graph node, instead of each path embedding the
+  // record independently (two provider round-trips, on different text). Both writes
+  // stay fire-and-forget — never the write's critical path.
+  const graphWriteThrough = (vec?: Float32Array | number[] | null | Promise<Float32Array | null>) =>
+    upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId, vec)
+      .catch((err) => log.debug({ err }, "Graph write-through failed"));
   if (!embedding && isEmbeddingAvailable()) {
-    void _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
+    // Indexable text changed: compute the new vector once (written back to the flat
+    // file by _refreshDurableEmbedding) and hand the same in-flight promise to the
+    // graph, which awaits it for its embedding SET (after creating the node).
+    const embedPromise = _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
+    void graphWriteThrough(embedPromise);
+  } else if (embedding) {
+    // Indexable text unchanged: reuse the existing vector for the graph too (was a
+    // redundant re-embed of content[:512] before).
+    void graphWriteThrough(embedding);
+  } else {
+    // Embeddings unavailable: graph node only (3-arg legacy call — no embedding).
+    void graphWriteThrough();
   }
-
-  // Fire-and-forget graph write-through — MemGraph enhances search but is not critical path
-  upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId)
-    .catch(err => log.debug({ err }, "Graph write-through failed"));
 
   // Best-effort auto-compaction: every COMPACT_CHECK_INTERVAL writes, compact
   // if the store has grown past COMPACT_MIN_RECORDS.
@@ -591,21 +602,25 @@ function storeDurableMemoryRecord(
   return result;
 }
 
-async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text: string): Promise<void> {
+async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text: string): Promise<Float32Array | null> {
   try {
     const vec = await computeQueryEmbedding(text);
-    if (!vec) return;
-    if (!existsSync(filePath)) return;
-    const parsed = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"));
-    if (!parsed) return;
-    // Only write back if the indexable text still matches what we embedded.
-    const currentIndex = `${parsed.subject ?? ""}\n${parsed.content}`;
-    if (currentIndex !== text) return;
-    const updated: StoredWorkspaceMemoryRecord = { ...parsed, embedding: Array.from(vec) };
-    writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
-    _bumpCacheVersion(cacheKey);
+    if (!vec) return null;
+    // Write the vector back to the flat file (future reads pick it up), but only when
+    // the indexable text still matches what we embedded. Either way return the SAME
+    // vector so the graph write-through can reuse it instead of embedding again (A4).
+    if (existsSync(filePath)) {
+      const parsed = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"));
+      if (parsed && `${parsed.subject ?? ""}\n${parsed.content}` === text) {
+        const updated: StoredWorkspaceMemoryRecord = { ...parsed, embedding: Array.from(vec) };
+        writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
+        _bumpCacheVersion(cacheKey);
+      }
+    }
+    return vec;
   } catch (err) {
     log.debug({ err }, "Embedding refresh failed — non-critical");
+    return null;
   }
 }
 
