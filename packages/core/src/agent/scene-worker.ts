@@ -175,6 +175,10 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
       ? await runWorkflowJob(job, session, controller, counters)
       : await runSingleSceneJob(job, session, controller, counters);
 
+    // Drain the coalesced progress tail BEFORE the terminal-state write so the final
+    // stage set by completeJob/markJobCancelled is not clobbered by a late flush.
+    await flushProgressBatcher(job.id);
+
     const current = await getJob(job.id);
     if (current?.status === "cancelling" || (controller.signal.aborted && !timedOut)) {
       await markJobCancelled(job.id, "Scene job cancelled by operator");
@@ -205,6 +209,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
       severity: output.blocked ? "warn" : "info",
     });
   } catch (err) {
+    await flushProgressBatcher(job.id); // drain before the terminal failJob/markJobCancelled write
     const current = await getJob(job.id);
     if (timedOut) {
       const error = `Scene timed out after ${Math.round(turnTimeoutMs / 60000)} minutes`;
@@ -301,6 +306,9 @@ async function runWorkflowJob(
 
     outputs.push(output);
 
+    // Drain this step's coalesced tool-progress before the step-boundary write so the
+    // direct "step completed" update is not reordered behind a trailing batched flush.
+    await flushProgressBatcher(job.id);
     await safeProgressUpdate(job.id, {
       stage: output.blocked ? "failed" : "step",
       message: output.blocked
@@ -344,7 +352,7 @@ function buildTurnStreamingHooks(
   return {
     onToolCall: (_toolCallId: string, name: string) => {
       counters.toolCallsRequested += 1;
-      void safeProgressUpdate(job.id, {
+      queueProgress(job.id, {
         stage: "tool",
         message: `Running tool ${name}`,
         currentTool: name,
@@ -362,7 +370,7 @@ function buildTurnStreamingHooks(
     },
     onToolResult: (_toolCallId: string, name: string) => {
       counters.toolCallsCompleted += 1;
-      void safeProgressUpdate(job.id, {
+      queueProgress(job.id, {
         stage: "tool",
         message: `Completed tool ${name}`,
         currentTool: name,
@@ -379,7 +387,7 @@ function buildTurnStreamingHooks(
       });
     },
     onIntervention: (notice: InterventionNotice) => {
-      void safeProgressUpdate(job.id, {
+      queueProgress(job.id, {
         ...progressFromIntervention(notice, counters),
         totalSteps: stepMeta?.totalSteps,
         completedSteps: stepMeta?.completedSteps,
@@ -387,7 +395,7 @@ function buildTurnStreamingHooks(
       });
     },
     onSwarmState: (state: SwarmState) => {
-      void safeProgressUpdate(job.id, {
+      queueProgress(job.id, {
         ...progressFromSwarmState(state, counters),
         totalSteps: stepMeta?.totalSteps,
         completedSteps: stepMeta?.completedSteps,
@@ -554,6 +562,80 @@ async function safeProgressUpdate(jobId: string, patch: Partial<SceneJobProgress
   } catch (err) {
     log.warn({ err, jobId }, "Failed to update scene job progress");
   }
+}
+
+// B19: scene jobs emit a progress write on EVERY tool call AND result (onToolCall /
+// onToolResult fire per tool), so a multi-tool swarm turn produces O(toolCalls) DB
+// writes. Coalesce them per job: progress patches are cumulative snapshots (absolute
+// counters), so merging is a shallow last-wins merge. Write at most once per throttle
+// window with a LEADING-edge write (the first event in a burst is still immediate) and
+// a trailing flush for the coalesced remainder; flush once when the turn ends. Low-
+// frequency writes (job start, step boundaries) stay direct.
+function resolveProgressBatchMs(): number {
+  const raw = Number.parseInt(process.env["SAI_PROGRESS_BATCH_MS"] ?? "250", 10);
+  if (!Number.isFinite(raw) || raw < 0) return 250;
+  return Math.min(raw, 5_000);
+}
+
+class ProgressBatcher {
+  private pending: Partial<SceneJobProgress> | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private lastWriteAt = 0;
+  private closed = false;
+  // Serialize the actual DB writes: the leading-edge write is fire-and-forget, so
+  // without a chain a stale earlier snapshot (e.g. completed:0) could land AFTER a
+  // later one (completed:1) and clobber it. Chaining keeps writes strictly ordered.
+  private inFlight: Promise<void> = Promise.resolve();
+  constructor(private readonly jobId: string, private readonly throttleMs: number) {}
+
+  queue(patch: Partial<SceneJobProgress>): void {
+    if (this.closed) return;
+    this.pending = this.pending ? { ...this.pending, ...patch } : { ...patch };
+    if (this.throttleMs === 0) { void this.write(); return; }
+    const elapsed = Date.now() - this.lastWriteAt;
+    if (elapsed >= this.throttleMs) {
+      void this.write(); // leading edge — enough time since the last write
+    } else if (this.timer === undefined) {
+      this.timer = setTimeout(() => { this.timer = undefined; void this.write(); }, this.throttleMs - elapsed);
+      this.timer.unref?.();
+    }
+  }
+
+  private write(): Promise<void> {
+    if (this.timer !== undefined) { clearTimeout(this.timer); this.timer = undefined; }
+    const patch = this.pending;
+    this.pending = null;
+    if (!patch) return this.inFlight;
+    this.lastWriteAt = Date.now();
+    this.inFlight = this.inFlight.then(() => safeProgressUpdate(this.jobId, patch));
+    return this.inFlight;
+  }
+
+  /** Flush any pending progress and stop batching (call once the turn/step ends). */
+  async flush(): Promise<void> {
+    this.closed = true;
+    await this.write();
+  }
+}
+
+const _progressBatchers = new Map<string, ProgressBatcher>();
+
+/** Coalesced progress write for the high-frequency streaming hooks. */
+function queueProgress(jobId: string, patch: Partial<SceneJobProgress>): void {
+  let batcher = _progressBatchers.get(jobId);
+  if (!batcher) {
+    batcher = new ProgressBatcher(jobId, resolveProgressBatchMs());
+    _progressBatchers.set(jobId, batcher);
+  }
+  batcher.queue(patch);
+}
+
+/** Drain + retire a job's progress batcher (no-op if it never emitted). */
+async function flushProgressBatcher(jobId: string): Promise<void> {
+  const batcher = _progressBatchers.get(jobId);
+  if (!batcher) return;
+  _progressBatchers.delete(jobId);
+  await batcher.flush();
 }
 
 function computeRuntimePercent(toolCallsRequested: number, toolCallsCompleted: number): number {
