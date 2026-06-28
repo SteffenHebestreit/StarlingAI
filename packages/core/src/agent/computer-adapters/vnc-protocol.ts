@@ -165,6 +165,35 @@ export async function encodeRgbaToPngAsync(width: number, height: number, rgba: 
   return assemblePng(width, height, compressed);
 }
 
+/**
+ * Crop a rectangular region out of a full RGBA framebuffer (4 bytes/pixel). The rect is
+ * CLAMPED into [0, screen) so an out-of-bounds request can never read past the buffer;
+ * the returned width/height are the clamped size. Pure (no I/O) so it is unit-testable
+ * without a live VNC connection.
+ */
+export function cropRgbaRegion(
+  data: Buffer,
+  fbWidth: number,
+  fbHeight: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { data: Buffer; width: number; height: number } {
+  const sx = Math.max(0, Math.min(Math.floor(x), fbWidth - 1));
+  const sy = Math.max(0, Math.min(Math.floor(y), fbHeight - 1));
+  const rw = Math.max(1, Math.min(Math.floor(width), fbWidth - sx));
+  const rh = Math.max(1, Math.min(Math.floor(height), fbHeight - sy));
+  const srcRowBytes = fbWidth * 4;
+  const dstRowBytes = rw * 4;
+  const cropped = Buffer.alloc(dstRowBytes * rh);
+  for (let row = 0; row < rh; row++) {
+    const srcOffset = (sy + row) * srcRowBytes + sx * 4;
+    data.copy(cropped, row * dstRowBytes, srcOffset, srcOffset + dstRowBytes);
+  }
+  return { data: cropped, width: rw, height: rh };
+}
+
 // ── VNC DES Authentication ────────────────────────────────────────────────────
 
 /**
@@ -417,6 +446,19 @@ export class VncClient extends EventEmitter {
       width: fb.width,
       height: fb.height,
     };
+  }
+
+  /**
+   * Capture a sub-region of the screen as PNG. Refreshes the full framebuffer, then
+   * crops the raw RGBA rows to the requested rect (clamped into the screen bounds) so
+   * ONLY the region is encoded and sent on — a much smaller model payload and less data
+   * exposure than a full frame. Returns the actual (clamped) region size.
+   */
+  async captureRegion(x: number, y: number, width: number, height: number): Promise<{ dataUrl: string; width: number; height: number }> {
+    const fb = await this.captureFramebuffer();
+    const region = cropRgbaRegion(fb.data, fb.width, fb.height, x, y, width, height);
+    const png = await encodeRgbaToPngAsync(region.width, region.height, region.data);
+    return { dataUrl: `data:image/png;base64,${png.toString("base64")}`, width: region.width, height: region.height };
   }
 
   /** Send a pointer (mouse) event. */

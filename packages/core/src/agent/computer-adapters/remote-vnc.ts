@@ -118,6 +118,9 @@ export class VncComputerAdapter implements ComputerAdapter {
 
     try {
       let output: string;
+      // For capture_region the region image IS the post-action screenshot — stash it
+      // here so the auto-screenshot block below sends the crop instead of a full frame.
+      let regionShot: { dataUrl: string; width: number; height: number } | undefined;
       switch (action.type) {
         case "click":
           output = await this.handleClick(action);
@@ -152,7 +155,8 @@ export class VncComputerAdapter implements ComputerAdapter {
           output = `Waited ${action.timeoutMs ?? 3000}ms.`;
           break;
         case "capture_region":
-          output = "Region capture via VNC — use computer_snapshot for full screen.";
+          regionShot = await this.client.captureRegion(action.x, action.y, action.width, action.height);
+          output = `Captured region ${regionShot.width}x${regionShot.height} at (${action.x},${action.y}).`;
           break;
         case "upload_file":
         case "download_file":
@@ -168,7 +172,7 @@ export class VncComputerAdapter implements ComputerAdapter {
       let screenshotWidth: number | undefined;
       let screenshotHeight: number | undefined;
       try {
-        const ss = await this.client.captureScreenshot();
+        const ss = regionShot ?? await this.client.captureScreenshot();
         screenshotAfter = ss.dataUrl;
         screenshotWidth = ss.width;
         screenshotHeight = ss.height;
