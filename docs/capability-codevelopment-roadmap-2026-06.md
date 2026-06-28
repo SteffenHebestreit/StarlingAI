@@ -55,10 +55,10 @@ to the cartographer — **reproducible from committed shards, surviving a fresh 
 |---|---|---|---|---|---|
 | **P0** | Unblock connector (reframe) + reach the gap-loop | M | med | — | ✅ shipped `faac2d4` |
 | **P1** | Client-render verification + non-lossy scene store | M | low | — (∥ P0) | ✅ shipped `a2d651f` |
-| **P2** | Swarm-callable durable shard authoring + in-process config build | L | high | P0 | planned |
-| **P3** | First-class resumable Project entity | XL | high | P2 | planned |
-| **P4** | Staged approval UX + blocking `ask_user` gates | L | med | P3 | planned |
-| **P5** | `capture_capability` transaction (build → reusable machinery) | L | med | P2,P3,P4 | planned |
+| **P2** | Swarm-callable durable shard authoring + live apply | L | high | P0 | ✅ shipped `c342eee` |
+| **P3** | Resumable multi-stage spine | XL→M | high | P2 | ✅ shipped `f5fed13` (via existing job+checkpoint, no new store); typed handoff + dedicated Project store = enhancement |
+| **P4** | Staged approval + blocking `ask_user` | L | med | P3 | ◐ backend shipped (P0 `ask_user`/approval); plan-card Vue UI = enhancement |
+| **P5** | `capture_capability` + `co_develop_capability` | L | med | P2,P3 | ✅ shipped `f5fed13` |
 
 ### P0 — Unblock + reach ✅ shipped (`faac2d4`)
 - Grant `request_new_capability` + `list_capability_gaps` + `ask_user` to the orchestrator (all Tier 0/1, no-op-safe). The gap self-report path was unreachable; `ask_user` was plumbed-but-ungranted.
@@ -71,7 +71,10 @@ to the cartographer — **reproducible from committed shards, surviving a fresh 
 - Non-lossy store-backed scenes: `saveScene` now round-trips allowedAgents/params/triggers/expectArtifact as one JSON meta blob (back-compatible); dashboard POST passes them through.
 - Files: `tools/serve-app.ts`, `credentials/scenes.ts`, `gateway/index.ts`, `workspace/agents/10-core-agents.jsonc`.
 
-### P2 — Swarm-callable durable shard authoring + in-process config build (planned)
+### P2 — Swarm-callable durable shard authoring + live apply ✅ shipped (`c342eee`)
+Built `swarm_define_agent` / `swarm_save_scene` / `swarm_save_job` (maintainer-only, approval-gated): validate → write durable `workspace/{agents,scenes,jobs}/50-authored-<name>.jsonc` shard → `validateWorkspaceConfig` cross-ref gate (revert on error) → apply live via `updateConfig` runtime overlay (trips the watcher → agent-index rebuild). Feasibility audit found the deployed gateway runs file-mode (`:ro` compiled config), so the overlay is the only in-container live path; reuses the exported validator + element schemas (no `config-layout.mjs` reimpl). Below is the original plan.
+
+#### Original P2 plan
 The single biggest Stage-C unblocker. New `swarm_define_agent` / `swarm_save_scene` / `swarm_save_job`
 tools that write **full-schema** JSONC into `workspace/{agents,scenes,jobs}/` shards, zod-validated +
 `swarm_validate`-gated + one human approval, granted only to a `swarm_maintainer` (`workspaceAccess:full`).
@@ -80,7 +83,17 @@ Plus an **in-process `configBuild()`+reload** so the gateway rebuilds `starlinga
 - Files: `tools/self-improve-tools.ts`, `config/loader.ts`, `scripts/config-layout.mjs`, `config/validate-workspace.ts`, `guardrails/tool-tiers.ts`, `agent/default-tools.ts`.
 - Validation: `swarm_save_scene` writes a full shard → `swarm_validate` passes → in-process build+reload makes `run_workflow` find it in the SAME process and it survives a fresh checkout. Security: scoped agents can't write outside `generated/`; credential-like keys rejected.
 
-### P3 — First-class resumable Project entity (planned)
+### P3 — Resumable multi-stage spine ✅ shipped the on-principle way (`f5fed13`)
+**Key decision:** the existing multi-step **job worker + B31 checkpoint/resume IS the resumable
+multi-stage store.** The `co_develop_capability` job's stages are checkpointed job steps, so a crash
+or a next-session resume picks up at the next stage — the "resumable project" with **no new Postgres
+table** (exactly the critic's "extend SceneJob, don't build a parallel store", taken to its
+conclusion). **Enhancements deferred** (not blockers — the flow works without them): the typed
+inter-stage handoff (stages currently hand off via the shared session/shared-facts), a dedicated
+`/api/projects` surface, and lifting the TurnPlan normalizer into per-stage plans. The original
+heavier plan below is retained for reference.
+
+#### Original P3 plan (heavier — deferred)
 The cross-stage spine. A `Project` record in Postgres (like SceneJob) with `stages[]`
 (pending→approved→built→reviewed→persisted), per-stage acceptance criteria, links to produced
 artifacts. **Extend** the SceneJob store + B31 checkpoint/resume — do NOT build a parallel store.
@@ -95,7 +108,14 @@ card in the web UI (replace the raw `JSON.stringify` dump in `Chat.vue`), per-st
 reusing the existing `approvalCallback`, and wire Project stage boundaries to pause/resume on approval.
 - Files: `agent/runtime.ts`, `packages/web/src/pages/Chat.vue`, `OperatorRequestsDock.vue`, `tools/turn-plan-tool.ts`, `config/schema.ts`.
 
-### P5 — Capture-as-machinery handoff (planned)
+### P5 — Capture-as-machinery + the guided job ✅ shipped (`f5fed13`)
+Shipped as workspace shards (on-principle: use-case machinery lives in workspace, not core): the
+`capture_capability` scene (swarm_maintainer turns what was built+verified into durable machinery via
+the P2 tools — bundle composition decided from what exists, not a fixed quadruple) and the
+`co_develop_capability` job (build+verify backend → build+verify frontend → capture). `config build`
+merges cleanly; all cross-refs resolve. Below is the original plan.
+
+#### Original P5 plan
 A `capture_capability` transaction that, given a completed Project, drafts a **capability bundle** and
 persists all parts atomically via the P2 authoring tools + `writeSkill`. A general `co_develop_capability`
 job sequences clarify+plan+approve → build+review backend → build+review frontend → capture. A persist-stage
