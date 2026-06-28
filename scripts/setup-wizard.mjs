@@ -78,9 +78,35 @@ function mintToken(secret, { userId = "admin", role = "admin", ttlSeconds = 30 *
   return `${header}.${payload}.${sig}`;
 }
 
+// ── model-endpoint probe — validate the chosen model actually answers BEFORE
+// declaring setup done, and list the loaded ids so the user picks a real one
+// (no guessing). Best-effort: a failure never throws into setup.
+async function probeOpenAi(baseUrl, apiKey) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return { reachable: true, models: [], status: res.status };
+    const body = await res.json().catch(() => ({}));
+    const models = Array.isArray(body?.data) ? body.data.map((m) => m?.id).filter(Boolean) : [];
+    return { reachable: true, models };
+  } catch {
+    return { reachable: false, models: [] };
+  }
+}
+
 async function main() {
   log(`\n${BOLD}🐦 StarlingAI — guided setup${RESET}\n`);
-  if (NON_INTERACTIVE) info("Running non-interactively (--defaults).");
+  if (NON_INTERACTIVE) {
+    if (process.argv.includes("--defaults")) info("Running non-interactively (--defaults).");
+    // A double-clicked launcher that didn't allocate a TTY silently lands here —
+    // make that loud so the user knows defaults (not their input) are being used.
+    else warn("No interactive terminal detected — using DEFAULTS (local model at host.docker.internal:1234). Re-run `pnpm sai setup` in a real terminal to choose a backend.");
+  }
 
   const env = readEnv();
   const rl = NON_INTERACTIVE ? null : createInterface({ input, output });
@@ -125,19 +151,26 @@ async function main() {
     for (const k of ["SAI_MODEL_BACKEND", "SAI_OLLAMA_MODEL"]) delete env[k];
 
     if (backendChoice === 1) {
-      // Anthropic
-      const key = NON_INTERACTIVE ? (process.env.SAI_SETUP_API_KEY ?? "") : await ask("Anthropic API key (sk-ant-…)");
+      // Anthropic (Claude) — best for constrained hardware: zero local VRAM.
+      let key = NON_INTERACTIVE ? (process.env.SAI_SETUP_API_KEY ?? "") : await ask("Anthropic API key (sk-ant-…)");
+      // Refuse to finish this backend with no key — re-prompt once, else fall back.
+      if (!NON_INTERACTIVE && !key) {
+        warn("This backend needs an Anthropic key (or connect Claude later via the dashboard's Local↔Claude switch).");
+        key = (await ask("Paste your Anthropic API key, or leave blank to skip")).trim();
+      }
       const model = NON_INTERACTIVE ? (process.env.SAI_SETUP_MODEL ?? "claude-sonnet-4-6")
         : await ask("Default Claude model id", "claude-sonnet-4-6");
-      if (key) env.ANTHROPIC_API_KEY = key; else warn("No key entered — set ANTHROPIC_API_KEY in .env before starting.");
+      if (key) { env.ANTHROPIC_API_KEY = key; ok("Anthropic key saved."); }
+      else warn("No key entered — set ANTHROPIC_API_KEY in .env (or use the dashboard switch) before delegating.");
       env.SAI_DEFAULT_MODEL = `anthropic/${model}`;
       env.SAI_MODEL_BACKEND = "anthropic";
       ok(`Model backend: Anthropic (${env.SAI_DEFAULT_MODEL})`);
     } else if (backendChoice === 2) {
       // Local Ollama (overlay-managed). Provider stays "lmstudio" pointing at
       // Ollama's OpenAI-compatible endpoint; the served id is the pulled tag.
+      // A small Qwen at Q4 runs on modest hardware (Ollama pulls Q4 by default).
       const tag = NON_INTERACTIVE ? (process.env.SAI_SETUP_MODEL ?? "qwen2.5:7b")
-        : await ask("Ollama model tag to pull", "qwen2.5:7b");
+        : await ask("Ollama model tag to pull (smaller = lighter on RAM/VRAM; Q4 by default)", "qwen2.5:7b");
       env.SAI_MODEL_BACKEND = "ollama";
       env.SAI_OLLAMA_MODEL = tag;
       env.SAI_LMSTUDIO_URL = "http://ollama:11434/v1";
@@ -145,14 +178,32 @@ async function main() {
       env.SAI_DEFAULT_MODEL = `lmstudio/${tag}`;
       ok(`Model backend: local Ollama (${tag}) — the launcher adds docker-compose.ollama.yml`);
     } else {
-      // OpenAI-compatible (default). host.docker.internal reaches a server on
-      // the host from inside the gateway container.
+      // OpenAI-compatible (LM Studio / vLLM / llama.cpp / OpenAI).
+      // host.docker.internal reaches a server on the host from the gateway container.
       const url = NON_INTERACTIVE ? (process.env.SAI_SETUP_URL ?? "http://host.docker.internal:1234/v1")
         : await ask("OpenAI-compatible base URL", "http://host.docker.internal:1234/v1");
       const key = NON_INTERACTIVE ? (process.env.SAI_SETUP_API_KEY ?? "lm-studio")
         : await ask("API key (any value if your server ignores it)", "lm-studio");
-      const model = NON_INTERACTIVE ? (process.env.SAI_SETUP_MODEL ?? "qwen/qwen3.6-35b-a3b")
-        : await ask("Default model id served by that endpoint", "qwen/qwen3.6-35b-a3b");
+
+      // Probe the endpoint and offer the LOADED models so the user picks a real
+      // id — your Qwen3 (3.5 / 3.6) models show up here automatically. Q4 quant
+      // is recommended for a good size/VRAM balance.
+      let model = NON_INTERACTIVE ? (process.env.SAI_SETUP_MODEL ?? "qwen/qwen3.6-35b-a3b") : "";
+      if (!NON_INTERACTIVE) {
+        info(`Checking ${url} …`);
+        const probe = await probeOpenAi(url, key);
+        if (probe.reachable && probe.models.length) {
+          ok(`Reachable — ${probe.models.length} model(s) loaded.`);
+          const idx = await choose("Which loaded model should the swarm use?", [...probe.models, "Type a different id…"], 0);
+          model = idx < probe.models.length ? probe.models[idx] : (await ask("Model id", probe.models[0])).trim();
+        } else if (probe.reachable) {
+          warn("Reachable, but no model is loaded — load a Qwen3 model (3.5 or 3.6, Q4 quant) in your server.");
+          model = await ask("Default model id to use once loaded", "qwen/qwen3.6-35b-a3b");
+        } else {
+          warn(`Not reachable at ${url} yet — start your model server and load a Qwen3 model (3.5/3.6, Q4). The stack connects once it's up.`);
+          model = await ask("Default model id to use", "qwen/qwen3.6-35b-a3b");
+        }
+      }
       env.SAI_LMSTUDIO_URL = url;
       env.SAI_LMSTUDIO_API_KEY = key || "lm-studio";
       env.SAI_DEFAULT_MODEL = `lmstudio/${model}`;
