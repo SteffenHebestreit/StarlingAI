@@ -178,6 +178,23 @@ describe("cost aggregator — pricing", () => {
     expect(summary.totalCost).toBeCloseTo(18, 5);
   });
 
+  it("prices Claude Opus 4.x at the Opus rate, not the Sonnet rate (regression)", async () => {
+    const cost = await import("../observability/cost.js");
+    cost.startCostAggregator();
+    // 1M prompt + 1M completion at claude-opus-4-8 default ($5 / $25) = $30
+    cost._injectEventForTests(makeSubAgentEvent({ promptTokens: 1_000_000, completionTokens: 1_000_000, model: "claude-opus-4-8" }));
+    const summary = cost.getCostSummary(30);
+    expect(summary.totalCost).toBeCloseTo(30, 5);
+  });
+
+  it("prices a locally-served model at $0", async () => {
+    const cost = await import("../observability/cost.js");
+    cost.startCostAggregator();
+    cost._injectEventForTests(makeSubAgentEvent({ promptTokens: 1_000_000, completionTokens: 1_000_000, model: "qwen/qwen3.6-35b-a3b" }));
+    const summary = cost.getCostSummary(30);
+    expect(summary.totalCost).toBeCloseTo(0, 5);
+  });
+
   it("custom rate card overrides default rates entirely (first match wins)", async () => {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
     tempDir = writeCostConfig({

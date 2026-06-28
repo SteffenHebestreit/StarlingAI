@@ -33,7 +33,14 @@ const DEFAULT_HOUR_BUCKET_CAP = 168; // 1 week of hours
 // totals are still tracked (sometimes operators just want the volume view).
 
 const DEFAULT_RATE_CARD: { matches: string; promptPer1m: number; completionPer1m: number; label?: string }[] = [
-  { matches: "^claude-(opus|sonnet|haiku)-?4", promptPer1m: 3, completionPer1m: 15, label: "Claude 4 family" },
+  // Claude 4.x family — verified Anthropic rates (2026). Opus / Sonnet / Haiku differ;
+  // the previous single `^claude-(opus|sonnet|haiku)-?4` row billed Opus AND Haiku at
+  // the Sonnet $3/$15 rate (Opus ~40% undercount, and budget alerts fired off it).
+  // First match wins, so the bare 4.x ids resolve here before the Claude-3 rows.
+  { matches: "^claude-opus-4", promptPer1m: 5, completionPer1m: 25, label: "Claude Opus 4.x" },
+  { matches: "^claude-sonnet-4", promptPer1m: 3, completionPer1m: 15, label: "Claude Sonnet 4.x" },
+  { matches: "^claude-haiku-4", promptPer1m: 1, completionPer1m: 5, label: "Claude Haiku 4.x" },
+  // Claude Fable 5: public rate not wired here yet — add a row when known (no match = $0).
   { matches: "^claude-3-5-sonnet", promptPer1m: 3, completionPer1m: 15 },
   { matches: "^claude-3-5-haiku", promptPer1m: 1, completionPer1m: 5 },
   { matches: "^claude-3-(opus|sonnet)", promptPer1m: 15, completionPer1m: 75 },
@@ -44,6 +51,10 @@ const DEFAULT_RATE_CARD: { matches: string; promptPer1m: number; completionPer1m
   { matches: "^gpt-3.5", promptPer1m: 0.5, completionPer1m: 1.5 },
   { matches: "^o1-preview", promptPer1m: 15, completionPer1m: 60 },
   { matches: "^o1-mini", promptPer1m: 3, completionPer1m: 12 },
+  // Locally-served models cost $0 — label them so the dashboard distinguishes a free
+  // LOCAL model from an unpriced/unknown cloud one (which also shows $0 via no-match).
+  // Last so the anchored cloud rows above always win for cloud ids.
+  { matches: "(qwen|glm|deepseek|gpt-oss|gemma|llama|mistral|mixtral|phi|command-r)", promptPer1m: 0, completionPer1m: 0, label: "Local model" },
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────
