@@ -8,7 +8,7 @@
 #
 # The launchers add this file automatically when .env has
 # SAI_MODEL_BACKEND=ollama. The gateway is already pointed at
-# http://ollama:11434/v1 (the wizard sets SAI_LMSTUDIO_URL), and the served
+# http://ollama:11434/v1 (the wizard sets SAI_PRIMARY_MODEL_URL), and the served
 # model id is the pulled tag (SAI_OLLAMA_MODEL, e.g. qwen2.5:7b).
 services:
   ollama:

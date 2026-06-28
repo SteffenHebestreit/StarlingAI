@@ -1,9 +1,12 @@
 {
   "providers": {
+    // The PRIMARY model provider slot — an OpenAI-compatible adapter. Despite the
+    // "lmstudio" key (kept for back-compat with lmstudio/<model> ids), the endpoint can be
+    // LM Studio, Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, or any OpenAI-compatible server.
     "lmstudio": {
-      // Fallback when SAI_LMSTUDIO_URL is unset. host.docker.internal reaches a
-      // model server (LM Studio / Ollama / llama.cpp / vLLM) on the Docker host.
-      // The gateway overlays SAI_LMSTUDIO_URL over this when set (config/loader.ts).
+      // Fallback when no override is set. host.docker.internal reaches a model server on the
+      // Docker HOST; for a remote/homelab box set SAI_PRIMARY_MODEL_URL in .env. The gateway
+      // overlays SAI_PRIMARY_MODEL_URL (or the legacy SAI_LMSTUDIO_URL alias) here — config/loader.ts.
       "baseUrl": "http://host.docker.internal:1234/v1",
       "apiKey": "lm-studio",
       "timeoutMs": 30000,

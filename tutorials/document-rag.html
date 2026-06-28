@@ -93,7 +93,7 @@
         <div class="section-title">Services it runs</div>
         <p>Document RAG adds three containers, started by the normal <code>sai start</code> / <code>docker compose up</code>:</p>
         <ul>
-          <li><code>engram</code> — the graph-RAG API (port 8088). Its embeddings and extraction LLM point at the same LM Studio endpoint as the gateway (<code>SAI_LMSTUDIO_URL</code>), using the loaded <code>text-embedding-bge-m3</code> and chat models.</li>
+          <li><code>engram</code> — the graph-RAG API (port 8088). Its embeddings and extraction LLM point at the same LM Studio endpoint as the gateway (<code>SAI_PRIMARY_MODEL_URL</code>), using the loaded <code>text-embedding-bge-m3</code> and chat models.</li>
           <li><code>engram-neo4j</code> — engram's graph store (Neo4j 5.26 + the Graph Data Science plugin for graph-proximity scoring).</li>
           <li><code>reranker</code> — a CPU HuggingFace TEI sidecar serving <code>bge-reranker-v2-m3</code>. It powers both engram's rerank stage and the gateway's own retrieval reranker. The model (~2&nbsp;GB) downloads on first start.</li>
         </ul>
@@ -161,7 +161,7 @@
         <ul>
           <li><strong>Reranker first-start lag.</strong> The TEI sidecar downloads <code>bge-reranker-v2-m3</code> on first run. Until it is ready, engram still works — it falls back to its fused score for ranking.</li>
           <li><strong>LM Studio JSON mode.</strong> engram's metadata extraction uses the LLM; LM Studio rejects <code>response_format=json_object</code>, so <code>ENGRAM_LLM_JSON_MODE</code> defaults to <code>false</code> (engram parses JSON out of the plain reply).</li>
-          <li><strong>Point engram at the right LM Studio.</strong> engram's embedding/LLM endpoints default to the gateway's <code>SAI_LMSTUDIO_URL</code> — the instance with the models loaded — not <code>host.docker.internal</code>.</li>
+          <li><strong>Point engram at the right LM Studio.</strong> engram's embedding/LLM endpoints default to the gateway's <code>SAI_PRIMARY_MODEL_URL</code> — the instance with the models loaded — not <code>host.docker.internal</code>.</li>
           <li><strong>Lightweight alternative.</strong> For one-off large pasted text (not a file), the <code>rag_ingest</code>/<code>rag_search</code> tools offer a simpler pgvector-backed store without the engram graph pipeline.</li>
         </ul>
       </div>

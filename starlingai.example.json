@@ -4,7 +4,8 @@
   "providers": {
     "lmstudio": {
       // host.docker.internal reaches a model server on the Docker host; override
-      // via SAI_LMSTUDIO_URL in .env to point at another machine.
+      // via SAI_PRIMARY_MODEL_URL in .env to point at another machine (the legacy
+      // SAI_LMSTUDIO_URL still works as an alias).
       "baseUrl": "http://host.docker.internal:1234/v1",
       "apiKey": "lm-studio",
       "timeoutMs": 30000,

@@ -15,8 +15,11 @@ function nativeBaseUrl(baseUrl) {
   return baseUrl.replace(/\/v1\/?$/, "").replace(/\/$/, "");
 }
 
-const lmstudioUrl = process.env.SAI_LMSTUDIO_URL || readGatewayEnv("SAI_LMSTUDIO_URL") || "http://localhost:1234/v1";
-const apiKey = process.env.SAI_LMSTUDIO_API_KEY || readGatewayEnv("SAI_LMSTUDIO_API_KEY");
+// Prefer the provider-neutral primary-model vars; fall back to the legacy SAI_LMSTUDIO_* aliases.
+const lmstudioUrl = process.env.SAI_PRIMARY_MODEL_URL || process.env.SAI_LMSTUDIO_URL
+  || readGatewayEnv("SAI_PRIMARY_MODEL_URL") || readGatewayEnv("SAI_LMSTUDIO_URL") || "http://localhost:1234/v1";
+const apiKey = process.env.SAI_PRIMARY_MODEL_KEY || process.env.SAI_LMSTUDIO_API_KEY
+  || readGatewayEnv("SAI_PRIMARY_MODEL_KEY") || readGatewayEnv("SAI_LMSTUDIO_API_KEY");
 const url = `${nativeBaseUrl(lmstudioUrl)}/api/v0/models`;
 
 const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined;

@@ -177,7 +177,7 @@ pnpm sai start --computer-desktop  # include VNC desktop for computer-use
 pnpm sai start --all               # all remaining optional services
 ```
 
-**Document RAG services.** Document RAG adds three containers — `engram` (graph-RAG API), `engram-neo4j` (graph store with the GDS plugin), and `reranker` (a CPU HuggingFace TEI sidecar serving `bge-reranker-v2-m3`). They come up with the normal `sai start` / `docker compose up`. The reranker downloads its model (~2 GB) on first start, and `engram` points its embeddings + extraction LLM at the same LM Studio endpoint as the gateway (`SAI_LMSTUDIO_URL`). See [`.env.example`](.env.example) for the `ENGRAM_*` / `RERANKER_MODEL` overrides. The gateway degrades gracefully if these are absent.
+**Document RAG services.** Document RAG adds three containers — `engram` (graph-RAG API), `engram-neo4j` (graph store with the GDS plugin), and `reranker` (a CPU HuggingFace TEI sidecar serving `bge-reranker-v2-m3`). They come up with the normal `sai start` / `docker compose up`. The reranker downloads its model (~2 GB) on first start, and `engram` points its embeddings + extraction LLM at the same primary model endpoint as the gateway (`SAI_PRIMARY_MODEL_URL`). See [`.env.example`](.env.example) for the `ENGRAM_*` / `RERANKER_MODEL` overrides. The gateway degrades gracefully if these are absent.
 
 ### Other CLI commands
 
@@ -244,7 +244,7 @@ A single per-session **effort** dial bundles the latency / budget / size / depth
 
 The tier is **per session** (persisted) and seeded by a configurable global default (`effort.default`, Settings → Agents → Orchestration Tuning, or the chat composer). Set it per message with the `--effort low|medium|high|max` override flag, alongside `--auto`, `--iter N`, `--agent NAME`, and `--timeout N`. Per-tier profiles are tunable in config (`effort.profiles.<tier>`; built-ins in `runtime/effort-context.ts`). Effort never touches the content-safety/security guardrails — only the orchestration quality/latency behavior.
 
-Model wiring is environment-driven (the setup wizard writes these to `.env`): `SAI_DEFAULT_MODEL` pins the default agent model, `SAI_LMSTUDIO_URL` / `ANTHROPIC_API_KEY` select the provider, and `SAI_MODEL_BACKEND=ollama` (with `SAI_OLLAMA_MODEL`) enables the bundled `docker-compose.ollama.yml` local-model overlay.
+Model wiring is environment-driven (the setup wizard writes these to `.env`): `SAI_PRIMARY_MODEL` pins the default agent model, `SAI_PRIMARY_MODEL_URL` / `SAI_PRIMARY_MODEL_KEY` point at your primary provider (any OpenAI-compatible server — LM Studio, Ollama, vLLM, llama.cpp, LocalAI, OpenRouter — or a remote box) or `ANTHROPIC_API_KEY` for Claude, and `SAI_MODEL_BACKEND=ollama` (with `SAI_OLLAMA_MODEL`) enables the bundled `docker-compose.ollama.yml` local-model overlay. The legacy `SAI_DEFAULT_MODEL` / `SAI_LMSTUDIO_URL` / `SAI_LMSTUDIO_API_KEY` names still work as aliases.
 
 ---
 

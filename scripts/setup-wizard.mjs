@@ -162,9 +162,9 @@ async function main() {
         : await ask("Default Claude model id", "claude-sonnet-4-6");
       if (key) { env.ANTHROPIC_API_KEY = key; ok("Anthropic key saved."); }
       else warn("No key entered — set ANTHROPIC_API_KEY in .env (or use the dashboard switch) before delegating.");
-      env.SAI_DEFAULT_MODEL = `anthropic/${model}`;
+      env.SAI_PRIMARY_MODEL = `anthropic/${model}`;
       env.SAI_MODEL_BACKEND = "anthropic";
-      ok(`Model backend: Anthropic (${env.SAI_DEFAULT_MODEL})`);
+      ok(`Model backend: Anthropic (${env.SAI_PRIMARY_MODEL})`);
     } else if (backendChoice === 2) {
       // Local Ollama (overlay-managed). Provider stays "lmstudio" pointing at
       // Ollama's OpenAI-compatible endpoint; the served id is the pulled tag.
@@ -173,9 +173,9 @@ async function main() {
         : await ask("Ollama model tag to pull (smaller = lighter on RAM/VRAM; Q4 by default)", "qwen2.5:7b");
       env.SAI_MODEL_BACKEND = "ollama";
       env.SAI_OLLAMA_MODEL = tag;
-      env.SAI_LMSTUDIO_URL = "http://ollama:11434/v1";
-      env.SAI_LMSTUDIO_API_KEY = "ollama";
-      env.SAI_DEFAULT_MODEL = `lmstudio/${tag}`;
+      env.SAI_PRIMARY_MODEL_URL = "http://ollama:11434/v1";
+      env.SAI_PRIMARY_MODEL_KEY = "ollama";
+      env.SAI_PRIMARY_MODEL = `lmstudio/${tag}`;
       ok(`Model backend: local Ollama (${tag}) — the launcher adds docker-compose.ollama.yml`);
     } else {
       // OpenAI-compatible (LM Studio / vLLM / llama.cpp / OpenAI).
@@ -204,11 +204,11 @@ async function main() {
           model = await ask("Default model id to use", "qwen/qwen3.6-35b-a3b");
         }
       }
-      env.SAI_LMSTUDIO_URL = url;
-      env.SAI_LMSTUDIO_API_KEY = key || "lm-studio";
-      env.SAI_DEFAULT_MODEL = `lmstudio/${model}`;
+      env.SAI_PRIMARY_MODEL_URL = url;
+      env.SAI_PRIMARY_MODEL_KEY = key || "lm-studio";
+      env.SAI_PRIMARY_MODEL = `lmstudio/${model}`;
       env.SAI_MODEL_BACKEND = "openai-compatible";
-      ok(`Model backend: ${url} (${env.SAI_DEFAULT_MODEL})`);
+      ok(`Model backend: ${url} (${env.SAI_PRIMARY_MODEL})`);
     }
 
     // ── 3. optional chat channel ─────────────────────────────────────────────
