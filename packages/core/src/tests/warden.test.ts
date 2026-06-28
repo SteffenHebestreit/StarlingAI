@@ -26,6 +26,7 @@ import {
   clearSessionDegraded,
   startWarden,
   stopWarden,
+  registerSessionAbortController,
   TOOL_STORM_THRESHOLD,
   TOOL_STORM_PREDICT_THRESHOLD,
 } from "../agent/warden.js";
@@ -64,8 +65,24 @@ describe("Warden — tool storm detection", () => {
     expect(vi.mocked(logAudit)).toHaveBeenCalledWith(
       "warden_alert",
       expect.objectContaining({ alertType: "tool_storm" }),
-      expect.objectContaining({ severity: "warn" }),
+      expect.objectContaining({ severity: "error" }),
     );
+  });
+
+  it("aborts the active session turn on a hard tool_storm (kill switch arms at error severity)", () => {
+    // Session ids must match extractSessionIdFromSubject (sub:* or UUID-like).
+    const target = new AbortController();
+    const bystander = new AbortController();
+    registerSessionAbortController("sub:runaway", target);
+    registerSessionAbortController("sub:other", bystander);
+
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: "sub:runaway", data: {} });
+    }
+    sweepAnomaliesNow();
+
+    expect(target.signal.aborted).toBe(true);   // the runaway session is aborted
+    expect(bystander.signal.aborted).toBe(false); // an unrelated session is not
   });
 
   it("ignores done-phase sub-agent tool events for tool storm counting", () => {

@@ -4,7 +4,7 @@
  * Subscribes to the live audit stream to track rolling-window counters for
  * four classes of suspicious behaviour:
  *
- *   tool_storm              — a session accumulates >15 tool calls within 5 minutes
+ *   tool_storm              — a session accumulates ≥80 tool calls within 5 minutes (aborts the runaway turn)
  *   repeated_failures       — an agent fails ≥3 times within 2 minutes
  *   tool_escape_attempt     — a sub-agent has ≥3 blocked tool calls in one session
  *   rate_limit_flood        — a channel sender is rate-limited ≥5 times within 1 minute
@@ -621,10 +621,16 @@ function sweepAnomalies(): WardenAlert[] {
     if (recent.length >= TOOL_STORM_THRESHOLD) {
       const alert = makeAlert(
         "tool_storm",
-        "warn",
+        // A hard storm (TOOL_STORM_THRESHOLD = 80 calls / 5 min) is a genuine
+        // runaway — already past the predictive imminent warning + the
+        // degradation ladder — so emit at ERROR severity to ARM the
+        // maybeAbortSession kill switch that already allowlists tool_storm. It was
+        // previously warn-only, so the single most severe runaway signal could
+        // never actually abort despite being in the allowlist.
+        "error",
         sessionId,
-        `Session accumulated ${recent.length} tool calls in the last 5 minutes`,
-        "logged",
+        `Session accumulated ${recent.length} tool calls in the last 5 minutes — aborting the runaway turn`,
+        "session_emergency_stopped",
       );
       emitAlert(alert);
       alerts.push(alert);
