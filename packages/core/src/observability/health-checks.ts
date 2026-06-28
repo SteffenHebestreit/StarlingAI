@@ -17,6 +17,7 @@ import { isEmbeddingAvailable, computeQueryEmbedding } from "../providers/embedd
 import { initVectorStore, vectorStoreDimension } from "../db/vector-store.js";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import { isQuestDbAvailable, questQuery } from "../db/questdb.js";
+import { getTelemetryWriteHealth } from "./telemetry.js";
 import { browserSessionManager } from "../agent/browser-session.js";
 
 const log = childLogger("health-checks");
@@ -165,13 +166,22 @@ async function checkTelemetry(): Promise<SubsystemCheck> {
   } catch (err) {
     return { name: "telemetry", status: "unavailable", detail: summarize(err) };
   }
+  // QuestDB is reachable — but the fire-and-forget batched writes may STILL be
+  // dropping. Surface that, or "reachable" masks a write path that's silently
+  // losing cost/latency rows.
+  const w = getTelemetryWriteHealth();
+  const dropped = w.droppedLines > 0;
+  const dropDetail = dropped
+    ? ` — DROPPED ${w.droppedLines} line(s) in ${w.failedBatches} batch(es)${w.lastError ? `: ${w.lastError}` : ""}`
+    : "";
+  const status: CheckStatus = dropped ? "degraded" : "ok";
   try {
     const rows = await questQuery("SELECT count() AS c FROM llm_usage");
     const n = Number(rows[0]?.["c"] ?? 0);
-    return { name: "telemetry", status: "ok", detail: `llm_usage rows: ${n}` };
+    return { name: "telemetry", status, detail: `llm_usage rows: ${n}${dropDetail}` };
   } catch {
     // Table not created yet (no turns since boot) — reachable, just empty.
-    return { name: "telemetry", status: "ok", detail: "reachable (no telemetry written yet)" };
+    return { name: "telemetry", status, detail: `reachable (no telemetry written yet)${dropDetail}` };
   }
 }
 

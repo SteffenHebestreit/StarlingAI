@@ -81,6 +81,9 @@ const TELEMETRY_FLUSH_MS = 1000;
 const TELEMETRY_MAX_BATCH = 100;
 let _buf: string[] = [];
 let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+let _failedBatches = 0;
+let _droppedLines = 0;
+let _lastFlushError: string | undefined;
 
 /** Flush buffered telemetry lines to QuestDB in one batched write. Exported for tests + shutdown. */
 export function flushTelemetry(): void {
@@ -88,8 +91,20 @@ export function flushTelemetry(): void {
   if (_buf.length === 0) return;
   const lines = _buf;
   _buf = [];
-  // Fire-and-forget: a QuestDB write must never disturb a turn.
-  void questWrite(lines).catch(() => {});
+  // Fire-and-forget: a QuestDB write must never disturb a turn — but don't swallow
+  // the failure SILENTLY. Count dropped batches/lines so checkTelemetry can surface a
+  // flapping write path instead of reporting "ok" off mere reachability (the exact
+  // silent-degradation the health module exists to catch — for its OWN writes).
+  void questWrite(lines).catch((err: unknown) => {
+    _failedBatches += 1;
+    _droppedLines += lines.length;
+    _lastFlushError = err instanceof Error ? err.message : String(err);
+  });
+}
+
+/** Self-health of the telemetry write path (monotonic since boot). */
+export function getTelemetryWriteHealth(): { failedBatches: number; droppedLines: number; lastError?: string } {
+  return { failedBatches: _failedBatches, droppedLines: _droppedLines, ...(_lastFlushError ? { lastError: _lastFlushError } : {}) };
 }
 
 function emit(line: string): void {
