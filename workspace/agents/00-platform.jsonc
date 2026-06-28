@@ -17,7 +17,7 @@
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
         // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").
         "promptCache": true,
-        "embeddingModel": "lmstudio/text-embedding-bge-m3",
+        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
         // Routing tier — the small/fast model the receptionist fast-lane uses to
         // answer trivial turns ("hi") without the full prompt + swarm. qwen3.5-9b
         // is loaded alongside the 35b primary.
