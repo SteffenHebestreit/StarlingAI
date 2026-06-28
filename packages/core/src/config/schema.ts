@@ -1575,6 +1575,13 @@ export const OrchestrationSchema = z.object({
    *  pays off when it actually removes a slower discovery round. Default OFF until
    *  pass^k confirms a net latency/quality win. */
   discoveryPrefetch: z.boolean().default(false),
+  /** B24 — toolset size ABOVE which the per-turn tool-rerank embedding kicks in. A small
+   *  toolset doesn't need semantic reranking (all tools fit the model's attention), so we
+   *  skip the embedding round-trip for it. Default 6 preserves the long-standing hardcoded
+   *  threshold; raise it (e.g. 12) to skip the rerank embed for more agents, trading rerank
+   *  coverage for one fewer embed round-trip per delegated turn. Behaviour-preserving at the
+   *  default, so the higher values are the eval-gated knob. */
+  toolRerankMinTools: z.number().int().min(1).default(6),
   /** Synthesis-headroom reserve (ms) carved out of the parent turn budget when a
    *  delegated sub-agent inherits that budget as its OWN hard timeout. A sub-agent's
    *  timeout is currently the FULL parent budget, so one slow node can consume 100% of

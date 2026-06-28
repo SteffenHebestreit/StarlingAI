@@ -2622,12 +2622,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // tools first — useful when the tool list is large and the model's
     // attention budget is finite.
     let tools = getToolsAsLLMDefs(effectiveToolNames);
-    if (tools.length > 6) {
-      try {
-        tools = await rerankToolsForTask(tools, sanitizedTask);
-      } catch (err) {
-        log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
-      }
+    // Rerank by semantic relevance only above a toolset-size threshold (B24): a small
+    // toolset fits the model's attention, so we skip the embed round-trip. The threshold is
+    // configurable (orchestration.toolRerankMinTools, default 6 = the long-standing value).
+    try {
+      tools = await rerankToolsForTask(tools, sanitizedTask, effectiveOrchestration().toolRerankMinTools ?? 6);
+    } catch (err) {
+      log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
     }
 
     // E19 graceful-degradation ladder: if the warden flagged this session

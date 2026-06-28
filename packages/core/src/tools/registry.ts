@@ -304,8 +304,12 @@ async function _getToolEmbedding(h: ToolHandler): Promise<Float32Array | null> {
 export async function rerankToolsForTask(
   defs: LLMToolDef[],
   task: string,
+  minTools = 1,
 ): Promise<LLMToolDef[]> {
-  if (!task || defs.length <= 1 || !isEmbeddingAvailable()) return defs;
+  // Skip the rerank embedding for small toolsets — they fit the model's attention and don't
+  // need semantic ordering (B24, orchestration.toolRerankMinTools). minTools=1 preserves the
+  // original no-op-for-<=1 behaviour for callers that don't pass a threshold.
+  if (!task || defs.length <= minTools || !isEmbeddingAvailable()) return defs;
 
   const queryVec = await computeQueryEmbedding(task);
   if (!queryVec) return defs;
