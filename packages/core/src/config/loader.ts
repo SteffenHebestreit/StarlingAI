@@ -368,15 +368,24 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
     raw["gateway"] = { ...(gw as object), jwtSecret: env["SAI_JWT_SECRET"] };
   }
-  if (env["SAI_LMSTUDIO_URL"]) {
+  // Primary model provider endpoint — provider-NEUTRAL. The primary provider may be LM Studio,
+  // Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, or ANY OpenAI-compatible server; it just
+  // happens to be wired through the `lmstudio` provider slot (an OpenAI-compatible adapter).
+  // SAI_PRIMARY_MODEL_URL is canonical; SAI_LMSTUDIO_URL is a deprecated back-compat alias.
+  const primaryModelUrl = env["SAI_PRIMARY_MODEL_URL"] ?? env["SAI_LMSTUDIO_URL"];
+  if (primaryModelUrl) {
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
-    raw["providers"] = { ...(p as object), lmstudio: { ...lms, baseUrl: env["SAI_LMSTUDIO_URL"] } };
+    raw["providers"] = { ...(p as object), lmstudio: { ...lms, baseUrl: primaryModelUrl } };
   }
-  if (env["SAI_LMSTUDIO_API_KEY"]) {
+  // Primary provider API key — needed in general, not just for one engine (LM Studio uses a
+  // placeholder, OpenRouter a real key, Ollama often none). SAI_PRIMARY_MODEL_KEY is canonical;
+  // SAI_LMSTUDIO_API_KEY is the back-compat alias.
+  const primaryModelKey = env["SAI_PRIMARY_MODEL_KEY"] ?? env["SAI_LMSTUDIO_API_KEY"];
+  if (primaryModelKey) {
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
-    raw["providers"] = { ...(p as object), lmstudio: { ...lms, apiKey: env["SAI_LMSTUDIO_API_KEY"] } };
+    raw["providers"] = { ...(p as object), lmstudio: { ...lms, apiKey: primaryModelKey } };
   }
   if (env["ANTHROPIC_API_KEY"]) {
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
@@ -393,15 +402,17 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       anthropic: { ...ant, authToken: env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDE_CODE_OAUTH_TOKEN"] },
     };
   }
-  if (env["SAI_DEFAULT_MODEL"]) {
-    // Lets the guided setup wizard pin the default agent model from .env alone
-    // (Docker-only first-run, where hand-editing config shards isn't an option).
+  // Default/primary agent model id. SAI_PRIMARY_MODEL is canonical; SAI_DEFAULT_MODEL is the
+  // back-compat alias. Lets the guided setup wizard pin the default model from .env alone
+  // (Docker-only first-run, where hand-editing config shards isn't an option).
+  const primaryModel = env["SAI_PRIMARY_MODEL"] ?? env["SAI_DEFAULT_MODEL"];
+  if (primaryModel) {
     const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
     const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
     const model = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
     raw["agents"] = {
       ...(agents as object),
-      defaults: { ...(defaults as object), model: { ...(model as object), primary: env["SAI_DEFAULT_MODEL"] } },
+      defaults: { ...(defaults as object), model: { ...(model as object), primary: primaryModel } },
     };
   }
   if (env["TELEGRAM_BOT_TOKEN"]) {

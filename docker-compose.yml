@@ -29,8 +29,15 @@ services:
       - NODE_ENV=production
       - SAI_JWT_SECRET=${SAI_JWT_SECRET}
       - SAI_MASTER_KEY=${SAI_MASTER_KEY}
-      - SAI_LMSTUDIO_URL=${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
-      - SAI_LMSTUDIO_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
+      # Primary model provider — any OpenAI-compatible server (LM Studio, Ollama, vLLM,
+      # llama.cpp, LocalAI, OpenRouter, …). Set SAI_PRIMARY_MODEL_URL/KEY in .env to point at
+      # yours; SAI_LMSTUDIO_URL/API_KEY remain as back-compat aliases. The host.docker.internal
+      # default only works when the model runs on THIS Docker host — for a remote/homelab box
+      # set SAI_PRIMARY_MODEL_URL=http://<host>:<port>/v1.
+      - SAI_PRIMARY_MODEL_URL=${SAI_PRIMARY_MODEL_URL:-${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}}
+      - SAI_PRIMARY_MODEL_KEY=${SAI_PRIMARY_MODEL_KEY:-${SAI_LMSTUDIO_API_KEY:-lm-studio}}
+      - SAI_LMSTUDIO_URL=${SAI_PRIMARY_MODEL_URL:-${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}}
+      - SAI_LMSTUDIO_API_KEY=${SAI_PRIMARY_MODEL_KEY:-${SAI_LMSTUDIO_API_KEY:-lm-studio}}
       - SAI_MULTIMODAL_STT_URL=${SAI_MULTIMODAL_STT_URL:-http://host.docker.internal:5002}
       - SAI_MULTIMODAL_TTS_URL=${SAI_MULTIMODAL_TTS_URL:-http://host.docker.internal:5004}
       - DATABASE_URL=postgresql://starlingai:${POSTGRES_PASSWORD}@postgres:5432/starlingai
@@ -211,24 +218,24 @@ services:
       # no Neo4j server, fastest backend at every scale (f16 = lossless ranking, ½ memory).
       - STORE_BACKEND=${ENGRAM_STORE_BACKEND:-engramdb}
       - ENGRAMDB_QUANTIZATION=${ENGRAM_ENGRAMDB_QUANTIZATION:-f16}
-      # Embeddings + extraction LLM run on the same model server as the gateway.
+      # Embeddings + extraction LLM run on the same primary model server as the gateway.
       # The default (host.docker.internal:1234) reaches a model server — LM Studio,
-      # Ollama, llama.cpp, vLLM — running on the Docker HOST. Override SAI_LMSTUDIO_URL
-      # in .env to point engram + the gateway at a model server on another machine
-      # (e.g. a homelab box at http://10.10.0.x:1234/v1).
-      # To embed on the local GPU sidecar instead of LM Studio (e.g. external
-      # provider flaky), set ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 and
+      # Ollama, llama.cpp, vLLM, OpenRouter — running on the Docker HOST. Override
+      # SAI_PRIMARY_MODEL_URL in .env to point engram + the gateway at a model server on
+      # another machine (e.g. a homelab box at http://10.10.0.x:1234/v1).
+      # To embed on the local GPU sidecar instead (e.g. external provider flaky), set
+      # ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 and
       # RERANKER_EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B in .env (see the reranker svc).
-      - EMBEDDING_API_BASE=${ENGRAM_EMBEDDING_API_BASE:-${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}}
-      - EMBEDDING_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
+      - EMBEDDING_API_BASE=${ENGRAM_EMBEDDING_API_BASE:-${SAI_PRIMARY_MODEL_URL:-${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}}}
+      - EMBEDDING_API_KEY=${SAI_PRIMARY_MODEL_KEY:-${SAI_LMSTUDIO_API_KEY:-lm-studio}}
       - EMBEDDING_MODEL=${ENGRAM_EMBEDDING_MODEL:-text-embedding-qwen3-embedding-0.6b}
       - EMBEDDING_DIM=${ENGRAM_EMBEDDING_DIM:-1024}
       # Qwen3-Embedding is instruction-tuned: prepend a task instruct to QUERIES only
       # (passages stay raw). Set before first ingest — the passage side is part of the
       # schema signature. (Double-quoted so the \n becomes a real newline.)
       - "QUERY_INSTRUCTION=Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
-      - LLM_API_BASE=${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
-      - LLM_API_KEY=${SAI_LMSTUDIO_API_KEY:-lm-studio}
+      - LLM_API_BASE=${SAI_PRIMARY_MODEL_URL:-${SAI_LMSTUDIO_URL:-http://host.docker.internal:1234/v1}}
+      - LLM_API_KEY=${SAI_PRIMARY_MODEL_KEY:-${SAI_LMSTUDIO_API_KEY:-lm-studio}}
       - LLM_MODEL=${ENGRAM_LLM_MODEL:-qwen/qwen3.6-35b-a3b}
       # This LM Studio build rejects response_format={"type":"json_object"} (it only
       # accepts json_schema/text), so disable JSON mode — engram still parses the

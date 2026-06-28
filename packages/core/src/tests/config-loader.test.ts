@@ -33,6 +33,9 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_LMSTUDIO_URL"];
     delete process.env["SAI_LMSTUDIO_API_KEY"];
     delete process.env["SAI_DEFAULT_MODEL"];
+    delete process.env["SAI_PRIMARY_MODEL_URL"];
+    delete process.env["SAI_PRIMARY_MODEL_KEY"];
+    delete process.env["SAI_PRIMARY_MODEL"];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -236,6 +239,54 @@ describe("config loader mutable overlay", () => {
 
       expect(config.providers.lmstudio?.baseUrl).toBe("http://env-lmstudio:1234/v1");
       expect(config.providers.lmstudio?.apiKey).toBe("env-api-key");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("overrides the primary provider from the neutral SAI_PRIMARY_MODEL_* vars (which win over the SAI_LMSTUDIO_* aliases)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-primary-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({
+      providers: { lmstudio: { baseUrl: "http://config:1234/v1", apiKey: "config-key" } },
+      agents: { defaults: { model: { primary: "lmstudio/config-model" } } },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    // The neutral primary vars point at a DIFFERENT engine (Ollama) and must win over the
+    // legacy lmstudio aliases set alongside them.
+    process.env["SAI_PRIMARY_MODEL_URL"] = "http://ollama:11434/v1";
+    process.env["SAI_PRIMARY_MODEL_KEY"] = "primary-key";
+    process.env["SAI_PRIMARY_MODEL"] = "lmstudio/llama3.3";
+    process.env["SAI_LMSTUDIO_URL"] = "http://legacy:1234/v1";
+    process.env["SAI_LMSTUDIO_API_KEY"] = "legacy-key";
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.providers.lmstudio?.baseUrl).toBe("http://ollama:11434/v1");
+      expect(config.providers.lmstudio?.apiKey).toBe("primary-key");
+      expect(config.agents.defaults.model.primary).toBe("lmstudio/llama3.3");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still honors the legacy SAI_LMSTUDIO_* aliases when the neutral vars are unset (back-compat)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-alias-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({
+      providers: { lmstudio: { baseUrl: "http://config:1234/v1", apiKey: "config-key" } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_LMSTUDIO_URL"] = "http://legacy:1234/v1";
+    process.env["SAI_LMSTUDIO_API_KEY"] = "legacy-key";
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.providers.lmstudio?.baseUrl).toBe("http://legacy:1234/v1");
+      expect(config.providers.lmstudio?.apiKey).toBe("legacy-key");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
