@@ -142,6 +142,13 @@ describe("selectAutoBuildBuilderAgent — route the auto-build by deliverable ty
     expect(selectAutoBuildBuilderAgent("build and serve an Express API for the dashboard")).toBe("backend_coder");
     expect(selectAutoBuildBuilderAgent("erstelle einen Node-Server und liefere das Frontend aus")).toBe("backend_coder");
   });
+  it("routes an EXTERNAL-API CONNECTOR to backend_coder — it must be served (egress), not a --network=none self-dev snippet", () => {
+    expect(selectAutoBuildBuilderAgent("build a connector for the Overpass API")).toBe("backend_coder");
+    expect(selectAutoBuildBuilderAgent("write an integration that queries a third-party geocoding API")).toBe("backend_coder");
+    expect(selectAutoBuildBuilderAgent("create an API proxy that fetches from an external service")).toBe("backend_coder");
+    // structural, not topic: a doc that merely MENTIONS a provider but asks for a report stays content_writer
+    expect(selectAutoBuildBuilderAgent("write a report comparing several mapping providers")).toBe("content_writer");
+  });
   it("keeps static pages, decks, and documents on content_writer", () => {
     expect(selectAutoBuildBuilderAgent("erstelle eine Landingpage über die Zertifizierung")).toBe("content_writer");
     expect(selectAutoBuildBuilderAgent("build a reveal.js presentation about Dresden")).toBe("content_writer");

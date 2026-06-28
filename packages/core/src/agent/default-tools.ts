@@ -14,6 +14,16 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // when skillLibrary.enabled is false.
   "record_skill",
   "skill_manage",
+  // Self-report a capability gap ("no tool/agent can do X") and read the gap
+  // ledger. Tier 0/1, no-approval; no-ops gracefully when selfImprovement is
+  // disabled. Without this grant the gap-detection path was unreachable from the
+  // orchestrator — only an autonomous routing-failure could ever record a gap.
+  "request_new_capability",
+  "list_capability_gaps",
+  // Mid-turn clarify: pause and ask the human a blocking question (with optional
+  // clickable choices) when genuine ambiguity would otherwise force a guess. The
+  // tool no-ops when no input channel is present, so it is safe to always offer.
+  "ask_user",
   // First-class plan checkpoint: on a complex turn the orchestrator records a
   // short structured plan (objective, reuse-or-delegate steps, acceptance
   // criteria) that QA checks against and the operator dock can surface/approve.

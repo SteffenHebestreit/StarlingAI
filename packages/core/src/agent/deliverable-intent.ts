@@ -43,13 +43,24 @@ export function looksLikeArtifactCreationRequest(userMessage: string): boolean {
  * running Node/Express server / live API) goes to backend_coder. Structural +
  * bilingual; the default stays content_writer so static deliverables (pages,
  * decks, documents) are unchanged.
+ *
+ * An EXTERNAL-API CONNECTOR (wrap/integrate a third-party HTTP API — e.g. a geocoding
+ * or POI service) also goes to backend_coder: it must run as a SERVED backend, which
+ * has full network egress + npm install, NOT as a sandboxed self-dev tool snippet
+ * (that sandbox is --network=none and cannot reach the API). The predicate is purely
+ * structural (build-architecture nouns + integrate/wrap/query verbs near api/endpoint/
+ * service), topic-agnostic — it encodes the "connectors are served backends" doctrine,
+ * never a specific service.
  */
 export function selectAutoBuildBuilderAgent(userMessage: string): "content_writer" | "web_coder" | "backend_coder" {
   const t = (userMessage ?? "").toLowerCase();
   const served =
     /\b(serve|deploy|backend|server|express|node\.?js|\brest\b|datenbank|database|ausliefern|bereitstellen)\b/.test(t)
     || /\b(run|starte?|start|laufen)\b[^.?!]{0,30}\b(app|server|backend|instance|instanz)\b/.test(t);
-  if (served) return "backend_coder";
+  const externalConnector =
+    /\b(connector|integration|api[- ]?(client|proxy|wrapper|gateway|connector))\b/.test(t)
+    || /\b(integrate|connect|wrap|query|call|fetch|pull|consume|proxy)\b[^.?!]{0,40}\b(api|endpoint|web ?service|webservice|third[- ]?party|external (?:service|api))\b/.test(t);
+  if (served || externalConnector) return "backend_coder";
   const interactiveApp =
     /\b(app|web ?app|webapp|web-app|anwendung|applikation|spa|single[- ]page|interactive|interaktiv|dashboard|quiz|game|spiel|calculator|rechner|simulator|lernplattform|lern-?app|learning ?platform|learning ?app|fragekatalog|multiple[- ]?choice|flashcards?|karteikarten?)\b/.test(t);
   if (interactiveApp) return "web_coder";
