@@ -63,6 +63,26 @@ async function main(): Promise<void> {
   if (repeatOverride !== undefined) plan.repeat = repeatOverride;
   if (concurrencyOverride !== undefined) plan.concurrency = concurrencyOverride;
 
+  // Pre-flight (in-process runs only): one quick model-backend health check so a run
+  // against an unreachable backend fails FAST with a clear reason, instead of every case
+  // crashing with a cryptic "Sub-agent error:" and a misleading clean-baseline verdict.
+  // --via-gateway routes through the gateway, which the connection check below covers.
+  if (!viaGateway) {
+    try {
+      const { getChatProvider } = await import("../providers/index.js");
+      const health = await getChatProvider().checkHealth();
+      if (!health.healthy) {
+        console.error(`\nPre-flight FAILED — the default chat model backend is unreachable${health.error ? ` (${health.error})` : ""}.`);
+        console.error("Start your model backend (e.g. LM Studio with the configured model loaded) and check");
+        console.error("SAI_CONFIG_PATH + the API key, or run with --via-gateway. Aborting before running the plan.");
+        process.exit(1);
+      }
+    } catch (err) {
+      // A failed health PROBE (vs an unhealthy verdict) shouldn't block a legit run.
+      console.error(`\nPre-flight model check could not run (${err instanceof Error ? err.message : String(err)}); continuing.`);
+    }
+  }
+
   let gateway: ReturnType<typeof createGatewayEvalRunner> | undefined;
   if (viaGateway) {
     if (!token) {
