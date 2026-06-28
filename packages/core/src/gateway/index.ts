@@ -4757,11 +4757,22 @@ export function createGateway() {
     if (!description || !task) return c.json({ error: "description and task are required" }, 400);
     if (task.length > 32_768) return c.json({ error: "task exceeds maximum length of 32 768 characters" }, 400);
 
+    // Optional structured extras — persisted with full fidelity (no longer dropped).
+    const asStringArray = (v: unknown): string[] | undefined =>
+      Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : undefined;
+
     try {
       saveScene(name, {
         description,
         task,
         webhookKey: body["webhookKey"] ? String(body["webhookKey"]) : undefined,
+        allowedAgents: asStringArray(body["allowedAgents"]),
+        humanInLoopSteps: asStringArray(body["humanInLoopSteps"]),
+        approvalChannel: body["approvalChannel"] ? String(body["approvalChannel"]) : undefined,
+        approvalTimeoutMs: typeof body["approvalTimeoutMs"] === "number" ? body["approvalTimeoutMs"] : undefined,
+        expectArtifact: typeof body["expectArtifact"] === "boolean" ? body["expectArtifact"] : undefined,
+        params: body["params"] && typeof body["params"] === "object" ? body["params"] as Record<string, { description?: string; default?: string }> : undefined,
+        triggers: body["triggers"] && typeof body["triggers"] === "object" ? body["triggers"] as never : undefined,
       });
       return c.json({ ok: true, name });
     } catch (err) {

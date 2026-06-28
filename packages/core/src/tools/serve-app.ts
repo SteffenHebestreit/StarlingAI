@@ -113,6 +113,35 @@ export function __setAppFetchForTests(fn: AppFetch | null): void { appFetch = fn
 /** Log lines that signal a real runtime fault (not just the word "error" in app output). */
 const FATAL_LOG_RE = /(unhandled(?:rejection)?|uncaughtexception|cannot find module|econnrefused|eaddrinuse|listen e[a-z]+|fatal|segmentation fault|traceback \(most recent call last\)|\b(?:error|exception):|\bthrow new )/i;
 
+/**
+ * A page is CLIENT-RENDERED when the server returns a thin shell (a mount root +
+ * scripts) and the visible content only appears after JS runs in a browser —
+ * Leaflet/OSM maps, canvas charts, SPAs. For these a server-side body fetch
+ * proves the shell loaded, NOT that the app painted: a JS error or a failed tile
+ * fetch leaves the same passing shell. We detect this so verify_app can refuse to
+ * give false confidence and demand a browser DOM check, instead of silently
+ * PASSing a blank map. Structural/topic-agnostic — keys off mount roots + script
+ * volume + sparse visible text, never "leaflet"/"map" specifically.
+ */
+function looksClientRendered(body: string): boolean {
+  if (!body) return false;
+  const hasScript = /<script[\s>]/i.test(body);
+  if (!hasScript) return false;
+  // A canvas or a conventional SPA/map mount root that is populated by JS.
+  const hasMountRoot = /<canvas[\s>]/i.test(body)
+    || /<div[^>]+id\s*=\s*["'](?:app|root|map|chart|root-app|application)["']/i.test(body)
+    || /\b(?:leaflet|maplibre|mapbox|deck\.gl|chart\.js|three\.js|react|vue|svelte)\b/i.test(body);
+  if (!hasMountRoot) return false;
+  // Visible text once tags/scripts/styles are stripped — a shell has very little.
+  const visibleText = body
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return visibleText.length < 400;
+}
+
 // ── Config (env-driven, no schema churn) ──────────────────────────────────
 function serveAppNetwork(): string { return process.env["SAI_APP_NETWORK"]?.trim() || "starlingai-public"; }
 function serveAppImage(): string { return process.env["SAI_APP_NODE_IMAGE"]?.trim() || "node:22-alpine"; }
@@ -314,12 +343,25 @@ async function verifyApp(args: Record<string, unknown>, ctx: ToolContext): Promi
   const httpOk = res.status >= 200 && res.status < 400;
   const contentPresent = expectContent ? res.body.toLowerCase().includes(expectContent.toLowerCase()) : undefined;
   const verdictPass = reachable && httpOk && contentPresent !== false;
+  // For a client-rendered app a server-side fetch only proves the shell loaded.
+  // A passing verdict here is NOT a confirmation that it painted.
+  const clientRendered = reachable && httpOk && looksClientRendered(res.body);
+  const renderConfirmed = clientRendered ? false : verdictPass;
 
   const lines: string[] = [];
-  lines.push(`${verdictPass ? "✅ PASS" : "❌ FAIL"} — verified ${path} on app '${app.name}'.`);
+  const verdictLabel = verdictPass ? (clientRendered ? "🟡 PASS (server) — RENDER UNCONFIRMED" : "✅ PASS") : "❌ FAIL";
+  lines.push(`${verdictLabel} — verified ${path} on app '${app.name}'.`);
   lines.push(reachable ? `HTTP ${res.status} (${res.contentType || "no content-type"}), ${res.body.length} bytes.` : `UNREACHABLE: ${res.error ?? "no response"}.`);
-  if (expectContent) lines.push(contentPresent ? `Expected content "${expectContent}" is present.` : `Expected content "${expectContent}" was NOT found in the response.`);
+  if (expectContent) lines.push(contentPresent ? `Expected content "${expectContent}" is present${clientRendered ? " in the shell HTML (not necessarily the rendered DOM)" : ""}.` : `Expected content "${expectContent}" was NOT found in the response.`);
   if (errorLines.length) lines.push(`⚠ Runtime error lines in the container logs:\n${errorLines.map((l) => `  ${l}`).join("\n")}`);
+  if (verdictPass && clientRendered) {
+    // The false-confidence case: shell loads, server check passes, but a JS error
+    // or a failed tile/data fetch would leave this exact passing shell. Demand a
+    // real DOM check before this counts as done — client-side JS errors never
+    // reach the container logs the server-side scan above reads.
+    lines.push("This app is CLIENT-RENDERED (map/canvas/SPA). The server answered, but this does NOT prove the UI actually painted — a JS error or a failed tile/data fetch would leave this same passing shell.");
+    lines.push(`REQUIRED before declaring done: browser_navigate to the preview URL (/api/app/${app.id}/${path === "/" ? "" : path.replace(/^\//, "")}), then browser_snapshot (or browser_evaluate) and assert the expected element actually rendered (map tiles/markers, chart canvas, list rows) and the browser console has no errors.`);
+  }
   if (reachable && res.body.trim()) lines.push(`Response head:\n${res.body.slice(0, 600)}`);
   if (!verdictPass) {
     lines.push(
@@ -330,7 +372,7 @@ async function verifyApp(args: Record<string, unknown>, ctx: ToolContext): Promi
     lines.push("Then re-run verify_app. For visual/DOM checks (client-side rendering, layout), browser_navigate to the previewPath and browser_snapshot.");
   }
 
-  logAudit("verify_app", { id: app.id, path, status: res.status, verdict: verdictPass ? "pass" : "fail", errorLogLines: errorLines.length }, { sessionId: ctx.sessionId, severity: verdictPass ? "info" : "warn" });
+  logAudit("verify_app", { id: app.id, path, status: res.status, verdict: verdictPass ? "pass" : "fail", clientRendered, renderConfirmed, errorLogLines: errorLines.length }, { sessionId: ctx.sessionId, severity: verdictPass ? "info" : "warn" });
 
   return {
     success: verdictPass,
@@ -339,6 +381,8 @@ async function verifyApp(args: Record<string, unknown>, ctx: ToolContext): Promi
     metadata: {
       ...appSummary(app),
       verdict: verdictPass ? "pass" : "fail",
+      clientRendered,
+      renderConfirmed,
       httpStatus: res.status,
       contentType: res.contentType,
       contentPresent,
@@ -351,7 +395,7 @@ async function verifyApp(args: Record<string, unknown>, ctx: ToolContext): Promi
 
 registerTool({
   name: "verify_app",
-  description: "Verify a web app you built and started with serve_app actually boots and serves correctly BEFORE declaring the task done. Fetches the running app server-side (no token needed), checks the HTTP status and (optionally) that expected content is present, and surfaces runtime error lines from the container logs. Returns PASS/FAIL with a concrete fix hint; on FAIL, fix the code and re-run. For visual/DOM/layout checks, additionally browser_navigate to the previewPath and browser_snapshot.",
+  description: "Verify a web app you built and started with serve_app actually boots and serves correctly BEFORE declaring the task done. Fetches the running app server-side (no token needed), checks the HTTP status and (optionally) that expected content is present, and surfaces runtime error lines from the container logs. Returns PASS/FAIL with a concrete fix hint; on FAIL, fix the code and re-run. For a CLIENT-RENDERED app (map/canvas/SPA) it returns 'PASS (server) — RENDER UNCONFIRMED' because a server fetch only proves the shell loaded, not that the UI painted; you MUST then browser_navigate to the preview URL + browser_snapshot/browser_evaluate to confirm the render before declaring done.",
   parameters: {
     type: "object",
     properties: {

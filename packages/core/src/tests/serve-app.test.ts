@@ -161,6 +161,31 @@ describe("verify_app — self-inspecting build verification", () => {
     expect(res.output).toContain("✅ PASS");
   });
 
+  it("returns RENDER UNCONFIRMED for a client-rendered shell (map/canvas/SPA) instead of falsely PASSing", async () => {
+    const id = await startRunningApp("Server listening on 3000");
+    // A Leaflet shell: server answers 200 with the mount root + scripts, but the
+    // map only paints in a browser — a JS error would leave this same shell.
+    const shell = '<!DOCTYPE html><html><head><link rel="stylesheet" href="leaflet.css"/></head>'
+      + '<body><div id="map"></div><script src="leaflet.js"></script><script>const m=L.map("map");</script></body></html>';
+    __setAppFetchForTests(fetchReturning({ status: 200, body: shell }));
+    const res = await getTool("verify_app")!.execute({ id, expectContent: "map" }, ctx);
+    // The server check passed, so success is true — but the verdict is explicitly render-unconfirmed.
+    expect(res.success).toBe(true);
+    expect(res.metadata?.["clientRendered"]).toBe(true);
+    expect(res.metadata?.["renderConfirmed"]).toBe(false);
+    expect(res.output).toContain("RENDER UNCONFIRMED");
+    expect(res.output).toMatch(/browser_navigate|browser_snapshot|browser_evaluate/);
+  });
+
+  it("does NOT flag a server-rendered page as client-rendered (no false render caveat)", async () => {
+    const id = await startRunningApp("Server listening on 3000");
+    __setAppFetchForTests(fetchReturning({ status: 200, body: "<h1>Report</h1><p>" + "x".repeat(500) + "</p>" }));
+    const res = await getTool("verify_app")!.execute({ id, expectContent: "Report" }, ctx);
+    expect(res.success).toBe(true);
+    expect(res.metadata?.["clientRendered"]).toBe(false);
+    expect(res.output).toContain("✅ PASS");
+  });
+
   it("FAILS on a non-2xx HTTP status and gives a route fix hint", async () => {
     const id = await startRunningApp();
     __setAppFetchForTests(fetchReturning({ status: 500, body: "Internal Server Error" }));

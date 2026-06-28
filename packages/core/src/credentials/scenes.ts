@@ -20,6 +20,29 @@ const log = childLogger("credentials:scenes");
 const SCENE_DESCRIPTION_KEY = (name: string) => `scene:${name}:description`;
 const SCENE_TASK_KEY         = (name: string) => `scene:${name}:task`;
 const SCENE_WEBHOOK_KEY      = (name: string) => `scene:${name}:webhookKey`;
+// Structured extras (allowedAgents/params/triggers/…) stored as ONE JSON blob so a
+// runtime-authored scene round-trips with full fidelity instead of collapsing to a
+// bare description+task. Optional and back-compatible: older scenes without it read
+// back exactly as before.
+const SCENE_META_KEY         = (name: string) => `scene:${name}:meta`;
+
+/** The non-description/task/webhookKey fields of a scene, persisted as the meta blob. */
+type SceneMeta = Pick<
+  SceneSummary,
+  "allowedAgents" | "params" | "humanInLoopSteps" | "approvalChannel" | "approvalTimeoutMs" | "expectArtifact" | "triggers"
+>;
+
+function readSceneMeta(name: string): SceneMeta {
+  const raw = getCredential(SCENE_META_KEY(name));
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as SceneMeta) : {};
+  } catch {
+    log.warn({ name }, "Scene meta blob is not valid JSON; ignoring");
+    return {};
+  }
+}
 
 export interface SceneSummary {
   name: string;
@@ -81,6 +104,7 @@ export function listAllScenes(): SceneSummary[] {
       task,
       webhookKey: getCredential(SCENE_WEBHOOK_KEY(name)) ?? undefined,
       source: "store",
+      ...readSceneMeta(name),
     });
   }
 
@@ -116,6 +140,7 @@ export function getScene(name: string): SceneSummary | null {
     task,
     webhookKey: getCredential(SCENE_WEBHOOK_KEY(name)) ?? undefined,
     source: "store",
+    ...readSceneMeta(name),
   };
 }
 
@@ -123,6 +148,20 @@ export interface SceneInput {
   description: string;
   task: string;
   webhookKey?: string;
+  /** Sub-agents this scene may delegate to (undefined = no restriction). */
+  allowedAgents?: string[];
+  /** Named template variables the scene task interpolates. */
+  params?: Record<string, { description?: string; default?: string }>;
+  /** Tool names that must pause for human approval when called from this scene. */
+  humanInLoopSteps?: string[];
+  /** Name of an approvalChannels entry (webhook-triggered approvals). */
+  approvalChannel?: string;
+  /** Per-scene approval-channel timeout override (ms). */
+  approvalTimeoutMs?: number;
+  /** Require a job step running this scene to persist an output file. */
+  expectArtifact?: boolean;
+  /** Catalog-routing triggers for the workflow guardrail. */
+  triggers?: WorkflowCatalogTriggers;
 }
 
 export function saveScene(name: string, input: SceneInput): void {
@@ -136,6 +175,22 @@ export function saveScene(name: string, input: SceneInput): void {
   } else {
     deleteCredential(SCENE_WEBHOOK_KEY(name));
   }
+  // Persist the structured extras so a runtime-authored scene keeps its
+  // allowedAgents/params/triggers/etc. instead of silently dropping them.
+  const meta: SceneMeta = {
+    allowedAgents: input.allowedAgents,
+    params: input.params,
+    humanInLoopSteps: input.humanInLoopSteps,
+    approvalChannel: input.approvalChannel,
+    approvalTimeoutMs: input.approvalTimeoutMs,
+    expectArtifact: input.expectArtifact,
+    triggers: input.triggers,
+  };
+  if (Object.values(meta).some((v) => v !== undefined)) {
+    setCredential(SCENE_META_KEY(name), JSON.stringify(meta));
+  } else {
+    deleteCredential(SCENE_META_KEY(name));
+  }
   log.info({ name }, "Scene saved to store");
 }
 
@@ -143,5 +198,6 @@ export function deleteScene(name: string): void {
   deleteCredential(SCENE_DESCRIPTION_KEY(name));
   deleteCredential(SCENE_TASK_KEY(name));
   deleteCredential(SCENE_WEBHOOK_KEY(name));
+  deleteCredential(SCENE_META_KEY(name));
   log.info({ name }, "Scene deleted from store");
 }
