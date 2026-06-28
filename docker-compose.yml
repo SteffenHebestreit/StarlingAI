@@ -471,6 +471,18 @@ services:
     profiles:
       - build-only   # Never started by `docker compose up`
 
+  # ── Shell/script sandbox (built here, launched on demand by the shell tools) ──
+  # Not started by compose; shell_exec/script_run `docker run` this locked-down image
+  # (--network=none --read-only --cap-drop=ALL) once per command via the Docker socket.
+  # Tagged :latest to match the shell tool's default (SAI_SANDBOX_IMAGE). Without this
+  # build the shell/git/test agents fail with "container error: unknown" (missing image).
+  sandbox:
+    build:
+      context: ./docker/sandbox
+    image: starlingai/sandbox:latest
+    profiles:
+      - build-only   # Never started by `docker compose up`; just built so the image exists
+
   # ── PostgreSQL (audit logs) ───────────────────────────────────────────────
   postgres:
     # pgvector image = stock PostgreSQL 16 + the `vector` extension (drop-in;
