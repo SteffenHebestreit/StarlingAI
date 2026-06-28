@@ -622,6 +622,11 @@ networks:
     driver: bridge
     internal: true   # No external internet access for backend services
   starlingai-public:
+    # Explicit name (no compose project-prefix) so serve_app, which launches app
+    # containers via raw `docker run --network starlingai-public`, attaches to the
+    # SAME network the gateway is on. Without this, compose creates
+    # `<project>_starlingai-public` and serve_app fails with "network not found".
+    name: starlingai-public
     driver: bridge
   starlingai-pentest:
     driver: bridge    # External internet access allowed for active scanning
