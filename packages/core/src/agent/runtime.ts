@@ -4659,6 +4659,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           durableCapsule,
           "",
         );
+      } else {
+        // No durable facts are stored about this user. Make that ABSENCE explicit so a
+        // question about the user's own background/skills/history/identity cannot be
+        // answered by invention — the "fabricated a whole CV from an empty profile"
+        // failure. Structural (keys off an empty capsule), language-independent.
+        parts.push(
+          "You currently have NO stored facts about this user — no remembered facts, no user model, no documents are in view. You therefore know NOTHING about their background, experience, skills, employers, education, or identity. If the turn asks about any of those, do NOT invent an answer: call recall_context / search_documents first, and if nothing is found say plainly you have no stored information about them and ask them to provide it. Never present a guess as their profile.",
+          "",
+        );
       }
       parts.push(
         "The user model, this session's working facts, recent related sessions, and learned skills are NOT preloaded — call recall_context(query) to pull those when a turn needs them. Do not assume that deeper context is already in view.",
