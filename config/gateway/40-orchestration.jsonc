@@ -23,6 +23,12 @@
     // capsule so the coordinator plans without separate search_agents/search_workflows
     // tool rounds. Watch the audit stream for the discovery_prefetch event (fires
     // early, on iteration 0 — the cheapest stage to confirm is live).
-    "discoveryPrefetch": true
+    "discoveryPrefetch": true,
+
+    // Honesty: stop the orchestrator dressing a from-memory answer up as freshly-
+    // sourced ("based on current market data…", "as of today…") when it retrieved
+    // nothing this turn. Sibling of the user-profile fabrication guard. Enabled here
+    // to validate on this deployment before flipping the schema default.
+    "freshnessHonestyGuard": true
   }
 }
