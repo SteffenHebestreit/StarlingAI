@@ -207,10 +207,12 @@ services:
     build:
       context: .
       dockerfile: docker/engram/Dockerfile
-      # Engram version to clone+build. Override to bump (e.g. ENGRAM_REF=v0.6.0 in .env);
-      # changing it re-clones (the git layer is otherwise cached). Default = the pinned tag.
+      # Engram version to clone+build. THIS is the effective ref (it overrides the Dockerfile
+      # ARG default). Override to bump (e.g. ENGRAM_REF=v0.6.0 in .env); changing the value
+      # re-fetches (the git layer is otherwise cached). Pinned to a post-v0.5.0 main commit
+      # that adds the separate fast extraction model + json_schema/reasoning-off controls.
       args:
-        ENGRAM_REF: ${ENGRAM_REF:-v0.5.0}
+        ENGRAM_REF: ${ENGRAM_REF:-d81a488295c2443a9de42b98d411634207c3dd3d}
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
@@ -241,6 +243,19 @@ services:
       # accepts json_schema/text), so disable JSON mode — engram still parses the
       # JSON object out of the plain text reply.
       - LLM_JSON_MODE=${ENGRAM_LLM_JSON_MODE:-false}
+      # Per-chunk metadata extraction (the high-volume, low-difficulty LLM call) is split
+      # OFF the strong LLM_MODEL onto a tiny fast model for "best quality + speed": the LLM
+      # extractor keeps semantic keywords/summaries (better graph than statistical `yake`),
+      # but runs them on qwen3-0.6b with json_schema constrained decoding — measured ~0.33s
+      # warm vs ~6-8s on the 35B, valid JSON guaranteed, and the schema constraint suppresses
+      # chain-of-thought (the only reasoning-off that this LM Studio honours; it rejects
+      # json_object). HyDE/contextual/community still use the strong LLM_MODEL above. Short
+      # chunks (< MIN_CHARS) skip the round trip and fall back to statistical yake.
+      - METADATA_EXTRACTOR=${ENGRAM_METADATA_EXTRACTOR:-default}
+      - EXTRACTION_LLM_MODEL=${ENGRAM_EXTRACTION_LLM_MODEL:-qwen3-0.6b}
+      - EXTRACTION_RESPONSE_FORMAT=${ENGRAM_EXTRACTION_RESPONSE_FORMAT:-json_schema}
+      - EXTRACTION_MAX_TOKENS=${ENGRAM_EXTRACTION_MAX_TOKENS:-96}
+      - EXTRACTION_MIN_CHARS=${ENGRAM_EXTRACTION_MIN_CHARS:-200}
       # Qwen3-Reranker-0.6B via the shared `reranker` GPU service (the measured
       # +3.15/+3.84 nDCG@10 upgrade) — the same reranker the gateway uses.
       - RERANKER_API_BASE=http://reranker:80
