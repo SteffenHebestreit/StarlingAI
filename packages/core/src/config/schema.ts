@@ -1836,6 +1836,17 @@ export const ConfigSchema = z.object({
        */
       taskConditionalPrompt: z.boolean().default(false),
       /**
+       * Split orchestration prompt. When true, the contiguous orchestration block
+       * (Swarm Rules → Orchestration Strategy, ~13KB / ~half the base) is lifted out
+       * of the always-on system prompt and injected back only on turns that show
+       * orchestration intent (the per-turn classifier fired). A direct-answer turn
+       * then pays a roughly half-size prompt — faster first token, fewer input tokens —
+       * while the delegation TOOLS and the honesty/core sections stay available regardless,
+       * so a misclassified turn loses routing GUIDANCE, not capability. Default off
+       * (eval-gate the routing quality before flipping). See runtime.ts (marker split).
+       */
+      splitOrchestrationPrompt: z.boolean().default(false),
+      /**
        * Prompt-cache warm-keeper. When true, a background warm-up prefills the
        * orchestrator's stable base system prompt into the model server's KV cache
        * (cache_prompt) on boot and a short idle window after each turn, so the next

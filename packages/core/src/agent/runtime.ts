@@ -4572,6 +4572,24 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
 
     let systemPrompt = session.getSystemPrompt();
+    // Split orchestration prompt (agents.performance.splitOrchestrationPrompt, default off): the
+    // ~13KB orchestration block (Swarm Rules → Orchestration Strategy) is only needed on turns that
+    // actually orchestrate. Lift it out of the always-on base so a direct-answer turn pays a roughly
+    // half-size prompt, and inject it back ONLY when the turn shows orchestration intent (the per-turn
+    // classifier fired). The delegation TOOLS stay available regardless, so a misclassified turn loses
+    // routing GUIDANCE, not capability; the honesty/core sections stay in the lean base either way.
+    // Marker-based + guarded (a custom/absent prompt is left untouched), and the lean core stays the
+    // cacheable KV prefix for both paths.
+    let orchestrationModuleMsg = "";
+    if (getConfig().agents.performance.splitOrchestrationPrompt === true) {
+      const si = systemPrompt.indexOf("## Swarm Rules");
+      const ei = si >= 0 ? systemPrompt.indexOf("## Proactive Memory", si) : -1;
+      if (si > 0 && ei > si) {
+        const orchestrationModule = systemPrompt.slice(si, ei).trimEnd();
+        systemPrompt = systemPrompt.slice(0, si).trimEnd() + "\n\n" + systemPrompt.slice(ei);
+        if (initialDynamicGuidance) orchestrationModuleMsg = orchestrationModule;
+      }
+    }
     const temporalContext = buildTemporalContextPrompt();
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
     // Lean context injection: when on, the heavy per-turn memory/user-model/skill/
@@ -4720,6 +4738,9 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
 
     const buildSystemMessages = (): LLMMessage[] => [
       { role: "system", content: systemPrompt },
+      // Orchestration module (split-prompt mode): injected right after the lean base so the base
+      // stays the shared, cacheable prefix; present only on orchestration-intent turns.
+      ...(orchestrationModuleMsg ? [{ role: "system" as const, content: orchestrationModuleMsg }] : []),
       { role: "system", content: temporalContext },
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
