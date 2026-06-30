@@ -2,9 +2,9 @@
   // Core agents — everyday essentials: orchestration/planning + bread-and-butter execution and review.
   "subAgents": {
     "mission_coordinator": {
-      "description": "Execution coordinator for complex multi-area missions that need partitioning into parallel specialists, dependency-aware sequencing, and a final quality gate. Handles any deliverable that decomposes into 3 or more distinct sub-topics or logistics dimensions, regardless of domain — it gathers evidence through specialists and synthesizes one merged result. It is selected by the multi-area SHAPE of the request, not by a specific domain; route single-domain lookups to one specialist and freshness-only lookups to web_task_coordinator. Example queries: 'coordinate a multi-agent research and drafting mission', 'orchestriere die parallele Quellenrecherche und Zusammenführung', 'plan a multi-section guide that spans several sub-topics', 'run the dependency graph for the audit and synthesize the findings', 'führe den Ablauf mit Qualitätsprüfung aus', 'produce a sourced report from parallel sub-agent findings'.",
-      "capabilities": ["multi-agent coordination", "parallel task partitioning", "dependency management", "result synthesis", "quality gating", "acceptance checking", "ephemeral agent generation", "workflow execution", "task graph execution", "multi-area deliverable orchestration"],
-      "tags": ["coordination", "orchestration", "parallel", "workflow", "dependencies", "synthesis", "quality", "acceptance", "mission", "execution", "multi-area", "planning"],
+      "description": "Execution coordinator that runs a multi-area deliverable end to end: partitions the request into parallel specialist slices, sequences dependent steps via a task graph, routes drafting to an author specialist, and runs a final quality pass before synthesizing one merged result. Selected by the multi-area SHAPE of a request — any deliverable that decomposes into roughly 3 or more distinct sub-topics or logistics dimensions and needs cross-topic synthesis (sourced reports, comparison briefs, how-to-build guides, recommendation memos, multi-section trip/plan deliverables). It orchestrates other agents and holds no file-writing tools itself. Different from project_planner, which only produces the plan and hands it here for execution; from web_task_coordinator, which handles single freshness lookups with no synthesis; and from devops_coordinator, which is scoped to CI/CD rollouts. Route single-domain lookups to one specialist. Example queries: 'coordinate a multi-agent research and drafting mission', 'orchestriere die parallele Quellenrecherche und Zusammenführung', 'plan a multi-section guide that spans several sub-topics', 'run the dependency graph for the audit and synthesize the findings', 'produce a sourced report from parallel sub-agent findings'.",
+      "capabilities": ["multi-agent mission execution", "parallel slice partitioning", "task-graph dependency sequencing", "cross-topic result synthesis", "drafting handoff to author specialists", "final quality gating", "acceptance-checklist tracking", "ephemeral agent spin-up"],
+      "tags": ["coordination", "orchestration", "parallel", "task-graph", "dependencies", "synthesis", "quality-gate", "acceptance", "mission", "multi-area", "execution"],
       "model": {
         "enableThinking": false,
         "temperature": 0.1,
@@ -38,9 +38,9 @@
       ]
     },
     "web_task_coordinator": {
-      "description": "Coordinator for freshness-sensitive web tasks including breaking news, headlines, weather forecasts, live scores, lottery results, stock quotes, and any task that requires the latest real-time data from the web. Delegates to researcher or browser_agent for live retrieval, then synthesises the findings. Example queries: 'what's in the news today', 'weather forecast for Berlin tomorrow', 'welches Spiel hat Bayern gestern gespielt', 'aktuelle Schlagzeilen zur Klimakonferenz', 'live score of the Chelsea match', 'was sagen heute die Börsen', 'Lottozahlen von gestern', 'breaking news about the tech industry'.",
-      "capabilities": ["breaking news", "headlines", "weather forecast", "live data retrieval", "browser orchestration", "current events", "real-time information", "live scores", "lottery results", "stock quotes"],
-      "tags": ["web", "browser", "news", "headlines", "weather", "live", "freshness", "scores", "lottery", "stocks", "realtime"],
+      "description": "Coordinator for freshness-only live web lookups that need NO cross-topic synthesis: today's breaking news and headlines, the weather forecast, live sports scores, lottery results, and current stock quotes. It delegates one or two live retrievals to researcher or browser_agent and relays the latest values. Scope is a single real-time fact, not a deliverable — multi-area or sourced/comparison work goes to mission_coordinator, and a deep single-topic source hunt goes straight to researcher. Example queries: 'what's in the news today', 'weather forecast for Berlin tomorrow', 'welches Spiel hat Bayern gestern gespielt', 'aktuelle Schlagzeilen zur Klimakonferenz', 'live score of the Chelsea match', 'was sagen heute die Börsen', 'Lottozahlen von gestern'.",
+      "capabilities": ["breaking news lookup", "weather forecast lookup", "live sports scores", "lottery results", "current stock quotes", "real-time single-fact retrieval", "live browser orchestration"],
+      "tags": ["news", "headlines", "weather", "live", "freshness", "scores", "lottery", "stocks", "realtime", "current-events"],
 
       "model": {
         "enableThinking": true,
@@ -65,9 +65,9 @@
       ]
     },
     "project_planner": {
-      "description": "Planning specialist for complex multi-step tasks: task breakdown, dependency mapping, roadmaps, and execution handoff to mission_coordinator. Example queries: 'plan the Q2 product launch in phases', 'erstelle eine Roadmap für das Migrationsprojekt', 'break down the refactor into dependency-ordered tasks', 'Aufgabenliste mit Abhängigkeiten für das Redesign', 'draft a delivery timeline with acceptance criteria', 'Projektplan mit Meilensteinen und Lieferobjekten'.",
-      "capabilities": ["project planning", "task breakdown", "roadmapping", "timeline estimation", "work tracking", "deliverable tracking", "dependency management", "milestone definition", "acceptance criteria"],
-      "tags": ["planning", "project", "tasks", "roadmap", "management", "dependencies", "milestones", "timeline"],
+      "description": "Planning-only specialist that turns a complex goal into a structured execution plan: phased task breakdown, dependency ordering, a timeline with milestones, and acceptance criteria — then hands the plan to mission_coordinator for execution. It plans; it does not run specialists, gather evidence, or build artifacts itself. Use when the user wants the roadmap/plan, not the finished work. Example queries: 'plan the Q2 product launch in phases', 'erstelle eine Roadmap für das Migrationsprojekt', 'break down the refactor into dependency-ordered tasks', 'Aufgabenliste mit Abhängigkeiten für das Redesign', 'draft a delivery timeline with acceptance criteria', 'Projektplan mit Meilensteinen und Lieferobjekten'.",
+      "capabilities": ["phased project planning", "task breakdown", "roadmapping", "milestone definition", "timeline estimation", "dependency ordering", "acceptance-criteria definition", "execution handoff to coordinator"],
+      "tags": ["planning", "project", "roadmap", "milestones", "timeline", "task-breakdown", "phases", "acceptance-criteria"],
       "model": {
         "enableThinking": true,
         "temperature": 0.2,
@@ -89,9 +89,9 @@
       ]
     },
     "researcher": {
-      "description": "Web research specialist that gathers sourced, verifiable evidence on a topic and reports it with exact source attribution: technical documentation, specifications and standards, product and comparison research, academic papers, citations and bibliography preparation, and cross-source fact-checking. Also handles security-intelligence research (CVE/NVD/Exploit-DB advisories, CVSS scores, patch status, threat intelligence). Gathers section-ready evidence for downstream writers rather than producing full composite deliverables. Route freshness-only single-shot lookups (breaking news, live scores, weather, lottery results, stock quotes) to web_task_coordinator, and multi-area composite deliverables (3+ sub-topics needing synthesis) to mission_coordinator. Example queries: 'find the latest Node.js release notes', 'was ist neu in Python 3.13', 'search NVD for CVE-2024-1234', 'aktuelle Sicherheitslücken in nginx', 'gather official sources and citations for a research paper', 'verify the manufacturer and interface of part number XYZ from its datasheet'.",
-      "capabilities": ["web research", "documentation lookup", "source triangulation", "fact checking", "citation research", "official source lookup", "specification discovery", "bibliography preparation", "security advisory research", "CVE lookup", "vulnerability research", "threat intelligence"],
-      "tags": ["research", "web-research", "documentation", "sources", "citations", "fact-checking", "verification", "specifications", "papers", "bibliography", "cve", "vulnerability", "advisory", "threat-intelligence"],
+      "description": "Web research specialist that finds external sources for a single topic and reports verifiable facts with exact source attribution — official documentation, specifications and standards, release notes, vendor pages, product and comparison research, and academic papers — cross-checking important claims across independent sources. It gathers section-ready evidence and source metadata for a downstream writer; it does not draft the final paper (that is paper_author) or audit an existing draft's citations (that is source_verifier). It can also read published security advisories (CVE/NVD/vendor bulletins) as part of normal source lookup, but it does NOT scan or test live systems — authorized vulnerability scanning belongs to the pentest swarm. Route single freshness lookups (today's news, live scores, weather, lottery, quotes) to web_task_coordinator, and multi-area composite deliverables to mission_coordinator. Example queries: 'find the latest Node.js release notes', 'was ist neu in Python 3.13', 'look up the NVD advisory for CVE-2024-1234', 'gather official sources for a research paper', 'verify the manufacturer and interface of part number XYZ from its datasheet'.",
+      "capabilities": ["web source research", "official documentation lookup", "specification and standards discovery", "release-note lookup", "product and comparison research", "cross-source fact-checking", "source-metadata capture for writers", "published security-advisory lookup"],
+      "tags": ["research", "web-research", "documentation", "sources", "specifications", "standards", "release-notes", "fact-checking", "comparison-research", "advisory-lookup"],
       "model": {
         "enableThinking": false,
         "temperature": 0.2,
@@ -120,9 +120,9 @@
       ]
     },
     "evidence_analyst": {
-      "description": "Synthesizes fetched pages, shared facts, files, and visual evidence into a grounded evidence ledger. Reconciles conflicting sources, separates confirmed facts from tentative claims, and preserves exact source attribution. Example queries: 'build an evidence ledger from the shared facts', 'reconcile the conflicting revenue numbers from the reports', 'Evidenz aus den Quellen zusammenführen', 'widersprüchliche Angaben aus Datei A und B abgleichen', 'ground these claims against the source documents'.",
-      "capabilities": ["evidence synthesis", "cross-source reconciliation", "document grounding", "research handoff", "claim verification", "conflict detection"],
-      "tags": ["evidence", "analysis", "research", "grounding", "reconciliation", "verification", "ledger"],
+      "description": "Consolidates already-collected evidence — shared facts, fetched pages, files, and extracted visuals — into one grounded evidence ledger: reconciles duplicate and conflicting sources, separates confirmed facts from tentative claims, and preserves exact source attribution so a writer can compose without reopening URLs. It works the evidence that other agents gathered (it does not run fresh web research like researcher), produces a structured ledger rather than a prose summary (unlike summarizer), and reconciles qualitative cross-source facts rather than computing on numeric tables (unlike data_analyst). Example queries: 'build an evidence ledger from the shared facts', 'reconcile the conflicting revenue numbers from the reports', 'Evidenz aus den Quellen zusammenführen', 'widersprüchliche Angaben aus Datei A und B abgleichen', 'ground these claims against the source documents'.",
+      "capabilities": ["evidence-ledger construction", "cross-source reconciliation", "confirmed-vs-tentative separation", "source-attribution preservation", "conflict detection", "writer-ready evidence handoff"],
+      "tags": ["evidence", "ledger", "grounding", "reconciliation", "conflict-detection", "attribution", "evidence-handoff"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -147,9 +147,9 @@
       ]
     },
     "summarizer": {
-      "description": "Produces short, faithful, structured summaries for files, fetched pages, shared findings, and long documents. Preserves exact values, dates, and caveats. Example queries: 'summarize this 500-word article in three bullets', 'fasse den Bericht in 5 Sätzen zusammen', 'TL;DR for this thread', 'Zusammenfassung der heutigen E-Mails', 'extract the key points from this document', 'Kurzzusammenfassung des Meetings-Transkripts'.",
-      "capabilities": ["summarization", "structured summaries", "bullet summaries", "tl;dr creation", "key-point extraction"],
-      "tags": ["summary", "summarize", "tldr", "key-points", "bullets"],
+      "description": "Condenses an existing body of text — a file, a fetched page, a long document, a thread, or shared findings — into a short faithful summary, TL;DR, or key-point bullet list, preserving exact values, dates, and caveats and inventing no new facts. Its output is a compact restatement of one source for a reader; it does not reconcile conflicting sources into a ledger (that is evidence_analyst) and does not assemble a status/handoff packet with owners and next actions (that is meeting_briefing_agent). Example queries: 'summarize this 500-word article in three bullets', 'fasse den Bericht in 5 Sätzen zusammen', 'TL;DR for this thread', 'extract the key points from this document', 'Kurzzusammenfassung des Meetings-Transkripts'.",
+      "capabilities": ["text summarization", "structured bullet summaries", "tl;dr creation", "key-point extraction", "faithful value-preserving condensation"],
+      "tags": ["summary", "summarize", "tldr", "key-points", "condensation"],
       "model": {
         "enableThinking": false,
         "temperature": 0.15,
@@ -168,9 +168,9 @@
       ]
     },
     "content_writer": {
-      "description": "Audience-ready content writing specialist for blog posts, product copy, newsletters, documentation, social media, press releases, multi-page static websites (landing pages, microsites, doc sites), AND HTML slide decks / reveal.js presentations. Writes from a brief or evidence base — not from speculation. Example queries: 'write a blog post about our new feature launch', 'verfasse einen Blogartikel zur neuen Funktion', 'draft the monthly newsletter from these highlights', 'schreibe einen Produkt-Pitch für die Landingpage', 'create a LinkedIn post about the conference', 'Pressemitteilung für die Partnerschaft entwerfen', 'polish the onboarding docs for new customers', 'Newsletter-Text mit Call-to-Action formulieren', 'bau mir eine Microsite für die Produkteinführung', 'generate a 4-page landing site for the launch', 'erstelle eine kleine Dokumentations-Website mit Sidebar-Navigation', 'publish a static docs site with theme clean-docs', 'create a reveal.js presentation about Dresden architecture', 'erstelle eine HTML-Präsentation über den Zwinger', 'build a 10-slide pitch deck as an HTML slideshow'.",
-      "capabilities": ["blog post writing", "product copy", "newsletter writing", "documentation writing", "social media copy", "press release drafting", "brand tone adaptation", "seo-friendly writing", "headline writing", "call-to-action drafting", "static site generation", "microsite authoring", "landing page authoring", "html presentation authoring", "reveal.js slide deck generation", "pitch deck authoring"],
-      "tags": ["content", "writing", "blog", "copy", "text", "newsletter", "documentation", "marketing", "seo", "press-release", "social-media", "headline", "website", "microsite", "landing-page", "static-site", "docs-site", "presentation", "slides", "slide-deck", "reveal.js", "pitch-deck", "slideshow"],
+      "description": "Audience-ready marketing and prose writer that authors from a brief or evidence base and persists the deliverable as an artifact. Owns three output classes: (1) marketing/editorial prose — blog posts, product copy, newsletters, press releases, social posts, and user-facing documentation; (2) STATIC multi-page websites (landing pages, microsites, doc sites) via generate_website, authoring one compact Markdown block per page while the tool assembles the HTML/CSS/JS; (3) HTML slide decks / reveal.js presentations via generate_presentation. It never hand-writes large HTML and never stands up a running server. Different from web_coder, which writes raw multi-file HTML/CSS/JS SPAs and dashboards; from backend_coder, which serves a live Node app; and from paper_author, which writes formal source-grounded papers with citations. Example queries: 'write a blog post about our new feature launch', 'draft the monthly newsletter from these highlights', 'Pressemitteilung für die Partnerschaft entwerfen', 'generate a 4-page landing site for the launch', 'erstelle eine kleine Dokumentations-Website mit Sidebar-Navigation', 'create a reveal.js presentation about Dresden architecture', 'build a 10-slide pitch deck as an HTML slideshow'.",
+      "capabilities": ["blog and editorial writing", "product and marketing copy", "newsletter writing", "press-release drafting", "social-media copy", "user-facing documentation", "brand tone adaptation", "static website generation", "microsite and docs-site authoring", "reveal.js slide-deck generation"],
+      "tags": ["content", "copywriting", "blog", "newsletter", "marketing", "press-release", "social-media", "documentation", "static-website", "microsite", "docs-site", "presentation", "slide-deck", "reveal.js"],
       "model": {
         "enableThinking": false,
         "temperature": 0.3,
@@ -198,9 +198,9 @@
       ]
     },
     "coder": {
-      "description": "JavaScript and TypeScript sandbox execution specialist. Writes and runs JS/TS scripts in an isolated environment for quick calculations, data transforms, ad-hoc logic, and scriptable problem-solving. Example queries: 'write a TypeScript function that parses ISO dates', 'run a JS script to compute the factorial of 20', 'schreibe ein TypeScript-Skript, das eine CSV-Datei einliest', 'sandbox: transform this JSON to XML', 'prototype a small utility function in JS', 'berechne die Fibonacci-Zahlen bis 1000 in TS'.",
-      "capabilities": ["code generation", "sandbox execution", "javascript scripting", "typescript scripting", "data transformation", "prototype code"],
-      "tags": ["code", "sandbox", "javascript", "js", "typescript", "ts", "script", "prototype"],
+      "description": "Writes and EXECUTES short JavaScript or TypeScript scripts in an isolated sandbox to produce a computed answer: calculations, algorithmic logic, format/data transforms (JSON↔XML, parsing, encoding), and quick utility prototypes. Use when the goal is to RUN code and return its result, not to deliver web files (web_coder), stand up a server (backend_coder), or analyze a data file's contents for insights (data_analyst). Example queries: 'write a TypeScript function that parses ISO dates and run it', 'run a JS script to compute the factorial of 20', 'sandbox: transform this JSON to XML', 'prototype a small utility function in JS', 'berechne die Fibonacci-Zahlen bis 1000 in TS'.",
+      "capabilities": ["javascript execution", "typescript execution", "sandboxed scripting", "calculation and algorithmic logic", "format and data transformation", "utility prototyping"],
+      "tags": ["code", "sandbox", "javascript", "typescript", "script", "execute", "calculation", "transform"],
       "model": {
         "enableThinking": true,
         "temperature": 0.2,
@@ -220,9 +220,9 @@
       ]
     },
     "web_coder": {
-      "description": "Front-end web specialist: builds multi-file static sites and SPAs (HTML, CSS, vanilla JS or a lightweight framework) plus reveal.js decks, writing the files into the workspace so they can be served by the workspace preview or by a backend. Example queries: 'build a landing page with HTML/CSS/JS', 'erstelle eine mehrseitige SPA', 'baue ein Dashboard-Frontend, das eine API aufruft', 'create a multi-file reveal.js deck', 'schreibe das Frontend für die App, die das Backend ausliefert'.",
-      "capabilities": ["frontend development", "html/css/js", "SPA building", "static site", "reveal.js decks", "responsive layout", "client-side fetch"],
-      "tags": ["web", "frontend", "html", "css", "js", "javascript", "spa", "ui", "website", "reveal", "slides", "client", "markup"],
+      "description": "Front-end engineer that hand-writes raw multi-file web front-ends — index.html plus separate CSS and vanilla-JS (or lightweight-framework) files, including interactive SPAs and dashboards whose JS fetches a backend API. It produces the actual source files in the workspace (split across files and chunked writes), unlike content_writer which generates static pages from Markdown blocks; it writes only the client side and does not run a server (backend_coder launches the app via serve_app). Use when the request needs bespoke client-side HTML/CSS/JS code rather than authored Markdown content. Example queries: 'build a landing page with custom HTML/CSS/JS', 'erstelle eine mehrseitige SPA', 'baue ein Dashboard-Frontend, das eine API aufruft', 'schreibe das Frontend für die App, die das Backend ausliefert'.",
+      "capabilities": ["front-end coding", "hand-written html/css/js", "single-page-app building", "interactive dashboard ui", "client-side api fetch", "responsive layout", "multi-file front-end authoring"],
+      "tags": ["frontend", "html", "css", "javascript", "spa", "dashboard-ui", "client-side", "ajax-fetch", "multi-file"],
       // maxTokens 16384: a complete self-contained app (~20KB HTML ≈ 7K tokens) plus thinking must
       // fit in ONE completion — at 8192 the big write_file call was cut mid-arguments every time
       // (audits 77944865, 0ac7d3fc, a438ef4a) and the file content was lost at the provider parser.
@@ -237,9 +237,9 @@
       "tools": ["read_file", "write_file", "list_files", "generate_website", "read_shared_facts", "share_finding"]
     },
     "backend_coder": {
-      "description": "Back-end web specialist: writes a Node.js/Express server (server.js + package.json) that serves a front-end and/or JSON APIs, then launches it as a LIVE container via serve_app and reports the gateway URL. Use for DYNAMIC web apps that need a running server — a purely static site or reveal.js deck does NOT need this (it is served by the workspace preview). Example queries: 'build and serve an Express API for the dashboard', 'erstelle einen Node-Server, der das Frontend ausliefert, und starte ihn', 'stand up a small REST backend and run it on a live instance', 'serve the web app'.",
-      "capabilities": ["backend development", "node.js server", "express api", "REST API", "serving web apps", "container serving", "static file serving", "api endpoints"],
-      "tags": ["backend", "server", "nodejs", "node", "express", "api", "rest", "serve", "container", "webapp", "fullstack", "endpoint"],
+      "description": "Back-end engineer that BUILDS and RUNS a dynamic web app: writes a Node.js/Express server (server.js + package.json) that serves a front-end and/or its own JSON API endpoints, launches it as a LIVE container via serve_app, verifies it, and returns the gateway /api/app/<id>/ URL. Use whenever a request needs a running server or 'serve/run the app' — a purely static site or reveal.js deck does not (content_writer/web_coder). It authors and hosts a new backend, unlike api_integrator which only calls and tests an already-running external API. Example queries: 'build and serve an Express API for the dashboard', 'erstelle einen Node-Server, der das Frontend ausliefert, und starte ihn', 'stand up a small REST backend and run it on a live instance', 'serve the web app'.",
+      "capabilities": ["node.js/express server authoring", "json api endpoint implementation", "serving a web app as a live container", "static-file serving", "app launch via serve_app", "served-app verification"],
+      "tags": ["backend", "server", "nodejs", "express", "rest-api", "serve-app", "live-container", "fullstack", "dynamic-webapp"],
       // maxTokens 16384: same single-completion headroom as web_coder — a full server.js +
       // package.json write must never be cut mid-arguments by the completion cap.
       "model": { "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
@@ -252,9 +252,9 @@
       "tools": ["read_file", "write_file", "list_files", "serve_app", "verify_app", "read_shared_facts", "share_finding"]
     },
     "code_analyst": {
-      "description": "Code analysis, workspace retrieval, and bug diagnosis specialist for code at rest. Reads source files, locates symbols, traces references, reviews architecture, flags logic errors, security issues, missing edge cases, and extracts exact config values or code locations from the codebase. Operates on the committed/checked-out tree, NOT on diffs — for git diff or pull-request review, route to diff_reviewer instead. Example queries: 'find all callers of resolveAgentRouting', 'why does auth middleware reject valid tokens', 'wo wird die Funktion buildAgentSearchDocument aufgerufen', 'zeige alle Vorkommen von FEATURE_FLAG_X', 'review packages/core/src/tools/registry.ts for bugs', 'Architekturprüfung des Retrieval-Moduls', 'locate every .env reference in the TS codebase', 'Codeanalyse für den neuen Worker-Pool'.",
-      "capabilities": ["code reading", "architecture review", "bug diagnosis", "workspace search", "code retrieval", "symbol lookup", "reference tracing", "config value search", "cross-file analysis", "security review", "edge case review"],
-      "tags": ["code", "analysis", "retrieval", "workspace", "search", "symbol", "references", "bug", "architecture", "static-review"],
+      "description": "Reads the workspace codebase at rest to retrieve and diagnose: locates files, symbols, and references, traces call sites, extracts exact config values and code locations, reviews architecture, and flags logic errors, security issues, and missing edge cases — all by reading source, never by running it. Operates on the committed/checked-out tree, NOT on a diff (git-diff/PR review is diff_reviewer) and without executing tests (that is qa_guard). Example queries: 'find all callers of resolveAgentRouting', 'why does auth middleware reject valid tokens', 'zeige alle Vorkommen von FEATURE_FLAG_X', 'review packages/core/src/tools/registry.ts for bugs', 'Architekturprüfung des Retrieval-Moduls', 'locate every .env reference in the TS codebase'.",
+      "capabilities": ["source-code reading", "symbol and reference lookup", "call-site tracing", "config-value extraction", "architecture review", "static bug diagnosis", "security and edge-case review", "workspace code retrieval"],
+      "tags": ["code-analysis", "workspace-search", "symbol-lookup", "references", "static-review", "bug-diagnosis", "architecture", "code-at-rest"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -275,9 +275,9 @@
       ]
     },
     "git_developer": {
-      "description": "Version control specialist for local repository operations, code reviews, branching, commit management, and the GitHub side of the loop — listing/reading PRs, opening new PRs from a feature branch, posting PR comments, inspecting CI check runs, and triggering or watching GitHub Actions workflows. Example queries: 'show me the last 10 commits', 'git commit the staged changes with a descriptive message', 'zeige den diff auf main', 'erstelle einen neuen Feature-Branch', 'open a PR from the current branch to main with the change summary', 'eröffne einen Pull Request für diesen Branch', 'comment on PR #42 that the latest commit fixed the review feedback', 'list failing CI checks on the head SHA', 'Statuschecks für PR 42 abrufen', 'trigger the deploy.yml workflow on staging', 'Release v1.4.0 mit Release Notes erstellen', 'clone this repo locally'.",
-      "capabilities": ["git status", "git log", "git diff", "commit", "branching", "code review", "repository cloning", "merge conflict inspection", "github pull requests", "pr opening", "pr comments", "github actions trigger", "ci status inspection", "github releases"],
-      "tags": ["git", "vcs", "version-control", "commits", "branches", "diff", "merge", "review", "repository", "github", "pull-request", "pr", "ci", "actions", "workflow", "check-runs", "release"],
+      "description": "Version-control operator that EXECUTES git and GitHub actions on a repository: stages and commits changes, creates and switches branches, clones repos, pushes, and tags; on the GitHub side it lists/reads PRs, opens a new PR from a feature branch, posts PR comments, inspects CI check runs, dispatches a repo CI/build/test workflow, and publishes releases (mutating calls are approval-gated). It performs repository and PR-loop operations, whereas diff_reviewer only reads and explains a diff without mutating, and devops_coordinator owns environment DEPLOYMENT and rollout — a 'deploy to staging/prod', promotion, or rollback request goes to devops_coordinator, not here, even when it ultimately fires a GitHub Actions workflow. Example queries: 'git commit the staged changes with a descriptive message', 'erstelle einen neuen Feature-Branch', 'open a PR from the current branch to main with the change summary', 'comment on PR #42 that the latest commit fixed the review feedback', 'list failing CI checks on the head SHA', 're-run the CI build workflow on this branch', 'Release v1.4.0 mit Release Notes erstellen', 'clone this repo locally'.",
+      "capabilities": ["git commit and staging", "branching and checkout", "git push and tagging", "repository cloning", "github pull-request opening", "pr comments", "ci check-run inspection", "github actions dispatch", "github release publishing"],
+      "tags": ["git", "version-control", "commit", "branch", "push", "tag", "github", "pull-request", "ci-checks", "actions-dispatch", "release"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -312,9 +312,9 @@
       ]
     },
     "shell_agent": {
-      "description": "Shell and SSH CLI specialist for commands, build checks, remote server inspection, and quick environment diagnosis. Runs targeted single commands like docker ps, systemctl status, whoami, df -h, journalctl, git status. Example queries: 'run df -h on the prod host', 'show docker ps on remote server', 'führe npm run build aus', 'Prüfe den Festplattenplatz auf dem Server', 'ssh to the VM and show systemctl status', 'welche Prozesse laufen gerade', 'check the build output'.",
-      "capabilities": ["shell execution", "CLI diagnostics", "SSH execution", "remote server inspection", "build checks", "command execution"],
-      "tags": ["shell", "cli", "ops", "ssh", "server", "remote", "command", "bash", "powershell", "terminal"],
+      "description": "Runs targeted one-off shell or SSH commands and reports their raw output: local commands like `npm run build` via shell_exec, or a single remote command like `docker ps`, `systemctl status`, `df -h`, `journalctl`, `whoami` on a host via ssh_exec. It executes the command the user asked for and grounds its answer in the actual stdout/stderr — it does not root-cause an incident from that output (ops_triage), parse a whole log file for patterns (log_analyst), or provision/deploy/manage clusters (infrastructure_agent). Example queries: 'run df -h on the prod host', 'show docker ps on remote server', 'führe npm run build aus', 'ssh to the VM and show systemctl status', 'welche Prozesse laufen gerade', 'check the build output'.",
+      "capabilities": ["local shell command execution", "single remote command via ssh", "build-command runs", "one-off cli inspection", "raw command-output reporting"],
+      "tags": ["shell", "cli", "ssh", "command", "shell-exec", "ssh-exec", "build-check", "terminal"],
       "model": {
         "enableThinking": false,
         "temperature": 0.1,
@@ -333,9 +333,9 @@
       ]
     },
     "quality_supervisor": {
-      "description": "Quality gate specialist that checks whether a draft or merged response actually met the requirements and whether one more targeted pass is justified. Example queries: 'review the drafted report against the original brief', 'prüfe ob der Entwurf die Anforderungen erfüllt', 'is this answer complete or should we rerun?', 'Abnahmeprüfung für das erstellte Dokument', 'identify any gaps before we ship', 'Qualitätsgate vor Auslieferung durchführen'.",
-      "capabilities": ["quality assurance", "acceptance criteria review", "gap analysis", "verification", "rerun gating", "completeness check", "grounding verification"],
-      "tags": ["quality", "qa", "review", "acceptance", "verification", "gaps", "completeness", "gate"],
+      "description": "Read-only acceptance gate that judges whether a finished draft, artifact, or merged answer actually met the request and its acceptance criteria, then decides whether one more targeted corrective pass is justified and which specialist should run it. It checks completeness, internal consistency, and whether claims are grounded in the provided evidence — it does NOT run tests (qa_guard), audit citations line-by-line against sources (source_verifier), or screen against compliance/approval policy (policy_compliance_reviewer), and it never supplies external facts from its own knowledge. Example queries: 'review the drafted report against the original brief', 'prüfe ob der Entwurf die Anforderungen erfüllt', 'is this answer complete or should we rerun?', 'identify any gaps before we ship', 'Qualitätsgate vor Auslieferung durchführen'.",
+      "capabilities": ["acceptance-criteria review", "deliverable completeness check", "internal-consistency check", "grounding check against provided evidence", "gap analysis", "rerun-vs-ship gating", "next-specialist recommendation"],
+      "tags": ["quality-gate", "acceptance", "completeness", "consistency", "gap-analysis", "ship-or-rerun", "deliverable-review"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -352,9 +352,9 @@
       ]
     },
     "qa_guard": {
-      "description": "Regression and verification specialist for reproducing issues, running tests, and checking whether a change actually solved the task. Runs unit/integration tests, reproduces bugs, and verifies fixes end-to-end. Example queries: 'run the test suite and report failures', 'verify that the fix for bug X actually works', 'reproduziere den Fehler im Checkout-Flow', 'Tests ausführen und Regressionen prüfen', 'run vitest for the changed files', 'prüfe ob die Implementierung die Akzeptanzkriterien erfüllt'.",
-      "capabilities": ["test execution", "regression verification", "bug reproduction", "implementation review", "acceptance criteria check"],
-      "tags": ["qa", "tests", "verification", "regression", "bug", "reproduction", "vitest", "jest", "pytest"],
+      "description": "Verification specialist that actually RUNS code to prove a change works: executes the test suite (vitest/jest/pytest and similar) via shell, reproduces a reported bug, and confirms a fix end-to-end, reporting confirmed-vs-partial-vs-unverified results. It runs tests and reproductions, unlike quality_supervisor which only reads and judges a draft, and unlike code_analyst which reads source without executing it. Example queries: 'run the test suite and report failures', 'verify that the fix for bug X actually works', 'reproduziere den Fehler im Checkout-Flow', 'run vitest for the changed files', 'prüfe ob die Implementierung die Akzeptanzkriterien erfüllt'.",
+      "capabilities": ["test-suite execution", "bug reproduction", "fix verification", "regression checking", "acceptance-criteria verification by running checks"],
+      "tags": ["qa", "run-tests", "test-execution", "regression", "bug-reproduction", "fix-verification", "vitest", "pytest"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -373,9 +373,9 @@
       ]
     },
     "diff_reviewer": {
-      "description": "Git diff and pull-request review specialist. Inspects the changed lines on a branch, classifies them by risk (renames, deletions, behavior changes, new dependencies), explains what each hunk does in plain language, and flags missing test coverage or doc updates. Different from code_analyst (which reviews code at rest) and qa_guard (which actually runs tests). Use when the question is shaped like 'review this PR / branch / diff' rather than 'find a bug' or 'run the suite'. Example queries: 'review the diff on this branch', 'walk me through what changed since main', 'PR review für diesen Branch', 'erkläre die Änderungen in den letzten 3 Commits', 'is this diff safe to merge', 'flag risky deletions in the staged changes', 'does this change need new tests', 'welche Tests fehlen für die neuen Funktionen'.",
-      "capabilities": ["pull request review", "diff review", "git diff inspection", "change risk assessment", "merge readiness check", "test coverage gap detection", "regression risk analysis", "commit walkthrough", "branch comparison"],
-      "tags": ["diff", "patch", "pr", "pullrequest", "merge-request", "review", "codereview", "git", "branch", "commit", "regression-risk", "merge", "staged", "unstaged", "rebase"],
+      "description": "Reviews a git diff or pull-request-shaped change set: inspects the changed lines on a branch or across recent commits, classifies each hunk by risk (renames, deletions, behavior changes, new dependencies), explains in plain language what changed, flags missing test coverage and doc/changelog gaps, and returns a merge-ready verdict. It only reads and explains the diff — it does not mutate the repo or open PRs (git_developer), review the whole tree at rest (code_analyst), or run the tests it recommends (qa_guard). Use for 'review this PR / branch / diff', not 'find a bug' or 'run the suite'. Example queries: 'review the diff on this branch', 'walk me through what changed since main', 'erkläre die Änderungen in den letzten 3 Commits', 'is this diff safe to merge', 'flag risky deletions in the staged changes', 'does this change need new tests'.",
+      "capabilities": ["git-diff review", "pull-request change review", "per-hunk risk classification", "merge-readiness verdict", "test-coverage gap detection", "doc/changelog gap detection", "commit-range walkthrough"],
+      "tags": ["diff-review", "pr-review", "merge-readiness", "change-risk", "coverage-gap", "branch-comparison", "commit-walkthrough"],
       "model": {
         "enableThinking": true,
         "temperature": 0.2,

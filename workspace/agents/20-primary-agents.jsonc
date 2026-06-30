@@ -2,9 +2,9 @@
   // Primary agents — require special infrastructure setup (pentest/Kali tooling, browser/desktop automation, infra ops, mail/calendar services, platform self-modification).
   "subAgents": {
     "pentest_coordinator": {
-      "description": "Penetration testing orchestrator. Handles two modes: live pentest engagements against authorized targets, and pentest-swarm maintenance requests that update prompts, tool selection, reporting workflow, and methodology docs. Live engagements require written authorization and PENTEST_SCOPE before active scanning.",
-      "capabilities": ["pentest coordination", "engagement planning", "methodology maintenance", "prompt tuning", "tool selection governance", "report writing"],
-      "tags": ["pentest", "security", "offensive"],
+      "description": "Penetration-testing engagement orchestrator: plans an authorized offensive-security assessment and drives the phased pentest swarm (recon_agent, web_auditor_agent, network_auditor_agent, exploit_agent, report_writer_agent) through recon, vulnerability analysis, web/network auditing, approval-gated exploitation, and reporting. Sets the engagement scope via pentest_set_scope (requires written authorization + target IPs/CIDRs/hosts) which unlocks active scanning. Also handles pentest-swarm MAINTENANCE: updating the pentest specialists' prompts, approved-tool lists, methodology SOP, and report structure. Distinct from the read-only researcher's CVE/advisory desk research and from infrastructure/ops agents — this agent commands live offensive tooling against in-scope systems. Example queries: 'run an authorized pentest against 10.0.0.0/24', 'starte einen Penetrationstest gegen den Webserver', 'plan and coordinate a security assessment of example.com', 'führe einen autorisierten Sicherheitstest durch', 'update the pentest swarm's methodology and approved tools', 'verbessere die Prompts der Pentest-Agenten'.",
+      "capabilities": ["pentest engagement coordination", "offensive security orchestration", "engagement scope authorization", "pentest phase sequencing", "pentest swarm maintenance", "pentest methodology governance", "approved-tool selection governance"],
+      "tags": ["pentest", "security", "offensive", "engagement", "scope", "authorization", "orchestration", "methodology"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -26,9 +26,9 @@
       ]
     },
     "recon_agent": {
-      "description": "Passive and active reconnaissance specialist. Performs port scanning, service enumeration, OS detection, and Exploit-DB searches to map the attack surface of authorized targets.",
-      "capabilities": ["network reconnaissance", "port scanning", "service enumeration", "OS fingerprinting", "CVE lookup"],
-      "tags": ["pentest", "recon", "nmap", "security"],
+      "description": "Pentest reconnaissance specialist that maps the attack surface of an authorized target by running live nmap scans (port discovery, service/version detection, OS fingerprinting, justified NSE scripts) and offline Exploit-DB/PoC lookups via searchsploit_query. Runs inside an active pentest engagement under a coordinator-set scope; produces structured per-host findings (open ports, services, versions, candidate CVEs, likely attack paths) for the auditor and exploit specialists. Unlike researcher's desk-based CVE/advisory lookup, this agent actively probes the network with Kali tooling. Example queries: 'scan the target for open ports and services', 'nmap-Portscan und Service-Enumeration des Zielhosts', 'enumerate services and fingerprint the OS of the in-scope host', 'führe Recon auf dem autorisierten Ziel durch'.",
+      "capabilities": ["pentest reconnaissance", "live port scanning", "service enumeration", "service version detection", "OS fingerprinting", "nmap NSE scripting", "exploit-db lookup", "attack-surface mapping"],
+      "tags": ["pentest", "recon", "nmap", "port-scan", "enumeration", "fingerprinting", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -46,9 +46,9 @@
       ]
     },
     "web_auditor_agent": {
-      "description": "Web application security auditor. Tests web services for directory traversal, SQL injection, misconfigurations, and known vulnerabilities using Nikto, Gobuster, and SQLMap.",
-      "capabilities": ["web vulnerability scanning", "directory brute-force", "SQL injection", "web reconnaissance"],
-      "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "security"],
+      "description": "Web-application security auditor in the Web Auditing phase of an authorized pentest. Tests in-scope HTTP services for the OWASP Top 10 / WSTG issues — server misconfigurations (Nikto), content/endpoint discovery (Gobuster directory brute-force), and SQL injection (SQLMap) — plus stack fingerprinting (whatweb/wafw00f) and manual reasoning about authz, sessions, and business-logic abuse. Operates on live authorized web targets with Kali web tooling; distinct from network_auditor_agent (protocol/service-level checks) and from code_analyst (static source review). Example queries: 'audit the web app for SQL injection and misconfigurations', 'teste die Webanwendung auf Schwachstellen', 'run nikto and gobuster against the in-scope site', 'OWASP-Top-10-Prüfung der Webseite durchführen'.",
+      "capabilities": ["web application vulnerability auditing", "owasp top 10 testing", "directory and content brute-force", "sql injection testing", "web server misconfiguration scanning", "web stack fingerprinting"],
+      "tags": ["pentest", "web", "nikto", "sqlmap", "gobuster", "owasp", "injection", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -68,9 +68,9 @@
       ]
     },
     "network_auditor_agent": {
-      "description": "Network security auditor. Performs in-depth network service assessment including UDP scanning, NSE script execution, and credential brute-force on exposed services.",
-      "capabilities": ["network auditing", "service exploitation", "credential testing", "NSE scripting"],
-      "tags": ["pentest", "network", "nmap", "hydra", "security"],
+      "description": "Network-protocol security auditor in the Network Auditing phase of an authorized pentest. Builds on recon data to assess exposed non-web services — SMB, FTP, SSH, RDP, DNS, TLS — with deep/UDP nmap scans, selective NSE scripts, and approval-gated credential brute-force (Hydra) on exposed login services. Distinct from web_auditor_agent (HTTP-app testing) and recon_agent (first-pass surface mapping); this agent goes deep on transport/service protocols. Example queries: 'audit the exposed SMB and SSH services for weaknesses', 'teste die Netzwerkdienste auf dem Zielhost', 'run a credential brute-force against the authorized FTP service', 'NSE-Skripte gegen die offenen Ports ausführen'.",
+      "capabilities": ["network service auditing", "protocol-level security assessment", "udp and deep nmap scanning", "nse script execution", "credential brute-force testing", "smb/ftp/ssh/rdp/dns/tls checks"],
+      "tags": ["pentest", "network", "nmap", "hydra", "smb", "ssh", "protocol", "brute-force", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -89,9 +89,9 @@
       ]
     },
     "exploit_agent": {
-      "description": "Exploitation specialist using Metasploit Framework. Executes verified exploits against authorized targets and keeps post-exploitation limited to impact verification. Requires explicit per-exploit approval from the user before running any exploit module.",
-      "capabilities": ["exploit execution", "metasploit", "payload delivery", "post-exploitation"],
-      "tags": ["pentest", "exploit", "metasploit", "security"],
+      "description": "Pentest exploitation specialist that runs Metasploit Framework modules against authorized, in-scope targets to validate confirmed vulnerabilities, with mandatory per-exploit user approval before any module fires and post-exploitation limited to minimal impact verification (identity, host, privilege level, reachable subnets). Only fires exploits that map to a confirmed service version or shared finding; prefers `check`/validation paths first. Distinct from recon/auditor agents (which find issues) and report_writer_agent (which documents them) — this is the only agent that actively exploits. Example queries: 'exploit the confirmed vulnerable service with metasploit', 'führe den freigegebenen Exploit gegen das Ziel aus', 'verify exploitability of the identified CVE on the authorized host', 'Proof-of-Concept-Ausnutzung der bestätigten Schwachstelle'.",
+      "capabilities": ["controlled exploit execution", "metasploit module execution", "vulnerability validation", "approval-gated exploitation", "limited post-exploitation impact verification"],
+      "tags": ["pentest", "exploit", "metasploit", "exploitation", "post-exploitation", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.05,
@@ -109,9 +109,9 @@
       ]
     },
     "report_writer_agent": {
-      "description": "Penetration test report writer. Collects all shared findings from the swarm and generates professional pentest deliverables with executive summary, severity ratings, evidence, remediation guidance, and optional alternate output formats.",
-      "capabilities": ["report writing", "finding aggregation", "risk rating", "remediation guidance", "executive summaries"],
-      "tags": ["pentest", "reporting", "security"],
+      "description": "Penetration-test report writer in the Reporting phase. Aggregates and de-duplicates all shared pentest findings, then produces a structured deliverable via pentest_report: engagement/scope summary, methodology references (PTES, NIST SP 800-115, OWASP WSTG, MITRE ATT&CK), findings ordered by severity with CVSS v3.1 scores, evidence, reproduction notes, remediation guidance, and retest priorities, plus a non-technical executive summary. Pentest-specific; not a general content_writer or paper_author. Example queries: 'write up the pentest findings into a final report', 'erstelle den Penetrationstest-Bericht aus den Findings', 'generate the executive summary and severity-rated report', 'Sicherheitsbericht mit Remediation-Empfehlungen verfassen'.",
+      "capabilities": ["pentest report writing", "finding aggregation and dedup", "severity and cvss rating", "remediation guidance", "executive summary writing"],
+      "tags": ["pentest", "reporting", "cvss", "remediation", "executive-summary", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.2,
@@ -129,9 +129,9 @@
       ]
     },
     "pentest_qa_validator": {
-      "description": "Cross-checks pentest findings for false positives, evidence quality, CVSS accuracy, and missing coverage before the final report.",
-      "capabilities": ["finding validation", "false positive detection", "CVSS review", "evidence quality audit", "coverage gap analysis"],
-      "tags": ["pentest", "qa", "validation", "security"],
+      "description": "Pentest finding-validation gate that runs before report_writer_agent assembles the final report. Reviews the shared pentest findings for false positives (banner-only matches, inapplicable scanner defaults), CVSS v3.1 score accuracy against the described vector/impact, evidence quality (is there concrete tool output proving the vuln?), reproduction-step specificity, and coverage gaps (open ports/services/endpoints found in recon but never tested). Pentest-specific QA — distinct from the general quality_supervisor/qa_guard and from source_verifier's citation checks. Example queries: 'validate the pentest findings before reporting', 'prüfe die Findings auf False Positives und CVSS-Genauigkeit', 'check which discovered services were never tested', 'Evidenz und Schweregrad der Sicherheitsfunde gegenprüfen'.",
+      "capabilities": ["pentest finding validation", "false positive detection", "cvss score review", "evidence quality audit", "reproduction-step review", "coverage gap analysis"],
+      "tags": ["pentest", "qa", "validation", "false-positive", "cvss", "coverage", "security"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -245,9 +245,9 @@
       ]
     },
     "infrastructure_agent": {
-      "description": "Infrastructure automation specialist for provisioning systems, deploying applications, and managing monitoring against external clusters and servers — Proxmox, Terraform, readiness checks, Ansible (incl. Vault), Kubernetes (kubectl read + mutate, helm), Prometheus / Alertmanager, Grafana, SSH, and SCP file transfers. Never runs a local cluster or local monitoring stack. Example queries: 'provision a new VM on Proxmox', 'apply the terraform plan for staging', 'deploy the container stack to prod', 'Ansible-Playbook für die Nginx-Konfiguration ausführen', 'VM einrichten und Docker installieren', 'terraform apply mit gespeichertem Plan', 'check the running pods on the prod cluster', 'kubectl get deployments im staging-Cluster', 'warum crasht der payments pod', 'helm releases im prod-Namespace auflisten', 'add a latency alert for the api service', 'Grafana-Dashboard für den neuen Dienst erstellen', 'mute payment alerts during maintenance', 'prometheus_query für die Fehlerrate der letzten Stunde', 'upload the deployment artifact via SSH', 'Dienst-Readiness prüfen bevor die Pipeline weitergeht'.",
+      "description": "Infrastructure automation specialist that MAKES changes against external clusters and servers: provisions VMs (Proxmox/vm_manage), applies Terraform plans, runs Ansible playbooks (incl. Vault), mutates Kubernetes (kubectl apply/scale/rollout/delete, helm upgrade/rollback), publishes Prometheus/Alertmanager silences and Grafana dashboards/alerts, and transfers files over SSH/SCP, gating readiness with service_check. Never runs a local cluster or local monitoring stack. Distinct from ops_triage (read-only diagnosis of failures) and devops_coordinator (CI/CD pipeline orchestration that delegates the actual change here). Example queries: 'provision a new VM on Proxmox', 'apply the terraform plan for staging', 'deploy the container stack to prod', 'Ansible-Playbook für die Nginx-Konfiguration ausführen', 'scale the prod deployment to 5 replicas', 'helm upgrade the release in the prod namespace', 'create a Grafana dashboard for the new service', 'mute payment alerts during maintenance', 'upload the deployment artifact via SSH'.",
       "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "kubernetes inspection", "kubectl read-only", "helm release inventory", "kubernetes deployments", "prometheus queries", "alertmanager silences", "grafana dashboards", "grafana alert rules", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
-      "tags": ["infrastructure", "ops", "devops", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "cluster", "pods", "deployments", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "monitoring", "ssh", "scp", "docker", "proxmox", "readiness", "provisioning", "deployment"],
+      "tags": ["infrastructure", "provisioning", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "ssh", "scp", "proxmox", "vm", "deployment"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -292,9 +292,9 @@
       ]
     },
     "ops_triage": {
-      "description": "Operational triage and runtime-incident specialist for service health, deployment failures, log-driven diagnosis, container/runtime issues, provider and gateway faults, configuration drift, and model-identifier problems. Example queries: 'why is the API returning 502', 'diagnose failing deployment on prod', 'LM Studio gateway times out', 'warum läuft der Container nicht', 'Health-Check für die staging-Umgebung', 'Log-Analyse für den letzten Absturz', 'provider returned invalid model id', 'Konfigurationsdrift zwischen Prod und Staging prüfen', 'SSH auf den Host und prüfe den Dienststatus'.",
-      "capabilities": ["service triage", "runtime incident triage", "deployment diagnosis", "log inspection", "container troubleshooting", "health-check analysis", "SSH diagnostics", "provider troubleshooting", "gateway diagnosis", "config drift detection", "invalid model id detection", "root cause analysis"],
-      "tags": ["ops", "triage", "logs", "containers", "reliability", "ssh", "server", "incident", "provider", "gateway", "debugging", "health", "rootcause", "config"],
+      "description": "Read-only operational-incident diagnostician that finds the ROOT CAUSE of a runtime failure before any remediation. Gathers the cheapest evidence — service_check probes, config/log reads, narrow shell/SSH commands, and kubectl_get/describe/logs/top against an external cluster — to separate provider faults, invalid model identifiers, gateway errors, stale runtime config / config drift, and container/deployment problems from one another. Diagnoses only; hands the fix to infrastructure_agent (provisioning/mutation) or devops_coordinator (rollout/rollback). Broader than log_analyst (which deep-parses a specific log file) and more diagnostic than shell_agent (which just runs a requested command). Example queries: 'why is the API returning 502', 'diagnose the failing deployment on prod', 'the LM Studio gateway times out — find the cause', 'warum läuft der Container nicht', 'provider returned an invalid model id', 'Konfigurationsdrift zwischen Prod und Staging prüfen'.",
+      "capabilities": ["runtime incident triage", "root cause analysis", "deployment failure diagnosis", "container troubleshooting", "health-check probing", "provider and gateway fault diagnosis", "config drift detection", "invalid model id detection"],
+      "tags": ["ops", "triage", "incident", "diagnosis", "rootcause", "reliability", "provider", "gateway", "health", "config-drift"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -326,9 +326,9 @@
       ]
     },
     "devops_coordinator": {
-      "description": "CI/CD and deployment coordinator for pipeline orchestration, container rollouts, rollback decisions, environment promotion, and deployment health verification. Example queries: 'promote the v2.3 build from staging to production', 'rolle das Deployment auf die vorherige Version zurück', 'diagnose the failing deployment pipeline', 'warum schlägt der CI-Build fehl?', 'run a canary rollout with health checks', 'führe Container-Rollout mit Gesundheitsprüfung aus', 'coordinate the blue-green switchover', 'Umgebungspromotion mit Qualitätspruefung'.",
-      "capabilities": ["ci/cd orchestration", "deployment coordination", "rollback planning", "environment promotion", "pipeline diagnosis", "container lifecycle", "deployment health", "release management", "canary deployment"],
-      "tags": ["devops", "cicd", "ci-cd", "deployment", "pipeline", "rollback", "container", "release", "promote", "environment", "staging", "production", "canary"],
+      "description": "CI/CD release coordinator that ORCHESTRATES a deployment end to end by sequencing other agents: checks GitHub CI is green on the head SHA (github_check_runs_list) and dispatches deploy workflows (github_actions_trigger), then delegates health checks to ops_triage, the actual rollout/provisioning to infrastructure_agent, the change-set review to git_developer, policy clearance to policy_compliance_reviewer, and post-deploy smoke tests to qa_guard. Owns environment promotion (staging→prod), canary/blue-green rollouts, and rollback decisions (smallest safe scope, prod changes require confirmation). It coordinates rather than running the low-level commands itself. Example queries: 'promote the v2.3 build from staging to production', 'rolle das Deployment auf die vorherige Version zurück', 'run a canary rollout with health checks', 'coordinate the blue-green switchover', 'Umgebungspromotion mit Freigabeprüfung'.",
+      "capabilities": ["ci/cd release orchestration", "environment promotion", "rollback decision-making", "canary and blue-green coordination", "github actions dispatch", "ci status gating", "post-deploy verification coordination"],
+      "tags": ["devops", "cicd", "release", "deployment", "pipeline", "rollback", "promote", "canary", "blue-green", "coordination"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -426,10 +426,10 @@
       ]
     },
     "notification_agent": {
-      "description": "Cross-channel notification specialist for sending messages via Telegram, Slack, Discord, and email. Example queries: 'send the deployment status to the ops Slack channel', 'benachrichtige das Team per Telegram über das Ergebnis', 'post the release notes to Discord', 'sende eine Alarm-E-Mail an den Bereitschaftsdienst', 'notify the customer success channel about the incident', 'Nachricht an mehrere Kanäle mit angepasstem Format'.",
+      "description": "Outbound notification dispatcher that fires short status messages, alerts, and broadcasts to chat/messaging channels — Telegram, Slack (mrkdwn), Discord (markdown), and alert email — adapting the format per platform. For one-way notifications and announcements, NOT inbox management: mailbox reading/triage/threaded replies belong to mail_agent. Example queries: 'send the deployment status to the ops Slack channel', 'benachrichtige das Team per Telegram über das Ergebnis', 'post the release notes to Discord', 'sende eine Alarm-E-Mail an den Bereitschaftsdienst', 'notify the on-call channel about the incident', 'denselben Hinweis kanal-angepasst an mehrere Kanäle senden'.",
       "domain": "communication",
-      "capabilities": ["telegram messaging", "slack messaging", "discord messaging", "email sending", "multi-channel notifications", "alert routing", "status broadcasts", "platform formatting"],
-      "tags": ["notifications", "messaging", "telegram", "slack", "discord", "email", "e-mail", "alerts", "broadcast", "channels"],
+      "capabilities": ["outbound channel notifications", "telegram messaging", "slack messaging", "discord messaging", "alert email dispatch", "multi-channel broadcast", "per-platform formatting", "alert routing"],
+      "tags": ["notifications", "messaging", "telegram", "slack", "discord", "alerts", "broadcast", "announcement", "channels"],
       "model": {
         "enableThinking": false,
         "temperature": 0.1,
@@ -503,9 +503,9 @@
       ]
     },
     "prompt_optimizer": {
-      "description": "Reviews agent prompts for convergence, grounding, and tool-use quality. Proposes the smallest prompt change that improves routing fit, stopping behavior, and grounded output. Example queries: 'review the researcher agent prompt', 'optimize the coder system prompt to avoid infinite loops', 'prüfe den Systemprompt auf Konvergenz', 'Prompt-Qualität für den Prompt des data_analyst analysieren', 'the agent keeps looping, fix its prompt', 'Systemprompt überarbeiten damit er schneller zum Ziel kommt'.",
-      "capabilities": ["prompt analysis", "prompt rewriting", "tool-use convergence", "agent quality review", "grounding improvement", "stopping-condition tuning"],
-      "tags": ["prompts", "prompt", "quality", "agents", "optimization", "convergence", "tuning"],
+      "description": "Prompt-quality reviewer that reads an existing agent's systemPrompt and proposes the SMALLEST change to improve routing fit, tool-use convergence, stopping behavior, and grounded output (e.g. an agent that loops or makes unsupported claims). Prompt-only and advisory: it diagnoses and recommends wording, whereas swarm_maintainer implements durable config/prompt edits across the workspace shards and tool_developer writes new tool code. Example queries: 'review the researcher agent prompt for convergence', 'the coder agent keeps looping — what prompt change fixes it', 'prüfe den Systemprompt auf Konvergenz und Grounding', 'schlage die kleinste Prompt-Änderung für den data_analyst vor', 'why does this agent over-claim — suggest a prompt fix'.",
+      "capabilities": ["prompt review", "prompt change proposal", "tool-use convergence analysis", "stopping-condition tuning", "grounding improvement", "routing-fit assessment"],
+      "tags": ["prompts", "prompt", "quality", "convergence", "tuning", "review"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,

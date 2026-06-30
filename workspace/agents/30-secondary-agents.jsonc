@@ -2,9 +2,9 @@
   // Secondary agents — very specific / niche single-purpose specialists.
   "subAgents": {
     "data_analyst": {
-      "description": "Analyzes structured data such as CSV, JSON, spreadsheets, metrics snapshots, and exported reports. Computes aggregations, trends, summaries, and anomalies from tabular evidence while preserving exact values, units, and caveats. Example queries: 'compute monthly revenue from this CSV', 'summarize the metrics in this JSON export', 'analysiere die Verkaufszahlen aus der Excel-Tabelle', 'welche Auffälligkeiten zeigen die KPIs', 'group this dataset by region and compute average', 'Trendanalyse der letzten 6 Monate', 'read CSV and compute averages by category'.",
-      "capabilities": ["data analysis", "csv review", "json inspection", "metrics interpretation", "tabular summarization", "aggregation", "trend analysis", "anomaly detection", "kpi computation"],
-      "tags": ["data", "analysis", "csv", "json", "xlsx", "spreadsheet", "metrics", "kpi", "trend", "aggregation", "statistics"],
+      "description": "Computes over already-collected structured data files — CSV, JSON, XLSX spreadsheets, exported metrics snapshots — to produce aggregations, group-bys, trends, KPIs, and statistical anomalies, preserving exact values, units, column names, and caveats. Reads files in the workspace and runs numeric tool pipelines on them; it does NOT query live databases (route SQL/Postgres/MySQL work to sql_specialist), does NOT render the numbers as charts or tables (chart_designer does that), and does NOT reconcile conflicting prose sources (evidence_analyst does that). Hands cleaned figures to chart_designer for plotting. Example queries: 'compute monthly revenue from this CSV', 'group this dataset by region and average the spend', 'analysiere die Verkaufszahlen aus der Excel-Tabelle', 'welche KPIs weichen vom Trend ab', 'flag anomalies in this metrics export', 'read the spreadsheet and compute averages by category'.",
+      "capabilities": ["structured-data analysis", "csv computation", "json data inspection", "spreadsheet aggregation", "group-by and pivot", "trend analysis", "statistical anomaly detection", "kpi computation"],
+      "tags": ["data", "analysis", "csv", "json", "xlsx", "spreadsheet", "metrics", "kpi", "trend", "aggregation", "statistics", "tabular"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -37,9 +37,9 @@
       ]
     },
     "log_analyst": {
-      "description": "Log parsing and anomaly detection specialist for structured JSON logs, journald output, nginx/web server access logs, application logs, and container logs. Extracts error patterns, rate spikes, latency outliers, and security signals. Example queries: 'why did error rate spike yesterday at 14:00?', 'analysiere die nginx-Logs auf ungewöhnliche Zugriffe', 'find the root cause in these container logs', 'Fehlermuster in der Anwendungslogdatei erkennen', 'identify slow requests over the last hour', 'Auffälligkeiten in journald seit Dienstag', 'correlate error IDs across services'.",
-      "capabilities": ["log parsing", "error pattern detection", "anomaly detection", "latency analysis", "access log analysis", "journald", "container logs", "security log analysis", "log summarization", "incident timeline reconstruction", "correlation id tracing"],
-      "tags": ["logs", "log-analysis", "errors", "anomaly", "journald", "nginx", "container-logs", "latency", "monitoring", "audit-log", "incident"],
+      "description": "Reads log TEXT and extracts patterns from it: structured JSON logs, journald output, nginx/web access logs, application stack traces, and container logs (via read_file, journalctl/docker-logs over ssh, or kubectl_logs). Surfaces error clusters, request-rate and latency outliers, authentication-failure bursts, and reconstructs an incident timeline by tracing correlation IDs across services. Its job is reading and correlating the log lines themselves — distinct from ops_triage, which diagnoses a live failing service end-to-end (health checks, config drift, provider/gateway faults) and may call on this agent for the log-reading slice. Example queries: 'why did error rate spike yesterday at 14:00', 'analysiere die nginx-Logs auf ungewöhnliche Zugriffe', 'trace the root cause through these container logs', 'identify the slowest requests in the last hour from the access log', 'correlate this error ID across the service logs'.",
+      "capabilities": ["log parsing", "error pattern extraction", "log anomaly detection", "latency outlier analysis", "access log analysis", "stack-trace triage", "security-log signal detection", "incident timeline reconstruction", "correlation id tracing"],
+      "tags": ["logs", "log-analysis", "errors", "stacktrace", "journald", "nginx", "container-logs", "access-log", "latency", "correlation-id", "incident"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -65,9 +65,9 @@
       ]
     },
     "document_intake": {
-      "description": "Attachment, document, and file analysis specialist for PDFs, DOCX, images, audio, video, spreadsheets, Jupyter notebooks (.ipynb), email files (.eml/.mbox), iCalendar files (.ics), and mixed payloads. Classifies, extracts, normalizes, and prepares reusable facts and exact text for downstream agents. Example queries: 'extract all line items from this invoice PDF', 'summarize this 40-page report', 'was steht auf der gescannten Rechnung', 'Metadaten aus dem DOCX lesen', 'fill in this PDF form', 'analyze the screenshots in this ZIP', 'Tabelle aus dem Excel-Sheet extrahieren', 'OCR für das eingescannte Dokument', 'walk through this Jupyter notebook', 'lies das .eml und gib mir den Inhalt', 'parse the .ics into structured events', 'transcribe the meeting recording video'.",
-      "capabilities": ["document intake", "attachment analysis", "attachment classification", "document extraction", "content normalization", "metadata extraction", "exact text extraction", "PDF form filling", "spreadsheet reading", "image OCR prep", "handoff preparation", "jupyter notebook reading", "email file parsing", "icalendar parsing", "video transcription"],
-      "tags": ["documents", "files", "intake", "attachments", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "video", "transcription", "analysis", "extraction", "ocr", "metadata"],
+      "description": "Extracts exact text, tables, and metadata out of BINARY or non-plaintext attachments and prepares them as reusable facts for the rest of the swarm: PDFs (incl. scanned/OCR and fillable forms), DOCX, XLSX/CSV spreadsheets, images, audio and video (transcription), Jupyter notebooks (.ipynb), email files (.eml/.mbox), and iCalendar (.ics). It is the FIRST step that turns an uploaded file into machine-readable content; it does not write summaries for the user (summarizer does that on already-readable text) and does not reconcile conflicting sources (evidence_analyst does that). Example queries: 'extract all line items from this invoice PDF', 'fill in this PDF form', 'was steht auf der gescannten Rechnung', 'Tabelle aus dem Excel-Sheet extrahieren', 'walk through this Jupyter notebook', 'lies das .eml und gib mir den Inhalt', 'parse the .ics into structured events', 'transcribe the meeting recording video'.",
+      "capabilities": ["document intake", "attachment extraction", "file-format classification", "metadata extraction", "exact text extraction", "PDF form filling", "spreadsheet reading", "OCR preparation", "jupyter notebook extraction", "email-file parsing", "icalendar parsing", "audio and video transcription"],
+      "tags": ["documents", "files", "intake", "attachments", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "audio", "video", "transcription", "extraction", "ocr", "metadata"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -97,9 +97,9 @@
       ]
     },
     "paper_author": {
-      "description": "Drafts source-grounded papers, literature reviews, and evidence-based reports from collected evidence. Works only from verified facts and provided sources; never fabricates authors, titles, DOIs, or quotes. Example queries: 'write a technical paper from the collected notes', 'schreibe einen Literaturüberblick zu MCP und A2A', 'draft a source-backed report on LLM safety', 'wissenschaftlicher Bericht aus den Quellen verfassen', 'build an evidence-grounded white paper', 'akademischen Artikel über Vektorsuche entwerfen'.",
-      "capabilities": ["scientific writing", "paper drafting", "literature review drafting", "source-grounded reports", "white paper drafting", "citation management"],
-      "tags": ["papers", "reports", "citations", "research", "drafting", "whitepaper", "academic", "scientific"],
+      "description": "Drafts FORMAL, source-grounded long-form documents from an already-collected evidence ledger: academic and technical papers, literature reviews, white papers, and citation-backed reports with a proper references section. Writes only from verified shared facts and provided sources, and never fabricates authors, titles, DOIs, journals, years, or quotes; if the evidence ledger is too thin it asks for research first rather than padding. Distinct from content_writer (marketing copy, blogs, websites, slide decks) and from researcher (gathers the sources but does not compose the paper). Persists the document via generate_document/PDF/DOCX for review. Example queries: 'write a technical paper from the collected notes', 'schreibe einen Literaturüberblick zu MCP und A2A', 'draft a source-backed report on LLM safety with a references list', 'wissenschaftlicher Bericht aus den Quellen verfassen', 'build an evidence-grounded white paper'.",
+      "capabilities": ["academic writing", "technical paper drafting", "literature review drafting", "source-grounded report drafting", "white paper drafting", "citation and reference management"],
+      "tags": ["papers", "report", "citations", "references", "literature-review", "whitepaper", "academic", "scientific"],
       "model": {
         "enableThinking": true,
         "temperature": 0.15,
@@ -122,9 +122,9 @@
       ]
     },
     "meeting_briefing_agent": {
-      "description": "Briefing specialist for turning long threads, files, findings, and project updates into concise handoff notes and executive-ready summaries. Example queries: 'prepare the Monday stand-up briefing', 'executive summary of last week's incidents', 'Briefing für das Vorstandsmeeting erstellen', 'fasse den Status des Projekts für das Team zusammen', 'handoff notes for the night shift', 'Statuspaket mit offenen Punkten und nächsten Schritten'.",
-      "capabilities": ["meeting briefings", "handoff notes", "status packets", "executive summaries", "action lists", "stand-up prep"],
-      "tags": ["briefing", "handoff", "meetings", "summary", "status", "executive", "standup"],
+      "description": "Assembles action-oriented BRIEFINGS and handoff packets from collected threads, files, and shared findings — structured for fast reading around status, key facts, risks/blockers, decisions needed, owners, dates, and next actions (not a flat TL;DR — that is summarizer's job; not a formal cited paper — that is paper_author's). Produces stand-up notes, shift-handoff packets, executive status memos, and meeting prep. Example queries: 'prepare the Monday stand-up briefing', 'executive status memo on last week's incidents with owners and next steps', 'Briefing für das Vorstandsmeeting mit offenen Punkten erstellen', 'handoff notes for the night shift', 'Statuspaket mit Blockern und nächsten Schritten'.",
+      "capabilities": ["status briefings", "handoff packets", "executive status memos", "decisions-and-owners tracking", "action item lists", "stand-up preparation"],
+      "tags": ["briefing", "handoff", "status", "executive-memo", "action-items", "standup", "blockers"],
       "model": {
         "enableThinking": false,
         "temperature": 0.15,
@@ -151,9 +151,9 @@
       ]
     },
     "diagram_designer": {
-      "description": "Creates Mermaid diagrams and visual knowledge maps from verified evidence, workflows, architectures, and timelines. Turns facts into flowcharts, sequence diagrams, timelines, graphs, and mindmaps. Example queries: 'diagram the deployment pipeline', 'Sequence-Diagramm für den Auth-Flow', 'Flussdiagramm der Bestellabwicklung', 'render a mindmap of the research topics', 'zeichne die Systemarchitektur als Mermaid-Graph', 'visualize the incident timeline'.",
-      "capabilities": ["mermaid diagrams", "workflow visualization", "architecture mapping", "timeline visualization", "evidence visualization", "flowchart design", "sequence diagrams", "mindmap creation"],
-      "tags": ["diagram", "mermaid", "visualization", "workflow", "architecture", "timeline", "flowchart", "sequence", "mindmap"],
+      "description": "Renders STRUCTURAL/relationship diagrams as Mermaid from established facts: flowcharts for workflows and pipelines, sequenceDiagram for interactions, timeline for chronology, graph for relationships, and mindmap for grouped concepts. Visualizes process/architecture/dependency structure — NOT numeric data (chart_designer plots numbers as HTML charts and tables) and NOT free-form artwork or logos (image_creator generates raster/SVG/QR). Diagrams only structure already supplied by the user or upstream agents. Example queries: 'diagram the deployment pipeline as a flowchart', 'Sequence-Diagramm für den Auth-Flow', 'Flussdiagramm der Bestellabwicklung', 'mindmap of the research topics', 'zeichne die Systemarchitektur als Mermaid-Graph', 'visualize the incident timeline'.",
+      "capabilities": ["mermaid diagram authoring", "workflow flowcharts", "architecture and dependency graphs", "sequence diagrams", "timeline diagrams", "mindmaps"],
+      "tags": ["diagram", "mermaid", "flowchart", "sequence-diagram", "architecture-diagram", "timeline", "graph", "mindmap"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -177,9 +177,9 @@
       ]
     },
     "chart_designer": {
-      "description": "Creates grounded HTML charts, tables, and lightweight visual summaries from verified numeric evidence and sourced time series. Supports line, bar, area, scatter, and combo charts plus HTML tables. Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'render a scatter plot of price vs. quality', 'Tabelle der KPIs als HTML', 'create a time-series chart from the verified metrics', 'Kombi-Diagramm aus Umsatz und Marge'.",
-      "capabilities": ["html charts", "data visualization", "time-series charting", "table design", "artifact rendering", "line charts", "bar charts", "scatter plots"],
-      "tags": ["chart", "html", "visualization", "data", "table", "plot", "graph", "timeseries"],
+      "description": "Plots already-verified NUMBERS as HTML charts and tables: line, bar, area, scatter, and combo charts plus formatted HTML data tables, preserving exact labels, units, date ranges, and source names. Takes a clean dataset and renders it — it does NOT compute or clean the figures (data_analyst does that; chart_designer hands messy data back to it) and does NOT draw process/architecture structure (diagram_designer does that with Mermaid). Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'scatter plot of price vs. quality', 'Tabelle der KPIs als HTML', 'time-series chart from the verified metrics', 'Kombi-Diagramm aus Umsatz und Marge'.",
+      "capabilities": ["html chart rendering", "numeric data visualization", "time-series charting", "html data tables", "line/bar/area charts", "scatter and combo charts"],
+      "tags": ["chart", "html", "plot", "data-visualization", "table", "bar-chart", "line-chart", "scatter", "timeseries"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -202,9 +202,9 @@
       ]
     },
     "image_creator": {
-      "description": "Image generation specialist for prompt refinement and final image creation. Produces illustrations, concept art, diagrams-as-image, marketing visuals, and direct SVG / QR code artifacts with verified output. Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a cover illustration in watercolor style', 'Bildgenerierung für Produktwerbung', 'design a minimalist logo concept', 'Bild eines Cyberpunk-Stadtbilds rendern', 'erstelle einen QR-Code für die Webseite', 'render an SVG badge with the version number', 'generate a QR code for the WiFi credentials'.",
-      "capabilities": ["image generation", "prompt refinement", "illustration creation", "concept art", "visual design", "svg authoring", "qr code generation"],
-      "tags": ["image", "design", "multimodal", "illustration", "art", "generation", "visual", "svg", "qr", "qr-code", "vector"],
+      "description": "GENERATES brand-new visual artifacts from a prompt: raster illustrations, concept art, and marketing imagery via a diffusion model (then verifies with analyze_image), hand-authored SVG vector graphics (icons, badges, logos, simple geometric art), and QR codes (URLs, Wi-Fi credentials, vCards). This is creation from scratch — it does NOT find or download existing web photos (image_sourcer does that), does NOT plot data (chart_designer) and does NOT draw Mermaid structure diagrams (diagram_designer). Example queries: 'generate a hero image for the blog post', 'erstelle ein Bild eines Sonnenuntergangs über Bergen', 'create a watercolor cover illustration', 'design a minimalist logo as SVG', 'render an SVG version badge', 'generate a QR code for the WiFi credentials'.",
+      "capabilities": ["image generation", "prompt-to-image illustration", "concept art generation", "svg vector authoring", "logo and badge creation", "qr code generation"],
+      "tags": ["image-generation", "illustration", "concept-art", "diffusion", "svg", "vector", "logo", "qr-code"],
       "model": {
         "enableThinking": false,
         "temperature": 0.45,
@@ -258,9 +258,9 @@
       ]
     },
     "api_integrator": {
-      "description": "HTTP API specialist for testing endpoints, consuming REST/GraphQL APIs, and building integrations. Covers auth, headers, status codes, response validation, webhook testing. Example queries: 'test the /users endpoint with bearer auth', 'call the GraphQL API and validate the response shape', 'REST-Endpunkt testen und JSON prüfen', 'Webhook auf Erreichbarkeit testen', 'GET http://host:1234/v1/models auf LM Studio prüfen', 'API-Antwort gegen Schema validieren', 'integrate with the payment provider API'.",
-      "capabilities": ["API testing", "REST calls", "GraphQL queries", "webhook testing", "HTTP debugging", "response validation", "endpoint health checks"],
-      "tags": ["api", "http", "rest", "graphql", "integration", "testing", "endpoint", "webhook", "json"],
+      "description": "CALLS existing HTTP endpoints to test and consume them: issues REST and GraphQL requests with auth headers (Bearer/API-key), inspects status codes, headers, and response bodies, validates the response shape against an expected schema, and checks webhook reachability. It exercises APIs that already exist — it does NOT write or launch a server (backend_coder builds+serves Node/Express apps), does NOT operate clusters or monitoring stacks (infrastructure_agent), and does NOT run live SQL (sql_specialist). Example queries: 'test the /users endpoint with bearer auth', 'call the GraphQL API and validate the response shape', 'REST-Endpunkt testen und JSON prüfen', 'check whether the webhook is reachable', 'GET http://host:1234/v1/models auf LM Studio prüfen', 'validate the API response against this schema'.",
+      "capabilities": ["http endpoint testing", "rest api calls", "graphql queries", "webhook reachability testing", "response schema validation", "auth header handling", "endpoint health checks"],
+      "tags": ["api", "http", "rest", "graphql", "endpoint", "webhook", "request", "response-validation", "integration-testing"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -283,9 +283,9 @@
       ]
     },
     "sql_specialist": {
-      "description": "SQL and database specialist for PostgreSQL and MySQL/MariaDB: live query execution, schema exploration, analytical query authoring, query optimization, index recommendations, schema migrations, EXPLAIN plan analysis, and data export. Example queries: 'show me the top 10 customers by revenue', 'optimize this slow query', 'schreibe eine Migration für eine neue Spalte email_verified', 'welche Indizes fehlen in der orders-Tabelle', 'count active users per region last month', 'Schema der users-Tabelle anzeigen', 'export query result to spreadsheet', 'EXPLAIN-Plan für diese SELECT analysieren', 'Foreign-Key-Beziehungen in der Bestelldatenbank prüfen'.",
-      "capabilities": ["sql queries", "sql query writing", "query optimization", "database inspection", "schema discovery", "schema design", "index recommendation", "migration scripts", "query performance analysis", "explain plan analysis", "data export", "postgres", "mysql", "mariadb"],
-      "tags": ["database", "sql", "postgres", "mysql", "mariadb", "data", "query", "schema", "migration", "index", "performance", "optimization", "explain"],
+      "description": "Connects to LIVE relational databases (PostgreSQL and MySQL/MariaDB) to run queries and manage schema: executes parameterized SELECT/analytical queries, explores tables and columns via information_schema, authors and optimizes queries, recommends indexes, writes idempotent schema migrations, interprets EXPLAIN/EXPLAIN ANALYZE plans, and exports results to a spreadsheet. Operates against a real DB connection (credentials via get_site_credentials) — distinct from data_analyst, which computes over CSV/JSON/XLSX files with no DB, and from api_integrator, which calls HTTP APIs. Example queries: 'show the top 10 customers by revenue', 'optimize this slow query', 'schreibe eine Migration für die Spalte email_verified', 'welche Indizes fehlen in der orders-Tabelle', 'Schema der users-Tabelle anzeigen', 'analyze the EXPLAIN plan for this SELECT'.",
+      "capabilities": ["live sql query execution", "analytical query authoring", "query optimization", "schema exploration", "schema design", "index recommendation", "migration script writing", "explain plan analysis", "query result export", "postgresql", "mysql", "mariadb"],
+      "tags": ["database", "sql", "postgres", "mysql", "mariadb", "query", "schema", "migration", "index", "explain", "optimization"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -309,9 +309,9 @@
       ]
     },
     "source_verifier": {
-      "description": "Checks drafts for unsupported claims, broken citations, fabricated references, and quote drift. Spot-checks doubtful sources and flags places where a citation does not actually support the claim. Example queries: 'check this paper for fabricated citations', 'verify every claim in the draft against the evidence', 'prüfe den Text auf unbelegte Aussagen', 'Zitate und Quellenangaben kontrollieren', 'validate the bibliography of this article', 'sind alle Fakten durch Quellen belegt'.",
-      "capabilities": ["citation verification", "fact checking", "source validation", "bibliography audit", "quote drift detection", "unsupported claim detection"],
-      "tags": ["verification", "citations", "fact-checking", "research", "bibliography", "validation", "sources"],
+      "description": "Audits an EXISTING written draft against its evidence: checks every claim and citation for unsupported statements, fabricated or invented references, broken/missing URLs, wrong dates, and quote drift, and flags any citation that does not actually support the claim it is attached to. Spot-checks doubtful references with web_search/web_fetch but does NOT gather new evidence to expand the draft (that is researcher) and does NOT judge overall completeness or acceptance (that is quality_supervisor). Returns precise issues pointing at the offending claim and the supporting (or missing) source. Example queries: 'check this paper for fabricated citations', 'verify every claim in the draft against the evidence', 'prüfe den Text auf unbelegte Aussagen', 'Zitate und Quellenangaben kontrollieren', 'validate the bibliography of this article'.",
+      "capabilities": ["citation verification", "claim-to-source checking", "fabricated reference detection", "broken-url detection", "quote drift detection", "bibliography audit"],
+      "tags": ["citation-check", "fact-checking", "fabrication-detection", "quote-drift", "bibliography-audit", "unsupported-claims"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
@@ -332,9 +332,9 @@
       ]
     },
     "policy_compliance_reviewer": {
-      "description": "Policy and approval specialist for checking planned actions, outputs, and workflows against guardrails, approvals, compliance, credential handling, and data-sensitivity rules. Example queries: 'review this deployment plan for compliance risk', 'check if this workflow needs explicit approval', 'prüfe den Plan auf Datenschutzrisiken', 'welche Freigaben sind für diese Aktion nötig', 'flag any policy violations in this output', 'Compliance-Prüfung für den geplanten Export'.",
-      "capabilities": ["policy review", "approval analysis", "compliance screening", "risk flagging", "workflow constraints", "credential-handling review", "data-sensitivity assessment"],
-      "tags": ["policy", "compliance", "approval", "risk", "review", "guardrail", "privacy"],
+      "description": "Screens a planned action, output, or workflow for POLICY and APPROVAL risk before it runs: identifies which steps need explicit approval, flags destructive operations, unsafe credential handling, external data egress, data-sensitivity/privacy exposure, and unsupported authorization claims, then classifies each as a hard blocker, soft risk, or missing evidence. It judges whether something is ALLOWED and what approvals it needs — distinct from quality_supervisor, which judges whether a deliverable is complete and grounded. Example queries: 'review this deployment plan for compliance risk', 'check if this workflow needs explicit approval', 'prüfe den Plan auf Datenschutzrisiken', 'welche Freigaben sind für diese Aktion nötig', 'flag any policy violations before this export'.",
+      "capabilities": ["policy review", "approval-requirement analysis", "compliance screening", "credential-handling review", "data-sensitivity assessment", "authorization-claim verification", "risk classification"],
+      "tags": ["policy", "compliance", "approval", "guardrail", "privacy", "data-sensitivity", "authorization"],
       "model": {
         "enableThinking": true,
         "temperature": 0.1,
