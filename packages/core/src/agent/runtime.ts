@@ -3828,17 +3828,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }, { sessionId: session.id, severity: "warn" });
       }
 
-      // Citation-honesty guard (orchestration.citationHonestyGuard, default-off, eval-gated):
-      // a sourceSensitive turn that ran NO real web/research execution but whose answer carries
-      // URL citations is FABRICATING sources (audit 1303e254: 7 invented 404 URLs, zero
+      // Citation-honesty guard (orchestration.citationHonestyGuard) — FULLY STRUCTURAL, no input
+      // classification. ANY answer that presents URL citations but ran NO real web/research
+      // execution this turn is fabricating sources (audit 1303e254: 7 invented 404 URLs, zero
       // delegation, only a failed run_workflow). Strip the fabricated URLs + prepend the honest
       // unverified caveat so no 404 link ever ships and any "verified" framing is corrected.
-      // Detection + strip are STRUCTURAL (URL shape, language-free — works for EN/DE/FR/…); the
-      // gate is the HONEST execution signals (a real delegation, a SUCCESSFUL workflow, a direct
-      // web tool, shared findings), NOT the orchestration flag, so a genuinely-researched answer
-      // keeps its citations. Never empties the answer.
+      // Both the trigger (answer carries URLs) and the gate (no real delegation / SUCCESSFUL
+      // workflow / direct web tool / shared findings ran) are STRUCTURAL + language-free — there
+      // is NO sourceSensitive keyword gate (de-lexicalized): a fabricated link is caught whatever
+      // the question was, in any language; a genuinely-researched answer keeps its citations.
       if (getConfig().orchestration?.citationHonestyGuard === true
-        && initialDynamicGuidance?.sourceSensitive === true
         && answerPresentsSourceCitations(finalResponse)) {
         const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
         const webToolCalledDirectly = [..._turnToolCallCounts.keys()].some(isWebReachingTool);
@@ -3853,7 +3852,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
           logAudit("guardrail_flagged", {
             type: "fabricated_citations_stripped",
-            sourceSensitive: true,
+            trigger: "structural_url_citation_without_research",
           }, { sessionId: session.id, severity: "warn" });
         }
       }
