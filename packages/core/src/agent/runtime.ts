@@ -74,7 +74,6 @@ import {
   extractAssistantName,
   type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
-  PRODUCT_RECOMMENDATION_PATTERNS,
   WORKFLOW_HINT_TERMS,
   WORKFLOW_ACTION_TERMS,
   WORKFLOW_DELIVERABLE_HINT_TERMS,
@@ -136,6 +135,35 @@ export {
   looksLikeRawToolEvidenceDump,
   stripLeadingDelegateLabelEcho,
 } from "./runtime-evidence-dump.js";
+
+// Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
+import {
+  looksLikeTransparentIncompleteReport,
+  isBroadSourceSensitiveAdvisoryRequest,
+  buildSynthesisRequiredDirective,
+  prependUnverifiedSourceCaveat,
+  answerPresentsSourceCitations,
+  stripFabricatedCitations,
+} from "./citation-honesty.js";
+
+// Re-export the originally-exported honesty helpers so existing imports from
+// runtime.js (tests, tools) keep working after the extraction.
+export {
+  buildSynthesisRequiredDirective,
+  prependUnverifiedSourceCaveat,
+  answerPresentsSourceCitations,
+  stripFabricatedCitations,
+} from "./citation-honesty.js";
+
+// Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
+import {
+  stripUntrustedDelegationContext,
+  deriveDelegationTaskFromArgs,
+} from "./delegation-response-collapse.js";
+
+// Re-export the originally-exported delegation-arg helper so existing imports
+// from runtime.js (tests, tools) keep working after the extraction.
+export { deriveDelegationTaskFromArgs } from "./delegation-response-collapse.js";
 
 const log = childLogger("agent:runtime");
 
@@ -361,65 +389,6 @@ function withDefaultResearchFallbackAgents(
   return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
 }
 
-function stripUntrustedDelegationContext(args: Record<string, unknown>): Record<string, unknown> {
-  if (!("context" in args)) return args;
-  const nextArgs = { ...args };
-  delete nextArgs["context"];
-  return nextArgs;
-}
-
-function looksLikeTransparentIncompleteReport(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return /\b(partial|incomplete|failed|failure|blocked|timed out|timeout|could not|unable|unverified|missing evidence|attempted)\b/.test(normalized);
-}
-
-function isBroadSourceSensitiveAdvisoryRequest(userMessage: string): boolean {
-  const normalized = userMessage.trim().toLowerCase();
-  if (!normalized) return false;
-
-  let signals = 0;
-  if (PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))) signals += 1;
-  if (/\b(layout|wiring|schematic|verdrahtung|schaltplan|connect(?:ion)?|put all of it together|zusammenbauen|zusammenstecken)\b/i.test(normalized)) signals += 1;
-  if (/\b(what else do i need|what do i need|bom|bill of materials|parts list|st[üu]ckliste|bauteilliste|battery|usb-c|charger|charging module|buttons?)\b/i.test(normalized)) signals += 1;
-  if (/\b(improvement|improvements|improve|best quality|quality for transcription|transcription quality|verbesser(?:ung|ungen|e|n)?|beste qualit[äa]t)\b/i.test(normalized)) signals += 1;
-  if ((normalized.match(/\n/g) ?? []).length >= 4) signals += 1;
-
-  return signals >= 2;
-}
-
-/**
- * Build the `[SYNTHESIS REQUIRED]` directive injected after orchestration. Three
- * shapes, pure so the selection is unit-testable:
- *  - artifacts attached → a SHORT completion summary (don't paste file contents);
- *  - partial/thin evidence on a source-sensitive turn → an HONESTY directive that
- *    forbids asserting any unverified specific (audit 0dc158ad: the normal "copy the
- *    exact names and numbers" wording oversold ~500 chars of off-topic evidence and
- *    the model fabricated an analog mic's interface as I2S). This is the central
- *    "never made-up facts" rule applied at the exact point that induced the fabrication;
- *  - otherwise → the standard "synthesise from the grounded evidence" directive.
- */
-export function buildSynthesisRequiredDirective(opts: {
-  artifactPaths?: readonly string[];
-  partialEvidence?: boolean;
-}): string {
-  const artifactPaths = (opts.artifactPaths ?? []).filter(Boolean);
-  if (artifactPaths.length > 0) {
-    return "[SYNTHESIS REQUIRED] The orchestration is COMPLETE and its deliverables are attached to this message as files ("
-      + artifactPaths.slice(0, 12).join(", ")
-      + "). Write a SHORT final answer in the user's language: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.";
-  }
-  if (opts.partialEvidence) {
-    return "[SYNTHESIS REQUIRED] The research for this turn did NOT complete — the evidence above is PARTIAL and is probably missing the specifics the request needs. "
-      + "Write the most useful answer you honestly can in the user's language, but follow the quality rule strictly: state a concrete fact — a spec, interface, rating, dimension, price, part number, model name, URL, or figure — as confirmed ONLY if it appears verbatim in the evidence above. "
-      + "For anything NOT in that evidence, including details you believe you already know, do NOT present it as verified: either omit it, or clearly mark it as UNVERIFIED and say it must be checked against the official datasheet/source. "
-      + "Never invent a value to fill a gap. A shorter answer that cleanly separates confirmed facts from unverified suggestions is BETTER than a complete-looking one that fabricates specifics. Do NOT delegate again.";
-  }
-  return "[SYNTHESIS REQUIRED] The orchestration results above contain grounded evidence blocks. "
-    + "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. "
-    + "Do NOT delegate again for the same information — the evidence is already collected. "
-    + "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.";
-}
-
 export function hasRecentSourceSensitivePartialDelegation(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
 ): boolean {
@@ -473,63 +442,6 @@ function hasRecentSparseSourceSensitiveMemoryReuse(
   }
 
   return false;
-}
-
-/** Lightweight German detection to localize the unverified-answer caveat. */
-function answerLooksGerman(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/[äöüß]/.test(t)) return true;
-  return /\b(ich|und|der|die|das|nicht|mit|für|oder|eine?|brauche|möchte|wie|was|kann|mir|dein|deine|ist|sind)\b/.test(t);
-}
-
-/**
- * Prepend a clear "unverified" banner to a source-sensitive answer that was
- * produced WITHOUT any research evidence (the model declined to delegate after
- * the research nudge, so no web/tool evidence backs it). This keeps the useful
- * general guidance but stops the swarm from presenting pre-assumptions — part
- * numbers, specs, prices, manufacturers — as confirmed facts. Regression:
- * session f59f85f5 (2026-05-29) shipped a wall of invented part numbers.
- */
-export function prependUnverifiedSourceCaveat(answer: string, userMessage: string): string {
-  if (answer.includes("NICHT mit aktuellen Online-Quellen") || answer.includes("NOT verified against live web sources")) {
-    return answer;
-  }
-  const german = answerLooksGerman(userMessage) || answerLooksGerman(answer);
-  const caveat = german
-    ? "> ⚠️ **Ungeprüft:** Diese Antwort beruht auf allgemeinem Wissen und wurde NICHT mit aktuellen Online-Quellen verifiziert. Behandle konkrete Teilenummern, Spezifikationen, Preise und Herstellerangaben als unbestätigte Annahmen, die vor dem Verlass darauf noch zu prüfen sind."
-    : "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources. Treat specific part numbers, specifications, prices, and manufacturer claims as unconfirmed assumptions to verify before relying on them.";
-  return `${caveat}\n\n${answer}`;
-}
-
-/**
- * STRUCTURAL, language-free detection of source citations in an answer: a markdown link to an
- * http(s) URL, or a bare http(s) URL. The citation-honesty guard uses this to catch an answer
- * that presents URL citations without any real retrieval having run this turn (the audited
- * "7 fabricated 404 URLs" case, session 1303e254). NO language/phrase matching: a fabricated
- * link is a fabricated link in any language, and an honest answer that merely says "laut den
- * Datenblättern" / "según las fuentes" with no URL is NOT flagged (it has no clickable 404 to
- * strip). The false "verified" framing is corrected by the prepended caveat, not by hunting
- * verification phrases. Pure/exported.
- */
-export function answerPresentsSourceCitations(text: string): boolean {
-  return /\[[^\]]+\]\(\s*https?:\/\//i.test(text)
-    || /\bhttps?:\/\/\S+/i.test(text);
-}
-
-/**
- * Remove fabricated URL citations from an answer that ran NO real retrieval: a markdown link
- * to a URL becomes its plain label (drops the clickable 404) and bare URLs are removed. NEVER
- * empties the answer — only the offending links are stripped; the body's substance survives,
- * and the honest unverified caveat (prependUnverifiedSourceCaveat) is prepended separately to
- * correct any "verified" framing. STRUCTURAL/language-free — no phrase neutralization. Pure.
- */
-export function stripFabricatedCitations(text: string): string {
-  return text
-    .replace(/\[([^\]]+)\]\(\s*https?:\/\/[^)]*\)/g, "$1")            // [label](404url) → label
-    .replace(/\bhttps?:\/\/[^\s)\]]+/g, "")                           // bare URLs removed
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 /** Pull the prior turn's topic + answer from history so a contextless follow-up
@@ -806,29 +718,6 @@ function collapseDuplicateToolCallsInResponse(
   }
 
   return filtered;
-}
-
-/**
- * Derive a usable delegation task string from the raw arguments of a tool call
- * that named a sub-agent as if it were a tool (e.g. `researcher({query:"…"})`).
- * Returns null when the arguments carry no real task — a parse-error sentinel,
- * an empty object, or only non-string fields — so the caller rejects the call
- * instead of fabricating a task by stringifying the argument object. That
- * fabrication previously leaked `{"_parse_error":true,"_raw":""}` straight into
- * a delegation as the task (audit a3828367: an empty `web_task_coordinator()`
- * call), bypassing the delegate tool's own "task is required" guard.
- * Field names are matched, not content, so this stays language-independent.
- */
-export function deriveDelegationTaskFromArgs(args: Record<string, unknown> | undefined): string | null {
-  if (!args || typeof args !== "object" || "_parse_error" in args) return null;
-  for (const key of ["task", "query", "prompt", "input", "message", "objective", "request", "instruction"]) {
-    const value = args[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  // No conventional task field — only stringify when there is genuine string
-  // content to carry; refuse empty or all-non-string argument objects.
-  const hasStringContent = Object.values(args).some(v => typeof v === "string" && v.trim());
-  return hasStringContent ? JSON.stringify(args) : null;
 }
 
 function collapseExcessDirectDelegationsInResponse(
