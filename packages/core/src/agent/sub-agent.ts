@@ -58,6 +58,22 @@ import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
 import { buildCanonicalSourceSensitiveDelegationTask, deriveSourceSensitiveDelegationFocus } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
+import {
+  ORCHESTRATION_DISCOVERY_TOOL_NAMES,
+  getEffectiveToolNames,
+  buildTaskModeGuidance,
+  isDirectRemoteCliTask,
+  buildModelExecutionGuidance,
+  isOrchestrationCapableRun,
+  buildSubAgentToolInventory,
+  buildSubAgentAgentDiscoveryGuidance,
+  sanitizeSubAgentTask,
+} from "./sub-agent-prompt-guidance.js";
+import { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+// Re-export pure helpers that were extracted from this module so existing
+// importers (and tests) of "../agent/sub-agent.js" keep working unchanged.
+export { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+export { getEffectiveToolNames, compactAgentCatalogDescription } from "./sub-agent-prompt-guidance.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
 // that register their own mocks before importing this module.
@@ -974,18 +990,6 @@ const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, numbe
   web_fetch: 25,
 };
 
-const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
-  "list_agents",
-  "search_agents",
-  "search_tools",
-  "search_workflows",
-  "delegate_to_agent",
-  "swarm_delegate",
-  "run_workflow",
-  "parallel_delegate",
-  "run_task_graph",
-]);
-
 const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
   "mail_",
   "calendar_",
@@ -1116,228 +1120,6 @@ function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): 
   const cfgOverride = orchestration?.subAgentToolCaps?.[toolName];
   if (cfgOverride !== undefined) return cfgOverride;
   return SUB_AGENT_PER_TOOL_CAPS[toolName];
-}
-
-export function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, _task: string): string[] | undefined {
-  // The task-keyword-gated tool-list narrowing (computer observation-only,
-  // mail read-only) was removed: routing/capability must not be decided from
-  // topic words in the task text. The agent keeps its full configured tool set
-  // and its own system prompt governs read-only discipline.
-  return configuredTools;
-}
-
-function buildTaskModeGuidance(agentName: string, _task: string): string {
-  // Task-text keyword branches (mail read-only, shell/ops remote-CLI, computer
-  // observation-only) were removed — guidance must not be selected from topic
-  // words in the task. The agent's own system prompt carries that discipline.
-  // The remaining line is agent-identity-gated (computer_use_agent), not keyword-gated.
-  if (agentName === "computer_use_agent") {
-    return "CREDENTIAL LOOKUP: Before making http_request calls to a service, call get_site_credentials with the hostname or short name to retrieve the stored URL, port, and API key. Do NOT guess default ports or URLs from training data.";
-  }
-  return "";
-}
-
-function isDirectRemoteCliTask(agentName: string, task: string): boolean {
-  if (agentName !== "shell_agent") {
-    return false;
-  }
-  return /\b(docker\s+ps|whoami|systemctl(?:\s+status)?|journalctl|df\s+-h|uname\s+-a|ps\s+aux)\b/i.test(task)
-    && /\b(ssh|server|host|docker|container|containers|n8n-server)\b/i.test(task);
-}
-
-/**
- * Merge a per-agent model override onto the defaults, dropping override keys
- * whose value is `undefined`. A partial override (e.g. an ephemeral agent that
- * passes `model: { temperature: 0.3 }` with no `primary`) must NOT spread
- * `primary: undefined` over the default and blank it out — that left
- * modelConfig.primary undefined and crashed downstream model-id handling (audit
- * c33e65dd: create_ephemeral_agent "Cannot read properties of undefined
- * (reading 'toLowerCase')").
- */
-export function mergeAgentModelOverride(
-  defaults: import("../config/schema.js").ModelConfig,
-  override: Partial<import("../config/schema.js").ModelConfig> | undefined,
-): import("../config/schema.js").ModelConfig {
-  const defined = Object.fromEntries(
-    Object.entries(override ?? {}).filter(([, value]) => value !== undefined),
-  ) as Partial<import("../config/schema.js").ModelConfig>;
-  return { ...defaults, ...defined };
-}
-
-/**
- * Overlay the active effort profile onto a resolved model config. The effort dial RAISES
- * budget/reasoning for a thorough turn, but it must respect an agent's EXPLICIT opt-outs:
- *  - maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
- *  - enableThinking / reasoningEffort are NOT forced ON for an agent that explicitly set
- *    enableThinking:false. A builder whose job is to emit a large artifact via tool calls
- *    disables thinking so its WHOLE completion budget goes to write_file calls, not a
- *    reasoning monologue. At max effort the unconditional thinking:true overrode
- *    content_writer's own enableThinking:false, so it burned its entire 32K-token budget
- *    reasoning ("Let me plan… I'll chunk…") and never called write_file — 651s, zero
- *    artifacts (audit 463d6192). Precedence: explicit agent opt-out > effort dial > default.
- * Pure so the precedence is unit-testable without a running sub-agent.
- */
-export function applyEffortModelOverlay(
-  baseModelConfig: import("../config/schema.js").ModelConfig,
-  effortProfile:
-    | { subAgentMaxTokens?: number; enableThinking?: boolean; reasoningEffort?: "low" | "medium" | "high" }
-    | null
-    | undefined,
-): import("../config/schema.js").ModelConfig {
-  if (!effortProfile) return baseModelConfig;
-  const agentDisabledThinking = baseModelConfig.enableThinking === false;
-  return {
-    ...baseModelConfig,
-    ...(effortProfile.subAgentMaxTokens !== undefined
-      ? { maxTokens: Math.max(baseModelConfig.maxTokens ?? 0, effortProfile.subAgentMaxTokens) }
-      : {}),
-    ...(effortProfile.enableThinking !== undefined && !agentDisabledThinking
-      ? { enableThinking: effortProfile.enableThinking }
-      : {}),
-    ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking
-      ? { reasoningEffort: effortProfile.reasoningEffort }
-      : {}),
-  };
-}
-
-function buildModelExecutionGuidance(modelId: string | undefined, enableThinking: boolean | undefined): string {
-  if (!modelId || !modelId.toLowerCase().includes("gemma-4-e4b-it")) {
-    return "";
-  }
-
-  return [
-    "MODEL FIT — COMPACT SPECIALIST EXECUTION.",
-    "Keep the plan short and implicit. Do not write long preambles before acting.",
-    "Prefer one decisive tool call at a time unless the current agent is explicitly coordinating parallel work.",
-    "After each tool result, either make the next needed tool call immediately or stop and summarize. Do not narrate future actions.",
-    "Stop as soon as the task can be completed from the current evidence. Do not keep searching for marginal improvements.",
-    "If two consecutive steps fail or return no materially new evidence, report the blocker instead of looping.",
-    enableThinking
-      ? "Use deeper reasoning only when reconciling conflicting evidence, extracting exact conclusions from dense output, or choosing between multiple plausible next steps."
-      : "Keep reasoning lightweight. Favor direct evidence extraction and deterministic tool sequences over speculative exploration.",
-  ].join("\n");
-}
-
-function isOrchestrationCapableRun(toolNames: string[] | undefined): boolean {
-  return toolNames?.some((toolName) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(toolName)) ?? false;
-}
-
-function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
-  const availableTools = toolNames ?? [];
-  if (availableTools.length === 0) {
-    return [
-      "TOOL INVENTORY",
-      "No callable tools are available in this run.",
-      "Do not claim to have used tools you do not have. If the task cannot be completed from the provided context alone, say so explicitly.",
-    ].join("\n");
-  }
-
-  const guidance = [
-    "TOOL INVENTORY",
-    `You may use only these tools in this run: ${availableTools.join(", ")}`,
-    "The runtime provides the real tool schemas separately. Use those exact tool definitions for names and parameters. Do not invent or paraphrase tool names.",
-  ];
-
-  const hasDirectWebResearch = availableTools.includes("web_search") || availableTools.includes("web_fetch");
-  const canSearchForSpecialists = availableTools.includes("search_agents");
-  const canDelegateToSpecialists = availableTools.includes("delegate_to_agent") || availableTools.includes("swarm_delegate");
-
-  if (hasDirectWebResearch) {
-    guidance.push("When the task depends on current, external, or source-sensitive facts, validate them with up-to-date web evidence whenever feasible instead of relying only on prior knowledge.");
-  } else if (canSearchForSpecialists && canDelegateToSpecialists) {
-    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents and then delegate_to_agent to route the work to a research-capable specialist before answering.");
-  } else if (canSearchForSpecialists) {
-    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents to identify a research-capable specialist instead of guessing.");
-  } else if (canDelegateToSpecialists) {
-    guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, delegate to a research-capable specialist instead of guessing.");
-  }
-
-  if (availableTools.includes("search_agents")) {
-    guidance.push("If the right specialist is not obvious, call search_agents before delegating.");
-  }
-  if (availableTools.includes("search_workflows")) {
-    guidance.push("If the request looks like a recurring packet, paper, review, or other reusable flow, call search_workflows before inventing a new plan.");
-  }
-  if (availableTools.includes("list_agents")) {
-    guidance.push("Call list_agents(query) — not list_agents() — when you need to browse several agent candidates at once. It requires a task description and searches semantically, same as search_agents but returns up to 10 candidates.");
-  }
-  if (availableTools.includes("delegate_to_agent")) {
-    guidance.push("Sub-agent names are not tools. Invoke another specialist only through delegate_to_agent or swarm_delegate.");
-  } else if (availableTools.includes("swarm_delegate")) {
-    guidance.push("Sub-agent names are not tools. Invoke specialists through swarm_delegate and let the swarm pick the right agent.");
-  }
-  if (availableTools.includes("parallel_delegate")) {
-    guidance.push("Use parallel_delegate only for genuinely independent partitions of work.");
-  }
-  if (availableTools.includes("run_task_graph")) {
-    guidance.push("Use run_task_graph when later steps depend on earlier findings.");
-  }
-  if (availableTools.includes("run_workflow")) {
-    guidance.push("Use run_workflow when a scene or job already matches the task shape closely.");
-  }
-
-  return guidance.join("\n");
-}
-
-/**
- * Compact an agent description for the inline delegation catalog. Configured
- * descriptions are written for EMBEDDING search and carry long "Example queries:"
- * bags plus multi-sentence detail — inlining 24 of them put ~12KB of padding into
- * every orchestration-capable sub-agent prompt (mission_coordinator ran at 27KB
- * while researcher ran at 4.8KB; on the prefill-bound local model that is seconds
- * of pure overhead per iteration). The catalog only needs the at-a-glance lead:
- * first sentence, examples stripped, hard cap. Semantic discovery (search_agents)
- * still sees the FULL description — this trims only the inline prompt copy.
- */
-export function compactAgentCatalogDescription(description: string | undefined): string {
-  const d = (description ?? "").trim();
-  if (!d) return "No description available.";
-  const withoutExamples = d.replace(/\s*(?:Example queries|Beispielanfragen)\s*:[\s\S]*$/i, "").trim() || d;
-  const firstSentence = withoutExamples.match(/^[\s\S]{20,}?[.!?](?=\s|$)/)?.[0]?.trim() ?? withoutExamples;
-  return firstSentence.length > 180 ? `${firstSentence.slice(0, 177)}…` : firstSentence;
-}
-
-function buildSubAgentAgentDiscoveryGuidance(agentName: string, allowedAgents: string[] | undefined): string {
-  const config = getConfig();
-  const catalogNames = Object.keys(config.subAgents)
-    .filter((name) => name !== agentName)
-    .filter((name) => !allowedAgents || allowedAgents.includes(name))
-    .sort((left, right) => left.localeCompare(right));
-
-  const header = [
-    "AGENT DISCOVERY",
-    allowedAgents && allowedAgents.length > 0
-      ? `Delegation in this run is restricted to these agents: ${allowedAgents.join(", ")}`
-      : "You may delegate only to configured specialist agents that are visible in this run.",
-    "If the right specialist is not obvious, search first and delegate second.",
-  ];
-
-  if (catalogNames.length === 0) {
-    header.push("No other delegate targets are available in this run.");
-    return header.join("\n");
-  }
-
-  const catalogLines = catalogNames.slice(0, 24).map((name) => {
-    return `- ${name}: ${compactAgentCatalogDescription(config.subAgents[name]?.description)}`;
-  });
-
-  if (catalogNames.length > 24) {
-    catalogLines.push(`- ${catalogNames.length - 24} more configured agents are available; use list_agents(query) or search_agents(query) to discover them semantically.`);
-  }
-
-  return [...header, ...catalogLines].join("\n");
-}
-
-function sanitizeSubAgentTask(configuredTools: string[] | undefined, task: string): string {
-  let sanitizedTask = task;
-  if (configuredTools?.some((toolName: string) => toolName.startsWith("computer_"))) {
-    sanitizedTask = sanitizedTask
-      .replace(/(?:using|use|press|hit|with|via)\s+(?:keyboard\s+shortcut\s+)?(?:Ctrl|Alt|Shift|Cmd|Meta|Win)\+[A-Za-z+]+/gi, "using mouse clicks on visible UI elements")
-      .replace(/(?:Ctrl|Alt|Cmd|Meta)\+(?:Shift|Alt)\+[A-Za-z]/gi, "(blocked shortcut — use mouse click)")
-      .replace(/(?:command\s+palette|Ctrl\+Shift\+P)/gi, "visible UI elements")
-      .replace(/(?:keyboard\s+shortcut|shortcut|key\s*(?:combo|combination))\s+(?:to\s+)?(?:open|toggle|show|launch)/gi, "mouse click to open");
-  }
-  return sanitizedTask;
 }
 
 function looksLikeNarratedToolCall(content: string): boolean {
