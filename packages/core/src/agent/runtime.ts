@@ -74,7 +74,7 @@ import {
   toSoftRoutingHint,
   looksMultiDomainResearch,
 } from "./intent-classifier.js";
-import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildEffectiveResearchSubject, buildSourceSensitiveCoordinatorTask } from "./source-sensitive-delegation.js";
+import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 import { looksEvidenceAnchored } from "./evidence-anchoring.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
 import {
@@ -118,9 +118,6 @@ import {
   BUILDER_AGENT_ROLE_RE,
   looksLikeRegurgitatedPriorAnswer,
   DELEGATE_TOOL_RESULT_RE,
-  looksLikeDelegateMetadata,
-  countStructuredItems,
-  stripToolEvidencePrefix,
   looksLikeOrchestrationOnlyEvidence,
   collapseWhitespace,
   stripPresentationFormatting,
@@ -159,7 +156,6 @@ import {
 import {
   extractAgentRoutingSuggestionFromMetadata,
   searchAgentsReturnedNoMatch,
-  chooseConfiguredAgent,
   buildRequiredResearchFallbackRoute,
   buildSearchAgentsNoMatchFallbackPrompt,
   enforceRequiredResearchFallbackRouteOnToolCall,
@@ -178,7 +174,6 @@ import {
   looksLikeRawWorkspaceToolDump,
   formatRawWorkspaceToolDumpFailure,
   looksLikeRawToolEvidenceDump,
-  stripLeadingDelegateLabelEcho,
 } from "./runtime-evidence-dump.js";
 
 // Re-export the originally-exported detectors so existing imports from runtime.js
@@ -194,7 +189,6 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   looksLikeTransparentIncompleteReport,
-  isBroadSourceSensitiveAdvisoryRequest,
   buildSynthesisRequiredDirective,
   prependUnverifiedSourceCaveat,
   answerPresentsSourceCitations,
@@ -212,7 +206,6 @@ export {
 
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
-  stripUntrustedDelegationContext,
   deriveDelegationTaskFromArgs,
 } from "./delegation-response-collapse.js";
 
@@ -242,6 +235,35 @@ import {
 // Re-export the originally-exported workflow helper + the test-only internals
 // object so existing imports from runtime.js (tests) keep working unchanged.
 export { shouldRequireWorkflowExecutionAfterSearch, __workflowCatalog } from "./workflow-catalog-routing.js";
+
+// Source-sensitive enforcement cluster (god-file seam): rewrites outgoing
+// delegation tool calls on a source-sensitive turn into the verified-evidence-first
+// frame while honoring coordinator/builder choices.
+import {
+  enforceSourceSensitiveOriginalRequestOnToolCall,
+  hasRecentSourceSensitivePartialDelegation,
+  hasRecentSparseSourceSensitiveMemoryReuse,
+  extractPriorTurnContext,
+} from "./source-sensitive-enforcement.js";
+
+// Re-export the originally-exported source-sensitive enforcement helpers so
+// existing imports from runtime.js (tests) keep working after the extraction.
+export {
+  enforceSourceSensitiveOriginalRequestOnToolCall,
+  ephemeralAgentSpecLacksWebTools,
+  hasRecentSourceSensitivePartialDelegation,
+} from "./source-sensitive-enforcement.js";
+
+// Interrupted/partial delegation evidence-recovery cluster (god-file seam):
+// recovers usable evidence from an interrupted sub-agent's surfaced output and
+// finds the richest recent delegate/workflow result to use as a synthesis backstop.
+import {
+  EVIDENCE_SECTION_RE,
+  extractUsefulInterruptedDelegationEvidence,
+  looksLikeInterruptedDelegationWithoutUsableEvidence,
+  measureEvidenceCoverage,
+  findRecentDelegateEvidence,
+} from "./interrupted-delegation-evidence.js";
 
 const log = childLogger("agent:runtime");
 
@@ -432,269 +454,13 @@ export {
 // NEGATION_MARKERS) was extracted to ./evidence-anchoring.ts (first god-file
 // decomposition seam). looksEvidenceAnchored is imported at the top.
 
-function defaultResearchFallbackAgentsFor(agentName: string | undefined, guidance: DynamicTurnGuidance | null | undefined): string[] {
-  const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
-    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
-    : ["mission_coordinator", "researcher"];
-  return preferredAgents
-    .filter((candidate) => candidate !== agentName)
-    .filter((candidate) => chooseConfiguredAgent([candidate]) === candidate);
-}
-
-function withDefaultResearchFallbackAgents(
-  args: Record<string, unknown>,
-  guidance: DynamicTurnGuidance | null | undefined,
-): Record<string, unknown> {
-  const agentName = typeof args["agentName"] === "string" ? String(args["agentName"]).trim() : undefined;
-  if (!agentName) return args;
-  const existingFallbacks = Array.isArray(args["fallbackAgents"])
-    ? args["fallbackAgents"].map(String).filter(Boolean)
-    : [];
-  if (existingFallbacks.length > 0) return args;
-  const fallbackAgents = defaultResearchFallbackAgentsFor(agentName, guidance);
-  return fallbackAgents.length > 0 ? { ...args, fallbackAgents } : args;
-}
-
-export function hasRecentSourceSensitivePartialDelegation(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-): boolean {
-  const recent = [...history].reverse().slice(0, 12);
-
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-    if (!DELEGATE_TOOL_RESULT_RE.test(content) && !looksLikeDelegateMetadata(meta)) continue;
-
-    const delegationOutcome = typeof meta["delegationOutcome"] === "string"
-      ? String(meta["delegationOutcome"]).toLowerCase()
-      : "";
-
-    if (delegationOutcome === "failure") return true;
-    // Any PARTIAL outcome means the swarm did not fully cover the request, so the
-    // curated shared findings must ground the final synthesis — regardless of
-    // terminalState. A coordinator that synthesizes after its inner researchers time
-    // out reports outcome "partial" with terminalState "completed"; the old list
-    // (timeout/max_iterations/cancelled/empty) excluded that case, so the backstop
-    // never fired and a confident training-data answer shipped that CONTRADICTED the
-    // verified finding (audit 1ba15cb5: shared finding = IM73A135V01 is analog; the
-    // answer said "digital PDM").
-    if (delegationOutcome === "partial") return true;
-  }
-
-  return false;
-}
-
-function hasRecentSparseSourceSensitiveMemoryReuse(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-  userMessage: string,
-): boolean {
-  if (!isBroadSourceSensitiveAdvisoryRequest(userMessage)) return false;
-
-  const recent = [...history].reverse().slice(0, 12);
-
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-    if (!DELEGATE_TOOL_RESULT_RE.test(content) && !looksLikeDelegateMetadata(meta)) continue;
-
-    const reusedFromSessionMemory = meta["reusedFromSessionMemory"] === true;
-    const factCount = typeof meta["factCount"] === "number" ? Number(meta["factCount"]) : 0;
-    const partialCount = typeof meta["partialCount"] === "number" ? Number(meta["partialCount"]) : 0;
-    if (reusedFromSessionMemory && factCount > 0 && factCount <= 3 && partialCount === 0) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/** Pull the prior turn's topic + answer from history so a contextless follow-up
- *  ("validate your response") can be delegated with the real subject folded in. */
-function extractPriorTurnContext(
-  history: readonly SessionHistoryMessage[],
-  currentMessage: string,
-): { priorUserRequest?: string; priorAssistantAnswer?: string } {
-  const current = currentMessage.trim();
-  let priorAssistantAnswer: string | undefined;
-  let priorUserRequest: string | undefined;
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const message = history[i]!;
-    const content = typeof message.content === "string" ? message.content.trim() : "";
-    const hasToolCalls = Array.isArray((message as { tool_calls?: unknown[] }).tool_calls)
-      && (((message as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0);
-    if (!priorAssistantAnswer && message.role === "assistant" && content.length > 40 && !hasToolCalls) {
-      priorAssistantAnswer = content;
-    }
-    if (!priorUserRequest && message.role === "user" && content && content !== current) {
-      priorUserRequest = content;
-    }
-    if (priorAssistantAnswer && priorUserRequest) break;
-  }
-  return { priorUserRequest, priorAssistantAnswer };
-}
-
-/**
- * True when a create_ephemeral_agent spec grants WRITE/artifact tools but no
- * web-reaching tools (web_search / web_fetch / browser_*). Such an agent renders
- * already-gathered evidence — it is NOT a researcher — so the source-sensitive
- * "WEB RESEARCH TASK — gather datasheets/sourcing/pricing" preamble must not be
- * injected into its task: that boilerplate both mis-frames the writer AND is the
- * exact trigger for the agent-factory research-capability gate, which then rejects
- * the writer for lacking web tools (audit 74e49d90: presentation_builder rejected,
- * artifact never built, turn shipped a raw evidence dump). Mirrors the gate's own
- * web-tool set (web_search/web_fetch/browser_*; url_inspect does not count).
- * Empty/omitted tools ⇒ inherits all (may include web) ⇒ do not skip.
- */
-export function ephemeralAgentSpecLacksWebTools(args: Record<string, unknown>): boolean {
-  const tools = Array.isArray(args["tools"])
-    ? args["tools"].filter((t): t is string => typeof t === "string")
-    : null;
-  if (!tools || tools.length === 0) return false;
-  return !tools.some((t) => /^web_search$/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t));
-}
-
-/**
- * A parallel-slice / task-graph node whose target agent BUILDS or COORDINATES must keep its
- * OWN instruction in a source-sensitive turn. Rewriting it into the "use web_search/web_fetch
- * and STOP and report" research frame means a builder (which has no web tools) never produces
- * the artifact, and a coordinator can't decompose+build — audit 0602f246: a content_writer
- * BUILD slice in a research+build parallel_delegate was flattened to a research task and the
- * app was never built. The research is the sibling research slice's job. Keyed on the agent
- * the LLM chose (role), not on matching keywords in the user's message — same accepted signal
- * as the single-delegate coordinator exemption below.
- */
-function sourceSensitiveSliceKeepsOwnTask(agentName: string): boolean {
-  return BUILDER_AGENT_ROLE_RE.test(agentName) || /(?:coordinator|planner)/i.test(agentName);
-}
-
-export function enforceSourceSensitiveOriginalRequestOnToolCall(
-  toolCall: LLMResponse["tool_calls"][number],
-  userMessage: string,
-  guidance: DynamicTurnGuidance | null | undefined,
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-  /**
-   * Receives the model's OWN build-task text when the research-first rewrite is about
-   * to discard it (a delegate to content_writer/web_coder/backend_coder on a
-   * source-sensitive turn). The orchestrator often writes an excellent spec — features,
-   * data shape, UI behaviour — and throwing it away leaves the later corrective build
-   * with only generic facts (audit c2f76a00: a detailed 100-question quiz-app spec was
-   * rewritten to research; the eventual build shipped a 4KB welcome page). The caller
-   * stashes it and feeds it back into the corrective build as the blueprint.
-   */
-  onDiscardedBuilderTask?: (spec: string) => void,
-): void {
-  if (!guidance?.sourceSensitive) return;
-  // A source-sensitive task may still spawn a downstream WRITER to render the
-  // gathered evidence into an artifact. Don't rewrite a write-only ephemeral
-  // agent's task into a research-gather preamble — it would be rejected for
-  // lacking web tools and the artifact would never be produced.
-  if (toolCall.name === "create_ephemeral_agent" && ephemeralAgentSpecLacksWebTools(toolCall.arguments ?? {})) {
-    return;
-  }
-  const originalArgs = toolCall.arguments ?? {};
-  let nextArgs: Record<string, unknown> | null = null;
-  let recoveryReason = "source_sensitive_original_request_enforced";
-
-  if (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate" || toolCall.name === "create_ephemeral_agent") {
-    // When the orchestrator LLM CHOSE a coordinator (mission_coordinator / *_planner),
-    // it has decided this request needs multiple steps. Honor that decision: give the
-    // coordinator a source-disciplined frame that lets it decompose + build + review,
-    // NOT the research-only "gather and STOP and report" rewrite below (which flattens
-    // the whole thing to research and blocks any build phase — audit 1740fb0c). This is
-    // keyed only on the agent the LLM picked — no message keyword-matching, no forced
-    // routing; the multi-step decision stays the model's.
-    const chosenAgent = typeof originalArgs["agentName"] === "string" ? String(originalArgs["agentName"]) : "";
-    if (
-      (toolCall.name === "delegate_to_agent" || toolCall.name === "swarm_delegate")
-      && /(?:coordinator|planner)/i.test(chosenAgent)
-    ) {
-      nextArgs = stripUntrustedDelegationContext({
-        ...originalArgs,
-        task: buildSourceSensitiveCoordinatorTask(userMessage),
-      });
-      recoveryReason = "source_sensitive_coordinator_frame";
-    } else {
-      const originalTask = typeof originalArgs["task"] === "string" ? String(originalArgs["task"]) : "";
-      // Preserve the model's build spec before the research-first rewrite discards it.
-      if (BUILDER_AGENT_ROLE_RE.test(chosenAgent) && originalTask.trim().length >= 200) {
-        onDiscardedBuilderTask?.(originalTask.trim());
-      }
-      const focus = deriveSourceSensitiveDelegationFocus(originalTask, userMessage);
-      nextArgs = withDefaultResearchFallbackAgents(
-        stripUntrustedDelegationContext({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) }),
-        guidance,
-      );
-    }
-  } else if (toolCall.name === "parallel_delegate") {
-    const rawTasks = Array.isArray(originalArgs["tasks"])
-      ? originalArgs["tasks"].filter((taskSpec): taskSpec is Record<string, unknown> => Boolean(taskSpec) && typeof taskSpec === "object")
-      : [];
-    if (rawTasks.length > 0) {
-      nextArgs = {
-        ...originalArgs,
-        tasks: rawTasks.map((taskSpec, index) => {
-          const sliceAgent = typeof taskSpec["agentName"] === "string" ? String(taskSpec["agentName"]) : "";
-          // Builder/coordinator slice: keep its own BUILD/decompose instruction — the
-          // research is the sibling research slice's job (audit 0602f246).
-          if (sourceSensitiveSliceKeepsOwnTask(sliceAgent)) {
-            return stripUntrustedDelegationContext({ ...taskSpec });
-          }
-          return withDefaultResearchFallbackAgents(
-            stripUntrustedDelegationContext({
-              ...taskSpec,
-              task: buildSourceSensitiveOriginalRequestTask(
-                userMessage,
-                `SLICE ${index + 1}/${rawTasks.length}`,
-                deriveSourceSensitiveDelegationFocus(typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "", userMessage),
-              ),
-            }),
-            guidance,
-          );
-        }),
-      };
-    }
-  } else if (toolCall.name === "run_task_graph") {
-    const rawNodes = Array.isArray(originalArgs["nodes"])
-      ? originalArgs["nodes"].filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
-      : [];
-    if (rawNodes.length > 0) {
-      nextArgs = {
-        ...originalArgs,
-        objective: userMessage,
-        nodes: rawNodes.map((node, index) => {
-          const nodeAgent = typeof node["agentName"] === "string" ? String(node["agentName"]) : "";
-          // Builder/coordinator node: keep its own BUILD/decompose instruction (audit 0602f246).
-          if (sourceSensitiveSliceKeepsOwnTask(nodeAgent)) {
-            return stripUntrustedDelegationContext({ ...node });
-          }
-          return withDefaultResearchFallbackAgents(
-            stripUntrustedDelegationContext({
-              ...node,
-              task: buildSourceSensitiveOriginalRequestTask(
-                userMessage,
-                `GRAPH NODE ${index + 1}/${rawNodes.length}`,
-                deriveSourceSensitiveDelegationFocus(typeof node["task"] === "string" ? String(node["task"]) : "", userMessage),
-              ),
-            }),
-            guidance,
-          );
-        }),
-      };
-    }
-  }
-
-  if (!nextArgs || stableSerialize(nextArgs) === stableSerialize(originalArgs)) return;
-  toolCall.arguments = nextArgs;
-  guardrailEvents.push({ type: "delegation_required", details: `${toolCall.name}:${recoveryReason}` });
-  logAudit("tool_call_recovered", {
-    originalTool: toolCall.name,
-    rewrittenTo: toolCall.name,
-    reason: recoveryReason,
-  }, { sessionId, severity: "info" });
-}
+// Source-sensitive enforcement cluster (defaultResearchFallbackAgentsFor,
+// withDefaultResearchFallbackAgents, hasRecentSourceSensitivePartialDelegation,
+// hasRecentSparseSourceSensitiveMemoryReuse, extractPriorTurnContext,
+// ephemeralAgentSpecLacksWebTools, sourceSensitiveSliceKeepsOwnTask,
+// enforceSourceSensitiveOriginalRequestOnToolCall) was extracted to
+// ./source-sensitive-enforcement.ts (god-file seam). The functions still called
+// here are imported at the top; the originally-exported ones are re-exported there.
 
 function collapseDuplicateToolCallsInResponse(
   toolCalls: LLMResponse["tool_calls"],
@@ -954,8 +720,6 @@ async function finalizeUserFacingAssistantResponse(
   return await enforceDelegateCoverage(resolved, toolIterations, session, provider, signal);
 }
 
-const WORKFLOW_TOOL_RESULT_RE = /^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:completed|blocked)\./i;
-const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
 
 function resolveEmptyAssistantResponseFallback(
   rawResponse: string,
@@ -1013,232 +777,15 @@ function resolveEmptyAssistantResponseFallback(
   return EMPTY_ASSISTANT_RESPONSE_FALLBACK;
 }
 
-function stripInterruptedSubAgentBoilerplate(text: string): string {
-  return text
-    // The reason text is sometimes extended with a tail clause such as
-    //   "timed out after Nms after finishing the current operation"
-    //   "timed out after Nms before starting another tool run"
-    // (see sub-agent.ts hard-deadline branches). The original alternation
-    // required `\d+ms` to be followed directly by whitespace + "Partial
-    // progress before interruption:", which fails for the extended form
-    // and leaves the scaffold prefix in the surfaced evidence. Allow any
-    // non-newline tail between the duration and the partial-progress
-    // header so both shapes get stripped cleanly.
-    .replace(
-      /Sub-agent '[^']+' timed out after \d+ms[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
-      "",
-    )
-    .replace(
-      /Sub-agent '[^']+' produced no final response after substantive work\.[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
-      "",
-    )
-    .replace(
-      /Sub-agent '[^']+' was cancelled[^\n]*\s+Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
-      "",
-    )
-    // Also strip a bare "Partial progress before interruption:" stanza
-    // that may appear after the extended-reason text was already matched
-    // by an earlier regex but the partial-progress block still trails.
-    .replace(
-      /Partial progress before interruption:\s*[\s\S]*?(?=Recovered evidence snippets from completed tools:|\n\n---|$)/g,
-      "",
-    )
-    .replace(/Sub-agent '[^']+' timed out after \d+ms[^\n]*\n?/g, "")
-    .replace(/Sub-agent '[^']+' produced no final response after substantive work\.[^\n]*\n?/g, "")
-    .replace(/Sub-agent '[^']+' was cancelled[^\n]*\n?/g, "")
-    .trim();
-}
-
-function stripRecoveredSnippetToolLabel(text: string): string {
-  const stripped = stripToolEvidencePrefix(text);
-  return stripped || text.trim();
-}
-
-function stripDelegationProgressPrefix(text: string): string {
-  return text
-    .replace(/^(?:parallel|task)_\d+\s+\[[^\]]+\]\s*/i, "")
-    .replace(/^[a-z_]+\s+\[[^\]]+\]\s*/i, "")
-    .trim();
-}
-
-function collectInterruptedDelegationSnippets(text: string): string[] {
-  const cleaned = stripPresentationFormatting(text);
-  const snippets: string[] = [];
-  const seen = new Set<string>();
-
-  const pushSnippet = (candidate: string) => {
-    const normalized = stripInterruptedSubAgentBoilerplate(candidate)
-      .replace(/^IMPORTANT:\s.*$/gim, "")
-      .trim();
-    if (!normalized || normalized.length < 80 || looksLikeOrchestrationOnlyEvidence(normalized)) return;
-    if (looksLikeProviderErrorEcho(normalized)) return;
-    if (seen.has(normalized)) return;
-    seen.add(normalized);
-    snippets.push(normalized);
-  };
-
-  // Recovered delegated specialist body — full delegated content surfaced
-  // verbatim by the inner agent's interrupt path (Fix 2). Push it FIRST so
-  // it ranks ahead of bullet-list snippets and a downstream cap preserves
-  // the actual delegated answer rather than a 900-char head.
-  const fullBodyMatch = /Recovered delegated specialist body \(full\):\s*\n([\s\S]+?)(?=\nRecovered evidence snippets from completed tools:|$)/i.exec(cleaned);
-  if (fullBodyMatch?.[1]) {
-    pushSnippet(fullBodyMatch[1].trim());
-  }
-
-  const progressMatch = /Partial progress before interruption:\s*([\s\S]*?)(?=\nRecovered (?:delegated specialist body \(full\)|evidence snippets from completed tools):|$)/i.exec(cleaned);
-  if (progressMatch?.[1]) {
-    for (const rawLine of progressMatch[1].split("\n")) {
-      const line = rawLine.trim();
-      if (!line.startsWith("- ")) continue;
-      const body = line.slice(2).trim();
-      if (!body || /^(?:Tool calls executed:|Iterations completed:)/i.test(body)) continue;
-      if (/\[(?:running|pending)\]/i.test(body)) continue;
-      if (/^(?:parallel|task)_\d+\s+\[[^\]]+\]/i.test(body) && !body.includes(" | ")) continue;
-      const normalizedBody = stripDelegationProgressPrefix(body);
-      const candidate = normalizedBody.includes(" | ")
-        ? normalizedBody.split(/\s+\|\s+/).slice(1).join(" | ")
-        : normalizedBody;
-      pushSnippet(candidate);
-    }
-  }
-
-  const recoveredMatch = /Recovered evidence snippets from completed tools:\s*\n([\s\S]+)$/i.exec(cleaned);
-  if (recoveredMatch?.[1]) {
-    for (const rawLine of recoveredMatch[1].split("\n")) {
-      const line = rawLine.trim();
-      if (!line.startsWith("- ")) continue;
-      const body = line.slice(2).trim();
-      const candidate = stripRecoveredSnippetToolLabel(body);
-      pushSnippet(candidate);
-    }
-  }
-
-  return snippets;
-}
-
-function extractUsefulInterruptedDelegationEvidence(text: string): string | null {
-  if (!/Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(text)) {
-    return null;
-  }
-  const snippets = collectInterruptedDelegationSnippets(text);
-  if (snippets.length > 0) return snippets.join("\n\n");
-
-  const fallback = stripInterruptedSubAgentBoilerplate(stripPresentationFormatting(text))
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => !/^(?:Tool calls executed:|Iterations completed:|Recovered evidence snippets from completed tools:)/i.test(line))
-    .filter((line) => !looksLikeOrchestrationOnlyEvidence(line))
-    .join("\n");
-
-  if (fallback.length < 120) return null;
-  if (looksLikeProviderErrorEcho(fallback)) return null;
-  return fallback;
-}
-
-function looksLikeInterruptedDelegationWithoutUsableEvidence(text: string): boolean {
-  return /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(text)
-    && !extractUsefulInterruptedDelegationEvidence(text);
-}
-
-function measureEvidenceCoverage(
-  text: string,
-  evidence: { evidence: string; itemCount: number },
-): { textItems: number; itemShortfall: boolean; lengthShortfall: boolean } {
-  const textItems = countStructuredItems(text);
-  return {
-    textItems,
-    itemShortfall: evidence.itemCount >= 5
-      && textItems < Math.ceil(evidence.itemCount * 0.6),
-    lengthShortfall: evidence.evidence.length >= 1500
-      && text.length < Math.ceil(evidence.evidence.length * 0.4),
-  };
-}
-
-/** Index of the most recent `user` message, or -1. Marks the current turn's start. */
-function lastUserMessageIndex(
-  history: readonly { role: string }[],
-): number {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === "user") return i;
-  }
-  return -1;
-}
-
-function findRecentDelegateEvidence(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-  options: { scopeToCurrentTurn?: boolean } = {},
-): { evidence: string; itemCount: number } | null {
-  // When scoped to the current turn, drop everything up to and including the
-  // last user message. Without this, the scan reaches back across turns and a
-  // PRIOR turn's richer deliverable wins on `length + items*200`, becoming the
-  // coverage target — or the dumped fallback — for THIS turn's answer (audit
-  // 2f4f5fe6: a Turn-2 news deliverable was force-relayed verbatim as the
-  // answer to an unrelated Turn-4 question).
-  const scoped = options.scopeToCurrentTurn
-    ? history.slice(lastUserMessageIndex(history) + 1)
-    : history;
-  const recent = [...scoped].reverse().slice(0, 24);
-  let bestCandidate: { evidence: string; itemCount: number; score: number } | null = null;
-
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-
-    // Workflow execution results (run_workflow) carry the same
-    // "Observed evidence:" block as delegated results and are an equally
-    // valid synthesis backstop when the model misbehaves at the synthesis
-    // step (e.g. emits another tool call after [SYNTHESIS REQUIRED]).
-    // Recognize them here so the terminal-evidence backstop can prefer
-    // the actual workflow dossier over the model's preamble text.
-    const isWorkflowResult = WORKFLOW_TOOL_RESULT_RE.test(content)
-      || typeof meta["workflowName"] === "string";
-    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate && !isWorkflowResult) continue;
-
-    const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
-    const rawEvidence = evidenceMatch
-      ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
-      : content.trim();
-    const evidence = stripLeadingDelegateLabelEcho(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence);
-    const delegationOutcome = typeof meta["delegationOutcome"] === "string"
-      ? String(meta["delegationOutcome"]).toLowerCase()
-      : "";
-    const terminalState = typeof meta["terminalState"] === "string"
-      ? String(meta["terminalState"]).toLowerCase()
-      : "";
-    const partialLike = delegationOutcome === "partial"
-      || terminalState === "timeout"
-      || /(?:TASK COMPLETED \(PARTIAL|PARTIAL PROGRESS|Partial progress before interruption:)/i.test(content);
-    const minimumEvidenceChars = partialLike ? 120 : 400;
-    if (!evidence || evidence.length < minimumEvidenceChars) continue;
-    // Reject evidence that is just a regurgitated provider/HTTP/HTML error
-    // — surfacing an LM Studio 500 page or an "OpenAI-compatible request
-    // failed" string as the final answer is worse than the generic
-    // "no usable evidence" fallback.
-    if (looksLikeProviderErrorEcho(evidence)) continue;
-    if (looksLikeRawWorkspaceToolDump(evidence)) continue;
-    // Reject evidence whose every non-empty line is interrupted-sub-agent
-    // scaffolding ("after finishing the current operation", "- Tool calls
-    // executed: N", "- Iterations completed: N"). Without this, the
-    // empty-response evidence backstop dumps the scaffold to the user as
-    // if it were real findings. A 161-char scaffold is technically above
-    // the partial-like 120-char minimum but is zero-information.
-    if (looksLikeOrchestrationOnlyEvidence(evidence)) continue;
-
-    const itemCount = countStructuredItems(evidence);
-    const score = evidence.length + (itemCount * 200);
-    if (!bestCandidate || score > bestCandidate.score) {
-      bestCandidate = { evidence, itemCount, score };
-    }
-  }
-
-  return bestCandidate
-    ? { evidence: bestCandidate.evidence, itemCount: bestCandidate.itemCount }
-    : null;
-}
+// Interrupted/partial delegation evidence-recovery cluster
+// (stripInterruptedSubAgentBoilerplate, stripRecoveredSnippetToolLabel,
+// stripDelegationProgressPrefix, collectInterruptedDelegationSnippets,
+// extractUsefulInterruptedDelegationEvidence,
+// looksLikeInterruptedDelegationWithoutUsableEvidence, measureEvidenceCoverage,
+// lastUserMessageIndex, findRecentDelegateEvidence) + the WORKFLOW_TOOL_RESULT_RE /
+// EVIDENCE_SECTION_RE constants were extracted to ./interrupted-delegation-evidence.ts
+// (god-file seam). The four functions + two regexes still used here are imported at
+// the top.
 
 /**
  * Cost-center 2 (audit 5d51862f): a meta-reasoning preamble the specialist sometimes
