@@ -69,7 +69,6 @@ import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
   extractAssistantName,
-  type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
   toSoftRoutingHint,
   looksMultiDomainResearch,
@@ -115,9 +114,7 @@ export {
 // imports from this file or any runtime-cluster module.
 import {
   stableSerialize,
-  BUILDER_AGENT_ROLE_RE,
   looksLikeRegurgitatedPriorAnswer,
-  DELEGATE_TOOL_RESULT_RE,
   looksLikeOrchestrationOnlyEvidence,
   collapseWhitespace,
   stripPresentationFormatting,
@@ -207,11 +204,55 @@ export {
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
   deriveDelegationTaskFromArgs,
+  getPerTurnToolCallLimit,
+  buildDelegationLoopResponse,
+  collapseDuplicateToolCallsInResponse,
+  collapseExcessDirectDelegationsInResponse,
+  collapseMixedOrchestrationLaunchersInResponse,
+  collapseMixedDiscoveryAndOrchestrationToolsInResponse,
+  buildRepeatedOutputFingerprint,
+  PERSISTED_SWARM_STATE_TOOL_NAMES,
+  AGENT_DISCOVERY_TOOL_NAMES,
 } from "./delegation-response-collapse.js";
 
-// Re-export the originally-exported delegation-arg helper so existing imports
-// from runtime.js (tests, tools) keep working after the extraction.
-export { deriveDelegationTaskFromArgs } from "./delegation-response-collapse.js";
+// Re-export the originally-exported delegation-arg + response-collapse helpers so
+// existing imports from runtime.js (tests, tools) keep working after the extraction.
+export {
+  deriveDelegationTaskFromArgs,
+  getPerTurnToolCallLimit,
+  buildDelegationLoopResponse,
+  buildRepeatedOutputFingerprint,
+} from "./delegation-response-collapse.js";
+
+// Single-deliverable relay shortcut + meta-preamble strip + truncated-code detector
+// (god-file seam). The functions still called here are imported; the originally-exported
+// ones are re-exported so existing imports from runtime.js (tests) keep working.
+import {
+  stripLeadingReasoningPreamble,
+  looksLikeTruncatedCodeDeliverable,
+  extractSingleRelayableDeliverable,
+} from "./deliverable-relay.js";
+
+export {
+  stripLeadingReasoningPreamble,
+  looksLikeTruncatedCodeDeliverable,
+  extractSingleRelayableDeliverable,
+} from "./deliverable-relay.js";
+
+// Prior-evidence reuse-don't-re-research nudges (god-file seam). The functions still
+// called here are imported; the originally-exported ones are re-exported so existing
+// imports from runtime.js (tests) keep working.
+import {
+  shouldReusePriorDelegateEvidenceForSourceFollowUp,
+  buildPriorEvidenceFollowUpPrompt,
+  shouldNudgeSessionEvidenceReuse,
+  buildSessionEvidenceReuseNudge,
+} from "./evidence-reuse-nudge.js";
+
+export {
+  shouldNudgeSessionEvidenceReuse,
+  buildSessionEvidenceReuseNudge,
+} from "./evidence-reuse-nudge.js";
 
 // Workflow-catalog + approved-run routing cluster (god-file seam): catalog
 // signal detection / guidance / execution-enforcement prompts and the
@@ -287,25 +328,6 @@ async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
-const PER_TURN_TOOL_CALL_LIMITS: Partial<Record<string, number>> = {
-  delegate_to_agent: 5,
-  search_agents: 4,
-  search_workflows: 2,
-  run_workflow: 2,
-  create_ephemeral_agent: 1,
-  computer_session_start: 1,
-  computer_focus_window: 2,
-  computer_snapshot: 3,
-  computer_list_windows: 2,
-  computer_click: 8,
-  computer_type: 6,
-  computer_hotkey: 6,
-  computer_scroll: 4,
-  computer_move_mouse: 4,
-  computer_wait: 3,
-  vscode_focus_panel: 2,
-  vscode_run_terminal_command: 3,
-};
 export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
@@ -389,37 +411,6 @@ export interface TurnPerformanceMetrics {
   untrackedMs?: number;
 }
 
-export function getPerTurnToolCallLimit(toolName: string): number | undefined {
-  const cfgOverride = getConfig().orchestration?.perTurnCaps?.[toolName];
-  if (cfgOverride !== undefined) return cfgOverride;
-  return PER_TURN_TOOL_CALL_LIMITS[toolName];
-}
-
-export function buildDelegationLoopResponse(
-  session: AgentSession,
-  latestOutput: string,
-  reason: "identical-output" | "limit" = "identical-output",
-): string {
-  const normalized = latestOutput.trim() || "The delegated agent returned no usable output.";
-  const evidence = findRecentDelegateEvidence(session.getHistory());
-  const bestAvailable = evidence?.evidence?.trim() || normalized;
-
-  if (reason === "limit") {
-    const intro = evidence
-      ? "I stopped here because the delegation limit for this turn was reached. Here is the best grounded result collected so far:"
-      : "I stopped here because the delegation limit for this turn was reached before a grounded final answer could be completed.";
-    return `${intro}\n\n${bestAvailable}\n\nIf you want me to continue past this limit, tell me to raise the delegation limit for this task. Otherwise, we can stop here.`;
-  }
-
-  return [
-    "Delegation loop detected. I stopped the repeated delegation and am using the best grounded result collected so far.",
-    "",
-    bestAvailable,
-    "",
-    "If you want another attempt, tell me to try a different strategy. Otherwise, we can stop here.",
-  ].join("\n");
-}
-
 // Shared-facts / evidence / recovery-backstop cluster moved to ./evidence-recovery.ts
 // (god-file seam). The functions runtime.ts still calls internally are imported below;
 // the originally-exported ones are re-exported so existing imports from runtime.js
@@ -462,189 +453,10 @@ export {
 // ./source-sensitive-enforcement.ts (god-file seam). The functions still called
 // here are imported at the top; the originally-exported ones are re-exported there.
 
-function collapseDuplicateToolCallsInResponse(
-  toolCalls: LLMResponse["tool_calls"],
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-): LLMResponse["tool_calls"] {
-  const seenFingerprints = new Set<string>();
-  const filtered: LLMResponse["tool_calls"] = [];
-
-  for (const toolCall of toolCalls) {
-    const fingerprint = `${toolCall.name}|${stableSerialize(toolCall.arguments ?? {})}`;
-    if (seenFingerprints.has(fingerprint)) {
-      logAudit("tool_call_blocked", {
-        tool: toolCall.name,
-        reason: "duplicate_same_response",
-        args: toolCall.arguments,
-      }, {
-        sessionId,
-        severity: "warn",
-      });
-      guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:duplicate_same_response` });
-      continue;
-    }
-
-    seenFingerprints.add(fingerprint);
-    filtered.push(toolCall);
-  }
-
-  return filtered;
-}
-
-function collapseExcessDirectDelegationsInResponse(
-  toolCalls: LLMResponse["tool_calls"],
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-  onDiscardedBuilderTask?: (spec: string) => void,
-): LLMResponse["tool_calls"] {
-  let seenDirectDelegation = false;
-  const filtered: LLMResponse["tool_calls"] = [];
-
-  for (const toolCall of toolCalls) {
-    if (toolCall.name !== "delegate_to_agent") {
-      filtered.push(toolCall);
-      continue;
-    }
-
-    if (!seenDirectDelegation) {
-      seenDirectDelegation = true;
-      filtered.push(toolCall);
-      continue;
-    }
-
-    // When the dropped surplus delegation is a BUILD task to a builder agent, its task
-    // text is the model's own build spec — preserve it for the corrective build instead
-    // of losing it (audit c2f76a00: the model emitted research + a detailed content_writer
-    // quiz-app spec in one response; the spec was dropped here and the eventual corrective
-    // build, running on generic facts only, shipped a 4KB welcome page).
-    const droppedAgent = typeof toolCall.arguments?.["agentName"] === "string" ? String(toolCall.arguments["agentName"]) : "";
-    const droppedTask = typeof toolCall.arguments?.["task"] === "string" ? String(toolCall.arguments["task"]) : "";
-    if (BUILDER_AGENT_ROLE_RE.test(droppedAgent) && droppedTask.trim().length >= 200) {
-      onDiscardedBuilderTask?.(droppedTask.trim());
-    }
-
-    logAudit("tool_call_blocked", {
-      tool: toolCall.name,
-      reason: "multiple_direct_delegations_same_response",
-      args: toolCall.arguments,
-    }, {
-      sessionId,
-      severity: "warn",
-    });
-    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:multiple_direct_delegations_same_response` });
-  }
-
-  return filtered;
-}
-
-const ORCHESTRATION_LAUNCHER_TOOL_NAMES = new Set([
-  "delegate_to_agent",
-  "parallel_delegate",
-  "run_task_graph",
-  "run_workflow",
-  "create_ephemeral_agent",
-]);
-const PERSISTED_SWARM_STATE_TOOL_NAMES = new Set([
-  ...ORCHESTRATION_LAUNCHER_TOOL_NAMES,
-  "swarm_delegate",
-]);
-const AGENT_DISCOVERY_TOOL_NAMES = new Set([
-  "search_agents",
-  "list_agents",
-  "search_tools",
-  "search_workflows",
-]);
-
 const __swarmStateContinuity = {
   loadPreviousTurnSwarmTasks,
   buildPersistableSwarmTaskDelta,
 };
-
-function collapseMixedOrchestrationLaunchersInResponse(
-  toolCalls: LLMResponse["tool_calls"],
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-): LLMResponse["tool_calls"] {
-  let firstLauncherName: string | null = null;
-  const filtered: LLMResponse["tool_calls"] = [];
-
-  for (const toolCall of toolCalls) {
-    if (!ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)) {
-      filtered.push(toolCall);
-      continue;
-    }
-
-    if (!firstLauncherName) {
-      firstLauncherName = toolCall.name;
-      filtered.push(toolCall);
-      continue;
-    }
-
-    logAudit("tool_call_blocked", {
-      tool: toolCall.name,
-      reason: "multiple_orchestration_launchers_same_response",
-      keptTool: firstLauncherName,
-      args: toolCall.arguments,
-    }, {
-      sessionId,
-      severity: "warn",
-    });
-    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:multiple_orchestration_launchers_same_response` });
-  }
-
-  return filtered;
-}
-
-function collapseMixedDiscoveryAndOrchestrationToolsInResponse(
-  toolCalls: LLMResponse["tool_calls"],
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-): LLMResponse["tool_calls"] {
-  const selectedPhase: "discovery" | "orchestration" | null = toolCalls.some((toolCall) =>
-    ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)
-  )
-    ? "orchestration"
-    : toolCalls.some((toolCall) => AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name))
-      ? "discovery"
-      : null;
-  const filtered: LLMResponse["tool_calls"] = [];
-
-  for (const toolCall of toolCalls) {
-    const phase = ORCHESTRATION_LAUNCHER_TOOL_NAMES.has(toolCall.name)
-      ? "orchestration"
-      : AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name)
-        ? "discovery"
-        : null;
-
-    if (!phase) {
-      filtered.push(toolCall);
-      continue;
-    }
-
-    if (selectedPhase === phase) {
-      filtered.push(toolCall);
-      continue;
-    }
-
-    logAudit("tool_call_blocked", {
-      tool: toolCall.name,
-      reason: "mixed_discovery_and_orchestration_same_response",
-      keptPhase: selectedPhase,
-      args: toolCall.arguments,
-    }, {
-      sessionId,
-      severity: "warn",
-    });
-    guardrailEvents.push({ type: "tool_blocked", details: `${toolCall.name}:mixed_discovery_and_orchestration_same_response` });
-  }
-
-  return filtered;
-}
-
-export function buildRepeatedOutputFingerprint(toolName: string, args: Record<string, unknown>, resultText: string): string {
-  return `${toolName}|${stableSerialize(args)}|${resultText.slice(0, 500)}`;
-}
 
 export { __swarmStateContinuity };
 
@@ -787,166 +599,22 @@ function resolveEmptyAssistantResponseFallback(
 // (god-file seam). The four functions + two regexes still used here are imported at
 // the top.
 
-/**
- * Cost-center 2 (audit 5d51862f): a meta-reasoning preamble the specialist sometimes
- * prepends to its deliverable ("Now I have comprehensive evidence. Let me synthesize…")
- * before the real content. When relaying the deliverable verbatim we strip that short
- * lead-in so the user sees the answer, not the agent's thinking. Conservative: only
- * removes a short (<400 char) meta lead-in that sits before an early `---` rule or `#`
- * heading; otherwise the text is returned unchanged.
- */
-const REASONING_PREAMBLE_STARTERS = /^(now\b|let me\b|here(?:'s| is| are)\b|based on\b|i['’]?(?:ll| ve| have)\b|i will\b|i now\b|okay\b|alright\b|sure\b|with (?:the|these|all)\b|to (?:answer|address|fulfil|fulfill|summari[sz]e)\b)/i;
-
-export function stripLeadingReasoningPreamble(text: string): string {
-  const t = text.trimStart();
-  if (/^(#{1,6}\s|\||[-*+]\s|\d+[.)]\s|>\s)/.test(t)) return t; // already real content
-  if (!REASONING_PREAMBLE_STARTERS.test(t)) return t;
-  const window = t.slice(0, 800);
-  const hr = /\n\s*-{3,}\s*\n/.exec(window);
-  const heading = /\n#{1,6}\s/.exec(window);
-  let cut = -1;
-  if (hr) cut = hr.index + hr[0].length;
-  if (heading && (cut === -1 || heading.index + 1 < cut)) cut = heading.index + 1;
-  if (cut <= 0 || cut > 400) return t;
-  return t.slice(cut).trimStart();
-}
+// Single-deliverable relay shortcut + meta-preamble strip + truncated-code detector
+// (stripLeadingReasoningPreamble, looksLikeTruncatedCodeDeliverable,
+// extractSingleRelayableDeliverable) moved to ./deliverable-relay.ts (god-file seam).
+// The functions still called here are imported at the top; the originally-exported ones
+// are re-exported there.
 
 // Repetition-collapse helpers live in ./text-dedup.js so the runtime relay/final
 // sanitizer AND the sub-agent passthrough share one guard. Re-exported here to keep
 // the existing public import surface (tests, callers) stable.
 export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines };
 
-/**
- * Decide whether a turn's single delegation already produced a complete, presentable
- * deliverable that can be surfaced AS-IS — so the main assistant does not run a second
- * full synthesis pass over it (the biggest avoidable per-turn cost on the slow local
- * model, and the source of coordinator↔assistant divergence; audit 5d51862f). Returns
- * the clean deliverable text, or null when the normal synthesis path should run.
- *
- * Deliberately strict: exactly ONE successful delegation this turn, its tool result was
- * tagged a long deliverable ("present … VERBATIM"), and the evidence is a real structured
- * answer (headings/table/bullets) that is not a raw dump / provider error / scaffold.
- */
-/**
- * True when a deliverable contains an UNTERMINATED fenced code block — an odd number
- * of ``` fences means one was opened and never closed, i.e. the text was cut off
- * mid-code (the slow local model hit its token/time budget while emitting a large
- * code blob). Such a deliverable is broken (truncated HTML/JS/etc.) and must never be
- * relayed as finished. Purely structural — counts fence lines, no language/lexicon.
- */
-export function looksLikeTruncatedCodeDeliverable(text: string): boolean {
-  const fences = (text.match(/^[ \t]*```/gm) ?? []).length;
-  return fences % 2 === 1;
-}
-
-export function extractSingleRelayableDeliverable(
-  toolResultMessages: readonly { role: string; content?: string | null }[],
-  turnDelegationCount: number,
-): string | null {
-  if (turnDelegationCount !== 1) return null;
-  const delegateResults = toolResultMessages.filter(
-    (m) => m.role === "tool" && typeof m.content === "string" && DELEGATE_TOOL_RESULT_RE.test(String(m.content)),
-  );
-  if (delegateResults.length !== 1) return null;
-  const content = String(delegateResults[0]!.content ?? "");
-  if (!/TASK COMPLETED\b/i.test(content)) return null;
-  if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(content)) return null;
-  // Only the long-deliverable formatting carries this marker; short relays still synthesize.
-  if (!/Present the full content below VERBATIM/i.test(content)) return null;
-  const m = EVIDENCE_SECTION_RE.exec(content);
-  if (!m) return null;
-  const evidence = stripLeadingReasoningPreamble(content.slice(m.index + m[0].length).trim());
-  if (evidence.length < 800) return null;
-  // A degenerate, repetition-looped deliverable must NOT be relayed verbatim. Return
-  // null so the normal synthesis pass runs and cleans it into a usable answer — the
-  // behaviour that worked before this relay shortcut existed (audit 9fd16384: the slow
-  // model looped "Microphone Selection: …" 17× and the relay shipped it as-is).
-  if (looksLikeDegenerateRepetition(evidence)) return null;
-  // A truncated/unterminated code-blob deliverable must NOT be relayed verbatim. A
-  // research agent that improvises a build (audit 61683c52: a single "research THEN
-  // build a WebApp" task sent to researcher, which authored a 14 KB single-file HTML
-  // blob and ran out of budget at the soft deadline) emits an OPENED ``` fence that
-  // never closes — the answer literally ends mid-string. Shipping that as a "finished
-  // deliverable" both gives the user broken code AND suppresses the auto-build net
-  // that would route the build to a real builder. Unbalanced fences = cut off =
-  // not shippable; structural + language-independent (no lexicon).
-  if (looksLikeTruncatedCodeDeliverable(evidence)) return null;
-  if (REASONING_PREAMBLE_STARTERS.test(evidence)) return null; // couldn't clean the lead-in
-  if (
-    looksLikeRawToolEvidenceDump(evidence)
-    || looksLikeRawSharedFactsDump(evidence)
-    || looksLikeProviderErrorEcho(evidence)
-    || looksLikeRawWorkspaceToolDump(evidence)
-    || looksLikeOrchestrationOnlyEvidence(evidence)
-  ) return null;
-  const tableRows = (evidence.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
-  const headings = (evidence.match(/^#{1,6}\s/gm) ?? []).length;
-  const bullets = (evidence.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
-  if (tableRows < 4 && headings < 2 && bullets < 6) return null;
-  return evidence;
-}
-
-const EXPLICIT_SOURCE_RECHECK_RE = /\b(verify|verification|check|recheck|validate|validation|source|sources|citation|citations|cite|official|datasheet|spec(?:ification)?s?|price|prices|supplier|suppliers|mouser|digikey|lcsc|aliexpress|search|lookup|look\s+up|find\s+online|recherch|pruef|pruefe|pruefen|verifiz|validier|quelle|quellen|beleg|belege)\b/i;
-const CONTEXTUAL_DECISION_FOLLOW_UP_RE = /\b(ok|okay|thx|thanks|thank\s+you|danke|got\s+it|verstanden|we\s+will|we'll|wir\s+werden|wir\s+nutzen|wir\s+nehmen|i\s+will|ich\s+werde|ich\s+nehme|let'?s|lass\s+uns|use\s+them|using\s+them|go\s+with|nehmen\s+wir)\b/i;
-
-function shouldReusePriorDelegateEvidenceForSourceFollowUp(
-  userMessage: string,
-  guidance: DynamicTurnGuidance | null | undefined,
-  priorEvidence: { evidence: string; itemCount: number } | null,
-): boolean {
-  if (!guidance?.sourceSensitive || guidance.freshnessSensitive || guidance.artifactSensitive) return false;
-  if (!priorEvidence || priorEvidence.evidence.length < 400) return false;
-  if (EXPLICIT_SOURCE_RECHECK_RE.test(userMessage)) return false;
-  if (/[?？]/.test(userMessage)) return false;
-  return userMessage.length <= 700 && CONTEXTUAL_DECISION_FOLLOW_UP_RE.test(userMessage);
-}
-
-function buildPriorEvidenceFollowUpPrompt(evidence: { evidence: string; itemCount: number }): string {
-  return [
-    "CONTINUATION FROM PRIOR EVIDENCE: The latest user message appears to accept or refine a previously researched topic, not request fresh verification.",
-    "Use the existing delegated evidence and the user's latest decision to answer directly.",
-    "Do NOT call tools or delegate again unless the user explicitly asks for new source checks, current prices, supplier availability, or additional external facts.",
-    `Prior delegated evidence preview (${evidence.evidence.length} chars, ${evidence.itemCount} structured items): ${truncatePlainText(evidence.evidence, 2200)}`,
-  ].join(" ");
-}
-
-/**
- * Reuse-don't-re-research nudge (audit 17f53ed0). The narrow
- * `shouldReusePriorDelegateEvidenceForSourceFollowUp` only fires for source-sensitive
- * follow-ups matching a contextual-decision regex, so a plain refinement like "Mache ein
- * ordentliches Angebot" slipped through and the orchestrator re-ran a 15-minute research
- * mission whose evidence was still in the conversation. This is the broader, purely
- * STRUCTURAL gate: substantial delegated evidence already exists in this session AND the
- * new message introduces no new URL to fetch. It does NOT try to detect "same subject"
- * lexically — instead the injected nudge is conditional ("if it can be answered from the
- * existing evidence"), so a genuinely-new follow-up (e.g. an unrelated question not
- * covered by the prior evidence) still delegates fresh. A new URL is the one hard signal
- * of new external work, so its presence disables the nudge.
- */
-export function shouldNudgeSessionEvidenceReuse(input: {
-  enabled: boolean;
-  narrowReuseAlreadyFired: boolean;
-  priorEvidence: { evidence: string; itemCount: number } | null;
-  userMessage: string;
-}): boolean {
-  if (!input.enabled) return false;
-  // The narrow source-sensitive reuse path injects a stronger directive — don't double up.
-  if (input.narrowReuseAlreadyFired) return false;
-  // Need a real prior deliverable's worth of evidence, not a one-liner.
-  if (!input.priorEvidence || input.priorEvidence.evidence.length < 800) return false;
-  // A URL in the new message is a fresh fetch target = genuinely new external work.
-  if (/\bhttps?:\/\//i.test(input.userMessage)) return false;
-  return true;
-}
-
-export function buildSessionEvidenceReuseNudge(evidence: { evidence: string; itemCount: number }): string {
-  const approxKb = Math.max(1, Math.round(evidence.evidence.length / 1000));
-  return [
-    `[SESSION EVIDENCE] Earlier in THIS session you already gathered sourced research evidence (~${approxKb}KB, ${evidence.itemCount} item(s)) — it is still in the conversation above.`,
-    "If the latest request can be answered or REFINED from that evidence (e.g. re-pricing, restructuring, correcting, or extending the existing deliverable), reuse it and do NOT re-run the research.",
-    "Delegate fresh research ONLY for specific facts the existing evidence does not already cover.",
-  ].join(" ");
-}
+// Prior-evidence reuse-don't-re-research nudges
+// (shouldReusePriorDelegateEvidenceForSourceFollowUp, buildPriorEvidenceFollowUpPrompt,
+// shouldNudgeSessionEvidenceReuse, buildSessionEvidenceReuseNudge) moved to
+// ./evidence-reuse-nudge.ts (god-file seam). The functions still called here are imported
+// at the top; the originally-exported ones are re-exported there.
 
 /**
  * Decide whether to skip the LLM synthesis call entirely and surface the
