@@ -33,7 +33,11 @@
       // just the session a file was attached to). Files uploaded on the Documents
       // page → Personal library become available across all of that user's chats.
       "includeUserDocs": true,
-      "includeWorkspaceDocs": false,
+      // Search the shared WORKSPACE library in every conversation too. Files uploaded
+      // on the Documents page → Workspace library (e.g. a CV/profile shared for the
+      // whole workspace) are otherwise invisible to retrieval — the assistant cannot
+      // see them via recall_context, the per-turn RAG, or the profile prefetch.
+      "includeWorkspaceDocs": true,
       "workspaceName": "workspace"
     }
   },

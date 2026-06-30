@@ -29,6 +29,15 @@
     // sourced ("based on current market data…", "as of today…") when it retrieved
     // nothing this turn. Sibling of the user-profile fabrication guard. Enabled here
     // to validate on this deployment before flipping the schema default.
-    "freshnessHonestyGuard": true
+    "freshnessHonestyGuard": true,
+
+    // Proactive user-profile retrieval. On a userOwnFacts turn (a question about the
+    // user's OWN background/skills/fit), the RUNTIME retrieves their memory + attached
+    // documents (CV/profile in the personal OR workspace library) up-front and injects
+    // the evidence — or an authoritative confirmed-empty marker. Deterministic: it no
+    // longer depends on the local model choosing to call recall_context (which it does
+    // NOT do reliably — toolCalls=0 on real turns). Enabled here to validate before
+    // flipping the schema default.
+    "userProfilePrefetch": true
   }
 }

@@ -267,6 +267,13 @@ services:
       - RERANK_TOP_K=${ENGRAM_RERANK_TOP_K:-15}
       # Adopt (don't refuse) when the embedding model/dim differs from prior indexes.
       - SCHEMA_GUARD_MODE=${ENGRAM_SCHEMA_GUARD_MODE:-warn}
+      # PERSISTENCE. engram-db is in-memory; with no path it snapshots NOWHERE, so every
+      # container restart/rebuild silently WIPES all uploaded documents (a user's CV /
+      # workspace library). Point it at a pickle snapshot on the named volume below: it is
+      # written on graceful shutdown and reloaded on start, so uploads survive restarts.
+      - ENGRAMDB_PATH=${ENGRAM_ENGRAMDB_PATH:-/data/engramdb.pkl}
+    volumes:
+      - engram-data:/data
     networks:
       - starlingai-internal
       - starlingai-public
@@ -631,6 +638,9 @@ volumes:
   gc-workspace:
   gc-qwen-model-cache:
   gc-engram-reranker-cache:
+  # engram-db snapshot — persists uploaded documents (CV/profile, workspace library)
+  # across container restarts/rebuilds. Wiped only by `sai stop --volumes` / `--fresh`.
+  engram-data:
 
 networks:
   starlingai-internal:

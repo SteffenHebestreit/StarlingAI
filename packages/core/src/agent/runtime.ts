@@ -4654,7 +4654,11 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // it OVERLAPS the memory/skill/discovery embeddings; bounded by a hard latency cap so a
     // slow/cold embed backend degrades to "" (the reworded retrieve-first digest then still
     // covers it). Fires ONLY on the narrow self-referential class → trivial turns pay nothing.
-    const PROFILE_PREFETCH_BUDGET_MS = 2500;
+    // Generous budget: the engram embedding + Qwen rerank for the profile lookup can
+    // take a few seconds, and missing the CV is worse than a slightly slower userOwnFacts
+    // turn. Still capped so a stalled embed backend degrades to "" (the per-turn RAG then
+    // covers it) rather than hanging the turn.
+    const PROFILE_PREFETCH_BUDGET_MS = 8000;
     const userProfilePrefetchPromise: Promise<string> =
       iterationCount === 0
         && dynamicGuidance?.userOwnFacts === true
@@ -4722,12 +4726,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           durableCapsule,
           "",
         );
-      } else {
-        // No durable facts are PRELOADED for this user. Make explicit that this is the
-        // lean-context default — NOT the result of a lookup — so the model cannot (a)
-        // fabricate a profile from nothing, nor (b) read "not preloaded" as "checked and
-        // empty" and admit ignorance without retrieving (the toolCalls=0 "I have no info"
-        // failure). Structural (keys off an empty capsule), language-independent.
+      } else if (!userProfileEvidence) {
+        // No durable facts are PRELOADED for this user, AND the proactive profile prefetch
+        // did not already inject an authoritative result. (When it DID — found a CV/profile,
+        // or established a confirmed-empty — this "no facts" marker is suppressed so it can
+        // never contradict the retrieved evidence: the "keine gespeicherten Informationen …
+        // aber ich sehe Ihren CV" awkwardness.) Make explicit that this is the lean-context
+        // default — NOT the result of a lookup — so the model cannot (a) fabricate a profile
+        // from nothing, nor (b) read "not preloaded" as "checked and empty" and admit
+        // ignorance without retrieving. Structural (keys off an empty capsule), language-independent.
         parts.push(
           "No durable facts, user model, or documents are PRELOADED into this turn — but that is the lean-context default, NOT the result of a lookup: nothing has been searched yet, so absence here is NOT evidence that nothing is stored. If the turn asks about the user's OWN background, experience, skills, employers, education, projects, fit, or identity, you MUST call recall_context (it also returns excerpts from an attached CV/profile) — and search_documents if more is needed — THIS turn BEFORE answering. Only after that retrieval actually returns nothing may you say plainly that you have no stored information and ask them to provide it. Never invent a profile, and never treat 'not preloaded' as 'already checked and empty'. A tool-free 'I have no information about you' is INVALID until the retrieval has run this turn.",
           "",

@@ -74,9 +74,18 @@ export async function buildUserProfileEvidence(
   sessionId: string,
   userId?: string,
 ): Promise<string> {
+  // Bias the DOCUMENT query toward the user's PROFILE rather than echoing the (often
+  // vague) self-referential question — "passt X zu meinem Skillset?" matches a CV only
+  // borderline, so engram returns it unreliably. A profile-oriented query reliably
+  // surfaces the CV/profile chunks; the original question stays in the conversation for
+  // the actual assessment. Memory records still use the raw query (subject-keyed).
+  const profileQuery =
+    `${query}\nProfil des Nutzers: Lebenslauf, beruflicher Werdegang, Berufserfahrung, `
+    + `Fähigkeiten, Qualifikationen, Projekte, Ausbildung — the user's professional `
+    + `background, work experience, skills, qualifications, projects, education (CV / resume).`;
   const [records, chunks] = await Promise.all([
     searchMemoryRecords(workspacePath, query, { limit: 6, sessionId }).catch(() => null),
-    retrieveDocumentContext(query, { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
+    retrieveDocumentContext(profileQuery, { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
   ]);
   return renderUserProfileEvidence(records, chunks);
 }

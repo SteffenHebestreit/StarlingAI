@@ -1,0 +1,20 @@
+{
+  // One-case live verify: the exact failing prompt from session e0cda422. With
+  // includeWorkspaceDocs + userProfilePrefetch on, the workspace-library CV must now
+  // be retrieved and the answer grounded in it — NOT "I have no stored information".
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "outputPath": "./.starlingai/live-check/cv-verify-report.json",
+  "cases": [
+    {
+      "name": "skillset-fit-finds-workspace-cv",
+      "message": "Passt ein GenAI-Projekt zu meinem Skillset?",
+      // Any "I found nothing about you" phrasing = the CV was NOT retrieved = FAIL.
+      "expectTextExcludes": [
+        "keine gespeicherten Informationen", "no stored information",
+        "keine Daten zu", "keine Informationen", "nichts gefunden",
+        "habe keine", "liegen mir keine", "RUN_ERROR", "LLM error:"
+      ],
+      "maxDurationMs": 120000
+    }
+  ]
+}
