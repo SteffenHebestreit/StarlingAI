@@ -46,14 +46,16 @@
     "enabled": true,
     "maxResponseChars": 400,
     "alwaysEscalateTerms": [],
-    // vLLM "Confidence" — let the fast desk ATTEMPT a confident direct answer for a
-    // clearly-direct, self-contained question (≤ confidenceAttemptMaxChars) instead of
-    // staying smalltalk-only. The Stage-0 gate still escalates ANY turn with a task /
-    // research / freshness / source-sensitive / user-own-facts signal BEFORE the relaxed
-    // gate (so it never short-circuits the citation/profile guards), and the micro-call
-    // self-scores confidence and escalates on any doubt. Saves a full-prompt round-trip
-    // on easy factual questions.
-    "confidenceAttempt": true,
+    // vLLM "Confidence" attempt — DISABLED after the de-lexicalization. Its safety premise was
+    // that the Stage-0 gate (buildDynamicTurnGuidance) escalates any task/research/mail/server/
+    // computer turn BEFORE the relaxed confident-answer gate. The de-lex GUTTED
+    // buildDynamicTurnGuidance (it now returns null for those turns — no keyword classification),
+    // so confidence-attempt lost its gate and began confidently REFUSING capability turns (live
+    // eval: "read my emails" → "I can't access email", never escalated to mail_agent). With this
+    // off, the receptionist is smalltalk-only and escalates any real request to the orchestrator,
+    // which then delegates (its base prompt now carries the never-refuse-a-delegatable-capability
+    // rule). Re-enable only once task-intent is detected semantically at intake, not by keywords.
+    "confidenceAttempt": false,
     "confidenceAttemptMaxChars": 400
   }
 }
