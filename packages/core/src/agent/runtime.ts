@@ -33,7 +33,6 @@ import {
   effectiveOrchestration,
   effectiveMaxDelegatedResultChars,
   effectiveOrchestratorMaxToolIterations,
-  effectiveOrchestratorTurnSloMs,
   currentEffortTier,
 } from "../runtime/effort-context.js";
 import {
@@ -64,7 +63,6 @@ import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful }
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
 import { join } from "node:path";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
@@ -306,24 +304,46 @@ import {
   findRecentDelegateEvidence,
 } from "./interrupted-delegation-evidence.js";
 
-const log = childLogger("agent:runtime");
+// Turn metrics & prompt-sizing cluster (god-file seam): pure, non-loop helpers that
+// measure prompt size, perform last-resort base-prompt compaction, and assemble the
+// TurnPerformanceMetrics record. The per-stage phase-timing AsyncLocalStorage lives
+// there too (runtime.ts wraps each turn in runWithPhaseTimings()).
+import {
+  runWithPhaseTimings,
+  timedPhase,
+  measurePrompt,
+  compactBasePromptUnderPressure,
+  buildTurnPerformanceMetrics,
+  type TurnPerformanceMetrics,
+} from "./turn-metrics.js";
 
-// Turn-scoped accumulator for per-stage wall-clock (A1). A turn runs inside one
-// runTurn() invocation, but the gateway runs turns concurrently — so this MUST be
-// AsyncLocalStorage (a module-level singleton would cross-contaminate turns), not a
-// shared mutable. timedPhase() records the elapsed ms of a stage into the active
-// turn's store; buildTurnPerformanceMetrics() reads it and computes untrackedMs.
-const _phaseTimingsStore = new AsyncLocalStorage<Record<string, number>>();
-async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
-  const store = _phaseTimingsStore.getStore();
-  if (!store) return fn();
-  const start = Date.now();
-  try {
-    return await fn();
-  } finally {
-    store[phase] = (store[phase] ?? 0) + (Date.now() - start);
-  }
-}
+// Re-export the originally-exported metrics symbols so existing imports from
+// runtime.js (compactBasePromptUnderPressure test; TurnPerformanceMetrics type used
+// by scene-worker.ts + jobs.ts) keep working after the extraction.
+export { compactBasePromptUnderPressure } from "./turn-metrics.js";
+export type { TurnPerformanceMetrics } from "./turn-metrics.js";
+
+// Turn-failure & never-empty-output cluster (god-file seam): pure, non-loop helpers
+// that classify a turn failure, render its marker text, persist a failure record,
+// and enforce the never-empty-response invariant on the runTurn boundary.
+import {
+  classifyTurnFailure,
+  recordTurnFailure,
+  finalizeTurnOutput,
+  type TurnFailureKind,
+} from "./turn-failure.js";
+
+// Re-export the originally-exported turn-failure helpers so existing imports from
+// runtime.js (runtime-turn-failure.test.ts, runtime-finalize.test.ts) keep working.
+export {
+  classifyTurnFailure,
+  turnFailureMarkerText,
+  recordTurnFailure,
+  finalizeTurnOutput,
+  type TurnFailureKind,
+} from "./turn-failure.js";
+
+const log = childLogger("agent:runtime");
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
@@ -379,36 +399,6 @@ export interface TurnOutput {
   blocked: boolean;
   swarmState?: SwarmState;
   performance?: TurnPerformanceMetrics;
-}
-
-export interface TurnPerformanceMetrics {
-  turnDurationMs: number;
-  firstModelResponseMs?: number;
-  llmCalls: number;
-  llmTimeMs: number;
-  toolCallsRequested: number;
-  toolExecutionTimeMs: number;
-  systemPromptChars: number;
-  collapsedHistoryMessages: number;
-  collapsedHistoryChars: number;
-  promptChars: number;
-  completionChars: number;
-  toolIterations: number;
-  finishReason: string;
-  blocked: boolean;
-  /** Effective orchestrator turn-SLO budget for this turn (ms), reflecting the
-   *  active effort profile. The Warden reads it off the turn_performance event so a
-   *  high/max-effort turn doesn't trip a spurious SLO-breach alert — without the
-   *  Warden having to import the session store (avoids a module cycle). */
-  effortSloBudgetMs?: number;
-  /** Per-stage wall-clock (ms) for work that runs OUTSIDE llmTimeMs/toolExecutionTimeMs —
-   *  e.g. discoveryPrefetch, documentRag, qaDeliveryLoop, receptionistFastLane. Lets the
-   *  Warden + eval attribute turn latency to a stage instead of treating turnDurationMs as
-   *  a black box. */
-  phaseTimingsMs?: Record<string, number>;
-  /** turnDurationMs minus llmTimeMs, toolExecutionTimeMs, and all tracked phase timings —
-   *  the residual that surfaces the next unmeasured cost. */
-  untrackedMs?: number;
 }
 
 // Shared-facts / evidence / recovery-backstop cluster moved to ./evidence-recovery.ts
@@ -1340,7 +1330,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   try {
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
-    return await _phaseTimingsStore.run(Object.create(null) as Record<string, number>, () => runTurnImpl(opts));
+    return await runWithPhaseTimings(() => runTurnImpl(opts));
   } finally {
     markOrchestratorIdle();
   }
@@ -1410,80 +1400,6 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     deregisterSessionAbortController(sessionId);
     turnSteeringManager.markTurnDone(sessionId);
   }
-}
-
-/**
- * Why a turn threw — used to decide whether it is a recordable failure or an
- * intentional cancel. A caller-initiated abort with no turn-timeout and no
- * Warden cancel is a user stop or a superseding newer turn (chat.cancel / a
- * fresh message), which must NOT clutter the transcript with a failure marker.
- */
-export type TurnFailureKind = "timeout" | "warden_abort" | "error" | "cancelled";
-
-export function classifyTurnFailure(flags: {
-  callerAborted: boolean;
-  turnTimedOut: boolean;
-  wardenAborted: boolean;
-}): TurnFailureKind {
-  if (flags.turnTimedOut) return "timeout";
-  if (flags.wardenAborted) return "warden_abort";
-  if (flags.callerAborted) return "cancelled";
-  return "error";
-}
-
-export function turnFailureMarkerText(kind: TurnFailureKind): string {
-  switch (kind) {
-    case "timeout":
-      return "This turn timed out before it could finish — the request was large or the model was slow. Please retry, lower the effort/scope, or break it into smaller parts.";
-    case "warden_abort":
-      return "This turn was stopped by the safety monitor before it completed. Please retry, or rephrase the request.";
-    default:
-      return "I wasn't able to complete this turn due to an error. Please retry, or rephrase the request — breaking a complex task into smaller parts usually helps.";
-  }
-}
-
-/**
- * Record a turn failure so it is never silently absent from the session record:
- * emit a `turn_failed` audit event AND persist a recoverable assistant marker to
- * the transcript (which also advances the session's updatedAt). Intentional
- * cancels are skipped. Returns the marker text, or null when nothing was recorded.
- */
-export function recordTurnFailure(session: AgentSession, err: unknown, kind: TurnFailureKind): string | null {
-  if (kind === "cancelled") return null;
-  const errorMessage = err instanceof Error ? err.message : String(err);
-  logAudit("turn_failed", { kind, error: errorMessage }, {
-    sessionId: session.id,
-    channel: session.channel,
-    severity: "error",
-  });
-  const text = turnFailureMarkerText(kind);
-  session.addMessage({ role: "assistant", content: text, metadata: { turnFailed: true, failureKind: kind } });
-  return text;
-}
-
-/**
- * Turn invariant — a chat turn must never hand the user a blank response.
- *
- * Most terminals build a non-empty message, but some suppression paths (e.g. a
- * tool call dropped as synthesis-required with no accompanying text, or an
- * unexpected early return) can leave `response` empty. This single chokepoint
- * on the runTurn boundary guarantees the user is never met with silence: an
- * empty/whitespace response is replaced with a graceful, recoverable message
- * and the occurrence is audited so the underlying cause stays visible.
- *
- * Non-empty responses pass through unchanged.
- */
-export function finalizeTurnOutput(out: TurnOutput, sessionId: string): TurnOutput {
-  if (out.response && out.response.trim().length > 0) return out;
-  logAudit("guardrail_flagged", {
-    type: "empty_response_recovered",
-    blocked: out.blocked,
-    finishReason: out.performance?.finishReason ?? "unknown",
-  }, { sessionId, severity: "warn" });
-  return {
-    ...out,
-    response: "I wasn't able to produce a complete answer this turn. Please retry, or rephrase the request — breaking a complex task into smaller parts usually helps.",
-  };
 }
 
 async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal): Promise<TurnOutput> {
@@ -6387,49 +6303,6 @@ async function continueLengthLimitedResponse(
   return { response, additionalCalls, additionalTimeMs, runawayInlineArtifact };
 }
 
-function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly LLMMessage[]): {
-  systemPromptChars: number;
-  collapsedHistoryMessages: number;
-  collapsedHistoryChars: number;
-  promptChars: number;
-} {
-  const systemPromptChars = systemMessages.reduce((sum, message) => {
-    const contentLength = typeof message.content === "string" ? message.content.length : 0;
-    return sum + contentLength;
-  }, 0);
-  const collapsedHistoryChars = history.reduce((sum, message) => {
-    const contentLength = typeof message.content === "string" ? message.content.length : 0;
-    return sum + contentLength;
-  }, 0);
-  return {
-    systemPromptChars,
-    collapsedHistoryMessages: history.length,
-    collapsedHistoryChars,
-    promptChars: systemPromptChars + collapsedHistoryChars,
-  };
-}
-
-/**
- * Last-resort base-prompt compaction, used only when the budget trimmer has
- * already dropped every auxiliary block and the prompt is *still* over budget.
- *
- * Strips clearly non-load-bearing verbose sections — the Markdown "## Response
- * Format" guidance — and collapses runs of blank lines. It deliberately leaves
- * Core Principles, Swarm Rules, Tool Use Discipline, Orchestration Strategy,
- * and Security untouched: those carry behavioral and safety contracts. Returns
- * the prompt unchanged when there is nothing safe to remove.
- */
-export function compactBasePromptUnderPressure(prompt: string): string {
-  let out = prompt;
-  // Remove the "## Response Format" section (heading through to the next "## ").
-  // Formatting guidance is the lowest-value block under genuine budget
-  // pressure: the model still answers correctly without it.
-  out = out.replace(/\n## Response Format\n[\s\S]*?(?=\n## )/, "\n");
-  // Collapse 3+ consecutive newlines left behind by removals to a single blank line.
-  out = out.replace(/\n{3,}/g, "\n\n");
-  return out;
-}
-
 /**
  * Consume a streaming LLM generator into a complete LLMResponse.
  * Optionally defers text until the response is known not to contain tool calls.
@@ -6488,52 +6361,4 @@ async function collectStream(
   }
 
   return { content: content || null, ...(reasoning ? { reasoning } : {}), tool_calls, usage, finishReason };
-}
-
-function buildTurnPerformanceMetrics(input: {
-  turnStartedAt: number;
-  firstModelResponseMs?: number;
-  llmCalls: number;
-  llmTimeMs: number;
-  toolCallsRequested: number;
-  toolExecutionTimeMs: number;
-  lastPromptMetrics: {
-    systemPromptChars: number;
-    collapsedHistoryMessages: number;
-    collapsedHistoryChars: number;
-    promptChars: number;
-  };
-  completionChars: number;
-  finishReason: string;
-  blocked: boolean;
-  toolIterations: number;
-}): TurnPerformanceMetrics {
-  const turnDurationMs = Date.now() - input.turnStartedAt;
-  // Per-stage timings recorded by timedPhase() during this turn (empty when no
-  // tracked stage ran). untrackedMs is the residual after LLM + tool + tracked
-  // stages — it surfaces the next unmeasured cost.
-  const phaseStore = _phaseTimingsStore.getStore();
-  const phaseTimingsMs = phaseStore && Object.keys(phaseStore).length > 0 ? { ...phaseStore } : undefined;
-  const trackedPhaseMs = phaseTimingsMs ? Object.values(phaseTimingsMs).reduce((a, b) => a + b, 0) : 0;
-  const untrackedMs = Math.max(0, turnDurationMs - input.llmTimeMs - input.toolExecutionTimeMs - trackedPhaseMs);
-  return {
-    turnDurationMs,
-    firstModelResponseMs: input.firstModelResponseMs,
-    llmCalls: input.llmCalls,
-    llmTimeMs: input.llmTimeMs,
-    toolCallsRequested: input.toolCallsRequested,
-    toolExecutionTimeMs: input.toolExecutionTimeMs,
-    systemPromptChars: input.lastPromptMetrics.systemPromptChars,
-    collapsedHistoryMessages: input.lastPromptMetrics.collapsedHistoryMessages,
-    collapsedHistoryChars: input.lastPromptMetrics.collapsedHistoryChars,
-    promptChars: input.lastPromptMetrics.promptChars,
-    completionChars: input.completionChars,
-    toolIterations: input.toolIterations,
-    finishReason: input.finishReason,
-    blocked: input.blocked,
-    // Resolved within the turn's effort context (or config default outside one).
-    effortSloBudgetMs: effectiveOrchestratorTurnSloMs(),
-    ...(phaseTimingsMs ? { phaseTimingsMs } : {}),
-    untrackedMs,
-  };
 }
