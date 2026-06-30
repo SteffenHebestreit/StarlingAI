@@ -562,32 +562,6 @@ const RESEARCH_CAPABLE_TOOL_NAMES = new Set<string>([
   "mcp__playwright__browser_screenshot",
 ]);
 
-/** Patterns that indicate an ephemeral agent needs external research access
- *  (datasheets, supplier inventory, current product availability, citations).
- *  Matched against the agent's description + systemPrompt + task — case-
- *  insensitive substring/regex against the joined text. */
-const EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS: RegExp[] = [
-  /\b(?:datasheet|datasheets)\b/i,
-  /\b(?:digikey|mouser|adafruit|aliexpress|sparkfun|tindie|seeed|farnell|conrad|reichelt)\b/i,
-  /\b(?:part\s+number|part\s+numbers|part\s+#|part-?numbers?)\b/i,
-  /\bcomponent\s+(?:sourcing|selection|recommendations?|suggestions?)\b/i,
-  /\b(?:product|hardware|component)\s+(?:recommendations?|suggestions?|comparisons?)\b/i,
-  /\b(?:pricing|price\s+(?:comparison|check)|availability|stock\s+level|supplier|suppliers)\b/i,
-  /\b(?:current|latest|aktuell|aktuelle)\s+(?:product|version|release|spec|news)/i,
-  /\b(?:cite|citations?|official\s+(?:source|documentation|spec|datasheet))\b/i,
-  /\bspecific\s+part\s+numbers?\b/i,
-  /\b(?:Mouser|DigiKey|Adafruit)\s+with\s+(?:pricing|availability)\b/i,
-];
-
-function looksLikeExternalResearchAgent(
-  description: string,
-  systemPrompt: string,
-  task: string,
-): boolean {
-  const haystack = `${description}\n${systemPrompt}\n${task}`;
-  return EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(haystack));
-}
-
 /** Coordination tools — an agent holding any of these can fan a research task
  *  out to a web-capable specialist, so it counts as research-capable. */
 const COORDINATION_TOOL_NAMES = new Set<string>([
@@ -692,7 +666,10 @@ export function taskRequiresExternalResearch(task: string): boolean {
   const t = task ?? "";
   if (t.includes("SOURCE-SENSITIVE DELEGATION")) return true;
   if (SEARCH_ONLINE_TASK_RE.test(t)) return true;
-  if (EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS.some((pattern) => pattern.test(t))) return true;
+  // (Deleted the EPHEMERAL_EXTERNAL_RESEARCH_PATTERNS hardware-sourcing keyword bag with the
+  //  ephemeral tool-fit de-lexicalization; the structural SOURCE-SENSITIVE marker + the
+  //  verb/noun shape below still gate research-capability. This whole gate is a deferred
+  //  capability invariant, to be replaced fully by the structural marker path later.)
   // General (incl. German) web-research shape: a research/search verb + an external
   // web noun, with no workspace/code marker that would make it an internal lookup.
   if (!WORKSPACE_CODE_MARKER_RE.test(t) && WEB_RESEARCH_VERB_RE.test(t) && EXTERNAL_WEB_NOUN_RE.test(t)) return true;
@@ -830,28 +807,18 @@ function validateEphemeralToolSelection(
     issues.push("Ephemeral coordinator agents using parallel_delegate cannot also hold additional execution-heavy tools.");
   }
 
-  // ── Tool-fit validation ────────────────────────────────────────────────
-  // When the spec describes an external-research agent (datasheets, supplier
-  // sourcing, part numbers, product recommendations, price/availability) but
-  // the granted tools cover none of web_search, web_fetch, or browser tools,
-  // reject the spawn.  The classic failure mode (audit session 0a93078b,
-  // May 2026) is a coordinator that creates `hardware_audio_engineer` with
-  // tools=[workspace_search, read_file, list_files] and then watches it loop
-  // 6 iterations of "No workspace files contain ..." before timing out.
-  if (opts?.description !== undefined || opts?.systemPrompt !== undefined || opts?.task !== undefined) {
-    const description = opts?.description ?? "";
-    const systemPrompt = opts?.systemPrompt ?? "";
-    const task = opts?.task ?? "";
-    const isResearchAgent = looksLikeExternalResearchAgent(description, systemPrompt, task);
-    const hasResearchTools = tools.some((toolName) => RESEARCH_CAPABLE_TOOL_NAMES.has(toolName));
-    if (isResearchAgent && !hasResearchTools) {
-      issues.push(
-        "This ephemeral agent's description, system prompt, or task indicates it needs external research access "
-        + "(datasheets, supplier sourcing, product/part recommendations, pricing, or current availability), "
-        + "but the granted tool list contains none of web_search, web_fetch, or browser_* tools. "
-        + "Re-spawn with at least one of those tools, or remove the research-shaped requirements from the spec.",
-      );
-    }
+  // ── Tool-fit validation (STRUCTURAL, language-free) ─────────────────────
+  // The old check keyword-matched the spec text (datasheet/mouser/pricing/aktuell…)
+  // to guess "this is a research agent" — deleted (de-lexicalization): the architect is
+  // trusted to pick the tools a task needs. We keep ONE structural guard: if the TASK
+  // references a URL the agent must fetch but it holds NO web-reaching tool, it will
+  // dead-loop on a page it can't open. Keyed on the URL's presence only, no topic lexicon.
+  const task = opts?.task ?? "";
+  if (/\bhttps?:\/\/[^\s<>"'`)\]]+/i.test(task) && !tools.some(isWebReachingToolName)) {
+    issues.push(
+      "This ephemeral agent's task references a URL to fetch, but the granted tool list contains no "
+      + "web-reaching tool (web_search, web_fetch, url_inspect, or a browser_* tool). Re-spawn with one of those.",
+    );
   }
 
   return issues;
