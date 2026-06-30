@@ -19,6 +19,7 @@ import {
   DELIVERABLE_CONSISTENCY_CRITERION,
 } from "./deliverable-consistency.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
+import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -4644,7 +4645,33 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             }
           }).catch(() => "")
         : Promise.resolve("");
-    const [memoryGuidanceText, skillRetrieved, prefetchedDiscoveryCapsule] = await Promise.all([
+    // Proactive user-profile prefetch (orchestration.userProfilePrefetch, default-off,
+    // eval-gated): on a userOwnFacts turn (a question about the user's OWN background /
+    // skills / fit), retrieve their memory records + attached documents (an uploaded
+    // CV/profile) up-front and inject the evidence — or an authoritative confirmed-empty
+    // marker — so the model answers from a REAL lookup instead of fabricating or admitting
+    // blindly (the audited toolCalls=0 "I have no info about you" failure). Started HERE so
+    // it OVERLAPS the memory/skill/discovery embeddings; bounded by a hard latency cap so a
+    // slow/cold embed backend degrades to "" (the reworded retrieve-first digest then still
+    // covers it). Fires ONLY on the narrow self-referential class → trivial turns pay nothing.
+    const PROFILE_PREFETCH_BUDGET_MS = 2500;
+    const userProfilePrefetchPromise: Promise<string> =
+      iterationCount === 0
+        && dynamicGuidance?.userOwnFacts === true
+        && getConfig().orchestration?.userProfilePrefetch === true
+        ? timedPhase("userProfilePrefetch", async () => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                buildUserProfileEvidence(session.getWorkspacePath(), userMessage, session.id, session.userId),
+                new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), PROFILE_PREFETCH_BUDGET_MS); }),
+              ]);
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          }).catch(() => "")
+        : Promise.resolve("");
+    const [memoryGuidanceText, skillRetrieved, prefetchedDiscoveryCapsule, userProfileEvidence] = await Promise.all([
       injectTurnContext
         ? formatScopedMemoryGuidance(session.getWorkspacePath(), userMessage, {
             sessionId: session.id,
@@ -4659,6 +4686,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           })
         : Promise.resolve(null),
       discoveryPrefetchPromise,
+      userProfilePrefetchPromise,
     ]);
     let memoryGuidance = memoryGuidanceText;
     let skillGuidance = "";
@@ -4695,12 +4723,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           "",
         );
       } else {
-        // No durable facts are stored about this user. Make that ABSENCE explicit so a
-        // question about the user's own background/skills/history/identity cannot be
-        // answered by invention — the "fabricated a whole CV from an empty profile"
-        // failure. Structural (keys off an empty capsule), language-independent.
+        // No durable facts are PRELOADED for this user. Make explicit that this is the
+        // lean-context default — NOT the result of a lookup — so the model cannot (a)
+        // fabricate a profile from nothing, nor (b) read "not preloaded" as "checked and
+        // empty" and admit ignorance without retrieving (the toolCalls=0 "I have no info"
+        // failure). Structural (keys off an empty capsule), language-independent.
         parts.push(
-          "You currently have NO stored facts about this user — no remembered facts, no user model, no documents are in view. You therefore know NOTHING about their background, experience, skills, employers, education, or identity. If the turn asks about any of those, do NOT invent an answer: call recall_context / search_documents first, and if nothing is found say plainly you have no stored information about them and ask them to provide it. Never present a guess as their profile.",
+          "No durable facts, user model, or documents are PRELOADED into this turn — but that is the lean-context default, NOT the result of a lookup: nothing has been searched yet, so absence here is NOT evidence that nothing is stored. If the turn asks about the user's OWN background, experience, skills, employers, education, projects, fit, or identity, you MUST call recall_context (it also returns excerpts from an attached CV/profile) — and search_documents if more is needed — THIS turn BEFORE answering. Only after that retrieval actually returns nothing may you say plainly that you have no stored information and ask them to provide it. Never invent a profile, and never treat 'not preloaded' as 'already checked and empty'. A tool-free 'I have no information about you' is INVALID until the retrieval has run this turn.",
           "",
         );
       }
@@ -4756,6 +4785,10 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
       ...(dynamicGuidance ? [{ role: "system" as const, content: dynamicGuidance.prompt }] : []),
       ...(freshnessHonestyPrompt ? [{ role: "system" as const, content: freshnessHonestyPrompt }] : []),
+      // Proactive user-profile evidence (default-off) leads the general retrieve-first
+      // digest: when the prefetch ran it is the AUTHORITATIVE result of a real lookup
+      // (found evidence, or a confirmed-empty fact) for a userOwnFacts turn.
+      ...(userProfileEvidence ? [{ role: "system" as const, content: userProfileEvidence }] : []),
       ...(contextRecallDigest ? [{ role: "system" as const, content: contextRecallDigest }] : []),
       ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
       ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),

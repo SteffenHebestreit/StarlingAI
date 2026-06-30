@@ -1,0 +1,63 @@
+{
+  // Live pass^k eval for the user-own-facts retrieval fix — the CV/Lead-Dev
+  // "admit-without-retrieve" failure (session da2844bd, where the orchestrator
+  // answered "I have no info about you" with toolCalls=0 instead of looking).
+  //
+  // WHAT THIS GATES: the DEFAULT-ON prompt fix (recall_context documents section,
+  // reworded empty-capsule digest, DIRECT-ANSWER-FIRST EXCEPT clause, userOwnFacts
+  // classifier nudge). It asserts that a question about the USER'S OWN background
+  // now triggers a real retrieval (recall_context) BEFORE the model answers, and
+  // that general-knowledge / first-person-but-not-about-the-user turns do NOT
+  // over-fire (no profile retrieval, no added latency).
+  //
+  // HOW TO RUN (after `sai start --build` rebuilds the gateway with the fix):
+  //   for i in 1 2 3 4 5; do \
+  //     pnpm --filter @starlingai/core runtime-guidance:evaluate runtime-guidance-eval.userfacts.jsonc \
+  //     || echo "RUN $i FAILED"; done
+  // All cases must PASS on every one of the k runs (pass^k) before relying on the
+  // default-on fix. NOTE: when orchestration.userProfilePrefetch is ENABLED, cases
+  // 1-3 may legitimately show toolCalls=0 (the runtime pre-injects the profile
+  // evidence, so the model no longer needs to call recall_context) — eval that path
+  // separately by observing phaseTimingsMs.userProfilePrefetch + a grounded,
+  // non-fabricated response, NOT this toolCalls assertion.
+  "gatewayBaseUrl": "http://127.0.0.1:8765",
+  "outputPath": "./.starlingai/live-check/userfacts-eval-report.json",
+  "cases": [
+    {
+      "name": "cv-fit-de-must-retrieve",
+      "message": "Wäre ich eine gute Besetzung für GenAI-Projekte als Lead-Dev?",
+      "expectToolIncludes": ["recall_context"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:", "Sub-agent error:"],
+      "maxDurationMs": 90000
+    },
+    {
+      "name": "cv-access-de-must-retrieve",
+      "message": "Hast du Zugriff auf mein CV oder meine Projektliste?",
+      "expectToolIncludes": ["recall_context"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 90000
+    },
+    {
+      "name": "background-en-must-retrieve",
+      "message": "Do I have enough experience to lead a GenAI project?",
+      "expectToolIncludes": ["recall_context"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 90000
+    },
+    {
+      "name": "general-knowledge-no-overfire",
+      "message": "Was ist die Hauptstadt von Frankreich?",
+      "expectToolExcludes": ["recall_context", "search_documents"],
+      "expectTextIncludes": ["Paris"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 60000
+    },
+    {
+      "name": "first-person-code-no-overfire",
+      "message": "Mein Skript wirft einen TypeError in Zeile 3. Was ist der häufigste Grund für einen TypeError?",
+      "expectToolExcludes": ["recall_context", "search_documents"],
+      "expectTextExcludes": ["RUN_ERROR", "LLM error:"],
+      "maxDurationMs": 90000
+    }
+  ]
+}

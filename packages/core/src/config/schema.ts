@@ -1575,6 +1575,17 @@ export const OrchestrationSchema = z.object({
    *  pays off when it actually removes a slower discovery round. Default OFF until
    *  pass^k confirms a net latency/quality win. */
   discoveryPrefetch: z.boolean().default(false),
+  /** Proactive user-profile prefetch. When true, an iteration-0 turn that the classifier
+   *  flagged userOwnFacts (a question about the user's OWN background/skills/experience/
+   *  fit) AND that has no durable memory capsule runs a BOUNDED, concurrent best-effort
+   *  retrieval over the user's memory records + attached documents (an uploaded CV/profile),
+   *  and injects either a "[USER PROFILE EVIDENCE]" block or an authoritative confirmed-empty
+   *  marker — so the model answers from a REAL lookup result instead of fabricating or
+   *  admitting blindly (the toolCalls=0 "I have no info about you" failure). Fires ONLY on the
+   *  narrow self-referential class, so trivial/general turns pay zero added latency; a hard
+   *  latency cap degrades to the confirmed-empty marker if the embed backend is slow. Default
+   *  OFF until pass^k confirms no regression. */
+  userProfilePrefetch: z.boolean().default(false),
   /** B24 — toolset size ABOVE which the per-turn tool-rerank embedding kicks in. A small
    *  toolset doesn't need semantic reranking (all tools fit the model's attention), so we
    *  skip the embedding round-trip for it. Default 6 preserves the long-standing hardcoded

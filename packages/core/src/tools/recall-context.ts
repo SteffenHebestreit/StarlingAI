@@ -25,12 +25,13 @@ import { searchSessions } from "../agent/session-search.js";
 import { searchSharedFacts } from "../swarm/memory.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { buildDynamicTurnGuidance } from "../agent/intent-classifier.js";
+import { retrieveDocumentContext } from "../retrieval/document-rag.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:recall-context");
 
-type Section = "user" | "facts" | "memory" | "sessions" | "skills";
-const ALL_SECTIONS: Section[] = ["user", "facts", "memory", "sessions", "skills"];
+type Section = "user" | "facts" | "memory" | "sessions" | "skills" | "documents";
+const ALL_SECTIONS: Section[] = ["user", "facts", "memory", "sessions", "skills", "documents"];
 
 function truncate(value: string, max: number): string {
   const collapsed = value.replace(/\s+/g, " ").trim();
@@ -52,27 +53,32 @@ function deriveRecallPlan(query: string): { intent: string; priority: Set<Sectio
   if (guidance?.swarmMaintenanceSensitive) {
     // Maintaining StarlingAI itself: prior decisions, learned procedures, and
     // past maintenance sessions matter most; the dialectic user model rarely does.
-    return { intent: "maintenance", priority: new Set(["memory", "skills", "sessions"]), order: ["memory", "skills", "sessions", "facts", "user"] };
+    return { intent: "maintenance", priority: new Set(["memory", "skills", "sessions"]), order: ["memory", "skills", "sessions", "facts", "user", "documents"] };
   }
   if (guidance?.sourceSensitive || guidance?.freshnessSensitive) {
     // Research/validation: long-term findings, this session's gathered evidence,
-    // prior research sessions, and research procedures lead.
-    return { intent: "research", priority: new Set(["memory", "facts", "sessions", "skills"]), order: ["memory", "facts", "sessions", "skills", "user"] };
+    // attached source documents, prior research sessions, and research procedures lead.
+    return { intent: "research", priority: new Set(["memory", "facts", "documents", "sessions", "skills"]), order: ["memory", "documents", "facts", "sessions", "skills", "user"] };
   }
-  // General: the user model and durable memory lead; all tiers carry full budget.
-  return { intent: "general", priority: new Set(ALL_SECTIONS), order: ["user", "facts", "memory", "sessions", "skills"] };
+  // General: the user model, attached documents (e.g. an uploaded CV/profile), and
+  // durable memory lead; all tiers carry full budget. Documents are placed second so a
+  // question about the user's own background surfaces an attached CV prominently.
+  return { intent: "general", priority: new Set(ALL_SECTIONS), order: ["user", "documents", "facts", "memory", "sessions", "skills"] };
 }
 
 registerTool({
   name: "recall_context",
   description:
     "Pull a compact planning-context pack for a task in one call: the user model, this session's "
-    + "working-memory shared facts, relevant long-term memories, recent related sessions, and learned "
-    + "skills. Call this before a non-trivial delegation/routing decision so task wording and agent "
-    + "choice are informed by what is already known — instead of guessing or re-researching.",
+    + "working-memory shared facts, relevant long-term memories, recent related sessions, learned "
+    + "skills, and excerpts from documents attached to this conversation (e.g. an uploaded CV or "
+    + "profile). Call this before a non-trivial delegation/routing decision — or before answering any "
+    + "question about the USER'S OWN background, skills, experience, or fit — so the answer is grounded "
+    + "in what is already known instead of guessing or claiming you have no information.",
   embeddingDescription:
     "gather context before planning or delegating; what do we already know about this; user preferences "
-    + "and prior decisions; recall memory user model sessions facts skills for a task; hydrate planning context",
+    + "and prior decisions; recall memory user model sessions facts skills for a task; hydrate planning context; "
+    + "the user's own background skills experience CV resume profile projects from attached documents",
   costHint: "low",
   latencyHint: "medium",
   parameters: {
@@ -89,7 +95,7 @@ registerTool({
       include: {
         type: "array",
         items: { type: "string", enum: ALL_SECTIONS },
-        description: "Which sections to include. Default: all (user, facts, memory, sessions, skills).",
+        description: "Which sections to include. Default: all (user, facts, memory, sessions, skills, documents).",
       },
     },
     required: ["query"],
@@ -190,6 +196,32 @@ registerTool({
         if (text.trim()) sectionMap.set("skills", `## Relevant skills\n${text.trim()}`);
       } catch (err) {
         log.debug({ err }, "recall_context: skill recall failed");
+      }
+    }
+
+    if (requested.has("documents")) {
+      // Documents attached to this conversation (engram RAG) — scoped to the
+      // current session + the signed-in user's corpus. This is how an uploaded
+      // CV / profile / project list becomes visible to a "would I be a good fit"
+      // question. No-op (returns []) when engram is unconfigured or nothing is in
+      // scope, so this section self-skips exactly like the others.
+      try {
+        const chunks = await retrieveDocumentContext(query, {
+          sessionId: ctx.sessionId,
+          ...(ctx.userId ? { userId: ctx.userId } : {}),
+        });
+        meta["documents"] = chunks.length;
+        if (chunks.length > 0) {
+          sectionMap.set("documents",
+            "## Attached documents (e.g. an uploaded CV / profile)\n"
+            + chunks.slice(0, limitFor("documents")).map((chunk) => {
+              const label = chunk.title?.trim() || chunk.documentId.slice(0, 8);
+              return `- **${label}**: ${truncate(chunk.text, 220)}`;
+            }).join("\n"),
+          );
+        }
+      } catch (err) {
+        log.debug({ err }, "recall_context: document retrieval failed");
       }
     }
 

@@ -402,6 +402,46 @@ const DURABLE_PREFERENCE_PATTERNS: readonly RegExp[] = [
   /\bremember (?:that|this|my)\b/,
 ];
 
+// ── User-own-facts (self-referential) detection ────────────────────────────────
+// A question about the USER'S OWN background/skills/experience/fit/identity needs
+// user-specific evidence the assistant does not inherently have. Detected
+// STRUCTURALLY — a first-person self-reference (subject "ich/I" or possessive
+// "mein/my") co-occurring with a person-descriptor context term or a fit-quality
+// phrase — NOT a topic-keyword pile (no domains/skills enumerated). Drives a
+// proactive bounded profile prefetch (and a retrieve-first prompt nudge) so the
+// model answers from real evidence (or a confirmed-empty marker) instead of
+// fabricating or admitting blindly. Distinct from SELF_CAPABILITY_* (about the
+// ASSISTANT's abilities); the term lists stay person-descriptor structural, not topical.
+const FIRST_PERSON_SELF_PATTERNS: readonly RegExp[] = [
+  /\b(w[äa]re|bin|w[üu]rde|habe|h[äa]tte|kann|k[öo]nnte|soll|passe|eigne)\s+ich\b/,
+  /\bich\s+(habe|bin|w[äa]re|h[äa]tte|kann|eigne|passe|besitze|bringe)\b/,
+  /\b(would|am|could|should|do|did|have|can|will)\s+i\b/,
+  // Subject-first self-reference ("...skills I have", "I possess", "ich bringe X mit"):
+  // catches the declarative shape the question-inversion patterns above miss.
+  /\bi\s+(have|'ve|had|possess|bring|hold)\b/,
+  /\bmein(?:e|en|er|es|em)?\b/,
+  /\bmy\b/,
+];
+const SELF_IDENTITY_CONTEXT_TERMS: readonly string[] = [
+  "cv", "lebenslauf", "resume", "résumé", "profil", "profile", "portfolio",
+  "hintergrund", "background", "werdegang", "biografie",
+  "erfahrung", "erfahrungen", "experience", "expertise",
+  "fähigkeit", "faehigkeit", "fähigkeiten", "faehigkeiten", "skill", "skills",
+  // Stem so all inflections are covered (qualifikation/qualifiziert/qualified/qualify)
+  // instead of enumerating each — leaner AND more general than a fixed list.
+  "qualif",
+  "kompetenz", "kompetenzen",
+  "stärke", "staerke", "stärken", "staerken", "strength", "strengths",
+  "projektliste", "projekte", "projects",
+  "besetzung", "geeignet", "eignung", "kandidat", "candidate",
+];
+const SELF_FIT_QUALITY_PATTERNS: readonly RegExp[] = [
+  /\bgut(?:e|er)?\s+(besetzung|fit|wahl|kandidat|kandidatin|match)\b/,
+  /\bgood\s+(fit|candidate|choice|match)\b/,
+  /\bwell[\s-]?suited\b/,
+  /\b(richtige|passende)\s+(person|besetzung|wahl)\b/,
+];
+
 // ── DynamicTurnGuidance ───────────────────────────────────────────────────────
 
 export interface DynamicTurnGuidance {
@@ -426,6 +466,11 @@ export interface DynamicTurnGuidance {
   /** Subset of durableMemorySensitive: the user is naming/renaming the
    *  assistant itself → assistant_personality_update, not memory_store. */
   assistantNamingSensitive?: boolean;
+  /** The turn asks about the USER'S OWN background/skills/experience/projects/fit/
+   *  identity — facts the assistant does not inherently have. Triggers retrieve-
+   *  before-answer (recall_context/search_documents) and, when enabled, a proactive
+   *  bounded profile prefetch, so the model never fabricates or admits blindly. */
+  userOwnFacts?: boolean;
 }
 
 /**
@@ -551,6 +596,16 @@ function computeDynamicTurnGuidance(userMessage: string, toolMode: MainAssistant
     && extractAssistantName(userMessage) !== undefined;
   const durableMemorySensitive = assistantNamingSensitive
     || DURABLE_PREFERENCE_PATTERNS.some((pattern) => pattern.test(normalized));
+  // User-own-facts: a question about the user's OWN background/skills/fit. Structural
+  // first-person self-reference + a person-descriptor context term (or a fit-quality
+  // phrase). Suppressed when it is the ASSISTANT's capability in question, so
+  // "was kannst DU" / "what can YOU do" never reads as a question about the user.
+  const userOwnFacts = !selfCapabilityQuestion
+    && FIRST_PERSON_SELF_PATTERNS.some((pattern) => pattern.test(normalized))
+    && (
+      includesTermAtWordStart(normalized, SELF_IDENTITY_CONTEXT_TERMS)
+      || SELF_FIT_QUALITY_PATTERNS.some((pattern) => pattern.test(normalized))
+    );
   // ── Inline-content analytical detection ──────────────────────────────────
   // Use the original userMessage (case-preserving) for the technical-content
   // patterns since some matchers (`[Interface]`, `[Service]`, fenced code
@@ -583,10 +638,11 @@ function computeDynamicTurnGuidance(userMessage: string, toolMode: MainAssistant
   const freshnessSensitive = (inlineReview || selfCapabilityQuestion) ? false : freshnessSensitiveByTerm;
   const sourceSensitive = (inlineReview || researchThenCreate) ? false : sourceSensitiveByTerm;
 
-  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, artifactSensitive, inlineAnalyticalContent, durableMemorySensitive };
+  const flags = { freshnessSensitive, sourceSensitive, mailSensitive, computerAccessSensitive, serverAccessSensitive, pentestMethodologySensitive, swarmMaintenanceSensitive, artifactSensitive, inlineAnalyticalContent, durableMemorySensitive, userOwnFacts };
   if (!Object.values(flags).some(Boolean)) return null;
 
   const reasons: string[] = [];
+  if (userOwnFacts) reasons.push("user-own-facts");
   if (freshnessSensitive) reasons.push("freshness-sensitive");
   if (sourceSensitive) reasons.push("source-sensitive");
   if (mailSensitive) reasons.push("mail-task");
@@ -603,6 +659,14 @@ function computeDynamicTurnGuidance(userMessage: string, toolMode: MainAssistant
 
   if (reasons.length > 0) {
     promptParts.push(`This turn is ${reasons.join(" and ")}.`);
+  }
+
+  if (userOwnFacts) {
+    promptParts.push(
+      "This turn asks about the USER'S OWN background, skills, experience, projects, or fit — facts you do not inherently know about this person.",
+      "Call recall_context FIRST (it returns excerpts from an attached CV/profile alongside the user model and stored memory), and search_documents if more is needed, BEFORE answering.",
+      "Only state you have no information after that retrieval THIS turn returns nothing — a tool-free 'I don't know you' / 'I have no access to your CV' is invalid until you have looked. Never invent a profile or present a guess as the user's documented facts.",
+    );
   }
 
   if (durableMemorySensitive) {
@@ -755,6 +819,7 @@ function computeDynamicTurnGuidance(userMessage: string, toolMode: MainAssistant
     inlineAnalyticalContent,
     durableMemorySensitive,
     assistantNamingSensitive,
+    userOwnFacts,
   };
 }
 
